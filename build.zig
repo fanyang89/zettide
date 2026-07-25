@@ -1,0 +1,156 @@
+const std = @import("std");
+
+const FuseTestMode = enum { off, auto, required };
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const fuse_test_mode = b.option(FuseTestMode, "fuse-tests", "FUSE tests: off, auto, or required") orelse .auto;
+
+    const portable_core = createCoreModule(b, target, optimize, false);
+    const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux);
+    const exe = createExecutable(b, "devdrive", target, optimize, app_core);
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd.addArgs(args);
+    const run_step = b.step("run", "Run devdrive");
+    run_step.dependOn(&run_cmd.step);
+
+    const core_tests = b.addTest(.{ .root_module = portable_core });
+    const run_core_tests = b.addRunArtifact(core_tests);
+    const unit_step = b.step("test-unit", "Run deterministic unit tests");
+    unit_step.dependOn(&run_core_tests.step);
+
+    const image_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/image.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "devdrive", .module = portable_core }},
+        }),
+    });
+    const run_image_tests = b.addRunArtifact(image_tests);
+    const image_step = b.step("test-image", "Run littlefs image integration tests");
+    image_step.dependOn(&run_image_tests.step);
+
+    const fault_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/fault.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "devdrive", .module = portable_core }},
+        }),
+    });
+    const run_fault_tests = b.addRunArtifact(fault_tests);
+    const fault_step = b.step("test-fault", "Run deterministic block fault tests");
+    fault_step.dependOn(&run_fault_tests.step);
+
+    const cli_test_cmd = b.addSystemCommand(&.{ "bash", "test/cli.sh" });
+    cli_test_cmd.addArtifactArg(exe);
+    const cli_step = b.step("test-cli", "Run CLI process integration tests");
+    cli_step.dependOn(&cli_test_cmd.step);
+
+    const probe = if (target.result.os.tag == .linux) createFsProbe(b, target, optimize) else null;
+    const fuse_test_cmd = b.addSystemCommand(&.{ "bash", "test/fuse.sh" });
+    fuse_test_cmd.addArg(@tagName(fuse_test_mode));
+    fuse_test_cmd.addArtifactArg(exe);
+    if (probe) |artifact| fuse_test_cmd.addArtifactArg(artifact);
+    const fuse_step = b.step("test-fuse", "Run real Linux FUSE syscall tests");
+    fuse_step.dependOn(&fuse_test_cmd.step);
+
+    const cross_step = b.step("test-cross", "Compile portable core and CLI for Windows");
+    const windows_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .windows,
+        .abi = .gnu,
+    });
+    const windows_core = createCoreModule(b, windows_target, optimize, false);
+    const windows_exe = createExecutable(b, "devdrive-windows-check", windows_target, optimize, windows_core);
+    cross_step.dependOn(&windows_exe.step);
+
+    const test_step = b.step("test", "Run unit, image, and CLI tests");
+    test_step.dependOn(unit_step);
+    test_step.dependOn(image_step);
+    test_step.dependOn(cli_step);
+
+    const ci_step = b.step("ci", "Run default tests and cross-compilation checks");
+    ci_step.dependOn(test_step);
+    ci_step.dependOn(fault_step);
+    ci_step.dependOn(cross_step);
+}
+
+fn createCoreModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    with_fuse: bool,
+) *std.Build.Module {
+    const core = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    core.addIncludePath(b.path("vendor/littlefs"));
+    core.addIncludePath(b.path("src"));
+    core.addCMacro("LFS_THREADSAFE", "1");
+    core.addCSourceFiles(.{
+        .files = &.{
+            "vendor/littlefs/lfs.c",
+            "vendor/littlefs/lfs_util.c",
+        },
+        .flags = &.{ "-std=c99", "-DLFS_THREADSAFE" },
+    });
+    if (with_fuse) {
+        core.addCMacro("FUSE_USE_VERSION", "35");
+        core.linkSystemLibrary("fuse3", .{});
+        core.addCSourceFiles(.{
+            .files = &.{"src/fuse_shim.c"},
+            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-DFUSE_USE_VERSION=35" },
+        });
+    }
+    return core;
+}
+
+fn createExecutable(
+    b: *std.Build,
+    name: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    core: *std.Build.Module,
+) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "devdrive", .module = core }},
+        }),
+    });
+}
+
+fn createFsProbe(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const probe = b.addExecutable(.{
+        .name = "fs-probe",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    probe.root_module.addCSourceFile(.{
+        .file = b.path("test/fs_probe.c"),
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
+    });
+    return probe;
+}

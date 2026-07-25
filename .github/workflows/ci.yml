@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        optimize: [Debug, ReleaseSafe]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
+      - name: Run portable tests
+        run: zig build test -Doptimize=${{ matrix.optimize }}
+      - name: Run deterministic fault tests
+        run: zig build test-fault -Doptimize=${{ matrix.optimize }}
+      - name: Cross-compile Windows boundary
+        run: zig build test-cross -Doptimize=${{ matrix.optimize }}
+
+  fuse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Install FUSE
+        run: sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev
+      - name: Verify FUSE capability
+        run: test -r /dev/fuse && test -w /dev/fuse
+      - name: Run real FUSE syscall tests
+        run: zig build test-fuse -Dfuse-tests=required
