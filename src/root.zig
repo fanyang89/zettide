@@ -2,6 +2,7 @@ pub const block_device = @import("block_device.zig");
 pub const container = @import("container.zig");
 pub const metadata = @import("metadata.zig");
 pub const object_format = @import("object_format.zig");
+pub const object_store = @import("object_store.zig");
 pub const size = @import("size.zig");
 pub const volume = @import("volume.zig");
 pub const linux_fuse = if (@import("builtin").os.tag == .linux) @import("linux_fuse.zig") else struct {};
@@ -12,6 +13,7 @@ test {
     _ = container;
     _ = metadata;
     _ = object_format;
+    _ = object_store;
     _ = size;
     _ = volume;
 }
