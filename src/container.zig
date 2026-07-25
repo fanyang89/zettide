@@ -9,11 +9,16 @@ pub const payload_offset: u64 = 64 * 1024;
 pub const default_block_size: u32 = 4096;
 pub const default_read_size: u32 = 512;
 pub const default_prog_size: u32 = 512;
+pub const default_chunk_size: u32 = 1024 * 1024;
+pub const virtual_file_max: u64 = std.math.maxInt(i64);
+pub const feature_object_store: u32 = 1 << 0;
+pub const supported_features: u32 = feature_object_store;
+pub const object_format_version: u32 = 1;
 pub const max_label_len: usize = 127;
 pub const min_volume_size: u64 = 256 * 1024;
 
-const magic = [8]u8{ 'L', 'F', 'S', 'D', 'R', 'V', '1', 0 };
-const format_major: u16 = 1;
+const magic = [8]u8{ 'L', 'F', 'S', 'D', 'R', 'V', '2', 0 };
+const format_major: u16 = 2;
 const format_minor: u16 = 0;
 const checksum_offset = header_size - @sizeOf(u32);
 
@@ -25,7 +30,7 @@ pub const State = enum(u8) {
 pub const Header = struct {
     sequence: u64,
     state: State,
-    features: u32 = 0,
+    features: u32 = supported_features,
     uuid: [16]u8,
     created_ns: i64,
     logical_size: u64,
@@ -37,6 +42,9 @@ pub const Header = struct {
     name_max: u32 = 255,
     file_max: u32 = 2_147_483_647,
     attr_max: u32 = 1022,
+    user_file_max: u64 = virtual_file_max,
+    object_version: u32 = object_format_version,
+    chunk_size: u32 = default_chunk_size,
     label: [max_label_len]u8 = @splat(0),
     label_len: u8 = 0,
 
@@ -88,6 +96,9 @@ pub const Header = struct {
         putInt(u32, &bytes, 96, header.attr_max);
         bytes[100] = header.label_len;
         @memcpy(bytes[104 .. 104 + header.label_len], header.label[0..header.label_len]);
+        putInt(u64, &bytes, 232, header.user_file_max);
+        putInt(u32, &bytes, 240, header.object_version);
+        putInt(u32, &bytes, 244, header.chunk_size);
         putInt(u32, &bytes, checksum_offset, checksum(bytes[0..checksum_offset]));
         return bytes;
     }
@@ -118,6 +129,9 @@ pub const Header = struct {
             .name_max = getInt(u32, bytes, 88),
             .file_max = getInt(u32, bytes, 92),
             .attr_max = getInt(u32, bytes, 96),
+            .user_file_max = getInt(u64, bytes, 232),
+            .object_version = getInt(u32, bytes, 240),
+            .chunk_size = getInt(u32, bytes, 244),
             .label_len = label_len,
         };
         @memcpy(result.label[0..label_len], bytes[104 .. 104 + label_len]);
@@ -126,7 +140,7 @@ pub const Header = struct {
     }
 
     pub fn validate(header: Header) !void {
-        if (header.features != 0) return error.UnsupportedFeatures;
+        if (header.features != supported_features) return error.UnsupportedFeatures;
         if (header.payload_start < payload_offset or header.payload_start % header_size != 0)
             return error.InvalidHeader;
         if (header.block_size == 0 or header.logical_size % header.block_size != 0)
@@ -141,6 +155,11 @@ pub const Header = struct {
         if (header.name_max == 0 or header.name_max > 255) return error.InvalidHeader;
         if (header.file_max == 0 or header.file_max > 2_147_483_647) return error.InvalidHeader;
         if (header.attr_max < 64 or header.attr_max > 1022) return error.InvalidHeader;
+        if (header.user_file_max != virtual_file_max) return error.InvalidHeader;
+        if (header.object_version != object_format_version) return error.UnsupportedFormat;
+        if (header.chunk_size == 0 or header.chunk_size > header.file_max or
+            header.chunk_size % header.block_size != 0)
+            return error.InvalidHeader;
         if (!std.unicode.utf8ValidateSlice(header.labelSlice())) return error.InvalidHeader;
     }
 };
@@ -191,6 +210,8 @@ test "header round trip" {
     const header = try Header.init(io, 1024 * 1024, "Workspace");
     const decoded = try Header.decode(&header.encode());
     try std.testing.expectEqual(header.logical_size, decoded.logical_size);
+    try std.testing.expectEqual(virtual_file_max, decoded.user_file_max);
+    try std.testing.expectEqual(default_chunk_size, decoded.chunk_size);
     try std.testing.expectEqualStrings("Workspace", decoded.labelSlice());
     try std.testing.expectEqualSlices(u8, &header.uuid, &decoded.uuid);
 }
@@ -241,11 +262,11 @@ test "header rejects unknown features and truncated containers" {
 
     var header = try Header.init(std.testing.io, 1024 * 1024, "Bad");
     header.state = .ready;
-    header.features = 1;
+    header.features |= 1 << 31;
     const bytes = header.encode();
     try std.testing.expectError(error.UnsupportedFeatures, Header.decode(&bytes));
 
-    header.features = 0;
+    header.features = supported_features;
     try write(file, std.testing.io, header_a_offset, header);
     try write(file, std.testing.io, header_b_offset, header);
     try file.setLength(std.testing.io, header.payload_start + header.logical_size - 1);
