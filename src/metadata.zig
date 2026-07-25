@@ -76,6 +76,7 @@ pub const Patch = struct {
     gid: ?u32 = null,
     atime_ns: ?i64 = null,
     mtime_ns: ?i64 = null,
+    update_ctime: bool = true,
 };
 
 fn checksum(bytes: []const u8) u32 {

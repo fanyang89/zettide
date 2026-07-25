@@ -472,7 +472,10 @@ pub const Volume = struct {
             handle.metadata.atime_ns <= handle.metadata.ctime_ns or
             timestamp -| handle.metadata.atime_ns >= one_day))
         {
-            _ = try self.patchObjectMetadata(handle.object_id, .{ .atime_ns = timestamp });
+            _ = try self.patchObjectMetadata(handle.object_id, .{
+                .atime_ns = timestamp,
+                .update_ctime = false,
+            });
         }
         return result;
     }
@@ -526,6 +529,19 @@ pub const Volume = struct {
 
     pub fn readObject(self: *Volume, object_id: object_format.ObjectId, buffer: []u8, offset: u64) !usize {
         return self.store().read(object_id, buffer, offset);
+    }
+
+    pub fn updateAccessTime(self: *Volume, object_id: object_format.ObjectId) !void {
+        _ = try self.patchObjectMetadata(object_id, .{
+            .atime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds),
+            .update_ctime = false,
+        });
+    }
+
+    pub fn updateDirectoryAccessTime(self: *Volume, path: [*:0]const u8) !void {
+        var value = try self.getMetadata(path);
+        value.atime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+        try self.setMetadata(path, value);
     }
 
     pub fn openDirectory(self: *Volume, handle: *DirectoryHandle, path: [*:0]const u8) !void {

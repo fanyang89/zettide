@@ -368,6 +368,16 @@ static void test_timestamps(const char *root) {
         fprintf(stderr, "relatime did not advance atime after read\n");
         exit(1);
     }
+    struct stat before_second_read;
+    if (stat(path, &before_second_read) != 0) fail("stat before ctime read check");
+    fd = open(path, O_RDONLY);
+    if (fd < 0 || read(fd, &byte, 1) != 1 || close(fd) != 0) fail("second timestamp read");
+    if (stat(path, &after_read) != 0) fail("stat after ctime read check");
+    if (after_read.st_ctim.tv_sec != before_second_read.st_ctim.tv_sec ||
+        after_read.st_ctim.tv_nsec != before_second_read.st_ctim.tv_nsec) {
+        fprintf(stderr, "read changed ctime\n");
+        exit(1);
+    }
 
     struct timespec omit[2] = {
         {.tv_sec = 0, .tv_nsec = UTIME_OMIT},

@@ -528,6 +528,7 @@ fn readLink(req: c.fuse_req_t, id: c.fuse_ino_t) callconv(.c) void {
     var buffer: [path_capacity:0]u8 = @splat(0);
     const amount = state.volume.readObject(object_id, buffer[0..path_capacity], 0) catch |err|
         return replyError(req, errnoValue(err));
+    state.volume.updateAccessTime(object_id) catch |err| return replyError(req, errnoValue(err));
     if (amount == path_capacity) return replyError(req, c.ENAMETOOLONG);
     buffer[amount] = 0;
     _ = c.fuse_reply_readlink(req, &buffer);
@@ -762,7 +763,9 @@ fn create(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
 fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.struct_fuse_file_info) void {
     const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
     const host_flags = c.devdrive_fuse_get_flags(fi);
-    const flags: c_int = switch (host_flags & 3) {
+    const flags: c_int = if (state.writeback_cache)
+        lfs.LFS_O_RDWR
+    else switch (host_flags & 3) {
         0 => lfs.LFS_O_RDONLY,
         else => lfs.LFS_O_RDWR,
     };
@@ -868,6 +871,10 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
     const state = stateFor(req);
     defer state.pruneCaches();
     const handle = fuseDirectoryHandle(fi.?);
+    if (offset == 0) {
+        const path = state.pathFor(handle.inode) orelse return replyError(req, c.ENOENT);
+        state.volume.updateDirectoryAccessTime(path) catch |err| return replyError(req, errnoValue(err));
+    }
     state.volume.seekDirectory(&handle.directory, @intCast(offset)) catch |err|
         return replyError(req, errnoValue(err));
     const buffer = std.heap.c_allocator.alloc(u8, size) catch return replyError(req, c.ENOMEM);

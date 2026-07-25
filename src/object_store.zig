@@ -254,7 +254,8 @@ pub const Store = struct {
         if (patch.gid) |gid| head.metadata.gid = gid;
         if (patch.atime_ns) |atime_ns| head.metadata.atime_ns = atime_ns;
         if (patch.mtime_ns) |mtime_ns| head.metadata.mtime_ns = mtime_ns;
-        head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+        if (patch.update_ctime)
+            head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
         head.generation = std.math.add(u64, head.generation, 1) catch return error.CorruptFilesystem;
         try self.writeHead(head);
         return head;
