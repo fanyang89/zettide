@@ -171,6 +171,7 @@ pub const Store = struct {
         if (data.len == 0) return .{ .amount = 0, .head = try self.readHead(id) };
 
         var head = try self.readHead(id);
+        try self.removeUncommittedChunkVersions(id, head.data_generation);
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
         var touched = std.AutoHashMap(u64, void).init(std.heap.c_allocator);
         defer touched.deinit();
@@ -208,6 +209,7 @@ pub const Store = struct {
     pub fn truncate(self: Store, id: format.ObjectId, size: u64) !format.ObjectHead {
         if (size > format.max_file_size) return error.FileTooLarge;
         var head = try self.readHead(id);
+        try self.removeUncommittedChunkVersions(id, head.data_generation);
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
         var touched = std.AutoHashMap(u64, void).init(std.heap.c_allocator);
         defer touched.deinit();
@@ -433,6 +435,33 @@ pub const Store = struct {
         while (try self.firstObsoleteChunkVersion(id, index, keep_generation)) |version| {
             var path_buffer: [max_path_bytes:0]u8 = @splat(0);
             try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPath(id, version, &path_buffer)));
+        }
+    }
+
+    fn removeUncommittedChunkVersions(self: Store, id: format.ObjectId, committed_generation: u64) !void {
+        while (try self.firstUncommittedChunkVersion(id, committed_generation)) |version| {
+            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPath(id, version, &path_buffer)));
+        }
+    }
+
+    fn firstUncommittedChunkVersion(
+        self: Store,
+        id: format.ObjectId,
+        committed_generation: u64,
+    ) !?ChunkVersion {
+        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try chunksPath(id, &path_buffer)));
+        defer _ = c.lfs_dir_close(self.lfs, &directory);
+        while (true) {
+            var info: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(self.lfs, &directory, &info);
+            try checkLfs(result);
+            if (result == 0) return null;
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+            const version = parseChunkVersion(name) catch continue;
+            if (version.generation > committed_generation) return version;
         }
     }
 
