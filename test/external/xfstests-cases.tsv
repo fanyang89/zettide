@@ -1,0 +1,7 @@
+# classification	case	contract	reason
+required	generic/080	mmap-timestamps	mmap writes update mtime and ctime
+required	generic/131	posix-locks	cross-process POSIX advisory locking
+required	generic/478	ofd-locks	OFD and POSIX lock lifetime and conflict reporting
+not-applicable	generic/029	scratch-device	requires destructive scratch mkfs and remount operations
+not-applicable	generic/340	fallocate	requires fallocate behavior outside the base profile
+not-applicable	generic/504	flock	tests flock which is outside the base profile

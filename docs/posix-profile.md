@@ -66,5 +66,11 @@ contains privileged pjdfstest cases, selected xfstests generic cases, mmap
 stress, fault injection, and crash recovery. `test-posix-soak` increases seeds,
 operation counts, and concurrent lock and namespace workloads.
 
+`test-posix-privileged` covers sticky directories, ownership changes, set-id
+clearing, and setgid inheritance using multiple real Linux identities. The
+nightly selection and every intentional non-applicable case are recorded as
+exact case IDs in the TSV manifests under `test/external/`; wildcard and group
+exclusions are not accepted.
+
 The profile is complete only when every required manifest entry executes and
 passes in Debug and ReleaseSafe builds with no required skips.

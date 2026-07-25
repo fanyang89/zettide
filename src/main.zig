@@ -35,7 +35,9 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn mountCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
-    if (args.len != 2) return error.InvalidArguments;
+    if (args.len < 2 or args.len > 3) return error.InvalidArguments;
+    const allow_other = args.len == 3 and std.mem.eql(u8, args[2], "--allow-other");
+    if (args.len == 3 and !allow_other) return error.UnknownOption;
     if (@import("builtin").os.tag != .linux) return error.MountNotImplemented;
     var volume = try devdrive.volume.Volume.open(io, args[0], true);
     defer volume.deinit();
@@ -43,7 +45,7 @@ fn mountCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     try volume.mount();
     try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
     try stdout.flush();
-    try devdrive.linux_fuse.mount(&volume, args[1]);
+    try devdrive.linux_fuse.mount(&volume, args[1], allow_other);
 }
 
 fn unmountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -117,7 +119,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  devdrive create <container> --size <size> [--label <label>]
         \\  devdrive info <container>
         \\  devdrive check <container>
-        \\  devdrive mount <container> <mountpoint>
+        \\  devdrive mount <container> <mountpoint> [--allow-other]
         \\  devdrive unmount <mountpoint>
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.

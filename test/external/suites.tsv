@@ -1,0 +1,4 @@
+# suite	url	commit	license
+pjdfstest	https://github.com/pjd/pjdfstest.git	ededbeb2b44929972898afb87474b0937f78a877	BSD-2-Clause
+xfstests	https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git	acb6d4cb84205a8e3f19ca470cfcf7bf6d93a509	GPL-2.0
+ltp	https://github.com/linux-test-project/ltp.git	6a60ae592cd375f004df0694efc7d50ddae9aa5e	GPL-2.0

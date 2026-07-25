@@ -1,0 +1,10 @@
+# classification	case	contract	reason
+required	tests/chmod/07.t	chmod-owner-check	owner and non-owner chmod permission checks
+required	tests/chmod/12.t	set-id-clearing	set-id bits clear after an unprivileged write
+required	tests/mkdir/00.t	mkdir-ownership	mode, umask, uid, gid, and parent timestamp behavior
+required	tests/open/00.t	open-create	mode, umask, uid, gid, truncate, and parent timestamps
+not-applicable	tests/chown/07.t	device-nodes	case inseparably includes block and character device nodes
+not-applicable	tests/unlink/11.t	device-nodes	case inseparably includes block and character device nodes
+not-applicable	tests/rmdir/11.t	device-nodes	case inseparably includes block and character device nodes
+not-applicable	tests/rename/09.t	device-nodes	case inseparably includes block and character device nodes
+not-applicable	tests/rename/10.t	device-nodes	case inseparably includes block and character device nodes

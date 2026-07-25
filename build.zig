@@ -2,12 +2,14 @@ const std = @import("std");
 
 const FuseTestMode = enum { off, auto, required };
 const ExternalTestMode = enum { off, auto, required };
+const PrivilegedTestMode = enum { off, auto, required };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const fuse_test_mode = b.option(FuseTestMode, "fuse-tests", "FUSE tests: off, auto, or required") orelse .auto;
     const external_test_mode = b.option(ExternalTestMode, "external-tests", "External tests: off, auto, or required") orelse .auto;
+    const privileged_test_mode = b.option(PrivilegedTestMode, "privileged-tests", "Privileged tests: off, auto, or required") orelse .auto;
 
     const portable_core = createCoreModule(b, target, optimize, false);
     const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux);
@@ -94,11 +96,48 @@ pub fn build(b: *std.Build) void {
     external_step.dependOn(libfuse_step);
     external_step.dependOn(fsx_step);
 
+    const permission_probe = if (target.result.os.tag == .linux) createPermissionProbe(b, target, optimize) else null;
+    const permission_test_cmd = b.addSystemCommand(&.{ "bash", "test/conformance/permissions.sh" });
+    permission_test_cmd.addArg(@tagName(privileged_test_mode));
+    permission_test_cmd.addArtifactArg(exe);
+    if (permission_probe) |artifact| permission_test_cmd.addArtifactArg(artifact);
+    const permission_step = b.step("test-permissions", "Run the privileged permission matrix");
+    permission_step.dependOn(&permission_test_cmd.step);
+
+    const pjdfstest_cmd = b.addSystemCommand(&.{ "bash", "test/external/pjdfstest.sh" });
+    pjdfstest_cmd.addArg(@tagName(privileged_test_mode));
+    pjdfstest_cmd.addArtifactArg(exe);
+    const pjdfstest_step = b.step("test-pjdfstest", "Run selected pjdfstest POSIX cases");
+    pjdfstest_step.dependOn(&pjdfstest_cmd.step);
+
+    const xfstests_cmd = b.addSystemCommand(&.{ "bash", "test/external/xfstests.sh" });
+    xfstests_cmd.addArg(@tagName(external_test_mode));
+    xfstests_cmd.addArtifactArg(exe);
+    const xfstests_step = b.step("test-xfstests", "Run selected xfstests mmap and lock cases");
+    xfstests_step.dependOn(&xfstests_cmd.step);
+
+    const ltp_cmd = b.addSystemCommand(&.{ "bash", "test/external/ltp-open-posix.sh" });
+    ltp_cmd.addArg(@tagName(external_test_mode));
+    ltp_cmd.addArtifactArg(exe);
+    const ltp_step = b.step("test-ltp-open-posix", "Run selected LTP Open POSIX cases");
+    ltp_step.dependOn(&ltp_cmd.step);
+
     const posix_quick_step = b.step("test-posix-quick", "Run the required POSIX filesystem quick gate");
     posix_quick_step.dependOn(fuse_step);
     posix_quick_step.dependOn(posix_step);
     posix_quick_step.dependOn(libfuse_step);
     posix_quick_step.dependOn(fsx_step);
+
+    const posix_privileged_step = b.step("test-posix-privileged", "Run privileged POSIX permission gates");
+    posix_privileged_step.dependOn(permission_step);
+    posix_privileged_step.dependOn(pjdfstest_step);
+
+    const posix_nightly_step = b.step("test-posix-nightly", "Run the POSIX nightly conformance gates");
+    posix_nightly_step.dependOn(posix_quick_step);
+    posix_nightly_step.dependOn(posix_privileged_step);
+    posix_nightly_step.dependOn(xfstests_step);
+    posix_nightly_step.dependOn(ltp_step);
+    posix_nightly_step.dependOn(fault_step);
 
     const cross_step = b.step("test-cross", "Compile portable core and CLI for Windows");
     const windows_target = b.resolveTargetQuery(.{
@@ -272,6 +311,26 @@ fn createFsxProbe(
     probe.root_module.addCSourceFile(.{
         .file = b.path("vendor/xfstests/ltp/fsx.c"),
         .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" },
+    });
+    return probe;
+}
+
+fn createPermissionProbe(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const probe = b.addExecutable(.{
+        .name = "permission-probe",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    probe.root_module.addCSourceFile(.{
+        .file = b.path("test/conformance/permission_probe.c"),
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     return probe;
 }

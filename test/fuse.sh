@@ -91,6 +91,13 @@ ln -s ../hello.txt "$mount_dir/subdir/link"
 chmod 750 "$mount_dir/hello.txt"
 touch -d @1577905445 "$mount_dir/hello.txt"
 [[ $(stat -c '%a %s %Y' "$mount_dir/hello.txt") == "750 15 1577905445" ]]
+mkdir "$mount_dir/inode-directory"
+inode_before=$(stat -c %i "$mount_dir/inode-directory")
+mv "$mount_dir/inode-directory" "$mount_dir/inode-directory-renamed"
+[[ $(stat -c %i "$mount_dir/inode-directory-renamed") == "$inode_before" ]] || {
+    echo "directory inode changed across rename" >&2
+    exit 1
+}
 
 "$probe" "$mount_dir"
 
@@ -108,6 +115,10 @@ stop_mount
 start_mount
 [[ $(<"$mount_dir/hello.txt") == "hello from fuse" ]]
 [[ $(stat -c '%a %s %Y' "$mount_dir/hello.txt") == "750 15 1577905445" ]]
+[[ $(stat -c %i "$mount_dir/inode-directory-renamed") == "$inode_before" ]] || {
+    echo "directory inode changed after FUSE cache eviction and relookup" >&2
+    exit 1
+}
 root_mtime_after=$(stat -c %Y "$mount_dir")
 (( root_mtime_after > root_mtime_before )) || { echo "parent directory mtime did not advance" >&2; exit 1; }
 stop_mount
@@ -142,6 +153,7 @@ fi
 "$exe" check "$image" >/dev/null
 start_mount
 "$durability_probe" verify "$mount_dir/crash.txt"
+"$probe" "$mount_dir" verify-crash-fallocate
 stop_mount
 
 # Repeated lifecycle checks catch leaked locks, mountpoints, and processes.

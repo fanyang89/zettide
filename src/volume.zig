@@ -22,6 +22,7 @@ pub const Volume = struct {
     open_files: ?*FileHandle = null,
     link_counts: std.AutoHashMap(object_format.ObjectId, u64),
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
+    reservation_blocks: u64 = 0,
 
     pub fn create(io: Io, path: []const u8, logical_size: u64, label: []const u8) !void {
         var header = try container.Header.init(io, logical_size, label);
@@ -56,6 +57,15 @@ pub const Volume = struct {
         const root_metadata = metadata.Metadata.init(io, .directory, 0o40755, owner.uid, owner.gid);
         const root_bytes = root_metadata.encode();
         try checkLfs(c.lfs_setattr(&lfs, object_store.namespace_root, metadata.attribute_type, &root_bytes, root_bytes.len));
+        var root_identity: object_format.ObjectId = undefined;
+        try io.randomSecure(&root_identity);
+        try checkLfs(c.lfs_setattr(
+            &lfs,
+            object_store.namespace_root,
+            metadata.directory_identity_attribute_type,
+            &root_identity,
+            root_identity.len,
+        ));
         try checkLfs(c.lfs_unmount(&lfs));
         mounted = false;
 
@@ -91,6 +101,7 @@ pub const Volume = struct {
         result.open_files = null;
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.reservation_blocks = 0;
         return result;
     }
 
@@ -113,6 +124,7 @@ pub const Volume = struct {
         self.object_pins.clearRetainingCapacity();
         try self.store().collectLinkCounts(&self.link_counts);
         if (self.writable) try self.store().recoverOrphans(&self.link_counts);
+        self.reservation_blocks = try self.collectReservationBlocks();
     }
 
     pub fn deinit(self: *Volume) void {
@@ -129,6 +141,16 @@ pub const Volume = struct {
         const result = c.lfs_fs_size(&self.lfs);
         try checkLfs(result);
         return @intCast(result);
+    }
+
+    pub fn availableBlocks(self: *Volume) !u64 {
+        const used = try self.usedBlocks();
+        const free = @as(u64, self.header.block_count) - used;
+        return free -| self.reservation_blocks;
+    }
+
+    pub fn reservedCapacityBlocks(self: *const Volume) u64 {
+        return self.reservation_blocks;
     }
 
     pub fn stat(self: *Volume, path: [*:0]const u8) !NodeInfo {
@@ -152,6 +174,7 @@ pub const Volume = struct {
             .allocated_bytes = 0,
             .metadata = stored_metadata,
             .object_id = null,
+            .identity = try self.directoryIdentity(translated),
             .nlink = try self.directoryLinkCount(translated),
         };
         const object_ref = try self.store().readRef(path);
@@ -161,6 +184,7 @@ pub const Volume = struct {
             .allocated_bytes = head.allocated_bytes,
             .metadata = head.metadata,
             .object_id = object_ref.object_id,
+            .identity = object_ref.object_id,
             .nlink = try self.linkCount(object_ref.object_id),
         };
     }
@@ -178,6 +202,7 @@ pub const Volume = struct {
             .allocated_bytes = head.allocated_bytes,
             .metadata = head.metadata,
             .object_id = object_id,
+            .identity = object_id,
             .nlink = try self.linkCount(object_id),
         };
     }
@@ -247,10 +272,20 @@ pub const Volume = struct {
 
     pub fn makeDirectory(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
         const inherited = try self.inheritCreateMetadata(path, mode, gid, true);
+        try self.ensureGrowthCapacity();
         var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         try checkLfs(c.lfs_mkdir(&self.lfs, translated));
         errdefer _ = c.lfs_remove(&self.lfs, translated);
+        var identity: object_format.ObjectId = undefined;
+        try self.io.randomSecure(&identity);
+        try checkLfs(c.lfs_setattr(
+            &self.lfs,
+            translated,
+            metadata.directory_identity_attribute_type,
+            &identity,
+            identity.len,
+        ));
         try self.setMetadata(path, metadata.Metadata.init(
             self.io,
             .directory,
@@ -290,6 +325,7 @@ pub const Volume = struct {
         if (stat_result >= 0) return error.PathAlreadyExists;
         if (stat_result != c.LFS_ERR_NOENT) try checkLfs(stat_result);
         try self.validateParentDirectory(new_path);
+        try self.ensureGrowthCapacity();
         var head = try self.store().readHead(object_ref.object_id);
         head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
         try self.store().updateMetadata(object_ref.object_id, head.metadata);
@@ -302,6 +338,7 @@ pub const Volume = struct {
             .allocated_bytes = head.allocated_bytes,
             .metadata = head.metadata,
             .object_id = object_ref.object_id,
+            .identity = object_ref.object_id,
             .nlink = count.*,
         };
     }
@@ -414,6 +451,7 @@ pub const Volume = struct {
 
         const object_ref = existing_ref orelse value: {
             const inherited = try self.inheritCreateMetadata(path, mode, gid, false);
+            try self.ensureGrowthCapacity();
             const created = try self.store().createObject(.file, metadata.Metadata.init(
                 self.io,
                 .file,
@@ -438,10 +476,9 @@ pub const Volume = struct {
     }
 
     pub fn openObject(self: *Volume, handle: *FileHandle, object_id: object_format.ObjectId, flags: c_int) !void {
-        const head = if (flags & c.LFS_O_TRUNC != 0)
-            try self.store().truncate(object_id, 0)
-        else
-            try self.store().readHead(object_id);
+        const old_head = try self.store().readHead(object_id);
+        const head = if (flags & c.LFS_O_TRUNC != 0) try self.store().truncate(object_id, 0) else old_head;
+        if (flags & c.LFS_O_TRUNC != 0) try self.replaceReservation(old_head, head);
         if (flags & c.LFS_O_TRUNC != 0) self.updateOpenMetadata(object_id, head.metadata);
         handle.* = .{
             .object_id = object_id,
@@ -466,16 +503,12 @@ pub const Volume = struct {
         const head = try self.store().readHead(handle.object_id);
         handle.metadata = head.metadata;
         const result = try self.store().read(handle.object_id, buffer, offset);
-        const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-        const one_day = 24 * std.time.ns_per_hour;
-        if (self.writable and (handle.metadata.atime_ns <= handle.metadata.mtime_ns or
-            handle.metadata.atime_ns <= handle.metadata.ctime_ns or
-            timestamp -| handle.metadata.atime_ns >= one_day))
-        {
-            _ = try self.patchObjectMetadata(handle.object_id, .{
+        if (self.writable) {
+            const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+            _ = self.patchObjectMetadata(handle.object_id, .{
                 .atime_ns = timestamp,
                 .update_ctime = false,
-            });
+            }) catch {};
         }
         return result;
     }
@@ -486,14 +519,42 @@ pub const Volume = struct {
             (try self.store().readHead(handle.object_id)).logical_size
         else
             offset;
+        const head = try self.store().readHead(handle.object_id);
+        const end = std.math.add(u64, effective_offset, data.len) catch return error.FileTooLarge;
+        if (end > object_format.max_file_size) return error.FileTooLarge;
+        const footprint = try self.store().writeFootprint(handle.object_id, effective_offset, data.len);
+        try self.ensureWriteCapacity(footprint);
         const result = try self.store().write(handle.object_id, data, effective_offset);
+        try self.replaceReservation(head, result.head);
         self.updateOpenMetadata(handle.object_id, result.head.metadata);
         return result.amount;
     }
 
     pub fn truncateFile(self: *Volume, handle: *FileHandle, size: u64) !void {
         if (!handle.writable) return error.AccessDenied;
+        const old_head = try self.store().readHead(handle.object_id);
         const head = try self.store().truncate(handle.object_id, size);
+        try self.replaceReservation(old_head, head);
+        self.updateOpenMetadata(handle.object_id, head.metadata);
+    }
+
+    pub fn fallocateFile(self: *Volume, handle: *FileHandle, offset: u64, length: u64) !void {
+        if (!handle.writable) return error.AccessDenied;
+        if (length == 0) return error.InvalidArgument;
+        const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
+        if (end > object_format.max_file_size) return error.FileTooLarge;
+        const old_head = try self.store().readHead(handle.object_id);
+        const proposed = try self.store().reservationProposal(handle.object_id, offset, length);
+        const old_blocks = try self.reservationBlocks(old_head);
+        const new_blocks = try self.reservationBlocks(proposed);
+        if (new_blocks > old_blocks) {
+            const free = @as(u64, self.header.block_count) - try self.usedBlocks();
+            var needed = try addCapacity(self.reservation_blocks, new_blocks - old_blocks);
+            needed = try addCapacity(needed, accounting_metadata_blocks);
+            if (free < needed) return error.NoSpaceLeft;
+        }
+        const head = try self.store().reserve(handle.object_id, offset, length);
+        try self.replaceReservation(old_head, head);
         self.updateOpenMetadata(handle.object_id, head.metadata);
     }
 
@@ -538,13 +599,9 @@ pub const Volume = struct {
         });
     }
 
-    pub fn updateDirectoryAccessTime(self: *Volume, path: [*:0]const u8) !void {
-        var value = try self.getMetadata(path);
-        value.atime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-        try self.setMetadata(path, value);
-    }
-
     pub fn openDirectory(self: *Volume, handle: *DirectoryHandle, path: [*:0]const u8) !void {
+        const info = try self.stat(path);
+        if (info.metadata.kind != .directory) return error.NotDirectory;
         var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         try checkLfs(c.lfs_dir_open(
             &self.lfs,
@@ -552,6 +609,7 @@ pub const Volume = struct {
             try object_store.Store.translateUserPath(path, &translated_buffer),
         ));
         handle.open = true;
+        handle.info = info;
     }
 
     pub fn readDirectory(self: *Volume, handle: *DirectoryHandle, info: *c.struct_lfs_info) !bool {
@@ -590,11 +648,108 @@ pub const Volume = struct {
         return .{ .io = self.io, .lfs = &self.lfs };
     }
 
+    fn collectReservationBlocks(self: *Volume) !u64 {
+        var total: u64 = 0;
+        var iterator = self.link_counts.keyIterator();
+        while (iterator.next()) |id| {
+            const head = try self.store().readHead(id.*);
+            try self.store().validateReservations(head);
+            total = try addCapacity(total, try self.reservationBlocks(head));
+        }
+        return total;
+    }
+
+    // littlefs has no physical preallocation primitive. Reserve twice the data
+    // blocks for CTZ/file overhead and enough payload for a complete COW copy.
+    fn reservationBlocks(self: *const Volume, head: object_format.ObjectHead) !u64 {
+        if (head.reservation_generation == 0) return 0;
+        const additional_bytes = std.math.sub(
+            u64,
+            head.reservation_payload_bytes,
+            head.reservation_existing_bytes,
+        ) catch return error.CorruptFilesystem;
+        const per_chunk_overhead = try std.math.mul(u64, head.reservation_chunk_count, 2);
+        var blocks = try inflatedDataBlocks(additional_bytes, self.header.block_size);
+        blocks = try addCapacity(blocks, per_chunk_overhead);
+        blocks = try addCapacity(blocks, try inflatedDataBlocks(head.reservation_payload_bytes, self.header.block_size));
+        blocks = try addCapacity(blocks, per_chunk_overhead);
+        const sidecar_entries = std.math.mul(u64, head.reservation_interval_count, 16) catch
+            return error.CorruptFilesystem;
+        const sidecar_bytes = std.math.add(u64, sidecar_entries, 36) catch return error.CorruptFilesystem;
+        blocks = try addCapacity(blocks, try inflatedDataBlocks(sidecar_bytes, self.header.block_size));
+        blocks = try addCapacity(blocks, 2);
+        return addCapacity(blocks, accounting_metadata_blocks);
+    }
+
+    fn ensureWriteCapacity(self: *Volume, footprint: object_store.WriteFootprint) !void {
+        if (footprint.chunk_count == 0) return;
+        var operation = try inflatedDataBlocks(footprint.payload_bytes, self.header.block_size);
+        operation = try addCapacity(operation, try std.math.mul(u64, footprint.chunk_count, 2));
+        operation = try addCapacity(operation, accounting_metadata_blocks);
+        if (!footprint.reserved) operation = try addCapacity(operation, self.reservation_blocks);
+        const free = @as(u64, self.header.block_count) - try self.usedBlocks();
+        if (free < operation) return error.NoSpaceLeft;
+    }
+
+    fn ensureGrowthCapacity(self: *Volume) !void {
+        if (self.reservation_blocks == 0) return;
+        const protected = try addCapacity(self.reservation_blocks, accounting_metadata_blocks);
+        const free = @as(u64, self.header.block_count) - try self.usedBlocks();
+        if (free < protected) return error.NoSpaceLeft;
+    }
+
+    fn replaceReservation(self: *Volume, old_head: object_format.ObjectHead, new_head: object_format.ObjectHead) !void {
+        const old_blocks = try self.reservationBlocks(old_head);
+        const new_blocks = try self.reservationBlocks(new_head);
+        self.reservation_blocks = std.math.sub(u64, self.reservation_blocks, old_blocks) catch
+            return error.CorruptFilesystem;
+        self.reservation_blocks = addCapacity(self.reservation_blocks, new_blocks) catch |err| {
+            self.reservation_blocks = try addCapacity(self.reservation_blocks, old_blocks);
+            return err;
+        };
+    }
+
     fn updateOpenMetadata(self: *Volume, id: object_format.ObjectId, value: metadata.Metadata) void {
         var current = self.open_files;
         while (current) |handle| : (current = handle.next) {
             if (std.mem.eql(u8, &handle.object_id, &id)) handle.metadata = value;
         }
+    }
+
+    fn directoryIdentity(self: *Volume, translated: [*:0]const u8) !object_format.ObjectId {
+        var identity: object_format.ObjectId = undefined;
+        const result = c.lfs_getattr(
+            &self.lfs,
+            translated,
+            metadata.directory_identity_attribute_type,
+            &identity,
+            identity.len,
+        );
+        if (result >= 0) {
+            if (result != identity.len) return error.InvalidMetadata;
+            return identity;
+        }
+        if (result != c.LFS_ERR_NOATTR) {
+            try checkLfs(result);
+            unreachable;
+        }
+
+        if (self.writable) {
+            try self.io.randomSecure(&identity);
+            const set_result = c.lfs_setattr(
+                &self.lfs,
+                translated,
+                metadata.directory_identity_attribute_type,
+                &identity,
+                identity.len,
+            );
+            if (set_result >= 0) return identity;
+            if (set_result != c.LFS_ERR_NOSPC) try checkLfs(set_result);
+        }
+
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(std.mem.span(translated), &digest, .{});
+        return digest[0..identity.len].*;
     }
 
     fn hasOpenObject(self: *Volume, id: object_format.ObjectId) bool {
@@ -608,7 +763,10 @@ pub const Volume = struct {
     fn reclaimObjectIfUnused(self: *Volume, id: object_format.ObjectId) !void {
         const links = self.link_counts.get(id) orelse return error.CorruptFilesystem;
         if (links != 0 or self.hasOpenObject(id) or self.objectPinCount(id) != 0) return;
+        const head = try self.store().readHead(id);
         try self.store().removeObject(id);
+        self.reservation_blocks = std.math.sub(u64, self.reservation_blocks, try self.reservationBlocks(head)) catch
+            return error.CorruptFilesystem;
         _ = self.link_counts.remove(id);
     }
 
@@ -635,6 +793,7 @@ pub const Volume = struct {
         uid: u32,
         gid: u32,
     ) !void {
+        try self.ensureGrowthCapacity();
         const created = try self.store().createObject(ref_kind, metadata.Metadata.init(
             self.io,
             kind,
@@ -734,6 +893,17 @@ pub const Volume = struct {
     }
 };
 
+const accounting_metadata_blocks: u64 = 32;
+
+fn inflatedDataBlocks(bytes: u64, block_size: u32) !u64 {
+    const blocks = try std.math.divCeil(u64, bytes, block_size);
+    return std.math.mul(u64, blocks, 2) catch error.FileTooLarge;
+}
+
+fn addCapacity(left: u64, right: u64) !u64 {
+    return std.math.add(u64, left, right) catch error.FileTooLarge;
+}
+
 fn parentSlice(path: [*:0]const u8) []const u8 {
     const value = std.mem.span(path);
     if (value.len <= 1) return "/";
@@ -751,6 +921,7 @@ pub const NodeInfo = struct {
     allocated_bytes: u64,
     metadata: metadata.Metadata,
     object_id: ?object_format.ObjectId,
+    identity: object_format.ObjectId,
     nlink: u64,
 };
 
@@ -771,6 +942,7 @@ pub const FileHandle = struct {
 
 pub const DirectoryHandle = struct {
     dir: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t),
+    info: NodeInfo = undefined,
     open: bool = false,
 };
 

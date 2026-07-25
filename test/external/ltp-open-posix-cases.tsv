@@ -1,0 +1,9 @@
+# classification	case	contract	reason
+required	mmap/1-1	shared-mmap	file contents are visible through a shared mapping
+required	mmap/3-1	map-fixed	MAP_FIXED replaces overlapping file-backed mappings
+required	mmap/11-1	mmap-alignment	unaligned file offsets fail with EINVAL
+required	mmap/12-1	mapping-lifetime	mapping remains valid after close and unlink
+required	fsync/4-1	fsync-regular-file	fsync succeeds after a regular-file write
+not-applicable	mmap/31-1	32-bit-overflow	only testable on a 32-bit kernel and process
+not-applicable	fsync/5-1	invalid-descriptor	does not exercise filesystem behavior
+not-applicable	fsync/7-1	pipe-fsync	does not exercise filesystem behavior

@@ -18,6 +18,7 @@ const cache_timeout = 1.0;
 
 const Inode = struct {
     id: c.fuse_ino_t,
+    identity: object_format.ObjectId,
     object_id: ?object_format.ObjectId,
     kind: metadata.Kind,
     cached_info: ?volume_mod.NodeInfo,
@@ -39,17 +40,18 @@ const MountState = struct {
     nodes: ?*Inode = null,
     dentries: ?*Dentry = null,
     open_files: ?*FuseFileHandle = null,
-    next_id: c.fuse_ino_t = c.FUSE_ROOT_ID + 1,
     writeback_cache: bool = false,
 
     fn init(volume: *volume_mod.Volume) !MountState {
         var state = MountState{ .volume = volume };
+        const root_info = try volume.stat("/");
         const root = try std.heap.c_allocator.create(Inode);
         root.* = .{
             .id = c.FUSE_ROOT_ID,
+            .identity = root_info.identity,
             .object_id = null,
             .kind = .directory,
-            .cached_info = null,
+            .cached_info = root_info,
             .lookup_count = 1,
             .open_count = 0,
             .next = null,
@@ -93,12 +95,10 @@ const MountState = struct {
         return null;
     }
 
-    fn findObject(self: *MountState, object_id: object_format.ObjectId) ?*Inode {
+    fn findIdentity(self: *MountState, identity: object_format.ObjectId) ?*Inode {
         var current = self.nodes;
         while (current) |node| : (current = node.next) {
-            if (node.object_id) |id| {
-                if (std.mem.eql(u8, &id, &object_id)) return node;
-            }
+            if (std.mem.eql(u8, &node.identity, &identity)) return node;
         }
         return null;
     }
@@ -107,14 +107,9 @@ const MountState = struct {
         if (name.len >= name_capacity) return error.NameTooLong;
         if (self.findChild(parent, name) != null) return error.PathAlreadyExists;
         var new_node = false;
-        const node = if (info.object_id) |object_id|
-            self.findObject(object_id) orelse value: {
-                new_node = true;
-                break :value try self.addNode(info.metadata.kind, object_id);
-            }
-        else value: {
+        const node = self.findIdentity(info.identity) orelse value: {
             new_node = true;
-            break :value try self.addNode(info.metadata.kind, null);
+            break :value try self.addNode(info);
         };
         errdefer if (new_node) self.maybeRemove(node);
         const dentry = try std.heap.c_allocator.create(Dentry);
@@ -134,20 +129,22 @@ const MountState = struct {
         return dentry;
     }
 
-    fn addNode(self: *MountState, kind: metadata.Kind, object_id: ?object_format.ObjectId) !*Inode {
+    fn addNode(self: *MountState, info: volume_mod.NodeInfo) !*Inode {
+        const id = inodeNumber(info.identity);
+        if (self.find(id) != null) return error.CorruptFilesystem;
         const node = try std.heap.c_allocator.create(Inode);
         errdefer std.heap.c_allocator.destroy(node);
-        if (object_id) |id| try self.volume.pinObject(id);
+        if (info.object_id) |object_id| try self.volume.pinObject(object_id);
         node.* = .{
-            .id = self.next_id,
-            .object_id = object_id,
-            .kind = kind,
+            .id = id,
+            .identity = info.identity,
+            .object_id = info.object_id,
+            .kind = info.metadata.kind,
             .cached_info = null,
             .lookup_count = 0,
             .open_count = 0,
             .next = self.nodes,
         };
-        self.next_id += 1;
         self.nodes = node;
         return node;
     }
@@ -306,9 +303,10 @@ const FuseFileHandle = struct {
 const FuseDirectoryHandle = struct {
     directory: volume_mod.DirectoryHandle,
     inode: *Inode,
+    parent_id: c.fuse_ino_t,
 };
 
-pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8) !void {
+pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bool) !void {
     const allocator = std.heap.c_allocator;
     const program = try allocator.dupeZ(u8, "devdrive");
     defer allocator.free(program);
@@ -318,7 +316,10 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8) !void {
     defer allocator.free(single_thread);
     const option = try allocator.dupeZ(u8, "-o");
     defer allocator.free(option);
-    const permissions = try allocator.dupeZ(u8, "default_permissions");
+    const permissions = try allocator.dupeZ(
+        u8,
+        if (allow_other) "default_permissions,allow_other" else "default_permissions",
+    );
     defer allocator.free(permissions);
     const mountpoint_z = try allocator.dupeZ(u8, mountpoint);
     defer allocator.free(mountpoint_z);
@@ -350,6 +351,7 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8) !void {
     operations.open = open;
     operations.read = read;
     operations.write = write;
+    operations.fallocate = fallocate;
     operations.statfs = statFs;
     operations.flush = flush;
     operations.release = release;
@@ -448,23 +450,35 @@ fn setAttr(req: c.fuse_req_t, id: c.fuse_ino_t, attr: ?*c.struct_stat, to_set: c
         c.FUSE_SET_ATTR_ATIME | c.FUSE_SET_ATTR_MTIME | c.FUSE_SET_ATTR_ATIME_NOW | c.FUSE_SET_ATTR_MTIME_NOW;
 
     if (fi) |file_info| {
-        if (node.kind != .file) return replyError(req, c.EISDIR);
-        const handle = fuseFileHandle(file_info);
-        if (to_set & c.FUSE_SET_ATTR_SIZE != 0) {
-            if (value.st_size < 0) return replyError(req, c.EINVAL);
-            state.volume.truncateFile(&handle.file, @intCast(value.st_size)) catch |err|
-                return replyError(req, errnoValue(err));
+        if (node.kind == .file) {
+            const handle = fuseFileHandle(file_info);
+            if (to_set & c.FUSE_SET_ATTR_SIZE != 0) {
+                if (value.st_size < 0) return replyError(req, c.EINVAL);
+                state.volume.truncateFile(&handle.file, @intCast(value.st_size)) catch |err|
+                    return replyError(req, errnoValue(err));
+            }
+            if (to_set & metadata_mask != 0) {
+                _ = state.volume.patchObjectMetadata(
+                    handle.file.object_id,
+                    metadataPatch(value, to_set, state.volume.io),
+                ) catch |err| return replyError(req, errnoValue(err));
+            }
+            if (to_set & c.FUSE_SET_ATTR_SIZE != 0)
+                state.volume.syncFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
+            const info = state.volume.statFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
+            node.cached_info = info;
+            var stat: c.struct_stat = undefined;
+            fillStat(&stat, node, info);
+            _ = c.fuse_reply_attr(req, &stat, cache_timeout);
+            return;
         }
-        if (to_set & metadata_mask != 0) {
-            _ = state.volume.patchObjectMetadata(
-                handle.file.object_id,
-                metadataPatch(value, to_set, state.volume.io),
-            ) catch |err| return replyError(req, errnoValue(err));
-        }
-        if (to_set & c.FUSE_SET_ATTR_SIZE != 0)
-            state.volume.syncFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
-        const info = state.volume.statFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
-        node.cached_info = info;
+        if (node.kind != .directory) return replyError(req, c.EOPNOTSUPP);
+        if (to_set & c.FUSE_SET_ATTR_SIZE != 0) return replyError(req, c.EISDIR);
+        const handle = fuseDirectoryHandle(file_info);
+        if (handle.inode != node) return replyError(req, c.EIO);
+        const info = patchDirectoryMetadata(state, node, value, to_set) catch |err|
+            return replyError(req, errnoValue(err));
+        handle.directory.info = info;
         var stat: c.struct_stat = undefined;
         fillStat(&stat, node, info);
         _ = c.fuse_reply_attr(req, &stat, cache_timeout);
@@ -501,6 +515,11 @@ fn setAttr(req: c.fuse_req_t, id: c.fuse_ino_t, attr: ?*c.struct_stat, to_set: c
         break :value_info state.volume.statObject(object_id) catch |err|
             return replyError(req, errnoValue(err));
     } else value_info: {
+        if (node.kind == .directory) {
+            if (to_set & c.FUSE_SET_ATTR_SIZE != 0) return replyError(req, c.EISDIR);
+            break :value_info patchDirectoryMetadata(state, node, value, to_set) catch |err|
+                return replyError(req, errnoValue(err));
+        }
         const path = state.pathFor(node) orelse return replyError(req, c.ENOENT);
         if (to_set & c.FUSE_SET_ATTR_SIZE != 0) return replyError(req, c.EISDIR);
         if (to_set & metadata_mask != 0) {
@@ -528,7 +547,7 @@ fn readLink(req: c.fuse_req_t, id: c.fuse_ino_t) callconv(.c) void {
     var buffer: [path_capacity:0]u8 = @splat(0);
     const amount = state.volume.readObject(object_id, buffer[0..path_capacity], 0) catch |err|
         return replyError(req, errnoValue(err));
-    state.volume.updateAccessTime(object_id) catch |err| return replyError(req, errnoValue(err));
+    state.volume.updateAccessTime(object_id) catch {};
     if (amount == path_capacity) return replyError(req, c.ENAMETOOLONG);
     buffer[amount] = 0;
     _ = c.fuse_reply_readlink(req, &buffer);
@@ -598,8 +617,10 @@ fn removeNode(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const 
     if (!directory and info.metadata.kind == .directory) return replyError(req, c.EISDIR);
     state.volume.remove(&path) catch |err| return replyError(req, errnoValue(err));
     if (state.findChild(parent, name)) |dentry| {
-        if (dentry.inode.cached_info) |*cached|
+        if (dentry.inode.cached_info) |*cached| {
             cached.nlink = if (directory) 0 else info.nlink -| 1;
+            if (directory) cached.metadata.ctime_ns = now(state.volume.io);
+        }
         state.removeEntry(dentry);
     }
     state.pruneCaches();
@@ -661,8 +682,10 @@ fn rename(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
         return replyError(req, errnoValue(err));
     if (result == .same_object) return replyError(req, 0);
     if (target) |dentry| {
-        if (dentry.inode.cached_info) |*cached|
+        if (dentry.inode.cached_info) |*cached| {
             cached.nlink = if (dentry.inode.kind == .directory) 0 else cached.nlink -| 1;
+            if (dentry.inode.kind == .directory) cached.metadata.ctime_ns = now(state.volume.io);
+        }
         state.removeEntry(dentry);
     }
     if (source) |dentry| {
@@ -808,15 +831,33 @@ fn write(req: c.fuse_req_t, id: c.fuse_ino_t, data_raw: ?[*]const u8, size: usiz
     _ = c.fuse_reply_write(req, amount);
 }
 
+fn fallocate(req: c.fuse_req_t, id: c.fuse_ino_t, mode: c_int, offset: c.off_t, length: c.off_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
+    _ = id;
+    if (mode != 0) return replyError(req, c.EOPNOTSUPP);
+    if (offset < 0 or length <= 0) return replyError(req, c.EINVAL);
+    const start: u64 = @intCast(offset);
+    const amount: u64 = @intCast(length);
+    const end = std.math.add(u64, start, amount) catch return replyError(req, c.EFBIG);
+    if (end > object_format.max_file_size) return replyError(req, c.EFBIG);
+    const handle = fuseFileHandle(fi.?);
+    const state = stateFor(req);
+    state.volume.fallocateFile(&handle.file, start, amount) catch |err|
+        return replyError(req, errnoValue(err));
+    state.volume.syncFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
+    const info = state.volume.statFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
+    handle.inode.cached_info = info;
+    replyError(req, 0);
+}
+
 fn statFs(req: c.fuse_req_t, id: c.fuse_ino_t) callconv(.c) void {
     _ = id;
     const volume = stateFor(req).volume;
-    const used = volume.usedBlocks() catch |err| return replyError(req, errnoValue(err));
+    const available = volume.availableBlocks() catch |err| return replyError(req, errnoValue(err));
     var stat: c.struct_statvfs = std.mem.zeroes(c.struct_statvfs);
     stat.f_bsize = volume.header.block_size;
     stat.f_frsize = volume.header.block_size;
     stat.f_blocks = volume.header.block_count;
-    stat.f_bfree = volume.header.block_count - used;
+    stat.f_bfree = available;
     stat.f_bavail = stat.f_bfree;
     stat.f_namemax = volume.header.name_max;
     _ = c.fuse_reply_statfs(req, &stat);
@@ -860,6 +901,8 @@ fn openDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_i
         return replyError(req, errnoValue(err));
     };
     handle.inode = node;
+    handle.parent_id = if (state.findEntryForInode(node)) |dentry| dentry.parent.id else c.FUSE_ROOT_ID;
+    node.cached_info = handle.directory.info;
     node.open_count += 1;
     c.devdrive_fuse_set_handle(fi.?, @intFromPtr(handle));
     _ = c.fuse_reply_open(req, fi.?);
@@ -871,10 +914,7 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
     const state = stateFor(req);
     defer state.pruneCaches();
     const handle = fuseDirectoryHandle(fi.?);
-    if (offset == 0) {
-        const path = state.pathFor(handle.inode) orelse return replyError(req, c.ENOENT);
-        state.volume.updateDirectoryAccessTime(path) catch |err| return replyError(req, errnoValue(err));
-    }
+    updateDirectoryAccessTime(state, handle) catch {};
     state.volume.seekDirectory(&handle.directory, @intCast(offset)) catch |err|
         return replyError(req, errnoValue(err));
     const buffer = std.heap.c_allocator.alloc(u8, size) catch return replyError(req, c.ENOMEM);
@@ -896,7 +936,7 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
             stat.st_ino = if (state.findEntryForInode(handle.inode)) |dentry|
                 dentry.parent.id
             else
-                c.FUSE_ROOT_ID;
+                handle.parent_id;
         } else {
             const dentry = state.findChild(handle.inode, name) orelse value: {
                 const directory_path = state.pathFor(handle.inode) orelse return replyError(req, c.ENOENT);
@@ -939,6 +979,40 @@ fn fsyncDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, datasync: c_int, fi: ?*c.
     replyError(req, 0);
 }
 
+fn currentDirectoryInfo(state: *MountState, node: *Inode) !volume_mod.NodeInfo {
+    if (state.pathFor(node)) |path| {
+        const info = try state.volume.stat(path);
+        if (!std.mem.eql(u8, &info.identity, &node.identity)) return error.CorruptFilesystem;
+        return info;
+    }
+    return node.cached_info orelse error.FileNotFound;
+}
+
+fn patchDirectoryMetadata(
+    state: *MountState,
+    node: *Inode,
+    stat: *const c.struct_stat,
+    to_set: c_int,
+) !volume_mod.NodeInfo {
+    var info = try currentDirectoryInfo(state, node);
+    const metadata_mask = c.FUSE_SET_ATTR_MODE | c.FUSE_SET_ATTR_UID | c.FUSE_SET_ATTR_GID |
+        c.FUSE_SET_ATTR_ATIME | c.FUSE_SET_ATTR_MTIME | c.FUSE_SET_ATTR_ATIME_NOW | c.FUSE_SET_ATTR_MTIME_NOW;
+    if (to_set & metadata_mask != 0) {
+        applyMetadata(&info.metadata, stat, to_set, state.volume.io);
+        if (state.pathFor(node)) |path| try state.volume.setMetadata(path, info.metadata);
+    }
+    node.cached_info = info;
+    return info;
+}
+
+fn updateDirectoryAccessTime(state: *MountState, handle: *FuseDirectoryHandle) !void {
+    var info = try currentDirectoryInfo(state, handle.inode);
+    info.metadata.atime_ns = now(state.volume.io);
+    if (state.pathFor(handle.inode)) |path| try state.volume.setMetadata(path, info.metadata);
+    handle.directory.info = info;
+    handle.inode.cached_info = info;
+}
+
 fn joinPath(output: *[path_capacity:0]u8, parent_path: []const u8, name: []const u8) !void {
     const separator: usize = if (parent_path.len == 1) 0 else 1;
     const length = std.math.add(usize, parent_path.len + separator, name.len) catch return error.NameTooLong;
@@ -951,6 +1025,12 @@ fn joinPath(output: *[path_capacity:0]u8, parent_path: []const u8, name: []const
         cursor += 1;
     }
     @memcpy(output[cursor .. cursor + name.len], name);
+}
+
+fn inodeNumber(identity: object_format.ObjectId) c.fuse_ino_t {
+    var id: c.fuse_ino_t = std.mem.readInt(u64, identity[0..8], .little);
+    if (id == 0 or id == c.FUSE_ROOT_ID) id +%= 2;
+    return id;
 }
 
 fn replyEntry(req: c.fuse_req_t, node: *Inode, info: volume_mod.NodeInfo) void {

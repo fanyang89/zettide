@@ -37,6 +37,8 @@ zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
 zig build test-libfuse -Dexternal-tests=required
 zig build test-fsx -Dexternal-tests=required
 zig build test-external -Dexternal-tests=required
+zig build test-posix-privileged -Dprivileged-tests=required
+zig build -j1 test-posix-nightly -Dfuse-tests=required -Dexternal-tests=required -Dprivileged-tests=required
 zig build ci
 ```
 
@@ -51,6 +53,21 @@ declared DevDrive semantics. `test-fsx` runs deterministic 10,000-operation
 buffered and mmap I/O workloads with two seeds. Set `DEVDRIVE_FSX_OPS=100000`
 for a longer stress run. These gates have the same Linux FUSE requirements as `test-fuse`
 and are not part of the default `test` or `ci` targets.
+
+The privileged and nightly gates use pinned upstream suites prepared by an
+explicit networked step. Test execution itself never downloads dependencies:
+
+```sh
+bash test/external/prepare.sh
+zig build -j1 test-posix-nightly \
+  -Dfuse-tests=required -Dexternal-tests=required -Dprivileged-tests=required
+```
+
+Passwordless `sudo` is used only by runners that require multiple identities.
+In `auto` mode, missing FUSE, root, or prepared-suite prerequisites skip that
+runner. In `required` mode, the same condition fails the gate. Full setup,
+pins, manifests, and log controls are documented in
+`docs/posix-nightly.md`.
 
 ## Usage
 
@@ -82,3 +99,5 @@ littlefs is licensed under BSD-3-Clause. Its pinned source and license are in
 
 Vendored libfuse and xfstests test sources are GPL-2.0 and are only compiled as
 test executables. Their source commits and licenses are recorded under `vendor/`.
+Fetched pjdfstest, xfstests, and LTP source licenses and commits are recorded in
+`test/external/suites.tsv`.

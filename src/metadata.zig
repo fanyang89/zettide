@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const attribute_type: u8 = 0xe0;
+pub const directory_identity_attribute_type: u8 = 0xe1;
 pub const encoded_size: usize = 64;
 const version: u8 = 1;
 

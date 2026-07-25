@@ -21,6 +21,21 @@ fn openVolume(path: []const u8) !Volume {
     return Volume.open(std.testing.io, path, true);
 }
 
+fn readReservations(
+    volume: *Volume,
+    object_id: devdrive.object_format.ObjectId,
+) !struct {
+    head: devdrive.object_format.ObjectHead,
+    intervals: []devdrive.object_format.ReservationInterval,
+} {
+    const store: devdrive.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+    const head = try store.readHead(object_id);
+    return .{
+        .head = head,
+        .intervals = try store.readReservationsAlloc(head, std.testing.allocator),
+    };
+}
+
 test "data and metadata survive a real container reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -253,6 +268,131 @@ test "namespace operations and directory cookies are stable" {
     try volume.remove("/dir/b");
     try volume.remove("/dir");
     try std.testing.expectError(error.FileNotFound, volume.stat("/dir"));
+}
+
+test "directory identity survives rename and container reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var expected_identity: devdrive.object_format.ObjectId = undefined;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try volume.makeDirectory("/identity-old", 0o40750, 10, 20);
+        const before = try volume.stat("/identity-old");
+        expected_identity = before.identity;
+
+        var directory: DirectoryHandle = .{};
+        try volume.openDirectory(&directory, "/identity-old");
+        try std.testing.expectEqualSlices(u8, &expected_identity, &directory.info.identity);
+        try volume.rename("/identity-old", "/identity-new");
+        try std.testing.expectEqualSlices(u8, &expected_identity, &(try volume.stat("/identity-new")).identity);
+        try std.testing.expectEqualSlices(u8, &expected_identity, &directory.info.identity);
+        try volume.closeDirectory(&directory);
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try std.testing.expectEqualSlices(u8, &expected_identity, &(try volume.stat("/identity-new")).identity);
+    }
+}
+
+test "directories from old images receive a compatible persistent identity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var expected_identity: devdrive.object_format.ObjectId = undefined;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try volume.makeDirectory("/legacy-directory", 0o40755, 1, 2);
+        try devdrive.volume.checkLfs(c.lfs_removeattr(
+            &volume.lfs,
+            "/namespace/legacy-directory",
+            devdrive.metadata.directory_identity_attribute_type,
+        ));
+    }
+
+    {
+        var volume = try Volume.open(std.testing.io, path, false);
+        defer volume.deinit();
+        try volume.mount();
+        _ = try volume.stat("/legacy-directory");
+        var stored_identity: devdrive.object_format.ObjectId = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, c.LFS_ERR_NOATTR),
+            c.lfs_getattr(
+                &volume.lfs,
+                "/namespace/legacy-directory",
+                devdrive.metadata.directory_identity_attribute_type,
+                &stored_identity,
+                stored_identity.len,
+            ),
+        );
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        expected_identity = (try volume.stat("/legacy-directory")).identity;
+        var stored_identity: devdrive.object_format.ObjectId = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, stored_identity.len),
+            c.lfs_getattr(
+                &volume.lfs,
+                "/namespace/legacy-directory",
+                devdrive.metadata.directory_identity_attribute_type,
+                &stored_identity,
+                stored_identity.len,
+            ),
+        );
+        try std.testing.expectEqualSlices(u8, &expected_identity, &stored_identity);
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try std.testing.expectEqualSlices(u8, &expected_identity, &(try volume.stat("/legacy-directory")).identity);
+    }
+}
+
+test "every observable file read advances atime without changing ctime" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/strict-atime", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 2);
+    _ = try volume.writeFile(&file, "x", 0);
+    var baseline = file.metadata;
+    baseline.atime_ns = 1;
+    baseline.ctime_ns = 2;
+    try volume.setObjectMetadata(file.object_id, baseline);
+
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try volume.readFile(&file, &byte, 0));
+    const first = (try volume.statFile(&file)).metadata;
+    try std.testing.expect(first.atime_ns > baseline.atime_ns);
+    try std.testing.expectEqual(baseline.ctime_ns, first.ctime_ns);
+    try std.testing.expectEqual(@as(usize, 1), try volume.readFile(&file, &byte, 0));
+    const second = (try volume.statFile(&file)).metadata;
+    try std.testing.expect(second.atime_ns > first.atime_ns);
+    try std.testing.expectEqual(baseline.ctime_ns, second.ctime_ns);
+    try volume.closeFile(&file);
 }
 
 test "an unlinked open handle stays isolated from a replacement" {
@@ -521,6 +661,270 @@ test "full volume reports no space and recovers after deletion" {
 
     try volume.openFile(&file, "/recovered", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
     try std.testing.expectEqual(block.len, try volume.writeFile(&file, &block, 0));
+    try volume.closeFile(&file);
+}
+
+test "high-offset fallocate reserves only its sparse interval" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 16 * 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    const offset = 8 * devdrive.object_format.chunk_size;
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/high-offset", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    try volume.fallocateFile(&file, offset, 4096);
+    const stored = try readReservations(&volume, file.object_id);
+    defer std.testing.allocator.free(stored.intervals);
+    try std.testing.expectEqual(@as(usize, 1), stored.intervals.len);
+    try std.testing.expectEqual(@as(u64, offset), stored.intervals[0].start);
+    try std.testing.expectEqual(@as(u64, offset + 4096), stored.intervals[0].end);
+    try std.testing.expectEqual(@as(u64, 4096), stored.head.reservation_interval_bytes);
+    try std.testing.expectEqual(@as(u64, 4096), stored.head.reservation_payload_bytes);
+    try std.testing.expectEqual(@as(u64, 1), stored.head.reservation_chunk_count);
+    try std.testing.expectEqual(@as(u64, offset + 4096), (try volume.statFile(&file)).size);
+    try volume.closeFile(&file);
+}
+
+test "fallocate merges overlaps and keeps disjoint hole writes unreserved" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 32 * 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/intervals", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    const chunk = devdrive.object_format.chunk_size;
+    try volume.fallocateFile(&file, chunk + 4096, 4096);
+    try volume.fallocateFile(&file, chunk, 4096);
+    try volume.fallocateFile(&file, chunk + 2048, 8192);
+    var index: u64 = 3;
+    while (index < 15) : (index += 1) try volume.fallocateFile(&file, index * chunk, 4096);
+
+    const stored = try readReservations(&volume, file.object_id);
+    defer std.testing.allocator.free(stored.intervals);
+    try std.testing.expectEqual(@as(usize, 13), stored.intervals.len);
+    try std.testing.expectEqual(@as(u64, chunk), stored.intervals[0].start);
+    try std.testing.expectEqual(@as(u64, chunk + 10 * 1024), stored.intervals[0].end);
+    const store: devdrive.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+    try std.testing.expect((try store.writeFootprint(file.object_id, chunk + 1024, 4096)).reserved);
+    try std.testing.expect(!(try store.writeFootprint(file.object_id, 2 * chunk, 4096)).reserved);
+    try std.testing.expect(!(try store.writeFootprint(file.object_id, chunk + 8192, 2 * chunk)).reserved);
+    try volume.closeFile(&file);
+}
+
+test "reservation sidecar selection persists and recovery removes unselected versions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 8 * 1024 * 1024);
+    var object_id: devdrive.object_format.ObjectId = undefined;
+    var selected_generation: u64 = 0;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/persistent-reservation", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        object_id = file.object_id;
+        try volume.fallocateFile(&file, 4096, 4096);
+        try volume.fallocateFile(&file, 16384, 4096);
+        const stored = try readReservations(&volume, object_id);
+        defer std.testing.allocator.free(stored.intervals);
+        selected_generation = stored.head.reservation_generation;
+
+        var id_buffer: [32]u8 = undefined;
+        var orphan_path: [160:0]u8 = @splat(0);
+        const id = devdrive.object_format.formatObjectId(object_id, &id_buffer);
+        const value = try std.fmt.bufPrint(
+            orphan_path[0..160],
+            "/system/objects/{s}/reservation-{x:0>16}",
+            .{ id, selected_generation + 1 },
+        );
+        orphan_path[value.len] = 0;
+        var orphan: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+        try devdrive.volume.checkLfs(c.lfs_file_open(
+            &volume.lfs,
+            &orphan,
+            &orphan_path,
+            c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
+        ));
+        try devdrive.volume.checkLfs(c.lfs_file_close(&volume.lfs, &orphan));
+        try volume.closeFile(&file);
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        const stored = try readReservations(&volume, object_id);
+        defer std.testing.allocator.free(stored.intervals);
+        try std.testing.expectEqual(selected_generation, stored.head.reservation_generation);
+        try std.testing.expectEqual(@as(usize, 2), stored.intervals.len);
+
+        var id_buffer: [32]u8 = undefined;
+        var orphan_path: [160:0]u8 = @splat(0);
+        const id = devdrive.object_format.formatObjectId(object_id, &id_buffer);
+        const value = try std.fmt.bufPrint(
+            orphan_path[0..160],
+            "/system/objects/{s}/reservation-{x:0>16}",
+            .{ id, selected_generation + 1 },
+        );
+        orphan_path[value.len] = 0;
+        var info: c.struct_lfs_info = undefined;
+        try std.testing.expectEqual(@as(c_int, c.LFS_ERR_NOENT), c.lfs_stat(&volume.lfs, &orphan_path, &info));
+    }
+}
+
+test "fallocate reservations persist, isolate space, share links, and release" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 8 * 1024 * 1024);
+    var expected_blocks: u64 = 0;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/reserved-a", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        _ = try volume.writeFile(&file, "preserved", 0);
+        try volume.fallocateFile(&file, 64 * 1024, 64 * 1024);
+        const info = try volume.statFile(&file);
+        try std.testing.expectEqual(@as(u64, 128 * 1024), info.size);
+        var contents: [9]u8 = undefined;
+        try std.testing.expectEqual(contents.len, try volume.readFile(&file, &contents, 0));
+        try std.testing.expectEqualStrings("preserved", &contents);
+        var zeroes: [32]u8 = undefined;
+        try std.testing.expectEqual(zeroes.len, try volume.readFile(&file, &zeroes, 4096));
+        for (zeroes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+        expected_blocks = volume.reservedCapacityBlocks();
+        try std.testing.expect(expected_blocks != 0);
+        try volume.link("/reserved-a", "/reserved-b");
+        try std.testing.expectEqual(expected_blocks, volume.reservedCapacityBlocks());
+        try volume.syncFile(&file);
+        try volume.closeFile(&file);
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try std.testing.expectEqual(expected_blocks, volume.reservedCapacityBlocks());
+        try std.testing.expectEqualSlices(
+            u8,
+            &(try volume.stat("/reserved-a")).object_id.?,
+            &(try volume.stat("/reserved-b")).object_id.?,
+        );
+
+        var hog: FileHandle = undefined;
+        try volume.openFile(&hog, "/hog", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        const block: [4096]u8 = @splat(0x5a);
+        var index: u64 = 0;
+        while (index < 4096) : (index += 1) {
+            _ = volume.writeFile(&hog, &block, index * devdrive.object_format.chunk_size) catch |err| switch (err) {
+                error.NoSpaceLeft => break,
+                else => return err,
+            };
+        }
+        try std.testing.expect(index < 4096);
+
+        var directory_index: usize = 0;
+        while (directory_index < 4096) : (directory_index += 1) {
+            var name_buffer: [64:0]u8 = @splat(0);
+            const name = try std.fmt.bufPrint(name_buffer[0..64], "/metadata-hog-{d}", .{directory_index});
+            name_buffer[name.len] = 0;
+            volume.makeDirectory(&name_buffer, 0o40755, 1, 1) catch |err| switch (err) {
+                error.NoSpaceLeft => break,
+                else => return err,
+            };
+        }
+        try std.testing.expect(directory_index < 4096);
+
+        var reserved: FileHandle = undefined;
+        try volume.openFile(&reserved, "/reserved-b", c.LFS_O_RDWR, 0, 0, 0);
+        try std.testing.expectError(error.NoSpaceLeft, volume.writeFile(&reserved, &block, 32 * 1024));
+        try std.testing.expectEqual(block.len, try volume.writeFile(&reserved, &block, 96 * 1024));
+        const post_write_blocks = volume.reservedCapacityBlocks();
+        var actual: [9]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&reserved, &actual, 0));
+        try std.testing.expectEqualStrings("preserved", &actual);
+
+        try volume.remove("/reserved-a");
+        try std.testing.expectEqual(post_write_blocks, volume.reservedCapacityBlocks());
+        try volume.remove("/reserved-b");
+        try std.testing.expectEqual(@as(u64, 0), (try volume.statFile(&reserved)).nlink);
+        try std.testing.expectEqual(post_write_blocks, volume.reservedCapacityBlocks());
+        try volume.closeFile(&reserved);
+        try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
+
+        var released: FileHandle = undefined;
+        try volume.openFile(&released, "/released", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        try std.testing.expectEqual(block.len, try volume.writeFile(&released, &block, 0));
+        try volume.closeFile(&released);
+        try volume.closeFile(&hog);
+    }
+}
+
+test "truncate and open truncation release fallocate reservations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 8 * 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/truncate-reservation", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    try volume.fallocateFile(&file, 0, 128 * 1024);
+    try volume.fallocateFile(&file, 256 * 1024, 128 * 1024);
+    const full = volume.reservedCapacityBlocks();
+    try volume.truncateFile(&file, 320 * 1024);
+    var stored = try readReservations(&volume, file.object_id);
+    try std.testing.expectEqual(@as(usize, 2), stored.intervals.len);
+    try std.testing.expectEqual(@as(u64, 320 * 1024), stored.intervals[1].end);
+    std.testing.allocator.free(stored.intervals);
+    try volume.truncateFile(&file, 32 * 1024);
+    stored = try readReservations(&volume, file.object_id);
+    try std.testing.expectEqual(@as(usize, 1), stored.intervals.len);
+    try std.testing.expectEqual(@as(u64, 32 * 1024), stored.intervals[0].end);
+    std.testing.allocator.free(stored.intervals);
+    try std.testing.expect(volume.reservedCapacityBlocks() < full);
+    try std.testing.expect(volume.reservedCapacityBlocks() != 0);
+    try volume.closeFile(&file);
+
+    try volume.openFile(&file, "/truncate-reservation", c.LFS_O_RDWR | c.LFS_O_TRUNC, 0, 0, 0);
+    try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
+    try volume.closeFile(&file);
+}
+
+test "fallocate rejects ranges beyond the supported file size" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/invalid-reservation", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    try std.testing.expectError(
+        error.FileTooLarge,
+        volume.fallocateFile(&file, devdrive.object_format.max_file_size, 1),
+    );
+    try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
+    try std.testing.expectError(error.InvalidArgument, volume.fallocateFile(&file, 0, 0));
+    try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
     try volume.closeFile(&file);
 }
 

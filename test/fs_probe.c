@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static void fail(const char *message) {
@@ -33,6 +35,17 @@ static void write_all(int fd, const void *data, size_t size) {
         cursor += amount;
         size -= (size_t)amount;
     }
+}
+
+static int compare_timespec(struct timespec left, struct timespec right) {
+    if (left.tv_sec != right.tv_sec) return left.tv_sec < right.tv_sec ? -1 : 1;
+    if (left.tv_nsec != right.tv_nsec) return left.tv_nsec < right.tv_nsec ? -1 : 1;
+    return 0;
+}
+
+static void pause_for_timestamp(void) {
+    struct timespec delay = {.tv_sec = 0, .tv_nsec = 2000000};
+    if (nanosleep(&delay, NULL) != 0) fail("nanosleep");
 }
 
 static void expect_contents(const char *path, const char *expected) {
@@ -105,13 +118,37 @@ static void test_unlinked_directories(const char *root) {
     if (mkdir(source, 0755) != 0) fail("mkdir removed open directory");
     int directory_fd = open(source, O_RDONLY | O_DIRECTORY);
     if (directory_fd < 0) fail("open removed directory");
+    struct stat before, st;
+    if (fstat(directory_fd, &before) != 0) fail("fstat linked directory");
     if (rmdir(source) != 0) fail("rmdir open directory");
-    struct stat st;
     if (fstat(directory_fd, &st) != 0) fail("fstat removed directory");
-    if (st.st_nlink != 0) {
-        fprintf(stderr, "removed directory retained links\n");
+    if (st.st_ino != before.st_ino || st.st_nlink != 0) {
+        fprintf(stderr, "removed directory lost identity or retained links\n");
         exit(1);
     }
+    if (fchmod(directory_fd, 0711) != 0) fail("fchmod removed directory");
+    if (fchown(directory_fd, geteuid(), getegid()) != 0) fail("fchown removed directory");
+    struct timespec times[2] = {
+        {.tv_sec = 1234567000, .tv_nsec = 123},
+        {.tv_sec = 1234568000, .tv_nsec = 456},
+    };
+    if (futimens(directory_fd, times) != 0) fail("futimens removed directory");
+    if (fsync(directory_fd) != 0) fail("fsync removed directory");
+    if (fstat(directory_fd, &st) != 0) fail("fstat changed removed directory");
+    if (st.st_ino != before.st_ino || st.st_nlink != 0 || (st.st_mode & 07777) != 0711 ||
+        st.st_uid != geteuid() || st.st_gid != getegid() || compare_timespec(st.st_atim, times[0]) != 0 ||
+        compare_timespec(st.st_mtim, times[1]) != 0) {
+        fprintf(stderr, "removed directory metadata was not retained\n");
+        exit(1);
+    }
+    int iteration_fd = dup(directory_fd);
+    if (iteration_fd < 0) fail("dup removed directory");
+    DIR *stream = fdopendir(iteration_fd);
+    if (stream == NULL) fail("fdopendir removed directory");
+    errno = 0;
+    while (readdir(stream) != NULL) {}
+    if (errno != 0) fail("readdir removed directory");
+    if (closedir(stream) != 0) fail("closedir removed directory");
     if (close(directory_fd) != 0) fail("close removed directory");
 
     make_path(source, sizeof(source), root, "rename-directory-source");
@@ -119,10 +156,16 @@ static void test_unlinked_directories(const char *root) {
     if (mkdir(source, 0755) != 0 || mkdir(target, 0755) != 0) fail("mkdir rename directories");
     directory_fd = open(target, O_RDONLY | O_DIRECTORY);
     if (directory_fd < 0) fail("open rename directory victim");
+    if (fstat(directory_fd, &before) != 0) fail("fstat rename directory victim before");
     if (rename(source, target) != 0) fail("rename over open directory");
     if (fstat(directory_fd, &st) != 0) fail("fstat renamed directory victim");
-    if (st.st_nlink != 0) {
-        fprintf(stderr, "renamed directory victim retained links\n");
+    if (st.st_ino != before.st_ino || st.st_nlink != 0) {
+        fprintf(stderr, "renamed directory victim lost identity or retained links\n");
+        exit(1);
+    }
+    if (fchmod(directory_fd, 0701) != 0 || fsync(directory_fd) != 0 || fstat(directory_fd, &st) != 0 ||
+        st.st_ino != before.st_ino || st.st_nlink != 0 || (st.st_mode & 07777) != 0701) {
+        fprintf(stderr, "renamed directory victim metadata was not retained\n");
         exit(1);
     }
     if (close(directory_fd) != 0) fail("close renamed directory victim");
@@ -281,6 +324,123 @@ static void test_large_sparse(const char *root) {
     if (fsync(fd) != 0 || close(fd) != 0) fail("sync large sparse");
 }
 
+static void test_fallocate(const char *root) {
+    char path[4096], alias[4096];
+    make_path(path, sizeof(path), root, "fallocate");
+    make_path(alias, sizeof(alias), root, "fallocate-link");
+    int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0644);
+    if (fd < 0) fail("create fallocate file");
+    write_all(fd, "preserved", 9);
+    if (fallocate(fd, 0, 4096, 4096) != 0) fail("mode zero fallocate");
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size != 8192) fail("mode zero fallocate size");
+    char contents[9];
+    if (pread(fd, contents, sizeof(contents), 0) != sizeof(contents) || memcmp(contents, "preserved", 9) != 0) {
+        fprintf(stderr, "fallocate changed existing data\n");
+        exit(1);
+    }
+    char zeroes[32];
+    if (pread(fd, zeroes, sizeof(zeroes), 1024) != sizeof(zeroes)) fail("read fallocate hole");
+    for (size_t i = 0; i < sizeof(zeroes); ++i) {
+        if (zeroes[i] != 0) {
+            fprintf(stderr, "fallocate extension is not zero-filled\n");
+            exit(1);
+        }
+    }
+    int result = posix_fallocate(fd, 16384, 4096);
+    if (result != 0) {
+        errno = result;
+        fail("posix_fallocate");
+    }
+    if (fstat(fd, &st) != 0 || st.st_size != 20480) fail("posix_fallocate size");
+
+    if (link(path, alias) != 0) fail("link fallocate file");
+    int alias_fd = open(alias, O_RDWR);
+    if (alias_fd < 0 || fallocate(alias_fd, 0, 24576, 4096) != 0) fail("fallocate hard link");
+    struct stat original_st, alias_st;
+    if (fstat(fd, &original_st) != 0 || fstat(alias_fd, &alias_st) != 0 ||
+        original_st.st_ino != alias_st.st_ino || original_st.st_size != 28672 || alias_st.st_size != 28672) {
+        fprintf(stderr, "hard links did not share fallocate state\n");
+        exit(1);
+    }
+
+    errno = 0;
+    if (fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 4096) != -1 || errno != EOPNOTSUPP) {
+        fprintf(stderr, "unsupported fallocate mode did not return EOPNOTSUPP\n");
+        exit(1);
+    }
+    errno = 0;
+    if (fallocate(fd, 0, -1, 1) != -1 || errno != EINVAL) {
+        fprintf(stderr, "negative fallocate offset did not return EINVAL\n");
+        exit(1);
+    }
+    errno = 0;
+    if (fallocate(fd, 0, 0, 0) != -1 || errno != EINVAL) {
+        fprintf(stderr, "zero-length fallocate did not return EINVAL\n");
+        exit(1);
+    }
+    errno = 0;
+    if (fallocate(fd, 0, (off_t)LLONG_MAX - 1, 4) != -1 || errno != EFBIG) {
+        fprintf(stderr, "overflowing fallocate range did not return EFBIG\n");
+        exit(1);
+    }
+    if (close(alias_fd) != 0 || close(fd) != 0 || unlink(alias) != 0 || unlink(path) != 0)
+        fail("clean up fallocate file");
+
+    make_path(path, sizeof(path), root, "fallocate-crash");
+    fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0644);
+    if (fd < 0 || write(fd, "crash-safe", 10) != 10) fail("create crash fallocate file");
+    result = posix_fallocate(fd, 0, 128 * 1024);
+    if (result != 0) {
+        errno = result;
+        fail("reserve crash fallocate file");
+    }
+    if (fsync(fd) != 0 || close(fd) != 0) fail("sync crash fallocate file");
+}
+
+static void verify_crash_fallocate(const char *root) {
+    char reserved_path[4096], hog_path[4096];
+    make_path(reserved_path, sizeof(reserved_path), root, "fallocate-crash");
+    make_path(hog_path, sizeof(hog_path), root, "fallocate-crash-hog");
+    int reserved_fd = open(reserved_path, O_RDWR);
+    int hog_fd = open(hog_path, O_CREAT | O_EXCL | O_RDWR, 0644);
+    if (reserved_fd < 0 || hog_fd < 0) fail("open crash reservation files");
+
+    char block[4096];
+    memset(block, 0x6b, sizeof(block));
+    int exhausted = 0;
+    for (off_t index = 0; index < 4096; ++index) {
+        ssize_t amount = pwrite(hog_fd, block, sizeof(block), index * (off_t)(1024 * 1024));
+        if (amount < 0 && errno == ENOSPC) {
+            exhausted = 1;
+            break;
+        }
+        if (amount != sizeof(block)) fail("fill unreserved crash file");
+        if (fsync(hog_fd) != 0) {
+            if (errno == ENOSPC) {
+                exhausted = 1;
+                break;
+            }
+            fail("sync unreserved crash file");
+        }
+    }
+    if (!exhausted) {
+        fprintf(stderr, "unreserved crash file did not reach ENOSPC\n");
+        exit(1);
+    }
+
+    if (pwrite(reserved_fd, block, sizeof(block), 64 * 1024) != sizeof(block) || fsync(reserved_fd) != 0)
+        fail("write crash-persistent reservation");
+    char marker[10];
+    if (pread(reserved_fd, marker, sizeof(marker), 0) != sizeof(marker) || memcmp(marker, "crash-safe", 10) != 0) {
+        fprintf(stderr, "crash-persistent reservation lost existing data\n");
+        exit(1);
+    }
+    if (close(reserved_fd) != 0) fail("close crash reservation");
+    close(hog_fd);
+    if (unlink(reserved_path) != 0 || unlink(hog_path) != 0) fail("remove crash reservation files");
+}
+
 static void test_rename_noreplace(const char *root) {
     char source[4096], target[4096];
     make_path(source, sizeof(source), root, "noreplace-source");
@@ -321,6 +481,20 @@ static void test_directory_iteration(const char *root) {
     if (closedir(stream) != 0) fail("closedir many-entries");
     if (count != 300) {
         fprintf(stderr, "readdir returned %d of 300 entries\n", count);
+        exit(1);
+    }
+
+    struct stat after_first, after_second;
+    if (stat(directory, &after_first) != 0) fail("stat after first readdir");
+    pause_for_timestamp();
+    stream = opendir(directory);
+    if (stream == NULL) fail("opendir repeated readdir");
+    while (readdir(stream) != NULL) {}
+    if (closedir(stream) != 0) fail("closedir repeated readdir");
+    if (stat(directory, &after_second) != 0) fail("stat after repeated readdir");
+    if (compare_timespec(after_second.st_atim, after_first.st_atim) <= 0 ||
+        compare_timespec(after_second.st_ctim, after_first.st_ctim) != 0) {
+        fprintf(stderr, "repeated readdir did not strictly advance only atime\n");
         exit(1);
     }
 }
@@ -370,12 +544,17 @@ static void test_timestamps(const char *root) {
     }
     struct stat before_second_read;
     if (stat(path, &before_second_read) != 0) fail("stat before ctime read check");
+    pause_for_timestamp();
     fd = open(path, O_RDONLY);
     if (fd < 0 || read(fd, &byte, 1) != 1 || close(fd) != 0) fail("second timestamp read");
     if (stat(path, &after_read) != 0) fail("stat after ctime read check");
     if (after_read.st_ctim.tv_sec != before_second_read.st_ctim.tv_sec ||
         after_read.st_ctim.tv_nsec != before_second_read.st_ctim.tv_nsec) {
         fprintf(stderr, "read changed ctime\n");
+        exit(1);
+    }
+    if (compare_timespec(after_read.st_atim, before_second_read.st_atim) <= 0) {
+        fprintf(stderr, "repeated read did not strictly advance atime\n");
         exit(1);
     }
 
@@ -394,6 +573,31 @@ static void test_timestamps(const char *root) {
         before_omit.st_ctim.tv_sec != after_omit.st_ctim.tv_sec ||
         before_omit.st_ctim.tv_nsec != after_omit.st_ctim.tv_nsec) {
         fprintf(stderr, "UTIME_OMIT changed timestamps\n");
+        exit(1);
+    }
+}
+
+static void test_symlink_atime(const char *root) {
+    char target[4096], link[4096], actual[32];
+    make_path(target, sizeof(target), root, "atime-link-target");
+    make_path(link, sizeof(link), root, "atime-link");
+    int fd = open(target, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    if (fd < 0 || close(fd) != 0) fail("create atime symlink target");
+    if (symlink("atime-link-target", link) != 0) fail("create atime symlink");
+    struct timespec times[2] = {
+        {.tv_sec = 1000000000, .tv_nsec = 123},
+        {.tv_sec = 1000001000, .tv_nsec = 456},
+    };
+    if (utimensat(AT_FDCWD, link, times, AT_SYMLINK_NOFOLLOW) != 0) fail("set symlink timestamps");
+    if (readlink(link, actual, sizeof(actual)) != (ssize_t)strlen("atime-link-target")) fail("first readlink");
+    struct stat after_first, after_second;
+    if (lstat(link, &after_first) != 0) fail("lstat after first readlink");
+    pause_for_timestamp();
+    if (readlink(link, actual, sizeof(actual)) != (ssize_t)strlen("atime-link-target")) fail("second readlink");
+    if (lstat(link, &after_second) != 0) fail("lstat after second readlink");
+    if (compare_timespec(after_second.st_atim, after_first.st_atim) <= 0 ||
+        compare_timespec(after_second.st_ctim, after_first.st_ctim) != 0) {
+        fprintf(stderr, "repeated readlink did not strictly advance only atime\n");
         exit(1);
     }
 }
@@ -501,8 +705,12 @@ static void test_setgid_inheritance(const char *root) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[2], "verify-crash-fallocate") == 0) {
+        verify_crash_fallocate(argv[1]);
+        return 0;
+    }
     if (argc != 2) {
-        fprintf(stderr, "usage: fs-probe MOUNTPOINT\n");
+        fprintf(stderr, "usage: fs-probe MOUNTPOINT [verify-crash-fallocate]\n");
         return 2;
     }
     test_unlink_open(argv[1]);
@@ -512,10 +720,12 @@ int main(int argc, char **argv) {
     test_append(argv[1]);
     test_truncate(argv[1]);
     test_large_sparse(argv[1]);
+    test_fallocate(argv[1]);
     test_rename_noreplace(argv[1]);
     test_directory_iteration(argv[1]);
     test_statfs_and_hardlink(argv[1]);
     test_timestamps(argv[1]);
+    test_symlink_atime(argv[1]);
     test_permissions(argv[1]);
     test_chown_sentinels(argv[1]);
     test_setgid_inheritance(argv[1]);

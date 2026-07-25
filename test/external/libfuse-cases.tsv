@@ -6,6 +6,6 @@ required	7	FIFOs
 required	8-12	directories, rename, and enumeration
 not-applicable	13	Unix socket nodes are not declared
 required	14-65	timestamps, truncate, open, and permissions
-unsupported	66	copy_file_range
+not-applicable	66	copy_file_range is outside the base profile
 required	67	statx basic attributes
 not-applicable	68	O_TMPFILE is not declared

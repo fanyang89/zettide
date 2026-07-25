@@ -27,6 +27,19 @@ pub const WriteResult = struct {
     head: format.ObjectHead,
 };
 
+pub const WriteFootprint = struct {
+    payload_bytes: u64,
+    chunk_count: u64,
+    reserved: bool,
+};
+
+const ReservationAccounting = struct {
+    interval_bytes: u64 = 0,
+    payload_bytes: u64 = 0,
+    existing_bytes: u64 = 0,
+    chunk_count: u64 = 0,
+};
+
 pub const Store = struct {
     io: Io,
     lfs: *c.lfs_t,
@@ -50,8 +63,7 @@ pub const Store = struct {
         }
         var iterator = referenced.keyIterator();
         while (iterator.next()) |id| {
-            const head = try self.readHead(id.*);
-            try self.removeUncommittedChunkVersions(id.*, head.data_generation);
+            _ = try self.recoverObject(id.*);
         }
         while (try self.firstOrphan(referenced)) |id| try self.removeObject(id);
     }
@@ -143,8 +155,42 @@ pub const Store = struct {
         const temporary = try temporaryHeadPath(head.object_id, &temporary_buffer);
         const final = try headPath(head.object_id, &final_buffer);
         const bytes = head.encode();
+        errdefer removeIfPresent(self.lfs, temporary) catch {};
         try writeExact(self.lfs, temporary, &bytes);
         try checkLfs(c.lfs_rename(self.lfs, temporary, final));
+    }
+
+    pub fn recoverObject(self: Store, id: format.ObjectId) !format.ObjectHead {
+        const head = try self.readHead(id);
+        var temporary_buffer: [max_path_bytes:0]u8 = @splat(0);
+        try removeIfPresent(self.lfs, try temporaryHeadPath(id, &temporary_buffer));
+        try self.removeUnselectedChunkVersions(id, head.data_generation);
+        try self.removeUnselectedReservationVersions(id, head.reservation_generation);
+        try self.validateReservations(head);
+        return head;
+    }
+
+    fn prepareObjectTransaction(self: Store, id: format.ObjectId) !format.ObjectHead {
+        const head = try self.readHead(id);
+        var temporary_buffer: [max_path_bytes:0]u8 = @splat(0);
+        try removeIfPresent(self.lfs, try temporaryHeadPath(id, &temporary_buffer));
+        try self.removeUncommittedChunkVersions(id, head.data_generation);
+        try self.removeUnselectedReservationVersions(id, head.reservation_generation);
+        return head;
+    }
+
+    pub fn validateReservations(self: Store, head: format.ObjectHead) !void {
+        const intervals = try self.readReservationsAlloc(head, std.heap.c_allocator);
+        defer std.heap.c_allocator.free(intervals);
+        var verified = head;
+        try self.setReservationAccounting(&verified, intervals);
+        if (verified.reservation_generation != head.reservation_generation or
+            verified.reservation_interval_bytes != head.reservation_interval_bytes or
+            verified.reservation_payload_bytes != head.reservation_payload_bytes or
+            verified.reservation_existing_bytes != head.reservation_existing_bytes or
+            verified.reservation_chunk_count != head.reservation_chunk_count or
+            verified.reservation_interval_count != head.reservation_interval_count)
+            return error.CorruptFilesystem;
     }
 
     pub fn read(
@@ -182,7 +228,8 @@ pub const Store = struct {
         if (data.len == 0) return .{ .amount = 0, .head = try self.readHead(id) };
 
         var head = try self.readHead(id);
-        try self.removeUncommittedChunkVersions(id, head.data_generation);
+        const reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
+        defer std.heap.c_allocator.free(reservations);
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
         var touched = std.AutoHashMap(u64, void).init(std.heap.c_allocator);
         defer touched.deinit();
@@ -208,6 +255,7 @@ pub const Store = struct {
         head.logical_size = @max(head.logical_size, end);
         head.generation = std.math.add(u64, head.generation, 1) catch return error.CorruptFilesystem;
         head.data_generation = generation;
+        try self.setReservationAccounting(&head, reservations);
         const now: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
         head.metadata.mtime_ns = now;
         head.metadata.ctime_ns = now;
@@ -217,10 +265,82 @@ pub const Store = struct {
         return .{ .amount = data.len, .head = head };
     }
 
+    pub fn writeFootprint(self: Store, id: format.ObjectId, offset: u64, length: u64) !WriteFootprint {
+        const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
+        if (end > format.max_file_size) return error.FileTooLarge;
+        if (length == 0) return .{ .payload_bytes = 0, .chunk_count = 0, .reserved = false };
+        const head = try self.prepareObjectTransaction(id);
+        const reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
+        defer std.heap.c_allocator.free(reservations);
+        var position = offset;
+        var result: WriteFootprint = .{
+            .payload_bytes = 0,
+            .chunk_count = 0,
+            .reserved = rangeCovered(reservations, offset, end),
+        };
+        while (position < end) {
+            const index = position / head.stored_chunk_size;
+            const chunk_offset: u32 = @intCast(position % head.stored_chunk_size);
+            const part = @min(end - position, head.stored_chunk_size - chunk_offset);
+            const old_size = if (try self.findChunkVersion(id, index, head.data_generation)) |version|
+                try self.readChunkLength(id, version, head.stored_chunk_size)
+            else
+                0;
+            const new_size = @max(@as(u64, old_size), @as(u64, chunk_offset) + part);
+            result.payload_bytes = std.math.add(u64, result.payload_bytes, new_size) catch
+                return error.FileTooLarge;
+            result.chunk_count += 1;
+            position += part;
+        }
+        return result;
+    }
+
+    pub fn reservationProposal(self: Store, id: format.ObjectId, offset: u64, length: u64) !format.ObjectHead {
+        if (length == 0) return error.InvalidArgument;
+        const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
+        if (end > format.max_file_size) return error.FileTooLarge;
+        var head = try self.prepareObjectTransaction(id);
+        const current = try self.readReservationsAlloc(head, std.heap.c_allocator);
+        defer std.heap.c_allocator.free(current);
+        const merged = try mergeReservationAlloc(std.heap.c_allocator, current, .{ .start = offset, .end = end });
+        defer std.heap.c_allocator.free(merged);
+        head.reservation_generation = std.math.add(u64, head.generation, 1) catch return error.CorruptFilesystem;
+        try self.setReservationAccounting(&head, merged);
+        head.logical_size = @max(head.logical_size, end);
+        return head;
+    }
+
+    pub fn reserve(self: Store, id: format.ObjectId, offset: u64, length: u64) !format.ObjectHead {
+        if (length == 0) return error.InvalidArgument;
+        const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
+        if (end > format.max_file_size) return error.FileTooLarge;
+        var head = try self.prepareObjectTransaction(id);
+        const current = try self.readReservationsAlloc(head, std.heap.c_allocator);
+        defer std.heap.c_allocator.free(current);
+        const merged = try mergeReservationAlloc(std.heap.c_allocator, current, .{ .start = offset, .end = end });
+        defer std.heap.c_allocator.free(merged);
+        const generation = std.math.add(u64, head.generation, 1) catch return error.CorruptFilesystem;
+        try self.writeReservationVersion(id, generation, merged);
+        errdefer self.removeReservationVersion(id, generation) catch {};
+        head.logical_size = @max(head.logical_size, end);
+        head.generation = generation;
+        head.reservation_generation = generation;
+        try self.setReservationAccounting(&head, merged);
+        const now: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+        head.metadata.mtime_ns = now;
+        head.metadata.ctime_ns = now;
+        try self.writeHead(head);
+        self.removeUnselectedReservationVersions(id, generation) catch {};
+        return head;
+    }
+
     pub fn truncate(self: Store, id: format.ObjectId, size: u64) !format.ObjectHead {
         if (size > format.max_file_size) return error.FileTooLarge;
-        var head = try self.readHead(id);
-        try self.removeUncommittedChunkVersions(id, head.data_generation);
+        var head = try self.prepareObjectTransaction(id);
+        const current_reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
+        defer std.heap.c_allocator.free(current_reservations);
+        const reservations = try clipReservationsAlloc(std.heap.c_allocator, current_reservations, size);
+        defer std.heap.c_allocator.free(reservations);
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
         var touched = std.AutoHashMap(u64, void).init(std.heap.c_allocator);
         defer touched.deinit();
@@ -230,12 +350,25 @@ pub const Store = struct {
         head.logical_size = size;
         head.generation = std.math.add(u64, head.generation, 1) catch return error.CorruptFilesystem;
         head.data_generation = generation;
+        var wrote_reservation = false;
+        if (reservations.len == 0) {
+            clearReservation(&head);
+        } else if (!reservationsEqual(current_reservations, reservations)) {
+            try self.writeReservationVersion(id, head.generation, reservations);
+            wrote_reservation = true;
+            head.reservation_generation = head.generation;
+            try self.setReservationAccounting(&head, reservations);
+        } else {
+            try self.setReservationAccounting(&head, reservations);
+        }
         const now: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
         head.metadata.mtime_ns = now;
         head.metadata.ctime_ns = now;
+        errdefer if (wrote_reservation) self.removeReservationVersion(id, head.generation) catch {};
         try self.writeHead(head);
         var touched_iterator = touched.keyIterator();
         while (touched_iterator.next()) |index| self.pruneChunkVersions(id, index.*, generation) catch {};
+        self.removeUnselectedReservationVersions(id, head.reservation_generation) catch {};
         return head;
     }
 
@@ -266,6 +399,10 @@ pub const Store = struct {
             var path_buffer: [max_path_bytes:0]u8 = @splat(0);
             try checkLfs(c.lfs_remove(self.lfs, try namedChunkPath(id, name, &path_buffer)));
         }
+        while (try self.firstReservationName(id)) |name| {
+            var reservation_path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            try checkLfs(c.lfs_remove(self.lfs, try namedReservationPath(id, name, &reservation_path_buffer)));
+        }
 
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         try removeIfPresent(self.lfs, try temporaryHeadPath(id, &path_buffer));
@@ -275,6 +412,136 @@ pub const Store = struct {
         try removeIfPresent(self.lfs, try chunksPath(id, &path_buffer));
         path_buffer = @splat(0);
         try removeIfPresent(self.lfs, try objectPath(id, &path_buffer));
+    }
+
+    pub fn readReservationsAlloc(
+        self: Store,
+        head: format.ObjectHead,
+        allocator: std.mem.Allocator,
+    ) ![]format.ReservationInterval {
+        if (head.reservation_generation == 0)
+            return allocator.alloc(format.ReservationInterval, 0);
+        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        const path = try reservationVersionPath(head.object_id, head.reservation_generation, &path_buffer);
+        var info: c.struct_lfs_info = undefined;
+        try checkLfs(c.lfs_stat(self.lfs, path, &info));
+        const bytes = try allocator.alloc(u8, info.size);
+        defer allocator.free(bytes);
+        try readExact(self.lfs, path, bytes);
+        const sidecar = try format.ReservationSidecar.decodeAlloc(allocator, bytes);
+        errdefer sidecar.deinit(allocator);
+        if (sidecar.generation != head.reservation_generation or
+            sidecar.intervals.len != head.reservation_interval_count)
+            return error.CorruptFilesystem;
+        var interval_bytes: u64 = 0;
+        for (sidecar.intervals) |interval| {
+            interval_bytes = std.math.add(u64, interval_bytes, interval.end - interval.start) catch
+                return error.CorruptFilesystem;
+        }
+        if (interval_bytes != head.reservation_interval_bytes) return error.CorruptFilesystem;
+        return sidecar.intervals;
+    }
+
+    fn setReservationAccounting(
+        self: Store,
+        head: *format.ObjectHead,
+        intervals: []const format.ReservationInterval,
+    ) !void {
+        if (intervals.len == 0) {
+            clearReservation(head);
+            return;
+        }
+        var accounting = try baseReservationAccounting(intervals, head.stored_chunk_size);
+        var indices = std.AutoHashMap(u64, void).init(std.heap.c_allocator);
+        defer indices.deinit();
+        try self.collectChunkIndices(head.object_id, &indices);
+        var iterator = indices.keyIterator();
+        while (iterator.next()) |index| {
+            const target = reservationTarget(intervals, index.*, head.stored_chunk_size) orelse continue;
+            const version = try self.findChunkVersion(head.object_id, index.*, head.data_generation) orelse continue;
+            const existing = try self.readChunkLength(head.object_id, version, head.stored_chunk_size);
+            accounting.existing_bytes = std.math.add(u64, accounting.existing_bytes, existing) catch
+                return error.CorruptFilesystem;
+            if (existing > target)
+                accounting.payload_bytes = std.math.add(u64, accounting.payload_bytes, existing - target) catch
+                    return error.CorruptFilesystem;
+        }
+        head.reservation_interval_bytes = accounting.interval_bytes;
+        head.reservation_payload_bytes = accounting.payload_bytes;
+        head.reservation_existing_bytes = accounting.existing_bytes;
+        head.reservation_chunk_count = accounting.chunk_count;
+        head.reservation_interval_count = @intCast(intervals.len);
+    }
+
+    fn writeReservationVersion(
+        self: Store,
+        id: format.ObjectId,
+        generation: u64,
+        intervals: []const format.ReservationInterval,
+    ) !void {
+        const bytes = try format.ReservationSidecar.encodeAlloc(std.heap.c_allocator, generation, intervals);
+        defer std.heap.c_allocator.free(bytes);
+        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        const path = try reservationVersionPath(id, generation, &path_buffer);
+        errdefer removeIfPresent(self.lfs, path) catch {};
+        try writeExact(self.lfs, path, bytes);
+    }
+
+    fn removeUnselectedReservationVersions(
+        self: Store,
+        id: format.ObjectId,
+        selected_generation: u64,
+    ) !void {
+        while (try self.firstUnselectedReservationName(id, selected_generation)) |name| {
+            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            try checkLfs(c.lfs_remove(self.lfs, try namedReservationPath(id, name, &path_buffer)));
+        }
+    }
+
+    fn removeReservationVersion(self: Store, id: format.ObjectId, generation: u64) !void {
+        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        try removeIfPresent(self.lfs, try reservationVersionPath(id, generation, &path_buffer));
+    }
+
+    fn firstUnselectedReservationName(
+        self: Store,
+        id: format.ObjectId,
+        selected_generation: u64,
+    ) !?[28]u8 {
+        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try objectPath(id, &path_buffer)));
+        defer _ = c.lfs_dir_close(self.lfs, &directory);
+        while (true) {
+            var info: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(self.lfs, &directory, &info);
+            try checkLfs(result);
+            if (result == 0) return null;
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+            const generation = parseReservationGeneration(name) catch continue;
+            if (generation == selected_generation) continue;
+            var copy: [28]u8 = undefined;
+            @memcpy(&copy, name);
+            return copy;
+        }
+    }
+
+    fn firstReservationName(self: Store, id: format.ObjectId) !?[28]u8 {
+        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try objectPath(id, &path_buffer)));
+        defer _ = c.lfs_dir_close(self.lfs, &directory);
+        while (true) {
+            var info: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(self.lfs, &directory, &info);
+            try checkLfs(result);
+            if (result == 0) return null;
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+            _ = parseReservationGeneration(name) catch continue;
+            var copy: [28]u8 = undefined;
+            @memcpy(&copy, name);
+            return copy;
+        }
     }
 
     fn readRefInternal(self: Store, path: [*:0]const u8) !format.ObjectRef {
@@ -432,13 +699,31 @@ pub const Store = struct {
         return length;
     }
 
+    fn readChunkLength(self: Store, id: format.ObjectId, version: ChunkVersion, maximum: u32) !u32 {
+        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+        try checkLfs(c.lfs_file_open(self.lfs, &file, try chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
+        defer _ = c.lfs_file_close(self.lfs, &file);
+        var header: [chunk_header_size]u8 = undefined;
+        const amount = c.lfs_file_read(self.lfs, &file, &header, header.len);
+        try checkLfs(amount);
+        if (amount != header.len or !std.mem.eql(u8, header[0..8], &chunk_magic) or
+            std.mem.readInt(u64, header[8..16], .little) != version.generation)
+            return error.CorruptFilesystem;
+        const length = std.mem.readInt(u32, header[16..20], .little);
+        if (length > maximum) return error.CorruptFilesystem;
+        return length;
+    }
+
     fn writeChunkVersion(self: Store, id: format.ObjectId, version: ChunkVersion, data: []const u8) !void {
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        const path = try chunkVersionPath(id, version, &path_buffer);
+        errdefer removeIfPresent(self.lfs, path) catch {};
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         try checkLfs(c.lfs_file_open(
             self.lfs,
             &file,
-            try chunkVersionPath(id, version, &path_buffer),
+            path,
             c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
         ));
         var open = true;
@@ -461,6 +746,17 @@ pub const Store = struct {
         while (try self.firstObsoleteChunkVersion(id, index, keep_generation)) |version| {
             var path_buffer: [max_path_bytes:0]u8 = @splat(0);
             try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPath(id, version, &path_buffer)));
+        }
+    }
+
+    fn removeUnselectedChunkVersions(self: Store, id: format.ObjectId, committed_generation: u64) !void {
+        var indices = std.AutoHashMap(u64, void).init(std.heap.c_allocator);
+        defer indices.deinit();
+        try self.collectChunkIndices(id, &indices);
+        var iterator = indices.keyIterator();
+        while (iterator.next()) |index| {
+            const selected = try self.findChunkVersion(id, index.*, committed_generation);
+            try self.pruneChunkVersions(id, index.*, if (selected) |version| version.generation else 0);
         }
     }
 
@@ -577,6 +873,144 @@ pub const Store = struct {
     }
 };
 
+fn clearReservation(head: *format.ObjectHead) void {
+    head.reservation_generation = 0;
+    head.reservation_interval_bytes = 0;
+    head.reservation_payload_bytes = 0;
+    head.reservation_existing_bytes = 0;
+    head.reservation_chunk_count = 0;
+    head.reservation_interval_count = 0;
+}
+
+fn rangeCovered(intervals: []const format.ReservationInterval, start: u64, end: u64) bool {
+    if (start == end) return false;
+    for (intervals) |interval| {
+        if (interval.start > start) return false;
+        if (interval.start <= start and interval.end >= end) return true;
+    }
+    return false;
+}
+
+fn reservationsEqual(
+    left: []const format.ReservationInterval,
+    right: []const format.ReservationInterval,
+) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |a, b| {
+        if (a.start != b.start or a.end != b.end) return false;
+    }
+    return true;
+}
+
+fn mergeReservationAlloc(
+    allocator: std.mem.Allocator,
+    intervals: []const format.ReservationInterval,
+    added: format.ReservationInterval,
+) ![]format.ReservationInterval {
+    const scratch = try allocator.alloc(format.ReservationInterval, intervals.len + 1);
+    defer allocator.free(scratch);
+    var count: usize = 0;
+    var merged = added;
+    var inserted = false;
+    for (intervals) |interval| {
+        if (interval.end < merged.start) {
+            scratch[count] = interval;
+            count += 1;
+        } else if (merged.end < interval.start) {
+            if (!inserted) {
+                scratch[count] = merged;
+                count += 1;
+                inserted = true;
+            }
+            scratch[count] = interval;
+            count += 1;
+        } else {
+            merged.start = @min(merged.start, interval.start);
+            merged.end = @max(merged.end, interval.end);
+        }
+    }
+    if (!inserted) {
+        scratch[count] = merged;
+        count += 1;
+    }
+    return allocator.dupe(format.ReservationInterval, scratch[0..count]);
+}
+
+fn clipReservationsAlloc(
+    allocator: std.mem.Allocator,
+    intervals: []const format.ReservationInterval,
+    size: u64,
+) ![]format.ReservationInterval {
+    var count: usize = 0;
+    for (intervals) |interval| {
+        if (interval.start >= size) break;
+        count += 1;
+    }
+    const clipped = try allocator.alloc(format.ReservationInterval, count);
+    for (intervals[0..count], 0..) |interval, index| {
+        clipped[index] = .{ .start = interval.start, .end = @min(interval.end, size) };
+    }
+    return clipped;
+}
+
+fn baseReservationAccounting(
+    intervals: []const format.ReservationInterval,
+    chunk_size: u32,
+) !ReservationAccounting {
+    var result = ReservationAccounting{};
+    var last_index: ?u64 = null;
+    var last_target: u64 = 0;
+    for (intervals) |interval| {
+        result.interval_bytes = std.math.add(u64, result.interval_bytes, interval.end - interval.start) catch
+            return error.FileTooLarge;
+        const start_index = interval.start / chunk_size;
+        const end_index = (interval.end - 1) / chunk_size;
+        const final_target = interval.end - end_index * chunk_size;
+        var first_index = start_index;
+        if (last_index != null and last_index.? == start_index) {
+            const replacement = if (end_index == start_index) final_target else chunk_size;
+            result.payload_bytes = std.math.add(u64, result.payload_bytes, replacement - last_target) catch
+                return error.FileTooLarge;
+            last_target = replacement;
+            if (end_index == start_index) continue;
+            first_index += 1;
+        }
+        const count = end_index - first_index + 1;
+        result.chunk_count = std.math.add(u64, result.chunk_count, count) catch return error.FileTooLarge;
+        const full_chunks = count - 1;
+        const full_bytes = std.math.mul(u64, full_chunks, chunk_size) catch return error.FileTooLarge;
+        result.payload_bytes = std.math.add(u64, result.payload_bytes, full_bytes) catch return error.FileTooLarge;
+        result.payload_bytes = std.math.add(u64, result.payload_bytes, final_target) catch return error.FileTooLarge;
+        last_index = end_index;
+        last_target = final_target;
+    }
+    return result;
+}
+
+fn reservationTarget(
+    intervals: []const format.ReservationInterval,
+    index: u64,
+    chunk_size: u32,
+) ?u64 {
+    const chunk_start = std.math.mul(u64, index, chunk_size) catch return null;
+    const chunk_end = std.math.add(u64, chunk_start, chunk_size) catch std.math.maxInt(u64);
+    var target: ?u64 = null;
+    for (intervals) |interval| {
+        if (interval.end <= chunk_start) continue;
+        if (interval.start >= chunk_end) break;
+        const current = @min(interval.end, chunk_end) - chunk_start;
+        target = @max(target orelse 0, current);
+        if (target.? == chunk_size) break;
+    }
+    return target;
+}
+
+fn parseReservationGeneration(name: []const u8) !u64 {
+    if (name.len != 28 or !std.mem.eql(u8, name[0..12], "reservation-"))
+        return error.InvalidReservationName;
+    return std.fmt.parseInt(u64, name[12..28], 16) catch error.InvalidReservationName;
+}
+
 fn makeDirectory(lfs: *c.lfs_t, path: [*:0]const u8) !void {
     const result = c.lfs_mkdir(lfs, path);
     if (result != c.LFS_ERR_EXIST) try checkLfs(result);
@@ -654,6 +1088,24 @@ fn temporaryHeadPath(id: format.ObjectId, buffer: *[max_path_bytes:0]u8) ![*:0]c
     return formatPath(buffer, "{s}/{s}/head.tmp", .{ objects_root, format.formatObjectId(id, &id_buffer) });
 }
 
+fn reservationVersionPath(id: format.ObjectId, generation: u64, buffer: *[max_path_bytes:0]u8) ![*:0]const u8 {
+    var id_buffer: [32]u8 = undefined;
+    return formatPath(buffer, "{s}/{s}/reservation-{x:0>16}", .{
+        objects_root,
+        format.formatObjectId(id, &id_buffer),
+        generation,
+    });
+}
+
+fn namedReservationPath(id: format.ObjectId, name: [28]u8, buffer: *[max_path_bytes:0]u8) ![*:0]const u8 {
+    var id_buffer: [32]u8 = undefined;
+    return formatPath(buffer, "{s}/{s}/{s}", .{
+        objects_root,
+        format.formatObjectId(id, &id_buffer),
+        name,
+    });
+}
+
 fn chunkVersionPath(id: format.ObjectId, version: ChunkVersion, buffer: *[max_path_bytes:0]u8) ![*:0]const u8 {
     var id_buffer: [32]u8 = undefined;
     return formatPath(buffer, "{s}/{s}/chunks/{x:0>16}-{x:0>16}", .{
@@ -705,4 +1157,32 @@ test "user paths are isolated below the namespace root" {
     try std.testing.expectError(error.InvalidArgument, Store.translateUserPath("/../system", &buffer));
     try std.testing.expectError(error.InvalidArgument, Store.translateUserPath("/a/../../system", &buffer));
     try std.testing.expectError(error.InvalidArgument, Store.translateUserPath("/a//b", &buffer));
+}
+
+test "reservation accounting preserves sparse prefixes and chunk payload prefixes" {
+    const chunk = format.chunk_size;
+    const intervals = [_]format.ReservationInterval{
+        .{ .start = 8 * chunk, .end = 8 * chunk + 4096 },
+        .{ .start = 9 * chunk + 100, .end = 9 * chunk + 200 },
+        .{ .start = 9 * chunk + 300, .end = 9 * chunk + 400 },
+    };
+    const accounting = try baseReservationAccounting(&intervals, chunk);
+    try std.testing.expectEqual(@as(u64, 4096 + 100 + 100), accounting.interval_bytes);
+    try std.testing.expectEqual(@as(u64, 4096 + 400), accounting.payload_bytes);
+    try std.testing.expectEqual(@as(u64, 2), accounting.chunk_count);
+}
+
+test "reservation merging and coverage distinguish holes" {
+    const current = [_]format.ReservationInterval{
+        .{ .start = 100, .end = 200 },
+        .{ .start = 400, .end = 500 },
+    };
+    const merged = try mergeReservationAlloc(std.testing.allocator, &current, .{ .start = 200, .end = 300 });
+    defer std.testing.allocator.free(merged);
+    try std.testing.expectEqual(@as(usize, 2), merged.len);
+    try std.testing.expectEqual(@as(u64, 100), merged[0].start);
+    try std.testing.expectEqual(@as(u64, 300), merged[0].end);
+    try std.testing.expect(rangeCovered(merged, 120, 280));
+    try std.testing.expect(!rangeCovered(merged, 280, 420));
+    try std.testing.expect(rangeCovered(merged, 420, 480));
 }
