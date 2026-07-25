@@ -1,0 +1,11 @@
+# classification  cases   contract reason
+required	1-3	regular files and symbolic links
+unsupported	4-5	hard links
+not-applicable	6	regular-file creation through mknod is not declared
+unsupported	7	FIFOs
+required	8-12	directories, rename, and enumeration
+not-applicable	13	Unix socket nodes are not declared
+required	14-65	timestamps, truncate, open, and permissions
+unsupported	66	copy_file_range
+required	67	statx basic attributes
+not-applicable	68	O_TMPFILE is not declared

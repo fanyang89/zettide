@@ -53,6 +53,8 @@ success for these operations.
 - `test-cli` runs the emitted executable and validates exit behavior.
 - `test-fault` injects deterministic block synchronization failures.
 - `test-fuse` performs real syscalls, a forced daemon crash, and 20 mount cycles.
+- `test-libfuse` runs the applicable cases from libfuse's syscall test suite.
+- `test-fsx` runs deterministic randomized read, write, and truncate workloads.
 - `test-cross` compiles the portable core and CLI for x86_64 Windows GNU.
 
 The required FUSE gate must not skip because `/dev/fuse` or helper programs are

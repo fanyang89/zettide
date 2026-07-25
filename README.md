@@ -32,6 +32,9 @@ zig build test-cli
 zig build test-fault
 zig build test-cross
 zig build test-fuse -Dfuse-tests=required
+zig build test-libfuse -Dexternal-tests=required
+zig build test-fsx -Dexternal-tests=required
+zig build test-external -Dexternal-tests=required
 zig build ci
 ```
 
@@ -39,6 +42,13 @@ zig build ci
 perform real Linux syscalls and require writable `/dev/fuse`, `fusermount3`,
 and `mountpoint`. Use `-Dfuse-tests=auto` to skip them when those capabilities
 are unavailable.
+
+The external gates compile pinned source snapshots from libfuse and xfstests
+stored under `vendor/`. `test-libfuse` runs the syscall cases that match the
+declared DevDrive semantics. `test-fsx` runs two deterministic 10,000-operation
+buffered I/O and truncate workloads. Set `DEVDRIVE_FSX_OPS=100000` for a longer
+stress run. These gates have the same Linux FUSE requirements as `test-fuse`
+and are not part of the default `test` or `ci` targets.
 
 ## Usage
 
@@ -64,3 +74,6 @@ The supported filesystem behavior and explicit exclusions are documented in
 
 littlefs is licensed under BSD-3-Clause. Its pinned source and license are in
 `vendor/littlefs`.
+
+Vendored libfuse and xfstests test sources are GPL-2.0 and are only compiled as
+test executables. Their source commits and licenses are recorded under `vendor/`.

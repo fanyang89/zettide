@@ -37,3 +37,7 @@ jobs:
         run: test -r /dev/fuse && test -w /dev/fuse
       - name: Run real FUSE syscall tests
         run: zig build test-fuse -Dfuse-tests=required
+      - name: Run libfuse syscall suite
+        run: zig build test-libfuse -Dexternal-tests=required
+      - name: Run deterministic fsx workloads
+        run: zig build test-fsx -Dexternal-tests=required

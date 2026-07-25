@@ -1,0 +1,7 @@
+#ifndef DEVDRIVE_FUSE_TEST_CONFIG_H
+#define DEVDRIVE_FUSE_TEST_CONFIG_H
+
+#define HAVE_COPY_FILE_RANGE 1
+#define HAVE_STATX 1
+
+#endif

@@ -17,5 +17,7 @@
         "vendor/littlefs/lfs_util.c",
         "vendor/littlefs/lfs_util.h",
         "vendor/littlefs/LICENSE.md",
+        "vendor/libfuse-tests",
+        "vendor/xfstests",
     },
 }

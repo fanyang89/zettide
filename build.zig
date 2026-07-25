@@ -1,11 +1,13 @@
 const std = @import("std");
 
 const FuseTestMode = enum { off, auto, required };
+const ExternalTestMode = enum { off, auto, required };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const fuse_test_mode = b.option(FuseTestMode, "fuse-tests", "FUSE tests: off, auto, or required") orelse .auto;
+    const external_test_mode = b.option(ExternalTestMode, "external-tests", "External tests: off, auto, or required") orelse .auto;
 
     const portable_core = createCoreModule(b, target, optimize, false);
     const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux);
@@ -61,6 +63,26 @@ pub fn build(b: *std.Build) void {
     if (probe) |artifact| fuse_test_cmd.addArtifactArg(artifact);
     const fuse_step = b.step("test-fuse", "Run real Linux FUSE syscall tests");
     fuse_step.dependOn(&fuse_test_cmd.step);
+
+    const libfuse_probe = if (target.result.os.tag == .linux) createLibfuseProbe(b, target, optimize) else null;
+    const libfuse_test_cmd = b.addSystemCommand(&.{ "bash", "test/external/libfuse.sh" });
+    libfuse_test_cmd.addArg(@tagName(external_test_mode));
+    libfuse_test_cmd.addArtifactArg(exe);
+    if (libfuse_probe) |artifact| libfuse_test_cmd.addArtifactArg(artifact);
+    const libfuse_step = b.step("test-libfuse", "Run vendored libfuse syscall tests");
+    libfuse_step.dependOn(&libfuse_test_cmd.step);
+
+    const fsx_probe = if (target.result.os.tag == .linux) createFsxProbe(b, target, optimize) else null;
+    const fsx_test_cmd = b.addSystemCommand(&.{ "bash", "test/external/fsx.sh" });
+    fsx_test_cmd.addArg(@tagName(external_test_mode));
+    fsx_test_cmd.addArtifactArg(exe);
+    if (fsx_probe) |artifact| fsx_test_cmd.addArtifactArg(artifact);
+    const fsx_step = b.step("test-fsx", "Run vendored fsx with deterministic seeds");
+    fsx_step.dependOn(&fsx_test_cmd.step);
+
+    const external_step = b.step("test-external", "Run vendored external filesystem tests");
+    external_step.dependOn(libfuse_step);
+    external_step.dependOn(fsx_step);
 
     const cross_step = b.step("test-cross", "Compile portable core and CLI for Windows");
     const windows_target = b.resolveTargetQuery(.{
@@ -151,6 +173,49 @@ fn createFsProbe(
     probe.root_module.addCSourceFile(.{
         .file = b.path("test/fs_probe.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
+    });
+    return probe;
+}
+
+fn createLibfuseProbe(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const probe = b.addExecutable(.{
+        .name = "libfuse-test-syscalls",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    probe.root_module.addIncludePath(b.path("test/external"));
+    probe.root_module.addCSourceFile(.{
+        .file = b.path("vendor/libfuse-tests/test_syscalls.c"),
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
+    });
+    return probe;
+}
+
+fn createFsxProbe(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const probe = b.addExecutable(.{
+        .name = "xfstests-fsx",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    probe.root_module.addIncludePath(b.path("test/external"));
+    probe.root_module.addIncludePath(b.path("vendor/xfstests/src"));
+    probe.root_module.addCSourceFile(.{
+        .file = b.path("vendor/xfstests/ltp/fsx.c"),
+        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" },
     });
     return probe;
 }
