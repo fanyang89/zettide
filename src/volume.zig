@@ -499,6 +499,10 @@ pub const Volume = struct {
         handle.original_metadata = handle.metadata;
     }
 
+    pub fn sync(self: *Volume) !void {
+        self.device.sync() catch return error.InputOutput;
+    }
+
     pub fn persistMetadata(self: *Volume, handle: *FileHandle) !void {
         try self.store().updateMetadata(handle.object_id, handle.metadata);
         self.updateOpenMetadata(handle.object_id, handle.metadata);

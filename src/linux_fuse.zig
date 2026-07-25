@@ -357,6 +357,7 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8) !void {
     operations.opendir = openDirectory;
     operations.readdir = readDirectory;
     operations.releasedir = releaseDirectory;
+    operations.fsyncdir = fsyncDirectory;
     operations.create = create;
 
     const result = c.devdrive_fuse_main(argv.len, &argv, &operations, &state);
@@ -920,6 +921,14 @@ fn releaseDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_fil
     std.heap.c_allocator.destroy(handle);
     state.maybeRemove(node);
     result catch |err| return replyError(req, errnoValue(err));
+    replyError(req, 0);
+}
+
+fn fsyncDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, datasync: c_int, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
+    _ = id;
+    _ = datasync;
+    _ = fi;
+    stateFor(req).volume.sync() catch |err| return replyError(req, errnoValue(err));
     replyError(req, 0);
 }
 

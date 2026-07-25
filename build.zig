@@ -57,10 +57,12 @@ pub fn build(b: *std.Build) void {
     cli_step.dependOn(&cli_test_cmd.step);
 
     const probe = if (target.result.os.tag == .linux) createFsProbe(b, target, optimize) else null;
+    const durability_probe = if (target.result.os.tag == .linux) createDurabilityProbe(b, target, optimize) else null;
     const fuse_test_cmd = b.addSystemCommand(&.{ "bash", "test/fuse.sh" });
     fuse_test_cmd.addArg(@tagName(fuse_test_mode));
     fuse_test_cmd.addArtifactArg(exe);
     if (probe) |artifact| fuse_test_cmd.addArtifactArg(artifact);
+    if (durability_probe) |artifact| fuse_test_cmd.addArtifactArg(artifact);
     const fuse_step = b.step("test-fuse", "Run real Linux FUSE syscall tests");
     fuse_step.dependOn(&fuse_test_cmd.step);
 
@@ -201,6 +203,26 @@ fn createLibfuseProbe(
     probe.root_module.addIncludePath(b.path("test/external"));
     probe.root_module.addCSourceFile(.{
         .file = b.path("vendor/libfuse-tests/test_syscalls.c"),
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
+    });
+    return probe;
+}
+
+fn createDurabilityProbe(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const probe = b.addExecutable(.{
+        .name = "durability-probe",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    probe.root_module.addCSourceFile(.{
+        .file = b.path("test/durability_probe.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     return probe;
