@@ -64,6 +64,14 @@ pub fn build(b: *std.Build) void {
     const fuse_step = b.step("test-fuse", "Run real Linux FUSE syscall tests");
     fuse_step.dependOn(&fuse_test_cmd.step);
 
+    const posix_probe = if (target.result.os.tag == .linux) createPosixProbe(b, target, optimize) else null;
+    const posix_test_cmd = b.addSystemCommand(&.{ "bash", "test/posix.sh" });
+    posix_test_cmd.addArg(@tagName(fuse_test_mode));
+    posix_test_cmd.addArtifactArg(exe);
+    if (posix_probe) |artifact| posix_test_cmd.addArtifactArg(artifact);
+    const posix_step = b.step("test-posix-baseline", "Run the POSIX filesystem baseline");
+    posix_step.dependOn(&posix_test_cmd.step);
+
     const libfuse_probe = if (target.result.os.tag == .linux) createLibfuseProbe(b, target, optimize) else null;
     const libfuse_test_cmd = b.addSystemCommand(&.{ "bash", "test/external/libfuse.sh" });
     libfuse_test_cmd.addArg(@tagName(external_test_mode));
@@ -193,6 +201,26 @@ fn createLibfuseProbe(
     probe.root_module.addIncludePath(b.path("test/external"));
     probe.root_module.addCSourceFile(.{
         .file = b.path("vendor/libfuse-tests/test_syscalls.c"),
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
+    });
+    return probe;
+}
+
+fn createPosixProbe(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const probe = b.addExecutable(.{
+        .name = "posix-probe",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    probe.root_module.addCSourceFile(.{
+        .file = b.path("test/posix_probe.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     return probe;

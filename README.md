@@ -32,6 +32,7 @@ zig build test-cli
 zig build test-fault
 zig build test-cross
 zig build test-fuse -Dfuse-tests=required
+zig build test-posix-baseline -Dfuse-tests=required
 zig build test-libfuse -Dexternal-tests=required
 zig build test-fsx -Dexternal-tests=required
 zig build test-external -Dexternal-tests=required
@@ -71,6 +72,9 @@ devdrive unmount workspace
 
 The supported filesystem behavior and explicit exclusions are documented in
 `docs/fs-semantics.md`.
+
+The target POSIX.1-2024 filesystem semantics and completion criteria are
+defined in `docs/posix-profile.md`.
 
 littlefs is licensed under BSD-3-Clause. Its pinned source and license are in
 `vendor/littlefs`.
