@@ -35,9 +35,5 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev
       - name: Verify FUSE capability
         run: test -r /dev/fuse && test -w /dev/fuse
-      - name: Run real FUSE syscall tests
-        run: zig build test-fuse -Dfuse-tests=required
-      - name: Run libfuse syscall suite
-        run: zig build test-libfuse -Dexternal-tests=required
-      - name: Run deterministic fsx workloads
-        run: zig build test-fsx -Dexternal-tests=required
+      - name: Run POSIX filesystem quick gate
+        run: zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required

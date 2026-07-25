@@ -94,6 +94,12 @@ pub fn build(b: *std.Build) void {
     external_step.dependOn(libfuse_step);
     external_step.dependOn(fsx_step);
 
+    const posix_quick_step = b.step("test-posix-quick", "Run the required POSIX filesystem quick gate");
+    posix_quick_step.dependOn(fuse_step);
+    posix_quick_step.dependOn(posix_step);
+    posix_quick_step.dependOn(libfuse_step);
+    posix_quick_step.dependOn(fsx_step);
+
     const cross_step = b.step("test-cross", "Compile portable core and CLI for Windows");
     const windows_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,

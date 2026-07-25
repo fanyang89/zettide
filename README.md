@@ -33,6 +33,7 @@ zig build test-fault
 zig build test-cross
 zig build test-fuse -Dfuse-tests=required
 zig build test-posix-baseline -Dfuse-tests=required
+zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
 zig build test-libfuse -Dexternal-tests=required
 zig build test-fsx -Dexternal-tests=required
 zig build test-external -Dexternal-tests=required
