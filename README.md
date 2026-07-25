@@ -55,9 +55,9 @@ devdrive unmount workspace
 ## Format limits
 
 - File names are at most 255 UTF-8 bytes.
-- Individual files are at most 2,147,483,647 bytes.
+- Sparse files are supported up to 9,223,372,036,854,775,807 bytes.
 - File name matching is case-sensitive on every platform.
-- Version 1 containers are not encrypted.
+- Version 2 containers are not encrypted.
 
 The supported filesystem behavior and explicit exclusions are documented in
 `docs/fs-semantics.md`.

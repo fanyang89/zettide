@@ -14,7 +14,8 @@ portable container core, but do not yet provide a WinFsp filesystem.
 - Multiple open handles observe committed non-overlapping writes.
 - `RENAME_NOREPLACE` is supported; exchange and whiteout rename modes are not.
 - Names are case-sensitive and limited to 255 UTF-8 bytes per path component.
-- Individual files are limited to 2,147,483,647 bytes by littlefs v2.
+- Sparse files support logical sizes up to 9,223,372,036,854,775,807 bytes.
+- Holes read as zero and do not allocate their logical length.
 
 Linux mounts use `default_permissions`; the kernel enforces user access before
 requests reach the filesystem. Internally, some read operations may require a
