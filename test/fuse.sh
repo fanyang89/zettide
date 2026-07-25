@@ -82,7 +82,7 @@ ln -s ../hello.txt "$mount_dir/subdir/link"
 [[ $(readlink "$mount_dir/subdir/link") == ../hello.txt ]]
 [[ $(<"$mount_dir/subdir/link") == "hello from fuse" ]]
 chmod 750 "$mount_dir/hello.txt"
-touch -t 202001020304.05 "$mount_dir/hello.txt"
+touch -d @1577905445 "$mount_dir/hello.txt"
 [[ $(stat -c '%a %s %Y' "$mount_dir/hello.txt") == "750 15 1577905445" ]]
 
 "$probe" "$mount_dir"
