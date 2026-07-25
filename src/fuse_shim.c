@@ -20,7 +20,10 @@ void devdrive_fuse_set_direct_io(struct fuse_file_info *file_info) {
 
 int devdrive_fuse_configure_connection(struct fuse_conn_info *connection) {
     connection->want &= ~(FUSE_CAP_POSIX_LOCKS | FUSE_CAP_FLOCK_LOCKS |
-                          FUSE_CAP_HANDLE_KILLPRIV | FUSE_CAP_HANDLE_KILLPRIV_V2);
+                          FUSE_CAP_HANDLE_KILLPRIV);
+#ifdef FUSE_CAP_HANDLE_KILLPRIV_V2
+    connection->want &= ~FUSE_CAP_HANDLE_KILLPRIV_V2;
+#endif
     if ((connection->capable & FUSE_CAP_WRITEBACK_CACHE) == 0)
         return 0;
     connection->want |= FUSE_CAP_WRITEBACK_CACHE;
