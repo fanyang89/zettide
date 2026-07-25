@@ -14,6 +14,7 @@ const head_magic = [8]u8{ 'D', 'D', 'V', 'H', 'E', 'A', 'D', '2' };
 pub const RefKind = enum(u8) {
     file = 1,
     symlink = 2,
+    fifo = 3,
 };
 
 pub const ObjectRef = struct {
@@ -130,6 +131,17 @@ test "object ref round trip and corruption" {
     try std.testing.expectEqualSlices(u8, &value.object_id, &decoded.object_id);
     bytes[20] ^= 1;
     try std.testing.expectError(error.InvalidObjectRef, ObjectRef.decode(&bytes));
+}
+
+test "FIFO ref uses the existing version and encoded size" {
+    const value: ObjectRef = .{
+        .kind = .fifo,
+        .object_id = @splat(0x5a),
+    };
+    const bytes = value.encode();
+    try std.testing.expectEqual(@as(usize, 64), bytes.len);
+    try std.testing.expectEqual(format_version, std.mem.readInt(u16, bytes[8..10], .little));
+    try std.testing.expectEqual(RefKind.fifo, (try ObjectRef.decode(&bytes)).kind);
 }
 
 test "object head preserves 63-bit logical size" {

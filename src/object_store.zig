@@ -38,16 +38,22 @@ pub const Store = struct {
         try makeDirectory(self.lfs, temporary_root);
     }
 
-    pub fn recoverOrphans(self: Store) !void {
-        var referenced = std.AutoHashMap(format.ObjectId, void).init(std.heap.c_allocator);
-        defer referenced.deinit();
-        try self.collectNamespaceRefs(namespace_root, &referenced);
+    pub fn collectLinkCounts(self: Store, counts: *std.AutoHashMap(format.ObjectId, u64)) !void {
+        try self.collectNamespaceRefs(namespace_root, counts);
+    }
+
+    pub fn recoverOrphans(self: Store, referenced: *const std.AutoHashMap(format.ObjectId, u64)) !void {
+        while (try self.firstTemporaryRef()) |name| {
+            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            const path = try formatPath(&path_buffer, "{s}/{s}", .{ temporary_root, name });
+            try checkLfs(c.lfs_remove(self.lfs, path));
+        }
         var iterator = referenced.keyIterator();
         while (iterator.next()) |id| {
             const head = try self.readHead(id.*);
             try self.removeUncommittedChunkVersions(id.*, head.data_generation);
         }
-        while (try self.firstOrphan(&referenced)) |id| try self.removeObject(id);
+        while (try self.firstOrphan(referenced)) |id| try self.removeObject(id);
     }
 
     pub fn translateUserPath(path: [*:0]const u8, buffer: *[max_path_bytes:0]u8) ![*:0]const u8 {
@@ -491,7 +497,7 @@ pub const Store = struct {
         }
     }
 
-    fn firstOrphan(self: Store, referenced: *const std.AutoHashMap(format.ObjectId, void)) !?format.ObjectId {
+    fn firstOrphan(self: Store, referenced: *const std.AutoHashMap(format.ObjectId, u64)) !?format.ObjectId {
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
         try checkLfs(c.lfs_dir_open(self.lfs, &directory, objects_root));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
@@ -507,10 +513,29 @@ pub const Store = struct {
         }
     }
 
+    fn firstTemporaryRef(self: Store) !?[36]u8 {
+        var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+        try checkLfs(c.lfs_dir_open(self.lfs, &directory, temporary_root));
+        defer _ = c.lfs_dir_close(self.lfs, &directory);
+        while (true) {
+            var info: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(self.lfs, &directory, &info);
+            try checkLfs(result);
+            if (result == 0) return null;
+            if (info.type == c.LFS_TYPE_DIR) continue;
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+            if (name.len != 36 or !std.mem.endsWith(u8, name, ".ref")) continue;
+            _ = format.parseObjectId(name[0..32]) catch continue;
+            var copy: [36]u8 = undefined;
+            @memcpy(&copy, name);
+            return copy;
+        }
+    }
+
     fn collectNamespaceRefs(
         self: Store,
         directory_path: [*:0]const u8,
-        referenced: *std.AutoHashMap(format.ObjectId, void),
+        counts: *std.AutoHashMap(format.ObjectId, u64),
     ) !void {
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
         try checkLfs(c.lfs_dir_open(self.lfs, &directory, directory_path));
@@ -525,10 +550,13 @@ pub const Store = struct {
             var child_buffer: [max_path_bytes:0]u8 = @splat(0);
             const child = try formatPath(&child_buffer, "{s}/{s}", .{ std.mem.span(directory_path), name });
             if (info.type == c.LFS_TYPE_DIR) {
-                try self.collectNamespaceRefs(child, referenced);
+                try self.collectNamespaceRefs(child, counts);
             } else {
                 const object_ref = try self.readRefInternal(child);
-                try referenced.put(object_ref.object_id, {});
+                const entry = try counts.getOrPut(object_ref.object_id);
+                if (!entry.found_existing) entry.value_ptr.* = 0;
+                entry.value_ptr.* = std.math.add(u64, entry.value_ptr.*, 1) catch
+                    return error.CorruptFilesystem;
             }
         }
     }

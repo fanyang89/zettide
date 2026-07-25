@@ -29,6 +29,32 @@ static int hard_links(void) {
         errno = EPROTO;
         return -1;
     }
+    if (rename(first, second) != 0 || stat(first, &a) != 0 || stat(second, &b) != 0 ||
+        a.st_nlink != 2 || b.st_nlink != 2) {
+        errno = EPROTO;
+        return -1;
+    }
+    fd = open(first, O_RDONLY);
+    if (fd < 0 || unlink(first) != 0 || fstat(fd, &a) != 0 || a.st_nlink != 1 ||
+        unlink(second) != 0 || fstat(fd, &a) != 0 || a.st_nlink != 0 || close(fd) != 0) {
+        errno = EPROTO;
+        return -1;
+    }
+    path(first, sizeof(first), "posix-link-directory");
+    struct stat root_before, root_after;
+    if (stat(root, &root_before) != 0) return -1;
+    if (mkdir(first, 0700) != 0) return -1;
+    errno = 0;
+    if (link(first, second) != -1 || errno != EPERM || stat(root, &root_after) != 0 ||
+        root_after.st_nlink != root_before.st_nlink + 1) {
+        errno = EPROTO;
+        return -1;
+    }
+    if (rename(first, first) != 0) return -1;
+    path(second, sizeof(second), "posix-link-directory/child");
+    if (mkdir(second, 0700) != 0 || stat(first, &a) != 0 || a.st_nlink != 3 ||
+        rmdir(second) != 0 || stat(first, &a) != 0 || a.st_nlink != 2 || rmdir(first) != 0)
+        return -1;
     return 0;
 }
 

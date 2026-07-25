@@ -17,15 +17,23 @@ external_initialize fsx "$mode" "$exe" 256MiB
 external_start_mount
 
 operations=${DEVDRIVE_FSX_OPS:-10000}
-for seed in 0x5eed1234 0xc0ffee; do
+run_fsx() {
+    local profile=$1
+    local seed=$2
+    shift 2
     timeout 600 "$fsx" \
         -S "$seed" \
         -N "$operations" \
         -l 16m \
         -o 64k \
-        -R -W -a -T \
+        "$@" -a -T \
         -F -K -u -H -z -Y -C -I -J -B -E -0 \
-        "$external_mount_dir/fsx-$seed.data"
+        "$external_mount_dir/fsx-$profile-$seed.data"
+}
+
+for seed in 0x5eed1234 0xc0ffee; do
+    run_fsx buffered "$seed" -R -W
+    run_fsx mmap "$seed"
 done
 
 external_stop_mount

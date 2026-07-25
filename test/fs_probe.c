@@ -59,8 +59,8 @@ static void test_unlink_open(const char *root) {
 
     struct stat st;
     if (fstat(old_fd, &st) != 0) fail("fstat unlinked file");
-    if (st.st_size != 3) {
-        fprintf(stderr, "wrong unlinked size\n");
+    if (st.st_size != 3 || st.st_nlink != 0) {
+        fprintf(stderr, "wrong unlinked stat\n");
         exit(1);
     }
     if (lseek(old_fd, 0, SEEK_SET) != 0) fail("seek old");
@@ -77,6 +77,56 @@ static void test_unlink_open(const char *root) {
     if (close(new_fd) != 0) fail("close new");
     if (close(old_fd) != 0) fail("close old");
     expect_contents(path, "new");
+}
+
+static void test_unlink_opath(const char *root) {
+    char path[4096];
+    make_path(path, sizeof(path), root, "opath-unlink");
+    int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    if (fd < 0) fail("create O_PATH file");
+    write_all(fd, "path", 4);
+    if (close(fd) != 0) fail("close O_PATH file");
+
+    int path_fd = open(path, O_PATH);
+    if (path_fd < 0) fail("open O_PATH file");
+    if (unlink(path) != 0) fail("unlink O_PATH file");
+    struct stat st;
+    if (fstat(path_fd, &st) != 0) fail("fstat unlinked O_PATH file");
+    if (st.st_size != 4 || st.st_nlink != 0) {
+        fprintf(stderr, "wrong unlinked O_PATH stat\n");
+        exit(1);
+    }
+    if (close(path_fd) != 0) fail("close O_PATH file reference");
+}
+
+static void test_unlinked_directories(const char *root) {
+    char source[4096], target[4096];
+    make_path(source, sizeof(source), root, "removed-open-directory");
+    if (mkdir(source, 0755) != 0) fail("mkdir removed open directory");
+    int directory_fd = open(source, O_RDONLY | O_DIRECTORY);
+    if (directory_fd < 0) fail("open removed directory");
+    if (rmdir(source) != 0) fail("rmdir open directory");
+    struct stat st;
+    if (fstat(directory_fd, &st) != 0) fail("fstat removed directory");
+    if (st.st_nlink != 0) {
+        fprintf(stderr, "removed directory retained links\n");
+        exit(1);
+    }
+    if (close(directory_fd) != 0) fail("close removed directory");
+
+    make_path(source, sizeof(source), root, "rename-directory-source");
+    make_path(target, sizeof(target), root, "rename-directory-victim");
+    if (mkdir(source, 0755) != 0 || mkdir(target, 0755) != 0) fail("mkdir rename directories");
+    directory_fd = open(target, O_RDONLY | O_DIRECTORY);
+    if (directory_fd < 0) fail("open rename directory victim");
+    if (rename(source, target) != 0) fail("rename over open directory");
+    if (fstat(directory_fd, &st) != 0) fail("fstat renamed directory victim");
+    if (st.st_nlink != 0) {
+        fprintf(stderr, "renamed directory victim retained links\n");
+        exit(1);
+    }
+    if (close(directory_fd) != 0) fail("close renamed directory victim");
+    if (rmdir(target) != 0) fail("remove renamed directory");
 }
 
 static void test_rename_open(const char *root) {
@@ -275,7 +325,7 @@ static void test_directory_iteration(const char *root) {
     }
 }
 
-static void test_statfs_and_unsupported(const char *root) {
+static void test_statfs_and_hardlink(const char *root) {
     struct statvfs stats;
     if (statvfs(root, &stats) != 0) fail("statvfs");
     if (stats.f_bsize == 0 || stats.f_blocks == 0 || stats.f_bfree > stats.f_blocks || stats.f_namemax != 255) {
@@ -284,12 +334,15 @@ static void test_statfs_and_unsupported(const char *root) {
     }
     char source[4096], target[4096];
     make_path(source, sizeof(source), root, "hello.txt");
-    make_path(target, sizeof(target), root, "unsupported-hardlink");
-    errno = 0;
-    if (link(source, target) != -1 || (errno != ENOSYS && errno != EOPNOTSUPP && errno != EPERM)) {
-        fprintf(stderr, "hard link did not return a stable unsupported error\n");
+    make_path(target, sizeof(target), root, "supported-hardlink");
+    if (link(source, target) != 0) fail("hard link");
+    struct stat source_stat, target_stat;
+    if (stat(source, &source_stat) != 0 || stat(target, &target_stat) != 0) fail("stat hard links");
+    if (source_stat.st_ino != target_stat.st_ino || source_stat.st_nlink != 2 || target_stat.st_nlink != 2) {
+        fprintf(stderr, "hard links do not share identity and link count\n");
         exit(1);
     }
+    if (unlink(target) != 0) fail("unlink hard link");
 }
 
 static void test_timestamps(const char *root) {
@@ -366,13 +419,15 @@ int main(int argc, char **argv) {
         return 2;
     }
     test_unlink_open(argv[1]);
+    test_unlink_opath(argv[1]);
+    test_unlinked_directories(argv[1]);
     test_rename_open(argv[1]);
     test_append(argv[1]);
     test_truncate(argv[1]);
     test_large_sparse(argv[1]);
     test_rename_noreplace(argv[1]);
     test_directory_iteration(argv[1]);
-    test_statfs_and_unsupported(argv[1]);
+    test_statfs_and_hardlink(argv[1]);
     test_timestamps(argv[1]);
     test_permissions(argv[1]);
     return 0;

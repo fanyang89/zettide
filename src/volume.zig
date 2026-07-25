@@ -20,6 +20,8 @@ pub const Volume = struct {
     fallback_gid: u32 = 0,
     writable: bool = false,
     open_files: ?*FileHandle = null,
+    link_counts: std.AutoHashMap(object_format.ObjectId, u64),
+    object_pins: std.AutoHashMap(object_format.ObjectId, u64),
 
     pub fn create(io: Io, path: []const u8, logical_size: u64, label: []const u8) !void {
         var header = try container.Header.init(io, logical_size, label);
@@ -87,6 +89,8 @@ pub const Volume = struct {
         result.fallback_gid = 0;
         result.writable = writable;
         result.open_files = null;
+        result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         return result;
     }
 
@@ -105,7 +109,10 @@ pub const Volume = struct {
             _ = c.lfs_unmount(&self.lfs);
             self.mounted = false;
         }
-        if (self.writable) try self.store().recoverOrphans();
+        self.link_counts.clearRetainingCapacity();
+        self.object_pins.clearRetainingCapacity();
+        try self.store().collectLinkCounts(&self.link_counts);
+        if (self.writable) try self.store().recoverOrphans(&self.link_counts);
     }
 
     pub fn deinit(self: *Volume) void {
@@ -113,6 +120,8 @@ pub const Volume = struct {
             _ = c.lfs_unmount(&self.lfs);
             self.mounted = false;
         }
+        self.object_pins.deinit();
+        self.link_counts.deinit();
         self.file.close(self.io);
     }
 
@@ -142,6 +151,8 @@ pub const Volume = struct {
             .size = 0,
             .allocated_bytes = 0,
             .metadata = stored_metadata,
+            .object_id = null,
+            .nlink = try self.directoryLinkCount(translated),
         };
         const object_ref = try self.store().readRef(path);
         const head = try self.store().readHead(object_ref.object_id);
@@ -149,17 +160,55 @@ pub const Volume = struct {
             .size = head.logical_size,
             .allocated_bytes = head.allocated_bytes,
             .metadata = head.metadata,
+            .object_id = object_ref.object_id,
+            .nlink = try self.linkCount(object_ref.object_id),
         };
     }
 
     pub fn statFile(self: *Volume, handle: *FileHandle) !NodeInfo {
-        const head = try self.store().readHead(handle.object_id);
-        handle.metadata = head.metadata;
+        const info = try self.statObject(handle.object_id);
+        handle.metadata = info.metadata;
+        return info;
+    }
+
+    pub fn statObject(self: *Volume, object_id: object_format.ObjectId) !NodeInfo {
+        const head = try self.store().readHead(object_id);
         return .{
             .size = head.logical_size,
             .allocated_bytes = head.allocated_bytes,
             .metadata = head.metadata,
+            .object_id = object_id,
+            .nlink = try self.linkCount(object_id),
         };
+    }
+
+    pub fn linkCount(self: *const Volume, object_id: object_format.ObjectId) !u64 {
+        return self.link_counts.get(object_id) orelse error.CorruptFilesystem;
+    }
+
+    pub fn pinObject(self: *Volume, object_id: object_format.ObjectId) !void {
+        if (!self.link_counts.contains(object_id)) return error.CorruptFilesystem;
+        const entry = try self.object_pins.getOrPut(object_id);
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* = std.math.add(u64, entry.value_ptr.*, 1) catch
+            return error.TooManyReferences;
+    }
+
+    pub fn unpinObject(self: *Volume, object_id: object_format.ObjectId) !void {
+        const count = self.object_pins.getPtr(object_id) orelse return error.InvalidArgument;
+        if (count.* == 0) return error.InvalidArgument;
+        count.* -= 1;
+        if (count.* != 0) return;
+        _ = self.object_pins.remove(object_id);
+        try self.reclaimObjectIfUnused(object_id);
+    }
+
+    pub fn objectPinCount(self: *const Volume, object_id: object_format.ObjectId) u64 {
+        return self.object_pins.get(object_id) orelse 0;
+    }
+
+    pub fn trackedObjectCount(self: *const Volume) usize {
+        return self.link_counts.count();
     }
 
     pub fn setMetadata(self: *Volume, path: [*:0]const u8, value: metadata.Metadata) !void {
@@ -205,50 +254,144 @@ pub const Volume = struct {
         try self.updateParentTimes(path);
     }
 
+    pub fn makeSymlink(self: *Volume, path: [*:0]const u8, target: []const u8, uid: u32, gid: u32) !void {
+        try self.createSpecial(path, target, .symlink, .symlink, 0o120777, uid, gid);
+    }
+
+    pub fn makeFifo(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
+        try self.createSpecial(path, "", .fifo, .fifo, mode, uid, gid);
+    }
+
+    pub fn link(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !void {
+        _ = try self.linkWithInfo(old_path, new_path);
+    }
+
+    pub fn linkWithInfo(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !NodeInfo {
+        const object_ref = self.store().readRef(old_path) catch |err| switch (err) {
+            error.IsDirectory => return error.PermissionDenied,
+            else => return err,
+        };
+        const count = self.link_counts.getPtr(object_ref.object_id) orelse
+            return error.CorruptFilesystem;
+        if (count.* == std.math.maxInt(u64)) return error.TooManyLinks;
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const translated = try object_store.Store.translateUserPath(new_path, &translated_buffer);
+        var info: c.struct_lfs_info = undefined;
+        const stat_result = c.lfs_stat(&self.lfs, translated, &info);
+        if (stat_result >= 0) return error.PathAlreadyExists;
+        if (stat_result != c.LFS_ERR_NOENT) try checkLfs(stat_result);
+        try self.validateParentDirectory(new_path);
+        var head = try self.store().readHead(object_ref.object_id);
+        head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+        try self.store().updateMetadata(object_ref.object_id, head.metadata);
+        self.updateOpenMetadata(object_ref.object_id, head.metadata);
+        try self.updateParentTimes(new_path);
+        try self.store().publishRef(new_path, object_ref, true);
+        count.* += 1;
+        return .{
+            .size = head.logical_size,
+            .allocated_bytes = head.allocated_bytes,
+            .metadata = head.metadata,
+            .object_id = object_ref.object_id,
+            .nlink = count.*,
+        };
+    }
+
     pub fn remove(self: *Volume, path: [*:0]const u8) !void {
         var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
         const removed_object = if (info.type == c.LFS_TYPE_DIR) null else try self.store().readRef(path);
-        try checkLfs(c.lfs_remove(&self.lfs, translated));
+        if (info.type == c.LFS_TYPE_DIR and !try self.directoryIsEmpty(translated))
+            return error.DirectoryNotEmpty;
+        const object_count = if (removed_object) |object_ref|
+            self.link_counts.getPtr(object_ref.object_id) orelse return error.CorruptFilesystem
+        else
+            null;
+        if (object_count) |count| if (count.* == 0) return error.CorruptFilesystem;
         if (removed_object) |object_ref| {
-            self.markUnlinked(object_ref.object_id);
-            if (!self.hasOpenObject(object_ref.object_id)) try self.store().removeObject(object_ref.object_id);
+            var object_metadata = (try self.store().readHead(object_ref.object_id)).metadata;
+            object_metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+            try self.store().updateMetadata(object_ref.object_id, object_metadata);
+            self.updateOpenMetadata(object_ref.object_id, object_metadata);
         }
         try self.updateParentTimes(path);
+        try checkLfs(c.lfs_remove(&self.lfs, translated));
+        if (removed_object) |object_ref| {
+            object_count.?.* -= 1;
+            self.reclaimObjectIfUnused(object_ref.object_id) catch {};
+        }
     }
 
     pub fn rename(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !void {
+        _ = try self.renameWithResult(old_path, new_path);
+    }
+
+    pub fn renameWithResult(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !RenameResult {
+        if (std.mem.eql(u8, std.mem.span(old_path), std.mem.span(new_path))) return .same_object;
         var old_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         var new_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         const old_translated = try object_store.Store.translateUserPath(old_path, &old_buffer);
         const new_translated = try object_store.Store.translateUserPath(new_path, &new_buffer);
+        var old_info: c.struct_lfs_info = undefined;
+        try checkLfs(c.lfs_stat(&self.lfs, old_translated, &old_info));
+        var new_info: c.struct_lfs_info = undefined;
+        const new_stat_result = c.lfs_stat(&self.lfs, new_translated, &new_info);
+        const new_exists = new_stat_result >= 0;
+        if (!new_exists and new_stat_result != c.LFS_ERR_NOENT) try checkLfs(new_stat_result);
+        if (new_exists) {
+            if (old_info.type == c.LFS_TYPE_DIR and new_info.type != c.LFS_TYPE_DIR)
+                return error.NotDirectory;
+            if (old_info.type != c.LFS_TYPE_DIR and new_info.type == c.LFS_TYPE_DIR)
+                return error.IsDirectory;
+            if (new_info.type == c.LFS_TYPE_DIR and !try self.directoryIsEmpty(new_translated))
+                return error.DirectoryNotEmpty;
+        }
+        if (old_info.type == c.LFS_TYPE_DIR) {
+            const old_value = std.mem.span(old_path);
+            const new_parent = parentSlice(new_path);
+            if (std.mem.eql(u8, old_value, new_parent) or
+                (new_parent.len > old_value.len and std.mem.startsWith(u8, new_parent, old_value) and
+                    new_parent[old_value.len] == '/'))
+                return error.InvalidArgument;
+        }
+        try self.validateParentDirectory(new_path);
         const replaced = self.store().readRef(new_path) catch |err| switch (err) {
-            error.FileNotFound, error.IsDirectory, error.InvalidObjectFormat => null,
+            error.FileNotFound, error.IsDirectory => null,
             else => return err,
         };
-        const source = self.store().readRef(old_path) catch null;
-        try checkLfs(c.lfs_rename(&self.lfs, old_translated, new_translated));
+        const source = self.store().readRef(old_path) catch |err| switch (err) {
+            error.IsDirectory => null,
+            else => return err,
+        };
+        if (source != null and replaced != null and
+            std.mem.eql(u8, &source.?.object_id, &replaced.?.object_id))
+            return .same_object;
+        const replaced_count = if (replaced) |object_ref|
+            self.link_counts.getPtr(object_ref.object_id) orelse return error.CorruptFilesystem
+        else
+            null;
+        if (replaced_count) |count| if (count.* == 0) return error.CorruptFilesystem;
+        const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
         if (replaced) |object_ref| {
-            const replaces_itself = if (source) |source_ref|
-                std.mem.eql(u8, &source_ref.object_id, &object_ref.object_id)
-            else
-                false;
-            if (!replaces_itself) {
-                self.markUnlinked(object_ref.object_id);
-                if (!self.hasOpenObject(object_ref.object_id)) try self.store().removeObject(object_ref.object_id);
-            }
+            var replaced_metadata = (try self.store().readHead(object_ref.object_id)).metadata;
+            replaced_metadata.ctime_ns = timestamp;
+            try self.store().updateMetadata(object_ref.object_id, replaced_metadata);
+            self.updateOpenMetadata(object_ref.object_id, replaced_metadata);
         }
+        var renamed_metadata = try self.getMetadata(old_path);
+        renamed_metadata.ctime_ns = timestamp;
+        try self.setMetadata(old_path, renamed_metadata);
         try self.updateParentTimes(old_path);
         if (!std.mem.eql(u8, parentSlice(old_path), parentSlice(new_path)))
             try self.updateParentTimes(new_path);
-        var renamed_metadata = self.getMetadata(new_path) catch |err| switch (err) {
-            error.AttributeNotFound => return,
-            else => return err,
-        };
-        renamed_metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-        try self.setMetadata(new_path, renamed_metadata);
+        try checkLfs(c.lfs_rename(&self.lfs, old_translated, new_translated));
+        if (replaced) |object_ref| {
+            replaced_count.?.* -= 1;
+            self.reclaimObjectIfUnused(object_ref.object_id) catch {};
+        }
+        return .renamed;
     }
 
     pub fn openFile(self: *Volume, handle: *FileHandle, path: [*:0]const u8, flags: c_int, mode: u32, uid: u32, gid: u32) !void {
@@ -268,23 +411,32 @@ pub const Volume = struct {
                 uid,
                 gid,
             ));
-            self.store().publishRef(path, created, true) catch |err| {
+            self.link_counts.put(created.object_id, 0) catch |err| {
                 self.store().removeObject(created.object_id) catch {};
                 return err;
             };
+            self.store().publishRef(path, created, true) catch |err| {
+                _ = self.link_counts.remove(created.object_id);
+                self.store().removeObject(created.object_id) catch {};
+                return err;
+            };
+            self.link_counts.getPtr(created.object_id).?.* = 1;
             self.updateParentTimes(path) catch {};
             break :value created;
         };
-        if (flags & c.LFS_O_TRUNC != 0) _ = try self.store().truncate(object_ref.object_id, 0);
-        const head = try self.store().readHead(object_ref.object_id);
+        try self.openObject(handle, object_ref.object_id, flags);
+    }
+
+    pub fn openObject(self: *Volume, handle: *FileHandle, object_id: object_format.ObjectId, flags: c_int) !void {
+        if (flags & c.LFS_O_TRUNC != 0) _ = try self.store().truncate(object_id, 0);
+        const head = try self.store().readHead(object_id);
         handle.* = .{
-            .object_id = object_ref.object_id,
+            .object_id = object_id,
             .metadata = head.metadata,
             .original_metadata = head.metadata,
             .append = flags & c.LFS_O_APPEND != 0,
             .writable = flags & c.LFS_O_WRONLY != 0 or flags & c.LFS_O_RDWR != 0,
             .open = true,
-            .linked = true,
             .next = self.open_files,
         };
         self.open_files = handle;
@@ -294,8 +446,7 @@ pub const Volume = struct {
         if (!handle.open) return;
         try self.unregisterFile(handle);
         handle.open = false;
-        if (!handle.linked and !self.hasOpenObject(handle.object_id))
-            try self.store().removeObject(handle.object_id);
+        try self.reclaimObjectIfUnused(handle.object_id);
     }
 
     pub fn readFile(self: *Volume, handle: *FileHandle, buffer: []u8, offset: u64) !usize {
@@ -340,6 +491,15 @@ pub const Volume = struct {
         try self.store().updateMetadata(handle.object_id, handle.metadata);
         self.updateOpenMetadata(handle.object_id, handle.metadata);
         handle.original_metadata = handle.metadata;
+    }
+
+    pub fn setObjectMetadata(self: *Volume, object_id: object_format.ObjectId, value: metadata.Metadata) !void {
+        try self.store().updateMetadata(object_id, value);
+        self.updateOpenMetadata(object_id, value);
+    }
+
+    pub fn readObject(self: *Volume, object_id: object_format.ObjectId, buffer: []u8, offset: u64) !usize {
+        return self.store().read(object_id, buffer, offset);
     }
 
     pub fn openDirectory(self: *Volume, handle: *DirectoryHandle, path: [*:0]const u8) !void {
@@ -395,13 +555,6 @@ pub const Volume = struct {
         }
     }
 
-    fn markUnlinked(self: *Volume, id: object_format.ObjectId) void {
-        var current = self.open_files;
-        while (current) |handle| : (current = handle.next) {
-            if (std.mem.eql(u8, &handle.object_id, &id)) handle.linked = false;
-        }
-    }
-
     fn hasOpenObject(self: *Volume, id: object_format.ObjectId) bool {
         var current = self.open_files;
         while (current) |handle| : (current = handle.next) {
@@ -410,17 +563,98 @@ pub const Volume = struct {
         return false;
     }
 
+    fn reclaimObjectIfUnused(self: *Volume, id: object_format.ObjectId) !void {
+        const links = self.link_counts.get(id) orelse return error.CorruptFilesystem;
+        if (links != 0 or self.hasOpenObject(id) or self.objectPinCount(id) != 0) return;
+        try self.store().removeObject(id);
+        _ = self.link_counts.remove(id);
+    }
+
     fn unregisterFile(self: *Volume, target: *FileHandle) !void {
-        var link = &self.open_files;
-        while (link.*) |handle| {
+        var cursor = &self.open_files;
+        while (cursor.*) |handle| {
             if (handle == target) {
-                link.* = handle.next;
+                cursor.* = handle.next;
                 target.next = null;
                 return;
             }
-            link = &handle.next;
+            cursor = &handle.next;
         }
         return error.InvalidArgument;
+    }
+
+    fn createSpecial(
+        self: *Volume,
+        path: [*:0]const u8,
+        contents: []const u8,
+        ref_kind: object_format.RefKind,
+        kind: metadata.Kind,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) !void {
+        const created = try self.store().createObject(ref_kind, metadata.Metadata.init(
+            self.io,
+            kind,
+            mode,
+            uid,
+            gid,
+        ));
+        self.link_counts.put(created.object_id, 0) catch |err| {
+            self.store().removeObject(created.object_id) catch {};
+            return err;
+        };
+        errdefer {
+            _ = self.link_counts.remove(created.object_id);
+            self.store().removeObject(created.object_id) catch {};
+        }
+        if (contents.len != 0) _ = try self.store().write(created.object_id, contents, 0);
+        try self.store().publishRef(path, created, true);
+        self.link_counts.getPtr(created.object_id).?.* = 1;
+        self.updateParentTimes(path) catch {};
+    }
+
+    fn directoryLinkCount(self: *Volume, translated: [*:0]const u8) !u64 {
+        var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+        try checkLfs(c.lfs_dir_open(&self.lfs, &directory, translated));
+        defer _ = c.lfs_dir_close(&self.lfs, &directory);
+        var count: u64 = 2;
+        while (true) {
+            var info: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(&self.lfs, &directory, &info);
+            try checkLfs(result);
+            if (result == 0) return count;
+            if (info.type == c.LFS_TYPE_DIR) {
+                const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+                if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, ".."))
+                    count = std.math.add(u64, count, 1) catch return error.CorruptFilesystem;
+            }
+        }
+    }
+
+    fn directoryIsEmpty(self: *Volume, translated: [*:0]const u8) !bool {
+        var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+        try checkLfs(c.lfs_dir_open(&self.lfs, &directory, translated));
+        defer _ = c.lfs_dir_close(&self.lfs, &directory);
+        while (true) {
+            var info: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(&self.lfs, &directory, &info);
+            try checkLfs(result);
+            if (result == 0) return true;
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+            if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) return false;
+        }
+    }
+
+    fn validateParentDirectory(self: *Volume, path: [*:0]const u8) !void {
+        const parent = parentSlice(path);
+        var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        @memcpy(parent_buffer[0..parent.len], parent);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const translated = try object_store.Store.translateUserPath(&parent_buffer, &translated_buffer);
+        var info: c.struct_lfs_info = undefined;
+        try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
+        if (info.type != c.LFS_TYPE_DIR) return error.NotDirectory;
     }
 
     fn updateParentTimes(self: *Volume, path: [*:0]const u8) !void {
@@ -455,6 +689,13 @@ pub const NodeInfo = struct {
     size: u64,
     allocated_bytes: u64,
     metadata: metadata.Metadata,
+    object_id: ?object_format.ObjectId,
+    nlink: u64,
+};
+
+pub const RenameResult = enum {
+    renamed,
+    same_object,
 };
 
 pub const FileHandle = struct {
@@ -464,7 +705,6 @@ pub const FileHandle = struct {
     append: bool = false,
     writable: bool = false,
     open: bool = false,
-    linked: bool = false,
     next: ?*FileHandle = null,
 };
 

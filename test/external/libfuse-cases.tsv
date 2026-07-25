@@ -1,8 +1,8 @@
 # classification  cases   contract reason
 required	1-3	regular files and symbolic links
-unsupported	4-5	hard links
+required	4-5	hard links
 not-applicable	6	regular-file creation through mknod is not declared
-unsupported	7	FIFOs
+required	7	FIFOs
 required	8-12	directories, rename, and enumeration
 not-applicable	13	Unix socket nodes are not declared
 required	14-65	timestamps, truncate, open, and permissions

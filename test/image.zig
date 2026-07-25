@@ -463,3 +463,261 @@ test "file name length boundary is enforced" {
         volume.openFile(&file, &invalid_path, c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1),
     );
 }
+
+test "hard links persist and keep objects alive through final unlink" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var object_id: devdrive.object_format.ObjectId = undefined;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/link-a", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100640, 1, 2);
+        object_id = file.object_id;
+        _ = try volume.writeFile(&file, "linked", 0);
+        try volume.closeFile(&file);
+        try volume.link("/link-a", "/link-b");
+        const first = try volume.stat("/link-a");
+        const second = try volume.stat("/link-b");
+        try std.testing.expectEqual(@as(u64, 2), first.nlink);
+        try std.testing.expectEqual(@as(u64, 2), second.nlink);
+        try std.testing.expectEqualSlices(u8, &first.object_id.?, &second.object_id.?);
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try std.testing.expectEqual(@as(u64, 2), (try volume.stat("/link-a")).nlink);
+        try std.testing.expectEqualSlices(u8, &object_id, &(try volume.stat("/link-b")).object_id.?);
+
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/link-a", c.LFS_O_RDWR, 0, 0, 0);
+        try volume.remove("/link-a");
+        try std.testing.expectEqual(@as(u64, 1), (try volume.statFile(&file)).nlink);
+        try std.testing.expectEqual(@as(u64, 1), (try volume.stat("/link-b")).nlink);
+        try volume.remove("/link-b");
+        try std.testing.expectEqual(@as(u64, 0), (try volume.statFile(&file)).nlink);
+        _ = try volume.writeFile(&file, "!", 6);
+        try volume.closeFile(&file);
+
+        var id_buffer: [32]u8 = undefined;
+        var object_path: [128:0]u8 = @splat(0);
+        const id = devdrive.object_format.formatObjectId(object_id, &id_buffer);
+        const value = try std.fmt.bufPrint(object_path[0..128], "/system/objects/{s}", .{id});
+        object_path[value.len] = 0;
+        var info: c.struct_lfs_info = undefined;
+        try std.testing.expectEqual(@as(c_int, c.LFS_ERR_NOENT), c.lfs_stat(&volume.lfs, &object_path, &info));
+    }
+}
+
+test "same-object rename is a no-op and rename preserves an open victim" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var source: FileHandle = undefined;
+    try volume.openFile(&source, "/source", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    _ = try volume.writeFile(&source, "source", 0);
+    try volume.closeFile(&source);
+    try volume.link("/source", "/alias");
+    try volume.rename("/source", "/alias");
+    try std.testing.expectEqual(@as(u64, 2), (try volume.stat("/source")).nlink);
+    try std.testing.expectEqual(@as(u64, 2), (try volume.stat("/alias")).nlink);
+
+    var victim: FileHandle = undefined;
+    try volume.openFile(&victim, "/victim", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    _ = try volume.writeFile(&victim, "victim", 0);
+    try volume.rename("/source", "/victim");
+    try std.testing.expectError(error.FileNotFound, volume.stat("/source"));
+    try std.testing.expectEqual(@as(u64, 2), (try volume.stat("/alias")).nlink);
+    try std.testing.expectEqual(@as(u64, 2), (try volume.stat("/victim")).nlink);
+    try std.testing.expectEqual(@as(u64, 0), (try volume.statFile(&victim)).nlink);
+    var contents: [6]u8 = undefined;
+    try std.testing.expectEqual(contents.len, try volume.readFile(&victim, &contents, 0));
+    try std.testing.expectEqualStrings("victim", &contents);
+    try volume.closeFile(&victim);
+}
+
+test "directory link counts and FIFO metadata persist" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try std.testing.expectEqual(@as(u64, 2), (try volume.stat("/")).nlink);
+        try volume.makeDirectory("/parent", 0o40755, 1, 1);
+        try volume.makeDirectory("/parent/child", 0o40755, 1, 1);
+        try std.testing.expectEqual(@as(u64, 3), (try volume.stat("/")).nlink);
+        try std.testing.expectEqual(@as(u64, 3), (try volume.stat("/parent")).nlink);
+        try std.testing.expectError(error.PermissionDenied, volume.link("/parent", "/directory-link"));
+        try volume.makeFifo("/pipe", 0o010640, 12, 34);
+
+        // Images made by older adapters stored symlink metadata behind a file-kind ObjectRef.
+        var legacy_link: FileHandle = undefined;
+        try volume.openFile(&legacy_link, "/legacy-link", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o120777, 1, 1);
+        legacy_link.metadata.kind = .symlink;
+        try volume.persistMetadata(&legacy_link);
+        _ = try volume.writeFile(&legacy_link, "target", 0);
+        try volume.closeFile(&legacy_link);
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        const info = try volume.stat("/pipe");
+        try std.testing.expectEqual(devdrive.metadata.Kind.fifo, info.metadata.kind);
+        try std.testing.expectEqual(@as(u32, 0o010640), info.metadata.mode);
+        try std.testing.expectEqual(@as(u32, 12), info.metadata.uid);
+        try std.testing.expectEqual(@as(u32, 34), info.metadata.gid);
+        try std.testing.expectEqual(@as(u64, 1), info.nlink);
+        const legacy_link = try volume.stat("/legacy-link");
+        try std.testing.expectEqual(devdrive.metadata.Kind.symlink, legacy_link.metadata.kind);
+        var target: [6]u8 = undefined;
+        try std.testing.expectEqual(target.len, try volume.readObject(legacy_link.object_id.?, &target, 0));
+        try std.testing.expectEqualStrings("target", &target);
+        try std.testing.expectEqual(@as(u64, 3), (try volume.stat("/parent")).nlink);
+        try volume.remove("/parent/child");
+        try std.testing.expectEqual(@as(u64, 2), (try volume.stat("/parent")).nlink);
+    }
+}
+
+test "object pins retain zero-link objects and reclamation drops tracking state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/pinned", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    const object_id = file.object_id;
+    _ = try volume.writeFile(&file, "pinned", 0);
+    try volume.closeFile(&file);
+
+    var object_metadata = (try volume.statObject(object_id)).metadata;
+    object_metadata.ctime_ns = 1;
+    try volume.setObjectMetadata(object_id, object_metadata);
+    try volume.pinObject(object_id);
+    try std.testing.expectEqual(@as(u64, 1), volume.objectPinCount(object_id));
+    try volume.remove("/pinned");
+    const unlinked = try volume.statObject(object_id);
+    try std.testing.expectEqual(@as(u64, 0), unlinked.nlink);
+    try std.testing.expect(unlinked.metadata.ctime_ns > 1);
+    try std.testing.expectEqual(@as(usize, 1), volume.trackedObjectCount());
+
+    try volume.unpinObject(object_id);
+    try std.testing.expectEqual(@as(u64, 0), volume.objectPinCount(object_id));
+    try std.testing.expectEqual(@as(usize, 0), volume.trackedObjectCount());
+    try std.testing.expectError(error.FileNotFound, volume.statObject(object_id));
+    try std.testing.expectError(error.CorruptFilesystem, volume.linkCount(object_id));
+    try std.testing.expectError(error.InvalidArgument, volume.unpinObject(object_id));
+}
+
+test "link count changes update object ctime including rename victims" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/links", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    const linked_id = file.object_id;
+    try volume.closeFile(&file);
+    var object_metadata = (try volume.statObject(linked_id)).metadata;
+    object_metadata.ctime_ns = 1;
+    try volume.setObjectMetadata(linked_id, object_metadata);
+    try std.testing.expectError(error.FileNotFound, volume.link("/links", "/missing/alias"));
+    try std.testing.expectEqual(@as(i64, 1), (try volume.statObject(linked_id)).metadata.ctime_ns);
+    try volume.link("/links", "/links-alias");
+    try std.testing.expect((try volume.statObject(linked_id)).metadata.ctime_ns > 1);
+    object_metadata = (try volume.statObject(linked_id)).metadata;
+    object_metadata.ctime_ns = 1;
+    try volume.setObjectMetadata(linked_id, object_metadata);
+    try volume.remove("/links-alias");
+    try std.testing.expect((try volume.statObject(linked_id)).metadata.ctime_ns > 1);
+    object_metadata = (try volume.statObject(linked_id)).metadata;
+    object_metadata.ctime_ns = 1;
+    try volume.setObjectMetadata(linked_id, object_metadata);
+    try std.testing.expectError(error.FileNotFound, volume.rename("/links", "/missing/links"));
+    try std.testing.expectEqual(@as(i64, 1), (try volume.statObject(linked_id)).metadata.ctime_ns);
+
+    try volume.openFile(&file, "/victim", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    const victim_id = file.object_id;
+    try volume.closeFile(&file);
+    try volume.pinObject(victim_id);
+    object_metadata = (try volume.statObject(victim_id)).metadata;
+    object_metadata.ctime_ns = 1;
+    try volume.setObjectMetadata(victim_id, object_metadata);
+    try volume.rename("/links", "/victim");
+    const victim = try volume.statObject(victim_id);
+    try std.testing.expectEqual(@as(u64, 0), victim.nlink);
+    try std.testing.expect(victim.metadata.ctime_ns > 1);
+    try volume.unpinObject(victim_id);
+}
+
+test "writable mount removes stale temporary ObjectRef files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var temporary_path: [128:0]u8 = @splat(0);
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/persistent", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        const object_ref: devdrive.object_format.ObjectRef = .{
+            .kind = .file,
+            .object_id = file.object_id,
+        };
+        try volume.closeFile(&file);
+
+        var id_buffer: [32]u8 = undefined;
+        const id = devdrive.object_format.formatObjectId(object_ref.object_id, &id_buffer);
+        const value = try std.fmt.bufPrint(temporary_path[0..128], "/system/tmp/{s}.ref", .{id});
+        temporary_path[value.len] = 0;
+        const bytes = object_ref.encode();
+        var raw_file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+        try devdrive.volume.checkLfs(c.lfs_file_open(
+            &volume.lfs,
+            &raw_file,
+            &temporary_path,
+            c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
+        ));
+        try devdrive.volume.checkLfs(c.lfs_file_write(&volume.lfs, &raw_file, &bytes, bytes.len));
+        try devdrive.volume.checkLfs(c.lfs_file_close(&volume.lfs, &raw_file));
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var info: c.struct_lfs_info = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, c.LFS_ERR_NOENT),
+            c.lfs_stat(&volume.lfs, &temporary_path, &info),
+        );
+        _ = try volume.stat("/persistent");
+    }
+}

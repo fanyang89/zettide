@@ -9,6 +9,7 @@ pub const Kind = enum(u8) {
     file = 1,
     directory = 2,
     symlink = 3,
+    fifo = 4,
 };
 
 pub const Metadata = struct {

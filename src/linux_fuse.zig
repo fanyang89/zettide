@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const volume_mod = @import("volume.zig");
 const metadata = @import("metadata.zig");
+const object_format = @import("object_format.zig");
 const lfs = volume_mod.c;
 
 const c = @cImport({
@@ -17,20 +18,26 @@ const cache_timeout = 1.0;
 
 const Inode = struct {
     id: c.fuse_ino_t,
-    parent: ?*Inode,
-    name: [name_capacity:0]u8,
-    path: [path_capacity:0]u8,
+    object_id: ?object_format.ObjectId,
     kind: metadata.Kind,
     cached_info: ?volume_mod.NodeInfo,
     lookup_count: u64,
     open_count: u64,
-    linked: bool,
     next: ?*Inode,
+};
+
+const Dentry = struct {
+    parent: *Inode,
+    inode: *Inode,
+    name: [name_capacity:0]u8,
+    path: [path_capacity:0]u8,
+    next: ?*Dentry,
 };
 
 const MountState = struct {
     volume: *volume_mod.Volume,
     nodes: ?*Inode = null,
+    dentries: ?*Dentry = null,
     open_files: ?*FuseFileHandle = null,
     next_id: c.fuse_ino_t = c.FUSE_ROOT_ID + 1,
     writeback_cache: bool = false,
@@ -40,25 +47,29 @@ const MountState = struct {
         const root = try std.heap.c_allocator.create(Inode);
         root.* = .{
             .id = c.FUSE_ROOT_ID,
-            .parent = null,
-            .name = @splat(0),
-            .path = @splat(0),
+            .object_id = null,
             .kind = .directory,
             .cached_info = null,
             .lookup_count = 1,
             .open_count = 0,
-            .linked = true,
             .next = null,
         };
-        root.path[0] = '/';
         state.nodes = root;
         return state;
     }
 
     fn deinit(self: *MountState) void {
+        var current_dentry = self.dentries;
+        while (current_dentry) |dentry| {
+            const next = dentry.next;
+            std.heap.c_allocator.destroy(dentry);
+            current_dentry = next;
+        }
+        self.dentries = null;
         var current = self.nodes;
         while (current) |node| {
             const next = node.next;
+            if (node.object_id) |object_id| self.volume.unpinObject(object_id) catch {};
             std.heap.c_allocator.destroy(node);
             current = next;
         }
@@ -73,85 +84,205 @@ const MountState = struct {
         return null;
     }
 
-    fn findChild(self: *MountState, parent: *Inode, name: []const u8) ?*Inode {
-        var current = self.nodes;
-        while (current) |node| : (current = node.next) {
-            if (node.linked and node.parent == parent and
-                std.mem.eql(u8, std.mem.sliceTo(&node.name, 0), name)) return node;
+    fn findChild(self: *MountState, parent: *Inode, name: []const u8) ?*Dentry {
+        var current = self.dentries;
+        while (current) |dentry| : (current = dentry.next) {
+            if (dentry.parent == parent and
+                std.mem.eql(u8, std.mem.sliceTo(&dentry.name, 0), name)) return dentry;
         }
         return null;
     }
 
-    fn addNode(self: *MountState, parent: *Inode, name: []const u8, kind: metadata.Kind) !*Inode {
+    fn findObject(self: *MountState, object_id: object_format.ObjectId) ?*Inode {
+        var current = self.nodes;
+        while (current) |node| : (current = node.next) {
+            if (node.object_id) |id| {
+                if (std.mem.eql(u8, &id, &object_id)) return node;
+            }
+        }
+        return null;
+    }
+
+    fn addEntry(self: *MountState, parent: *Inode, name: []const u8, info: volume_mod.NodeInfo) !*Dentry {
         if (name.len >= name_capacity) return error.NameTooLong;
-        const node = try std.heap.c_allocator.create(Inode);
-        errdefer std.heap.c_allocator.destroy(node);
-        node.* = .{
-            .id = self.next_id,
+        if (self.findChild(parent, name) != null) return error.PathAlreadyExists;
+        var new_node = false;
+        const node = if (info.object_id) |object_id|
+            self.findObject(object_id) orelse value: {
+                new_node = true;
+                break :value try self.addNode(info.metadata.kind, object_id);
+            }
+        else value: {
+            new_node = true;
+            break :value try self.addNode(info.metadata.kind, null);
+        };
+        errdefer if (new_node) self.maybeRemove(node);
+        const dentry = try std.heap.c_allocator.create(Dentry);
+        errdefer std.heap.c_allocator.destroy(dentry);
+        dentry.* = .{
             .parent = parent,
+            .inode = node,
             .name = @splat(0),
             .path = @splat(0),
+            .next = self.dentries,
+        };
+        @memcpy(dentry.name[0..name.len], name);
+        try self.setDentryPath(dentry);
+        self.dentries = dentry;
+        node.kind = info.metadata.kind;
+        node.cached_info = info;
+        return dentry;
+    }
+
+    fn addNode(self: *MountState, kind: metadata.Kind, object_id: ?object_format.ObjectId) !*Inode {
+        const node = try std.heap.c_allocator.create(Inode);
+        errdefer std.heap.c_allocator.destroy(node);
+        if (object_id) |id| try self.volume.pinObject(id);
+        node.* = .{
+            .id = self.next_id,
+            .object_id = object_id,
             .kind = kind,
             .cached_info = null,
             .lookup_count = 0,
             .open_count = 0,
-            .linked = true,
             .next = self.nodes,
         };
         self.next_id += 1;
-        @memcpy(node.name[0..name.len], name);
-        try setNodePath(node);
         self.nodes = node;
         return node;
     }
 
     fn maybeRemove(self: *MountState, target: *Inode) void {
-        if (target.id == c.FUSE_ROOT_ID or target.linked or
-            target.lookup_count != 0 or target.open_count != 0) return;
-        var child = self.nodes;
-        while (child) |node| : (child = node.next) {
-            if (node.parent == target) return;
-        }
-        var link = &self.nodes;
-        while (link.*) |node| {
+        self.removeUnreferencedNode(target);
+        self.pruneCaches();
+    }
+
+    fn removeUnreferencedNode(self: *MountState, target: *Inode) void {
+        if (target.id == c.FUSE_ROOT_ID or target.lookup_count != 0 or target.open_count != 0 or
+            self.hasDentryReference(target)) return;
+        var cursor = &self.nodes;
+        while (cursor.*) |node| {
             if (node == target) {
-                const parent = node.parent;
-                link.* = node.next;
+                cursor.* = node.next;
+                if (node.object_id) |object_id| self.volume.unpinObject(object_id) catch {};
                 std.heap.c_allocator.destroy(node);
-                if (parent) |value| self.maybeRemove(value);
                 return;
             }
-            link = &node.next;
+            cursor = &node.next;
+        }
+    }
+
+    fn hasDentryReference(self: *MountState, target: *const Inode) bool {
+        var current = self.dentries;
+        while (current) |dentry| : (current = dentry.next) {
+            if (dentry.inode == target or dentry.parent == target) return true;
+        }
+        return false;
+    }
+
+    fn hasChildren(self: *MountState, target: *const Inode) bool {
+        var current = self.dentries;
+        while (current) |dentry| : (current = dentry.next) {
+            if (dentry.parent == target) return true;
+        }
+        return false;
+    }
+
+    fn pruneCaches(self: *MountState) void {
+        while (true) {
+            var cursor = &self.dentries;
+            var removed = false;
+            while (cursor.*) |dentry| {
+                if (dentry.inode.lookup_count == 0 and dentry.inode.open_count == 0 and
+                    !self.hasChildren(dentry.inode))
+                {
+                    const inode = dentry.inode;
+                    const parent = dentry.parent;
+                    cursor.* = dentry.next;
+                    std.heap.c_allocator.destroy(dentry);
+                    self.removeUnreferencedNode(inode);
+                    self.removeUnreferencedNode(parent);
+                    removed = true;
+                    break;
+                }
+                cursor = &dentry.next;
+            }
+            if (removed) continue;
+
+            var current = self.nodes;
+            while (current) |node| : (current = node.next) {
+                if (node.id != c.FUSE_ROOT_ID and node.lookup_count == 0 and node.open_count == 0 and
+                    !self.hasDentryReference(node))
+                {
+                    self.removeUnreferencedNode(node);
+                    removed = true;
+                    break;
+                }
+            }
+            if (!removed) return;
+        }
+    }
+
+    fn removeEntry(self: *MountState, target: *Dentry) void {
+        var cursor = &self.dentries;
+        while (cursor.*) |dentry| {
+            if (dentry == target) {
+                cursor.* = dentry.next;
+                std.heap.c_allocator.destroy(dentry);
+                return;
+            }
+            cursor = &dentry.next;
         }
     }
 
     fn updateDescendantPaths(self: *MountState, parent: *Inode) !void {
-        var current = self.nodes;
-        while (current) |node| : (current = node.next) {
-            if (node.linked and node.parent == parent) {
-                try setNodePath(node);
-                try self.updateDescendantPaths(node);
+        var current = self.dentries;
+        while (current) |dentry| : (current = dentry.next) {
+            if (dentry.parent == parent) {
+                try self.setDentryPath(dentry);
+                try self.updateDescendantPaths(dentry.inode);
             }
         }
     }
 
-    fn validateDescendantPaths(self: *MountState, source: *Inode, new_path: []const u8) !void {
+    fn validateDescendantPaths(self: *MountState, source: *Dentry, new_path: []const u8) !void {
         const old_path_length = std.mem.sliceTo(&source.path, 0).len;
-        var current = self.nodes;
-        while (current) |node| : (current = node.next) {
-            if (!node.linked or node == source or !isDescendant(node, source)) continue;
-            const path_length = std.mem.sliceTo(&node.path, 0).len;
+        var current = self.dentries;
+        while (current) |dentry| : (current = dentry.next) {
+            if (dentry == source or !self.isDescendant(dentry, source.inode)) continue;
+            const path_length = std.mem.sliceTo(&dentry.path, 0).len;
             if (new_path.len + path_length - old_path_length >= path_capacity)
                 return error.NameTooLong;
         }
     }
 
-    fn findOpenFile(self: *MountState, inode: *Inode) ?*FuseFileHandle {
-        var current = self.open_files;
-        while (current) |handle| : (current = handle.next) {
-            if (handle.inode == inode) return handle;
+    fn isDescendant(self: *MountState, dentry: *const Dentry, ancestor: *const Inode) bool {
+        var parent: ?*Inode = dentry.parent;
+        while (parent) |current| {
+            if (current == ancestor) return true;
+            const parent_dentry = self.findEntryForInode(current) orelse return false;
+            parent = parent_dentry.parent;
+        }
+        return false;
+    }
+
+    fn findEntryForInode(self: *MountState, inode: *const Inode) ?*Dentry {
+        var current = self.dentries;
+        while (current) |dentry| : (current = dentry.next) {
+            if (dentry.inode == inode) return dentry;
         }
         return null;
+    }
+
+    fn pathFor(self: *MountState, inode: *const Inode) ?[*:0]const u8 {
+        if (inode.id == c.FUSE_ROOT_ID) return "/";
+        const dentry = self.findEntryForInode(inode) orelse return null;
+        return &dentry.path;
+    }
+
+    fn setDentryPath(self: *MountState, dentry: *Dentry) !void {
+        const parent_path = self.pathFor(dentry.parent) orelse return error.FileNotFound;
+        try joinPath(&dentry.path, std.mem.span(parent_path), std.mem.sliceTo(&dentry.name, 0));
     }
 
     fn unregisterOpenFile(self: *MountState, target: *FuseFileHandle) void {
@@ -209,11 +340,13 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8) !void {
     operations.getattr = getAttr;
     operations.setattr = setAttr;
     operations.readlink = readLink;
+    operations.mknod = makeNode;
     operations.mkdir = makeDirectory;
     operations.unlink = unlink;
     operations.rmdir = removeDirectory;
     operations.symlink = makeSymlink;
     operations.rename = rename;
+    operations.link = makeLink;
     operations.open = open;
     operations.read = read;
     operations.write = write;
@@ -256,10 +389,12 @@ fn lookup(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8) 
     const parent = state.find(parent_id) orelse return replyError(req, c.ENOENT);
     const name = std.mem.span(name_raw.?);
     var path: [path_capacity:0]u8 = @splat(0);
-    joinPath(&path, parent, name) catch |err| return replyError(req, errnoValue(err));
+    const parent_path = state.pathFor(parent) orelse return replyError(req, c.ENOENT);
+    joinPath(&path, std.mem.span(parent_path), name) catch |err| return replyError(req, errnoValue(err));
     const info = state.volume.stat(&path) catch |err| return replyError(req, errnoValue(err));
-    const node = state.findChild(parent, name) orelse
-        state.addNode(parent, name, info.metadata.kind) catch |err| return replyError(req, errnoValue(err));
+    const dentry = state.findChild(parent, name) orelse
+        state.addEntry(parent, name, info) catch |err| return replyError(req, errnoValue(err));
+    const node = dentry.inode;
     node.kind = info.metadata.kind;
     node.cached_info = info;
     node.lookup_count += 1;
@@ -283,16 +418,19 @@ fn getAttr(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_info) c
             const handle = fuseFileHandle(file_info);
             break :value state.volume.statFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
         }
-        if (!node.linked)
+        if (node.object_id) |object_id|
+            break :value state.volume.statObject(object_id) catch
+                node.cached_info orelse return replyError(req, c.ENOENT);
+        const path = state.pathFor(node) orelse
             break :value node.cached_info orelse return replyError(req, c.ENOENT);
-        break :value state.volume.stat(&node.path) catch |err| return replyError(req, errnoValue(err));
+        break :value state.volume.stat(path) catch |err| return replyError(req, errnoValue(err));
     } else value: {
-        if (!node.linked) {
-            if (state.findOpenFile(node)) |handle|
-                break :value state.volume.statFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
+        if (node.object_id) |object_id|
+            break :value state.volume.statObject(object_id) catch
+                node.cached_info orelse return replyError(req, c.ENOENT);
+        const path = state.pathFor(node) orelse
             break :value node.cached_info orelse return replyError(req, c.ENOENT);
-        }
-        break :value state.volume.stat(&node.path) catch |err| return replyError(req, errnoValue(err));
+        break :value state.volume.stat(path) catch |err| return replyError(req, errnoValue(err));
     };
     node.kind = info.metadata.kind;
     node.cached_info = info;
@@ -330,29 +468,45 @@ fn setAttr(req: c.fuse_req_t, id: c.fuse_ino_t, attr: ?*c.struct_stat, to_set: c
         return;
     }
 
-    if (!node.linked) return replyError(req, c.ENOENT);
-    if (to_set & c.FUSE_SET_ATTR_SIZE != 0) {
-        if (value.st_size < 0) return replyError(req, c.EINVAL);
-        var handle: volume_mod.FileHandle = undefined;
-        state.volume.openFile(&handle, &node.path, lfs.LFS_O_RDWR, 0, 0, 0) catch |err|
-            return replyError(req, errnoValue(err));
-        var open_handle = true;
-        defer if (open_handle) state.volume.closeFile(&handle) catch {};
-        state.volume.truncateFile(&handle, @intCast(value.st_size)) catch |err|
-            return replyError(req, errnoValue(err));
-        if (to_set & metadata_mask != 0) {
-            applyMetadata(&handle.metadata, value, to_set, state.volume.io);
-            state.volume.persistMetadata(&handle) catch |err| return replyError(req, errnoValue(err));
+    const info = if (node.object_id) |object_id| value_info: {
+        if (to_set & c.FUSE_SET_ATTR_SIZE != 0) {
+            if (node.kind != .file) return replyError(req, c.EINVAL);
+            if (value.st_size < 0) return replyError(req, c.EINVAL);
+            var handle: volume_mod.FileHandle = undefined;
+            state.volume.openObject(&handle, object_id, lfs.LFS_O_RDWR) catch |err|
+                return replyError(req, errnoValue(err));
+            var open_handle = true;
+            defer if (open_handle) state.volume.closeFile(&handle) catch {};
+            state.volume.truncateFile(&handle, @intCast(value.st_size)) catch |err|
+                return replyError(req, errnoValue(err));
+            if (to_set & metadata_mask != 0) {
+                applyMetadata(&handle.metadata, value, to_set, state.volume.io);
+                state.volume.persistMetadata(&handle) catch |err| return replyError(req, errnoValue(err));
+            }
+            state.volume.syncFile(&handle) catch |err| return replyError(req, errnoValue(err));
+            state.volume.closeFile(&handle) catch |err| return replyError(req, errnoValue(err));
+            open_handle = false;
+        } else if (to_set & metadata_mask != 0) {
+            var object_info = state.volume.statObject(object_id) catch |err|
+                return replyError(req, errnoValue(err));
+            applyMetadata(&object_info.metadata, value, to_set, state.volume.io);
+            state.volume.setObjectMetadata(object_id, object_info.metadata) catch |err|
+                return replyError(req, errnoValue(err));
         }
-        state.volume.syncFile(&handle) catch |err| return replyError(req, errnoValue(err));
-        state.volume.closeFile(&handle) catch |err| return replyError(req, errnoValue(err));
-        open_handle = false;
-    } else if (to_set & metadata_mask != 0) {
-        var info = state.volume.stat(&node.path) catch |err| return replyError(req, errnoValue(err));
-        applyMetadata(&info.metadata, value, to_set, state.volume.io);
-        state.volume.setMetadata(&node.path, info.metadata) catch |err| return replyError(req, errnoValue(err));
-    }
-    const info = state.volume.stat(&node.path) catch |err| return replyError(req, errnoValue(err));
+        break :value_info state.volume.statObject(object_id) catch |err|
+            return replyError(req, errnoValue(err));
+    } else value_info: {
+        const path = state.pathFor(node) orelse return replyError(req, c.ENOENT);
+        if (to_set & c.FUSE_SET_ATTR_SIZE != 0) return replyError(req, c.EISDIR);
+        if (to_set & metadata_mask != 0) {
+            var directory_info = state.volume.stat(path) catch |err|
+                return replyError(req, errnoValue(err));
+            applyMetadata(&directory_info.metadata, value, to_set, state.volume.io);
+            state.volume.setMetadata(path, directory_info.metadata) catch |err|
+                return replyError(req, errnoValue(err));
+        }
+        break :value_info state.volume.stat(path) catch |err| return replyError(req, errnoValue(err));
+    };
     node.cached_info = info;
     var stat: c.struct_stat = undefined;
     fillStat(&stat, node, info);
@@ -362,16 +516,12 @@ fn setAttr(req: c.fuse_req_t, id: c.fuse_ino_t, attr: ?*c.struct_stat, to_set: c
 fn readLink(req: c.fuse_req_t, id: c.fuse_ino_t) callconv(.c) void {
     const state = stateFor(req);
     const node = state.find(id) orelse return replyError(req, c.ENOENT);
-    if (!node.linked) return replyError(req, c.ENOENT);
-    const info = state.volume.stat(&node.path) catch |err| return replyError(req, errnoValue(err));
+    const object_id = node.object_id orelse return replyError(req, c.EINVAL);
+    const info = state.volume.statObject(object_id) catch |err| return replyError(req, errnoValue(err));
     node.cached_info = info;
     if (info.metadata.kind != .symlink) return replyError(req, c.EINVAL);
-    var handle: volume_mod.FileHandle = undefined;
-    state.volume.openFile(&handle, &node.path, lfs.LFS_O_RDONLY, 0, 0, 0) catch |err|
-        return replyError(req, errnoValue(err));
-    defer state.volume.closeFile(&handle) catch {};
     var buffer: [path_capacity:0]u8 = @splat(0);
-    const amount = state.volume.readFile(&handle, buffer[0..path_capacity], 0) catch |err|
+    const amount = state.volume.readObject(object_id, buffer[0..path_capacity], 0) catch |err|
         return replyError(req, errnoValue(err));
     if (amount == path_capacity) return replyError(req, c.ENAMETOOLONG);
     buffer[amount] = 0;
@@ -383,19 +533,43 @@ fn makeDirectory(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]con
     const parent = state.find(parent_id) orelse return replyError(req, c.ENOENT);
     const name = std.mem.span(name_raw.?);
     var path: [path_capacity:0]u8 = @splat(0);
-    joinPath(&path, parent, name) catch |err| return replyError(req, errnoValue(err));
+    const parent_path = state.pathFor(parent) orelse return replyError(req, c.ENOENT);
+    joinPath(&path, std.mem.span(parent_path), name) catch |err| return replyError(req, errnoValue(err));
     const context = c.fuse_req_ctx(req).?;
     const permissions = @as(u32, mode) & ~@as(u32, context[0].umask);
     state.volume.makeDirectory(&path, permissions | 0o040000, context[0].uid, context[0].gid) catch |err|
         return replyError(req, errnoValue(err));
-    const node = state.addNode(parent, name, .directory) catch |err| {
+    const info = state.volume.stat(&path) catch |err| return replyError(req, errnoValue(err));
+    const dentry = state.addEntry(parent, name, info) catch |err| {
         state.volume.remove(&path) catch {};
         return replyError(req, errnoValue(err));
     };
-    const info = state.volume.stat(&node.path) catch |err| return replyError(req, errnoValue(err));
-    node.cached_info = info;
+    const node = dentry.inode;
     node.lookup_count = 1;
     replyEntry(req, node, info);
+}
+
+fn makeNode(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, mode: c.mode_t, rdev: c.dev_t) callconv(.c) void {
+    _ = rdev;
+    if (@as(u32, mode) & 0o170000 != 0o010000) return replyError(req, c.EOPNOTSUPP);
+    const state = stateFor(req);
+    const parent = state.find(parent_id) orelse return replyError(req, c.ENOENT);
+    const parent_path = state.pathFor(parent) orelse return replyError(req, c.ENOENT);
+    const name = std.mem.span(name_raw.?);
+    var path: [path_capacity:0]u8 = @splat(0);
+    joinPath(&path, std.mem.span(parent_path), name) catch |err|
+        return replyError(req, errnoValue(err));
+    const context = c.fuse_req_ctx(req).?;
+    const permissions = @as(u32, mode) & ~@as(u32, context[0].umask);
+    state.volume.makeFifo(&path, permissions, context[0].uid, context[0].gid) catch |err|
+        return replyError(req, errnoValue(err));
+    const info = state.volume.stat(&path) catch |err| return replyError(req, errnoValue(err));
+    const dentry = state.addEntry(parent, name, info) catch |err| {
+        state.volume.remove(&path) catch {};
+        return replyError(req, errnoValue(err));
+    };
+    dentry.inode.lookup_count += 1;
+    replyEntry(req, dentry.inode, info);
 }
 
 fn unlink(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8) callconv(.c) void {
@@ -411,15 +585,18 @@ fn removeNode(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const 
     const parent = state.find(parent_id) orelse return replyError(req, c.ENOENT);
     const name = std.mem.span(name_raw.?);
     var path: [path_capacity:0]u8 = @splat(0);
-    joinPath(&path, parent, name) catch |err| return replyError(req, errnoValue(err));
+    const parent_path = state.pathFor(parent) orelse return replyError(req, c.ENOENT);
+    joinPath(&path, std.mem.span(parent_path), name) catch |err| return replyError(req, errnoValue(err));
     const info = state.volume.stat(&path) catch |err| return replyError(req, errnoValue(err));
     if (directory and info.metadata.kind != .directory) return replyError(req, c.ENOTDIR);
     if (!directory and info.metadata.kind == .directory) return replyError(req, c.EISDIR);
     state.volume.remove(&path) catch |err| return replyError(req, errnoValue(err));
-    if (state.findChild(parent, name)) |node| {
-        node.linked = false;
-        state.maybeRemove(node);
+    if (state.findChild(parent, name)) |dentry| {
+        if (dentry.inode.cached_info) |*cached|
+            cached.nlink = if (directory) 0 else info.nlink -| 1;
+        state.removeEntry(dentry);
     }
+    state.pruneCaches();
     replyError(req, 0);
 }
 
@@ -428,29 +605,18 @@ fn makeSymlink(req: c.fuse_req_t, target_raw: ?[*:0]const u8, parent_id: c.fuse_
     const parent = state.find(parent_id) orelse return replyError(req, c.ENOENT);
     const name = std.mem.span(name_raw.?);
     var path: [path_capacity:0]u8 = @splat(0);
-    joinPath(&path, parent, name) catch |err| return replyError(req, errnoValue(err));
+    const parent_path = state.pathFor(parent) orelse return replyError(req, c.ENOENT);
+    joinPath(&path, std.mem.span(parent_path), name) catch |err| return replyError(req, errnoValue(err));
     const context = c.fuse_req_ctx(req).?;
-    var handle: volume_mod.FileHandle = undefined;
-    state.volume.openFile(&handle, &path, lfs.LFS_O_CREAT | lfs.LFS_O_EXCL | lfs.LFS_O_WRONLY, 0o120777, context[0].uid, context[0].gid) catch |err|
-        return replyError(req, errnoValue(err));
-    handle.metadata.kind = .symlink;
-    state.volume.persistMetadata(&handle) catch |err| {
-        state.volume.closeFile(&handle) catch {};
-        state.volume.remove(&path) catch {};
-        return replyError(req, errnoValue(err));
-    };
     const target = std.mem.span(target_raw.?);
-    _ = state.volume.writeFile(&handle, target, 0) catch |err| {
-        state.volume.closeFile(&handle) catch {};
+    state.volume.makeSymlink(&path, target, context[0].uid, context[0].gid) catch |err|
+        return replyError(req, errnoValue(err));
+    const info = state.volume.stat(&path) catch |err| return replyError(req, errnoValue(err));
+    const dentry = state.addEntry(parent, name, info) catch |err| {
         state.volume.remove(&path) catch {};
         return replyError(req, errnoValue(err));
     };
-    state.volume.closeFile(&handle) catch |err| return replyError(req, errnoValue(err));
-    const node = state.addNode(parent, name, .symlink) catch |err| {
-        state.volume.remove(&path) catch {};
-        return replyError(req, errnoValue(err));
-    };
-    const info = state.volume.stat(&node.path) catch |err| return replyError(req, errnoValue(err));
+    const node = dentry.inode;
     node.lookup_count = 1;
     replyEntry(req, node, info);
 }
@@ -463,10 +629,13 @@ fn rename(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
     const new_parent = state.find(new_parent_id) orelse return replyError(req, c.ENOENT);
     const name = std.mem.span(name_raw.?);
     const new_name = std.mem.span(new_name_raw.?);
+    if (parent == new_parent and std.mem.eql(u8, name, new_name)) return replyError(req, 0);
     var old_path: [path_capacity:0]u8 = @splat(0);
     var new_path: [path_capacity:0]u8 = @splat(0);
-    joinPath(&old_path, parent, name) catch |err| return replyError(req, errnoValue(err));
-    joinPath(&new_path, new_parent, new_name) catch |err| return replyError(req, errnoValue(err));
+    const parent_path = state.pathFor(parent) orelse return replyError(req, c.ENOENT);
+    const new_parent_path = state.pathFor(new_parent) orelse return replyError(req, c.ENOENT);
+    joinPath(&old_path, std.mem.span(parent_path), name) catch |err| return replyError(req, errnoValue(err));
+    joinPath(&new_path, std.mem.span(new_parent_path), new_name) catch |err| return replyError(req, errnoValue(err));
     if (flags & rename_noreplace != 0) {
         if (state.volume.stat(&new_path)) |_| {
             return replyError(req, c.EEXIST);
@@ -477,60 +646,128 @@ fn rename(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
     }
     const source = state.findChild(parent, name);
     const target = state.findChild(new_parent, new_name);
-    if (source) |node| {
+    if (source) |dentry| {
         if (new_name.len >= name_capacity) return replyError(req, c.ENAMETOOLONG);
-        state.validateDescendantPaths(node, std.mem.sliceTo(&new_path, 0)) catch |err|
+        state.validateDescendantPaths(dentry, std.mem.sliceTo(&new_path, 0)) catch |err|
             return replyError(req, errnoValue(err));
     }
-    state.volume.rename(&old_path, &new_path) catch |err| return replyError(req, errnoValue(err));
-    if (target) |node| {
-        if (node != source) {
-            node.linked = false;
-            state.maybeRemove(node);
-        }
+    const result = state.volume.renameWithResult(&old_path, &new_path) catch |err|
+        return replyError(req, errnoValue(err));
+    if (result == .same_object) return replyError(req, 0);
+    if (target) |dentry| {
+        if (dentry.inode.cached_info) |*cached|
+            cached.nlink = if (dentry.inode.kind == .directory) 0 else cached.nlink -| 1;
+        state.removeEntry(dentry);
     }
-    if (source) |node| {
-        node.parent = new_parent;
-        node.name = @splat(0);
-        @memcpy(node.name[0..new_name.len], new_name);
-        setNodePath(node) catch return replyError(req, c.ENAMETOOLONG);
-        state.updateDescendantPaths(node) catch return replyError(req, c.ENAMETOOLONG);
+    if (source) |dentry| {
+        dentry.parent = new_parent;
+        dentry.name = @splat(0);
+        @memcpy(dentry.name[0..new_name.len], new_name);
+        dentry.path = new_path;
+        state.updateDescendantPaths(dentry.inode) catch {};
     }
+    state.pruneCaches();
     replyError(req, 0);
+}
+
+fn makeLink(req: c.fuse_req_t, id: c.fuse_ino_t, new_parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8) callconv(.c) void {
+    const state = stateFor(req);
+    const node = state.find(id) orelse return replyError(req, c.ENOENT);
+    if (node.kind == .directory) return replyError(req, c.EPERM);
+    const old_path = state.pathFor(node) orelse return replyError(req, c.ENOENT);
+    const new_parent = state.find(new_parent_id) orelse return replyError(req, c.ENOENT);
+    const new_parent_path = state.pathFor(new_parent) orelse return replyError(req, c.ENOENT);
+    const name = std.mem.span(name_raw.?);
+    var new_path: [path_capacity:0]u8 = @splat(0);
+    joinPath(&new_path, std.mem.span(new_parent_path), name) catch |err|
+        return replyError(req, errnoValue(err));
+    const object_id = node.object_id orelse return replyError(req, c.EIO);
+    const old_info = state.volume.statObject(object_id) catch |err| return replyError(req, errnoValue(err));
+    const dentry = state.addEntry(new_parent, name, old_info) catch |err|
+        return replyError(req, errnoValue(err));
+    if (dentry.inode != node) {
+        state.removeEntry(dentry);
+        state.pruneCaches();
+        return replyError(req, c.EIO);
+    }
+    const info = state.volume.linkWithInfo(old_path, &new_path) catch |err| {
+        state.removeEntry(dentry);
+        state.pruneCaches();
+        return replyError(req, errnoValue(err));
+    };
+    node.lookup_count += 1;
+    replyEntry(req, node, info);
 }
 
 fn open(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
     const state = stateFor(req);
     const node = state.find(id) orelse return replyError(req, c.ENOENT);
-    if (!node.linked) return replyError(req, c.ENOENT);
     if (node.kind == .directory) return replyError(req, c.EISDIR);
-    openInternal(req, state, node, fi.?, false, 0);
+    if (node.kind != .file) return replyError(req, c.EOPNOTSUPP);
+    openInternal(req, state, node, fi.?);
 }
 
 fn create(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, mode: c.mode_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
     const state = stateFor(req);
     const parent = state.find(parent_id) orelse return replyError(req, c.ENOENT);
     const name = std.mem.span(name_raw.?);
-    const node = state.addNode(parent, name, .file) catch |err| return replyError(req, errnoValue(err));
-    openInternal(req, state, node, fi.?, true, mode);
-    if (node.open_count == 0) {
-        node.linked = false;
-        state.maybeRemove(node);
-    }
-}
-
-fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.struct_fuse_file_info, create_file: bool, mode: c.mode_t) void {
+    const parent_path = state.pathFor(parent) orelse return replyError(req, c.ENOENT);
+    var path: [path_capacity:0]u8 = @splat(0);
+    joinPath(&path, std.mem.span(parent_path), name) catch |err|
+        return replyError(req, errnoValue(err));
     const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
     const context = c.fuse_req_ctx(req).?;
-    const host_flags = c.devdrive_fuse_get_flags(fi);
+    const host_flags = c.devdrive_fuse_get_flags(fi.?);
     var flags: c_int = switch (host_flags & 3) {
         0 => lfs.LFS_O_RDONLY,
         else => lfs.LFS_O_RDWR,
     };
-    if (create_file) flags |= lfs.LFS_O_CREAT | lfs.LFS_O_EXCL;
-    if (!create_file and host_flags & c.O_TRUNC != 0) flags |= lfs.LFS_O_TRUNC;
+    flags |= lfs.LFS_O_CREAT | lfs.LFS_O_EXCL;
+    if (!state.writeback_cache and host_flags & c.O_APPEND != 0) flags |= lfs.LFS_O_APPEND;
     const permissions = @as(u32, mode) & ~@as(u32, context[0].umask);
-    state.volume.openFile(&handle.file, &node.path, flags, permissions | 0o100000, context[0].uid, context[0].gid) catch |err| {
+    state.volume.openFile(&handle.file, &path, flags, permissions | 0o100000, context[0].uid, context[0].gid) catch |err| {
+        std.heap.c_allocator.destroy(handle);
+        return replyError(req, errnoValue(err));
+    };
+    const info = state.volume.statFile(&handle.file) catch |err| {
+        state.volume.closeFile(&handle.file) catch {};
+        state.volume.remove(&path) catch {};
+        std.heap.c_allocator.destroy(handle);
+        return replyError(req, errnoValue(err));
+    };
+    const dentry = state.addEntry(parent, name, info) catch |err| {
+        state.volume.closeFile(&handle.file) catch {};
+        state.volume.remove(&path) catch {};
+        std.heap.c_allocator.destroy(handle);
+        return replyError(req, errnoValue(err));
+    };
+    const node = dentry.inode;
+    handle.inode = node;
+    handle.next = state.open_files;
+    state.open_files = handle;
+    node.open_count += 1;
+    node.lookup_count += 1;
+    c.devdrive_fuse_set_handle(fi.?, @intFromPtr(handle));
+    if (!state.writeback_cache) c.devdrive_fuse_set_direct_io(fi.?);
+    var entry: c.struct_fuse_entry_param = undefined;
+    fillEntry(&entry, node, info);
+    _ = c.fuse_reply_create(req, &entry, fi.?);
+}
+
+fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.struct_fuse_file_info) void {
+    const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
+    const host_flags = c.devdrive_fuse_get_flags(fi);
+    const flags: c_int = switch (host_flags & 3) {
+        0 => lfs.LFS_O_RDONLY,
+        else => lfs.LFS_O_RDWR,
+    };
+    var open_flags = flags | if (host_flags & c.O_TRUNC != 0) lfs.LFS_O_TRUNC else 0;
+    if (!state.writeback_cache and host_flags & c.O_APPEND != 0) open_flags |= lfs.LFS_O_APPEND;
+    const object_id = node.object_id orelse {
+        std.heap.c_allocator.destroy(handle);
+        return replyError(req, c.EIO);
+    };
+    state.volume.openObject(&handle.file, object_id, open_flags) catch |err| {
         std.heap.c_allocator.destroy(handle);
         return replyError(req, errnoValue(err));
     };
@@ -540,22 +777,7 @@ fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.stru
     node.open_count += 1;
     c.devdrive_fuse_set_handle(fi, @intFromPtr(handle));
     if (!state.writeback_cache) c.devdrive_fuse_set_direct_io(fi);
-    if (create_file) {
-        const info = state.volume.statFile(&handle.file) catch |err| {
-            state.volume.closeFile(&handle.file) catch {};
-            state.unregisterOpenFile(handle);
-            node.open_count -= 1;
-            std.heap.c_allocator.destroy(handle);
-            return replyError(req, errnoValue(err));
-        };
-        node.cached_info = info;
-        node.lookup_count = 1;
-        var entry: c.struct_fuse_entry_param = undefined;
-        fillEntry(&entry, node, info);
-        _ = c.fuse_reply_create(req, &entry, fi);
-    } else {
-        _ = c.fuse_reply_open(req, fi);
-    }
+    _ = c.fuse_reply_open(req, fi);
 }
 
 fn read(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
@@ -621,11 +843,11 @@ fn release(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_info) c
 fn openDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
     const state = stateFor(req);
     const node = state.find(id) orelse return replyError(req, c.ENOENT);
-    if (!node.linked) return replyError(req, c.ENOENT);
     if (node.kind != .directory) return replyError(req, c.ENOTDIR);
+    const path = state.pathFor(node) orelse return replyError(req, c.ENOENT);
     const handle = std.heap.c_allocator.create(FuseDirectoryHandle) catch return replyError(req, c.ENOMEM);
     handle.directory = .{};
-    state.volume.openDirectory(&handle.directory, &node.path) catch |err| {
+    state.volume.openDirectory(&handle.directory, path) catch |err| {
         std.heap.c_allocator.destroy(handle);
         return replyError(req, errnoValue(err));
     };
@@ -639,6 +861,7 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
     _ = id;
     if (offset < 0 or offset > std.math.maxInt(u32)) return replyError(req, c.EINVAL);
     const state = stateFor(req);
+    defer state.pruneCaches();
     const handle = fuseDirectoryHandle(fi.?);
     state.volume.seekDirectory(&handle.directory, @intCast(offset)) catch |err|
         return replyError(req, errnoValue(err));
@@ -658,10 +881,23 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
         if (std.mem.eql(u8, name, ".")) {
             stat.st_ino = handle.inode.id;
         } else if (std.mem.eql(u8, name, "..")) {
-            stat.st_ino = if (handle.inode.parent) |parent| parent.id else c.FUSE_ROOT_ID;
-        } else if (state.findChild(handle.inode, name)) |node| {
-            stat.st_ino = node.id;
-            stat.st_mode = kindMode(node.kind);
+            stat.st_ino = if (state.findEntryForInode(handle.inode)) |dentry|
+                dentry.parent.id
+            else
+                c.FUSE_ROOT_ID;
+        } else {
+            const dentry = state.findChild(handle.inode, name) orelse value: {
+                const directory_path = state.pathFor(handle.inode) orelse return replyError(req, c.ENOENT);
+                var child_path: [path_capacity:0]u8 = @splat(0);
+                joinPath(&child_path, std.mem.span(directory_path), name) catch |err|
+                    return replyError(req, errnoValue(err));
+                const child_info = state.volume.stat(&child_path) catch |err|
+                    return replyError(req, errnoValue(err));
+                break :value state.addEntry(handle.inode, name, child_info) catch |err|
+                    return replyError(req, errnoValue(err));
+            };
+            stat.st_ino = dentry.inode.id;
+            stat.st_mode = kindMode(dentry.inode.kind);
         }
         const needed = c.fuse_add_direntry(req, buffer.ptr + used, size - used, @ptrCast(&info.name), &stat, next_offset);
         if (needed > size - used) break;
@@ -683,21 +919,7 @@ fn releaseDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_fil
     replyError(req, 0);
 }
 
-fn setNodePath(node: *Inode) !void {
-    const parent = node.parent orelse return;
-    try joinPath(&node.path, parent, std.mem.sliceTo(&node.name, 0));
-}
-
-fn isDescendant(node: *const Inode, ancestor: *const Inode) bool {
-    var parent = node.parent;
-    while (parent) |current| : (parent = current.parent) {
-        if (current == ancestor) return true;
-    }
-    return false;
-}
-
-fn joinPath(output: *[path_capacity:0]u8, parent: *const Inode, name: []const u8) !void {
-    const parent_path = std.mem.sliceTo(&parent.path, 0);
+fn joinPath(output: *[path_capacity:0]u8, parent_path: []const u8, name: []const u8) !void {
     const separator: usize = if (parent_path.len == 1) 0 else 1;
     const length = std.math.add(usize, parent_path.len + separator, name.len) catch return error.NameTooLong;
     if (length >= path_capacity) return error.NameTooLong;
@@ -731,7 +953,8 @@ fn fillStat(stat: *c.struct_stat, node: *const Inode, info: volume_mod.NodeInfo)
     stat.* = std.mem.zeroes(c.struct_stat);
     stat.st_ino = node.id;
     stat.st_mode = info.metadata.mode;
-    stat.st_nlink = if (!node.linked) 0 else if (info.metadata.kind == .directory) 2 else 1;
+    stat.st_nlink = std.math.cast(@TypeOf(stat.st_nlink), info.nlink) orelse
+        std.math.maxInt(@TypeOf(stat.st_nlink));
     stat.st_uid = info.metadata.uid;
     stat.st_gid = info.metadata.gid;
     stat.st_size = @intCast(info.size);
@@ -748,6 +971,7 @@ fn kindMode(kind: metadata.Kind) c.mode_t {
     return switch (kind) {
         .directory => 0o040000,
         .symlink => 0o120000,
+        .fifo => 0o010000,
         .file => 0o100000,
     };
 }
@@ -807,7 +1031,9 @@ fn errnoValue(err: anyerror) c_int {
         error.NoSpaceLeft => c.ENOSPC,
         error.OutOfMemory => c.ENOMEM,
         error.NameTooLong => c.ENAMETOOLONG,
+        error.TooManyLinks => c.EMLINK,
         error.AccessDenied, error.PermissionDenied => c.EACCES,
+        error.UnsupportedOperation => c.EOPNOTSUPP,
         else => c.EIO,
     };
 }

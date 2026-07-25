@@ -46,9 +46,9 @@ are unavailable.
 
 The external gates compile pinned source snapshots from libfuse and xfstests
 stored under `vendor/`. `test-libfuse` runs the syscall cases that match the
-declared DevDrive semantics. `test-fsx` runs two deterministic 10,000-operation
-buffered I/O and truncate workloads. Set `DEVDRIVE_FSX_OPS=100000` for a longer
-stress run. These gates have the same Linux FUSE requirements as `test-fuse`
+declared DevDrive semantics. `test-fsx` runs deterministic 10,000-operation
+buffered and mmap I/O workloads with two seeds. Set `DEVDRIVE_FSX_OPS=100000`
+for a longer stress run. These gates have the same Linux FUSE requirements as `test-fuse`
 and are not part of the default `test` or `ci` targets.
 
 ## Usage
