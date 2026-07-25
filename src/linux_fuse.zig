@@ -33,6 +33,7 @@ const MountState = struct {
     nodes: ?*Inode = null,
     open_files: ?*FuseFileHandle = null,
     next_id: c.fuse_ino_t = c.FUSE_ROOT_ID + 1,
+    writeback_cache: bool = false,
 
     fn init(volume: *volume_mod.Volume) !MountState {
         var state = MountState{ .volume = volume };
@@ -168,7 +169,6 @@ const MountState = struct {
 const FuseFileHandle = struct {
     file: volume_mod.FileHandle,
     inode: *Inode,
-    append: bool,
     next: ?*FuseFileHandle,
 };
 
@@ -203,6 +203,7 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8) !void {
         mountpoint_z.ptr,
     };
     var operations: c.struct_fuse_lowlevel_ops = std.mem.zeroes(c.struct_fuse_lowlevel_ops);
+    operations.init = initialize;
     operations.lookup = lookup;
     operations.forget = forget;
     operations.getattr = getAttr;
@@ -243,6 +244,11 @@ pub fn unmount(allocator: std.mem.Allocator, io: Io, mountpoint: []const u8) !vo
 
 fn stateFor(req: c.fuse_req_t) *MountState {
     return @ptrCast(@alignCast(c.fuse_req_userdata(req).?));
+}
+
+fn initialize(userdata: ?*anyopaque, connection: ?*c.struct_fuse_conn_info) callconv(.c) void {
+    const state: *MountState = @ptrCast(@alignCast(userdata.?));
+    state.writeback_cache = c.devdrive_fuse_configure_connection(connection.?) != 0;
 }
 
 fn lookup(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8) callconv(.c) void {
@@ -517,12 +523,10 @@ fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.stru
     const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
     const context = c.fuse_req_ctx(req).?;
     const host_flags = c.devdrive_fuse_get_flags(fi);
-    handle.append = host_flags & c.O_APPEND != 0;
     var flags: c_int = switch (host_flags & 3) {
         0 => lfs.LFS_O_RDONLY,
         else => lfs.LFS_O_RDWR,
     };
-    if (handle.append) flags |= lfs.LFS_O_APPEND;
     if (create_file) flags |= lfs.LFS_O_CREAT | lfs.LFS_O_EXCL;
     if (!create_file and host_flags & c.O_TRUNC != 0) flags |= lfs.LFS_O_TRUNC;
     const permissions = @as(u32, mode) & ~@as(u32, context[0].umask);
@@ -535,7 +539,7 @@ fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.stru
     state.open_files = handle;
     node.open_count += 1;
     c.devdrive_fuse_set_handle(fi, @intFromPtr(handle));
-    c.devdrive_fuse_set_direct_io(fi);
+    if (!state.writeback_cache) c.devdrive_fuse_set_direct_io(fi);
     if (create_file) {
         const info = state.volume.statFile(&handle.file) catch |err| {
             state.volume.closeFile(&handle.file) catch {};
@@ -569,10 +573,8 @@ fn write(req: c.fuse_req_t, id: c.fuse_ino_t, data_raw: ?[*]const u8, size: usiz
     _ = id;
     if (offset < 0) return replyError(req, c.EINVAL);
     const handle = fuseFileHandle(fi.?);
-    const amount = if (handle.append)
-        stateFor(req).volume.writeFile(&handle.file, data_raw.?[0..size], 0) catch |err| return replyError(req, errnoValue(err))
-    else
-        stateFor(req).volume.writeFile(&handle.file, data_raw.?[0..size], @intCast(offset)) catch |err| return replyError(req, errnoValue(err));
+    const amount = stateFor(req).volume.writeFile(&handle.file, data_raw.?[0..size], @intCast(offset)) catch |err|
+        return replyError(req, errnoValue(err));
     _ = c.fuse_reply_write(req, amount);
 }
 

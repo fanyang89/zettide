@@ -9,6 +9,7 @@ int devdrive_fuse_get_flags(const struct fuse_file_info *file_info);
 uint64_t devdrive_fuse_get_handle(const struct fuse_file_info *file_info);
 void devdrive_fuse_set_handle(struct fuse_file_info *file_info, uint64_t handle);
 void devdrive_fuse_set_direct_io(struct fuse_file_info *file_info);
+int devdrive_fuse_configure_connection(struct fuse_conn_info *connection);
 int devdrive_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations, void *user_data);
 
 #endif

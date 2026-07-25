@@ -18,6 +18,15 @@ void devdrive_fuse_set_direct_io(struct fuse_file_info *file_info) {
     file_info->direct_io = 1;
 }
 
+int devdrive_fuse_configure_connection(struct fuse_conn_info *connection) {
+    connection->want &= ~(FUSE_CAP_POSIX_LOCKS | FUSE_CAP_FLOCK_LOCKS |
+                          FUSE_CAP_HANDLE_KILLPRIV | FUSE_CAP_HANDLE_KILLPRIV_V2);
+    if ((connection->capable & FUSE_CAP_WRITEBACK_CACHE) == 0)
+        return 0;
+    connection->want |= FUSE_CAP_WRITEBACK_CACHE;
+    return 1;
+}
+
 int devdrive_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations, void *user_data) {
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
     struct fuse_cmdline_opts options = {0};
