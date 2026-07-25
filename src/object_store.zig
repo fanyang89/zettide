@@ -246,6 +246,20 @@ pub const Store = struct {
         try self.writeHead(head);
     }
 
+    pub fn patchMetadata(self: Store, id: format.ObjectId, patch: metadata.Patch) !format.ObjectHead {
+        var head = try self.readHead(id);
+        if (patch.mode) |mode|
+            head.metadata.mode = (head.metadata.mode & 0o170000) | (mode & 0o7777);
+        if (patch.uid) |uid| head.metadata.uid = uid;
+        if (patch.gid) |gid| head.metadata.gid = gid;
+        if (patch.atime_ns) |atime_ns| head.metadata.atime_ns = atime_ns;
+        if (patch.mtime_ns) |mtime_ns| head.metadata.mtime_ns = mtime_ns;
+        head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+        head.generation = std.math.add(u64, head.generation, 1) catch return error.CorruptFilesystem;
+        try self.writeHead(head);
+        return head;
+    }
+
     pub fn removeObject(self: Store, id: format.ObjectId) !void {
         while (try self.firstChunkName(id)) |name| {
             var path_buffer: [max_path_bytes:0]u8 = @splat(0);

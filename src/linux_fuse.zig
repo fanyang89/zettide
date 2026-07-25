@@ -455,8 +455,10 @@ fn setAttr(req: c.fuse_req_t, id: c.fuse_ino_t, attr: ?*c.struct_stat, to_set: c
                 return replyError(req, errnoValue(err));
         }
         if (to_set & metadata_mask != 0) {
-            applyMetadata(&handle.file.metadata, value, to_set, state.volume.io);
-            state.volume.persistMetadata(&handle.file) catch |err| return replyError(req, errnoValue(err));
+            _ = state.volume.patchObjectMetadata(
+                handle.file.object_id,
+                metadataPatch(value, to_set, state.volume.io),
+            ) catch |err| return replyError(req, errnoValue(err));
         }
         if (to_set & c.FUSE_SET_ATTR_SIZE != 0)
             state.volume.syncFile(&handle.file) catch |err| return replyError(req, errnoValue(err));
@@ -480,17 +482,19 @@ fn setAttr(req: c.fuse_req_t, id: c.fuse_ino_t, attr: ?*c.struct_stat, to_set: c
             state.volume.truncateFile(&handle, @intCast(value.st_size)) catch |err|
                 return replyError(req, errnoValue(err));
             if (to_set & metadata_mask != 0) {
-                applyMetadata(&handle.metadata, value, to_set, state.volume.io);
-                state.volume.persistMetadata(&handle) catch |err| return replyError(req, errnoValue(err));
+                _ = state.volume.patchObjectMetadata(
+                    object_id,
+                    metadataPatch(value, to_set, state.volume.io),
+                ) catch |err| return replyError(req, errnoValue(err));
             }
             state.volume.syncFile(&handle) catch |err| return replyError(req, errnoValue(err));
             state.volume.closeFile(&handle) catch |err| return replyError(req, errnoValue(err));
             open_handle = false;
         } else if (to_set & metadata_mask != 0) {
-            var object_info = state.volume.statObject(object_id) catch |err|
-                return replyError(req, errnoValue(err));
-            applyMetadata(&object_info.metadata, value, to_set, state.volume.io);
-            state.volume.setObjectMetadata(object_id, object_info.metadata) catch |err|
+            _ = state.volume.patchObjectMetadata(
+                object_id,
+                metadataPatch(value, to_set, state.volume.io),
+            ) catch |err|
                 return replyError(req, errnoValue(err));
         }
         break :value_info state.volume.statObject(object_id) catch |err|
@@ -992,6 +996,24 @@ fn applyMetadata(value: *metadata.Metadata, stat: *const c.struct_stat, to_set: 
         value.mtime_ns = timespecNs(stat.st_mtim);
     }
     value.ctime_ns = now(io);
+}
+
+fn metadataPatch(stat: *const c.struct_stat, to_set: c_int, io: Io) metadata.Patch {
+    var patch: metadata.Patch = .{};
+    if (to_set & c.FUSE_SET_ATTR_MODE != 0) patch.mode = @as(u32, stat.st_mode) & 0o7777;
+    if (to_set & c.FUSE_SET_ATTR_UID != 0) patch.uid = stat.st_uid;
+    if (to_set & c.FUSE_SET_ATTR_GID != 0) patch.gid = stat.st_gid;
+    if (to_set & c.FUSE_SET_ATTR_ATIME_NOW != 0) {
+        patch.atime_ns = now(io);
+    } else if (to_set & c.FUSE_SET_ATTR_ATIME != 0) {
+        patch.atime_ns = timespecNs(stat.st_atim);
+    }
+    if (to_set & c.FUSE_SET_ATTR_MTIME_NOW != 0) {
+        patch.mtime_ns = now(io);
+    } else if (to_set & c.FUSE_SET_ATTR_MTIME != 0) {
+        patch.mtime_ns = timespecNs(stat.st_mtim);
+    }
+    return patch;
 }
 
 fn timespecNs(value: c.struct_timespec) i64 {

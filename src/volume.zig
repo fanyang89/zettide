@@ -246,20 +246,29 @@ pub const Volume = struct {
     }
 
     pub fn makeDirectory(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
+        const inherited = try self.inheritCreateMetadata(path, mode, gid, true);
         var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         try checkLfs(c.lfs_mkdir(&self.lfs, translated));
         errdefer _ = c.lfs_remove(&self.lfs, translated);
-        try self.setMetadata(path, metadata.Metadata.init(self.io, .directory, mode, uid, gid));
+        try self.setMetadata(path, metadata.Metadata.init(
+            self.io,
+            .directory,
+            inherited.mode,
+            uid,
+            inherited.gid,
+        ));
         try self.updateParentTimes(path);
     }
 
     pub fn makeSymlink(self: *Volume, path: [*:0]const u8, target: []const u8, uid: u32, gid: u32) !void {
-        try self.createSpecial(path, target, .symlink, .symlink, 0o120777, uid, gid);
+        const inherited = try self.inheritCreateMetadata(path, 0o120777, gid, false);
+        try self.createSpecial(path, target, .symlink, .symlink, inherited.mode, uid, inherited.gid);
     }
 
     pub fn makeFifo(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
-        try self.createSpecial(path, "", .fifo, .fifo, mode, uid, gid);
+        const inherited = try self.inheritCreateMetadata(path, mode, gid, false);
+        try self.createSpecial(path, "", .fifo, .fifo, inherited.mode, uid, inherited.gid);
     }
 
     pub fn link(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !void {
@@ -404,12 +413,13 @@ pub const Volume = struct {
         if (existing_ref == null and flags & c.LFS_O_CREAT == 0) return error.FileNotFound;
 
         const object_ref = existing_ref orelse value: {
+            const inherited = try self.inheritCreateMetadata(path, mode, gid, false);
             const created = try self.store().createObject(.file, metadata.Metadata.init(
                 self.io,
                 .file,
-                mode,
+                inherited.mode,
                 uid,
-                gid,
+                inherited.gid,
             ));
             self.link_counts.put(created.object_id, 0) catch |err| {
                 self.store().removeObject(created.object_id) catch {};
@@ -428,8 +438,11 @@ pub const Volume = struct {
     }
 
     pub fn openObject(self: *Volume, handle: *FileHandle, object_id: object_format.ObjectId, flags: c_int) !void {
-        if (flags & c.LFS_O_TRUNC != 0) _ = try self.store().truncate(object_id, 0);
-        const head = try self.store().readHead(object_id);
+        const head = if (flags & c.LFS_O_TRUNC != 0)
+            try self.store().truncate(object_id, 0)
+        else
+            try self.store().readHead(object_id);
+        if (flags & c.LFS_O_TRUNC != 0) self.updateOpenMetadata(object_id, head.metadata);
         handle.* = .{
             .object_id = object_id,
             .metadata = head.metadata,
@@ -459,8 +472,7 @@ pub const Volume = struct {
             handle.metadata.atime_ns <= handle.metadata.ctime_ns or
             timestamp -| handle.metadata.atime_ns >= one_day))
         {
-            handle.metadata.atime_ns = timestamp;
-            try self.store().updateMetadata(handle.object_id, handle.metadata);
+            _ = try self.patchObjectMetadata(handle.object_id, .{ .atime_ns = timestamp });
         }
         return result;
     }
@@ -472,14 +484,14 @@ pub const Volume = struct {
         else
             offset;
         const result = try self.store().write(handle.object_id, data, effective_offset);
-        handle.metadata = result.head.metadata;
+        self.updateOpenMetadata(handle.object_id, result.head.metadata);
         return result.amount;
     }
 
     pub fn truncateFile(self: *Volume, handle: *FileHandle, size: u64) !void {
         if (!handle.writable) return error.AccessDenied;
         const head = try self.store().truncate(handle.object_id, size);
-        handle.metadata = head.metadata;
+        self.updateOpenMetadata(handle.object_id, head.metadata);
     }
 
     pub fn syncFile(self: *Volume, handle: *FileHandle) !void {
@@ -496,6 +508,16 @@ pub const Volume = struct {
     pub fn setObjectMetadata(self: *Volume, object_id: object_format.ObjectId, value: metadata.Metadata) !void {
         try self.store().updateMetadata(object_id, value);
         self.updateOpenMetadata(object_id, value);
+    }
+
+    pub fn patchObjectMetadata(
+        self: *Volume,
+        object_id: object_format.ObjectId,
+        patch: metadata.Patch,
+    ) !object_format.ObjectHead {
+        const head = try self.store().patchMetadata(object_id, patch);
+        self.updateOpenMetadata(object_id, head.metadata);
+        return head;
     }
 
     pub fn readObject(self: *Volume, object_id: object_format.ObjectId, buffer: []u8, offset: u64) !usize {
@@ -612,6 +634,25 @@ pub const Volume = struct {
         try self.store().publishRef(path, created, true);
         self.link_counts.getPtr(created.object_id).?.* = 1;
         self.updateParentTimes(path) catch {};
+    }
+
+    fn inheritCreateMetadata(
+        self: *Volume,
+        path: [*:0]const u8,
+        mode: u32,
+        gid: u32,
+        directory: bool,
+    ) !struct { mode: u32, gid: u32 } {
+        const parent = parentSlice(path);
+        var buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        if (parent.len >= buffer.len) return error.NameTooLong;
+        @memcpy(buffer[0..parent.len], parent);
+        const parent_metadata = try self.getMetadata(&buffer);
+        if (parent_metadata.mode & 0o2000 == 0) return .{ .mode = mode, .gid = gid };
+        return .{
+            .mode = if (directory) mode | 0o2000 else mode,
+            .gid = parent_metadata.gid,
+        };
     }
 
     fn directoryLinkCount(self: *Volume, translated: [*:0]const u8) !u64 {

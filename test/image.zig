@@ -407,6 +407,91 @@ test "two writable handles preserve non-overlapping writes" {
     try volume.closeFile(&reader);
 }
 
+test "metadata patches preserve two-handle write and truncate updates" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var first: FileHandle = undefined;
+    var second: FileHandle = undefined;
+    try volume.openFile(&first, "/patched", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 2);
+    try volume.openFile(&second, "/patched", c.LFS_O_RDWR, 0, 0, 0);
+
+    const before_write = second.metadata;
+    _ = try volume.writeFile(&first, "latest", 0);
+    const write_mtime = first.metadata.mtime_ns;
+    const write_ctime = first.metadata.ctime_ns;
+    try std.testing.expectEqual(first.metadata, second.metadata);
+    second.metadata = before_write;
+    const chmod_head = try volume.patchObjectMetadata(second.object_id, .{ .mode = 0o600 });
+    try std.testing.expectEqual(@as(u32, 0o100600), chmod_head.metadata.mode);
+    try std.testing.expectEqual(write_mtime, chmod_head.metadata.mtime_ns);
+    try std.testing.expect(chmod_head.metadata.ctime_ns > write_ctime);
+    try std.testing.expectEqual(chmod_head.metadata, first.metadata);
+    try std.testing.expectEqual(chmod_head.metadata, second.metadata);
+
+    const before_truncate = second.metadata;
+    try volume.truncateFile(&first, 3);
+    const truncate_mtime = first.metadata.mtime_ns;
+    const truncate_ctime = first.metadata.ctime_ns;
+    try std.testing.expectEqual(first.metadata, second.metadata);
+    second.metadata = before_truncate;
+    const chown_head = try volume.patchObjectMetadata(second.object_id, .{ .uid = 7, .gid = 8 });
+    try std.testing.expectEqual(@as(u32, 7), chown_head.metadata.uid);
+    try std.testing.expectEqual(@as(u32, 8), chown_head.metadata.gid);
+    try std.testing.expectEqual(truncate_mtime, chown_head.metadata.mtime_ns);
+    try std.testing.expect(chown_head.metadata.ctime_ns > truncate_ctime);
+    try std.testing.expectEqual(chown_head.metadata, first.metadata);
+    try std.testing.expectEqual(chown_head.metadata, second.metadata);
+
+    try volume.closeFile(&first);
+    try volume.closeFile(&second);
+}
+
+test "futimens-style patch is visible to every open handle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var first: FileHandle = undefined;
+    var second: FileHandle = undefined;
+    try volume.openFile(&first, "/times", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100640, 11, 12);
+    try volume.openFile(&second, "/times", c.LFS_O_RDWR, 0, 0, 0);
+    const birthtime = first.metadata.birthtime_ns;
+    first.metadata.windows_attributes = 0xa5;
+    try volume.persistMetadata(&first);
+    const before_times = first.metadata;
+
+    const times_head = try volume.patchObjectMetadata(first.object_id, .{
+        .atime_ns = 1_000_000_123,
+        .mtime_ns = 2_000_000_456,
+    });
+    try std.testing.expect(times_head.metadata.ctime_ns > before_times.ctime_ns);
+    try std.testing.expectEqual(@as(i64, 1_000_000_123), second.metadata.atime_ns);
+    try std.testing.expectEqual(@as(i64, 2_000_000_456), second.metadata.mtime_ns);
+    second.metadata = before_times;
+    const mode_head = try volume.patchObjectMetadata(second.object_id, .{ .mode = 0o620 });
+    try std.testing.expectEqual(times_head.metadata.atime_ns, mode_head.metadata.atime_ns);
+    try std.testing.expectEqual(times_head.metadata.mtime_ns, mode_head.metadata.mtime_ns);
+    try std.testing.expectEqual(devdrive.metadata.Kind.file, mode_head.metadata.kind);
+    try std.testing.expectEqual(birthtime, mode_head.metadata.birthtime_ns);
+    try std.testing.expectEqual(@as(u32, 0xa5), mode_head.metadata.windows_attributes);
+    try std.testing.expect(mode_head.metadata.ctime_ns > times_head.metadata.ctime_ns);
+    try std.testing.expectEqual(mode_head.metadata, first.metadata);
+    try std.testing.expectEqual(mode_head.metadata, second.metadata);
+
+    try volume.closeFile(&first);
+    try volume.closeFile(&second);
+}
+
 test "full volume reports no space and recovers after deletion" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

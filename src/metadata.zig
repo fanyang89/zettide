@@ -70,6 +70,14 @@ pub const Metadata = struct {
     }
 };
 
+pub const Patch = struct {
+    mode: ?u32 = null,
+    uid: ?u32 = null,
+    gid: ?u32 = null,
+    atime_ns: ?i64 = null,
+    mtime_ns: ?i64 = null,
+};
+
 fn checksum(bytes: []const u8) u32 {
     return std.hash.crc.Crc32Iscsi.hash(bytes);
 }

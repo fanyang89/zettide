@@ -413,6 +413,83 @@ static void test_permissions(const char *root) {
     }
 }
 
+static void test_chown_sentinels(const char *root) {
+    char path[4096];
+    make_path(path, sizeof(path), root, "chown-sentinels");
+    int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0644);
+    if (fd < 0) fail("create chown sentinel file");
+    struct stat before, after;
+    if (fstat(fd, &before) != 0) fail("stat before chown sentinels");
+    if (fchown(fd, (uid_t)-1, getegid()) != 0) fail("fchown uid sentinel");
+    if (fstat(fd, &after) != 0) fail("stat after uid sentinel");
+    if (after.st_uid != before.st_uid || after.st_gid != getegid()) {
+        fprintf(stderr, "uid sentinel changed the wrong ownership field\n");
+        exit(1);
+    }
+    if (fchown(fd, geteuid(), (gid_t)-1) == 0) {
+        if (fstat(fd, &after) != 0) fail("stat after gid sentinel");
+        if (after.st_uid != geteuid() || after.st_gid != getegid()) {
+            fprintf(stderr, "gid sentinel changed the wrong ownership field\n");
+            exit(1);
+        }
+    } else if (errno != EPERM) {
+        fail("fchown gid sentinel");
+    }
+    if (close(fd) != 0) fail("close chown sentinel file");
+}
+
+static void test_setgid_inheritance(const char *root) {
+    char parent[4096], regular[4096], directory[4096], link[4096], fifo[4096];
+    make_path(parent, sizeof(parent), root, "setgid-parent");
+    make_path(regular, sizeof(regular), parent, "regular");
+    make_path(directory, sizeof(directory), parent, "directory");
+    make_path(link, sizeof(link), parent, "link");
+    make_path(fifo, sizeof(fifo), parent, "fifo");
+    if (mkdir(parent, 0775) != 0) fail("mkdir setgid parent");
+
+    gid_t inherited_gid = getegid();
+    int group_count = getgroups(0, NULL);
+    if (group_count < 0) fail("count supplementary groups");
+    if (group_count != 0) {
+        gid_t *groups = calloc((size_t)group_count, sizeof(*groups));
+        if (groups == NULL) fail("allocate supplementary groups");
+        if (getgroups(group_count, groups) != group_count) fail("read supplementary groups");
+        for (int i = 0; i < group_count; ++i) {
+            if (groups[i] != getegid()) {
+                inherited_gid = groups[i];
+                break;
+            }
+        }
+        free(groups);
+    }
+    if (chown(parent, (uid_t)-1, inherited_gid) != 0) fail("chgrp setgid parent");
+    if (chmod(parent, 02775) != 0) fail("chmod setgid parent");
+
+    int fd = open(regular, O_CREAT | O_EXCL | O_WRONLY, 0664);
+    if (fd < 0 || close(fd) != 0) fail("create setgid regular child");
+    if (mkdir(directory, 0755) != 0) fail("create setgid directory child");
+    if (symlink("regular", link) != 0) fail("create setgid symlink child");
+    if (mkfifo(fifo, 0660) != 0) fail("create setgid FIFO child");
+
+    struct stat st;
+    if (stat(regular, &st) != 0 || st.st_gid != inherited_gid || (st.st_mode & S_ISGID) != 0) {
+        fprintf(stderr, "regular child did not inherit only the parent gid\n");
+        exit(1);
+    }
+    if (stat(directory, &st) != 0 || st.st_gid != inherited_gid || (st.st_mode & S_ISGID) == 0) {
+        fprintf(stderr, "directory child did not inherit gid and setgid\n");
+        exit(1);
+    }
+    if (lstat(link, &st) != 0 || st.st_gid != inherited_gid || (st.st_mode & S_ISGID) != 0) {
+        fprintf(stderr, "symlink child did not inherit only the parent gid\n");
+        exit(1);
+    }
+    if (stat(fifo, &st) != 0 || st.st_gid != inherited_gid || (st.st_mode & S_ISGID) != 0) {
+        fprintf(stderr, "FIFO child did not inherit only the parent gid\n");
+        exit(1);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: fs-probe MOUNTPOINT\n");
@@ -430,5 +507,7 @@ int main(int argc, char **argv) {
     test_statfs_and_hardlink(argv[1]);
     test_timestamps(argv[1]);
     test_permissions(argv[1]);
+    test_chown_sentinels(argv[1]);
+    test_setgid_inheritance(argv[1]);
     return 0;
 }
