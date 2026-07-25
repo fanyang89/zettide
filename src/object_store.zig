@@ -42,6 +42,11 @@ pub const Store = struct {
         var referenced = std.AutoHashMap(format.ObjectId, void).init(std.heap.c_allocator);
         defer referenced.deinit();
         try self.collectNamespaceRefs(namespace_root, &referenced);
+        var iterator = referenced.keyIterator();
+        while (iterator.next()) |id| {
+            const head = try self.readHead(id.*);
+            try self.removeUncommittedChunkVersions(id.*, head.data_generation);
+        }
         while (try self.firstOrphan(&referenced)) |id| try self.removeObject(id);
     }
 
