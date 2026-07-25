@@ -46,3 +46,34 @@ test "a failed sync can be retried without losing committed data" {
         try volume.closeFile(&file);
     }
 }
+
+test "a failed multi-chunk write leaves the published generation unchanged" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createPath(&tmp, &path_buffer);
+    try Volume.create(std.testing.io, path, 8 * 1024 * 1024, "CowFaultTest");
+
+    var volume = try Volume.open(std.testing.io, path, true);
+    defer volume.deinit();
+    try volume.mount();
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    const offset = devdrive.object_format.chunk_size - 2;
+    _ = try volume.writeFile(&file, "abcd", offset);
+
+    var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 1 };
+    volume.device.fault = &fault;
+    try std.testing.expectError(error.InputOutput, volume.writeFile(&file, "WXYZ", offset));
+    fault.disable();
+
+    var unchanged: [4]u8 = undefined;
+    try std.testing.expectEqual(unchanged.len, try volume.readFile(&file, &unchanged, offset));
+    try std.testing.expectEqualStrings("abcd", &unchanged);
+
+    _ = try volume.writeFile(&file, "WXYZ", offset);
+    var updated: [4]u8 = undefined;
+    try std.testing.expectEqual(updated.len, try volume.readFile(&file, &updated, offset));
+    try std.testing.expectEqualStrings("WXYZ", &updated);
+    try volume.closeFile(&file);
+}

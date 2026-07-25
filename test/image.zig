@@ -46,7 +46,7 @@ test "data and metadata survive a real container reopen" {
         defer volume.deinit();
         try volume.mount();
         const info = try volume.stat("/payload");
-        try std.testing.expectEqual(@as(u32, expected.len), info.size);
+        try std.testing.expectEqual(@as(u64, expected.len), info.size);
         try std.testing.expectEqual(@as(u32, 0o100640), info.metadata.mode);
         try std.testing.expectEqual(@as(u32, 123), info.metadata.uid);
         try std.testing.expectEqual(@as(u32, 456), info.metadata.gid);
@@ -79,12 +79,143 @@ test "read write and truncate preserve boundary data" {
     for (gap) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 
     try volume.truncateFile(&file, 2);
-    try std.testing.expectEqual(@as(u32, 2), @as(u32, @intCast(c.lfs_file_size(&volume.lfs, &file.file))));
+    try std.testing.expectEqual(@as(u64, 2), (try volume.statFile(&file)).size);
     try volume.truncateFile(&file, 513);
     var extension: [511]u8 = undefined;
     try std.testing.expectEqual(extension.len, try volume.readFile(&file, &extension, 2));
     for (extension) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     try volume.closeFile(&file);
+}
+
+test "files support 63-bit sparse offsets without allocating holes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 8 * 1024 * 1024);
+
+    const distant_offset: u64 = @as(u64, 4) * 1024 * 1024 * 1024 + 123;
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/sparse", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        try std.testing.expectEqual(@as(usize, 4), try volume.writeFile(&file, "left", 0));
+        try std.testing.expectEqual(@as(usize, 5), try volume.writeFile(&file, "right", distant_offset));
+
+        const info = try volume.statFile(&file);
+        try std.testing.expectEqual(distant_offset + 5, info.size);
+        try std.testing.expect(info.allocated_bytes < 2 * devdrive.object_format.chunk_size);
+
+        var boundary: [8]u8 = undefined;
+        try std.testing.expectEqual(boundary.len, try volume.readFile(&file, &boundary, distant_offset - 3));
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 'r', 'i', 'g', 'h', 't' }, &boundary);
+
+        const huge_size: u64 = @as(u64, 8) * 1024 * 1024 * 1024 * 1024;
+        try volume.truncateFile(&file, huge_size);
+        try std.testing.expectEqual(huge_size, (try volume.statFile(&file)).size);
+        try volume.truncateFile(&file, distant_offset + 2);
+        try volume.truncateFile(&file, distant_offset + 5);
+        var regrown: [5]u8 = undefined;
+        try std.testing.expectEqual(regrown.len, try volume.readFile(&file, &regrown, distant_offset));
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 'r', 'i', 0, 0, 0 }, &regrown);
+
+        try volume.truncateFile(&file, devdrive.object_format.max_file_size);
+        try std.testing.expectEqual(
+            devdrive.object_format.max_file_size,
+            (try volume.statFile(&file)).size,
+        );
+        try std.testing.expectError(
+            error.FileTooLarge,
+            volume.writeFile(&file, "x", devdrive.object_format.max_file_size),
+        );
+        try volume.syncFile(&file);
+        try volume.closeFile(&file);
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        const info = try volume.stat("/sparse");
+        try std.testing.expectEqual(devdrive.object_format.max_file_size, info.size);
+        try std.testing.expect(info.allocated_bytes < 2 * devdrive.object_format.chunk_size);
+    }
+}
+
+test "append handle keeps object identity across rename and unlink" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var old_file: FileHandle = undefined;
+    try volume.openFile(
+        &old_file,
+        "/append-old",
+        c.LFS_O_CREAT | c.LFS_O_RDWR | c.LFS_O_APPEND,
+        0o100644,
+        1,
+        1,
+    );
+    _ = try volume.writeFile(&old_file, "A", 999);
+    try volume.rename("/append-old", "/append-renamed");
+    _ = try volume.writeFile(&old_file, "B", 0);
+    try volume.remove("/append-renamed");
+
+    var replacement: FileHandle = undefined;
+    try volume.openFile(&replacement, "/append-renamed", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    _ = try volume.writeFile(&replacement, "new", 0);
+    _ = try volume.writeFile(&old_file, "C", 0);
+
+    var old_data: [3]u8 = undefined;
+    var new_data: [3]u8 = undefined;
+    try std.testing.expectEqual(old_data.len, try volume.readFile(&old_file, &old_data, 0));
+    try std.testing.expectEqual(new_data.len, try volume.readFile(&replacement, &new_data, 0));
+    try std.testing.expectEqualStrings("ABC", &old_data);
+    try std.testing.expectEqualStrings("new", &new_data);
+    try volume.closeFile(&old_file);
+    try volume.closeFile(&replacement);
+}
+
+test "writable mount reclaims objects orphaned by a crashed open handle" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var orphan_id: devdrive.object_format.ObjectId = undefined;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/orphan", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        orphan_id = file.object_id;
+        _ = try volume.writeFile(&file, "orphaned", 0);
+        try volume.remove("/orphan");
+        // Simulate daemon death: the in-memory handle disappears without close.
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var id_buffer: [32]u8 = undefined;
+        var internal_path: [128:0]u8 = @splat(0);
+        const id = devdrive.object_format.formatObjectId(orphan_id, &id_buffer);
+        const value = try std.fmt.bufPrint(internal_path[0..128], "/system/objects/{s}", .{id});
+        internal_path[value.len] = 0;
+        var info: c.struct_lfs_info = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, c.LFS_ERR_NOENT),
+            c.lfs_stat(&volume.lfs, &internal_path, &info),
+        );
+    }
 }
 
 test "namespace operations and directory cookies are stable" {
@@ -103,7 +234,7 @@ test "namespace operations and directory cookies are stable" {
     try volume.closeFile(&file);
     try volume.rename("/dir/a", "/dir/b");
     try std.testing.expectError(error.FileNotFound, volume.stat("/dir/a"));
-    try std.testing.expectEqual(@as(u32, 1), (try volume.stat("/dir/b")).size);
+    try std.testing.expectEqual(@as(u64, 1), (try volume.stat("/dir/b")).size);
 
     var directory: DirectoryHandle = .{};
     try volume.openDirectory(&directory, "/dir");
@@ -152,6 +283,28 @@ test "an unlinked open handle stays isolated from a replacement" {
     try std.testing.expectEqualStrings("new", &new_data);
     try volume.closeFile(&old_file);
     try volume.closeFile(&new_file);
+}
+
+test "an unlinked open handle accepts subsequent writes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/unlinked", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    try volume.remove("/unlinked");
+    _ = try volume.writeFile(&file, "after unlink", 0);
+
+    const info = try volume.statFile(&file);
+    try std.testing.expectEqual(@as(u64, 12), info.size);
+    var actual: [12]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+    try std.testing.expectEqualStrings("after unlink", &actual);
+    try volume.closeFile(&file);
 }
 
 test "container writer lock excludes another opener" {
@@ -204,17 +357,19 @@ test "corrupt metadata is reported instead of replaced with defaults" {
     try volume.openFile(&file, "/corrupt", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
     try volume.closeFile(&file);
 
-    var corrupt: [devdrive.metadata.encoded_size]u8 = @splat(0xa5);
-    try devdrive.volume.checkLfs(c.lfs_setattr(
+    const corrupt: [devdrive.object_format.ref_encoded_size]u8 = @splat(0xa5);
+    var raw_file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+    try devdrive.volume.checkLfs(c.lfs_file_open(
         &volume.lfs,
-        "/corrupt",
-        devdrive.metadata.attribute_type,
-        &corrupt,
-        corrupt.len,
+        &raw_file,
+        "/namespace/corrupt",
+        c.LFS_O_WRONLY | c.LFS_O_TRUNC,
     ));
-    try std.testing.expectError(error.UnsupportedMetadata, volume.stat("/corrupt"));
+    try devdrive.volume.checkLfs(c.lfs_file_write(&volume.lfs, &raw_file, &corrupt, corrupt.len));
+    try devdrive.volume.checkLfs(c.lfs_file_close(&volume.lfs, &raw_file));
+    try std.testing.expectError(error.InvalidObjectRef, volume.stat("/corrupt"));
     try std.testing.expectError(
-        error.UnsupportedMetadata,
+        error.InvalidObjectRef,
         volume.openFile(&file, "/corrupt", c.LFS_O_RDWR, 0, 0, 0),
     );
 }

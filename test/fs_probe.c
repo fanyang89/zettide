@@ -182,6 +182,55 @@ static void test_truncate(const char *root) {
     if (fsync(fd) != 0 || close(fd) != 0) fail("sync truncate");
 }
 
+static void test_large_sparse(const char *root) {
+    char path[PATH_MAX];
+    make_path(path, sizeof(path), root, "large-sparse");
+    int fd = open(path, O_CREAT | O_RDWR | O_EXCL, 0644);
+    if (fd < 0) fail("create large sparse");
+
+    const off_t distant = (off_t)4 * 1024 * 1024 * 1024 + 123;
+    if (pwrite(fd, "right", 5, distant) != 5) fail("large sparse pwrite");
+    struct stat st;
+    if (fstat(fd, &st) != 0) fail("large sparse fstat");
+    if (st.st_size != distant + 5) {
+        fprintf(stderr, "wrong large sparse size: %lld\n", (long long)st.st_size);
+        exit(1);
+    }
+    if (st.st_blocks > 4096) {
+        fprintf(stderr, "large sparse hole was allocated: %lld blocks\n", (long long)st.st_blocks);
+        exit(1);
+    }
+
+    unsigned char boundary[8];
+    const unsigned char expected[8] = {0, 0, 0, 'r', 'i', 'g', 'h', 't'};
+    if (pread(fd, boundary, sizeof(boundary), distant - 3) != (ssize_t)sizeof(boundary))
+        fail("large sparse pread");
+    if (memcmp(boundary, expected, sizeof(expected)) != 0) {
+        fprintf(stderr, "large sparse boundary mismatch\n");
+        exit(1);
+    }
+
+    const off_t huge = (off_t)8 * 1024 * 1024 * 1024 * 1024;
+    if (ftruncate(fd, huge) != 0) fail("large sparse grow");
+    if (fstat(fd, &st) != 0 || st.st_size != huge) fail("large sparse grown size");
+    if (st.st_blocks > 4096) {
+        fprintf(stderr, "large truncate allocated its hole\n");
+        exit(1);
+    }
+
+    if (ftruncate(fd, distant + 2) != 0) fail("large sparse shrink");
+    if (ftruncate(fd, distant + 5) != 0) fail("large sparse regrow");
+    unsigned char regrown[5];
+    const unsigned char expected_regrown[5] = {'r', 'i', 0, 0, 0};
+    if (pread(fd, regrown, sizeof(regrown), distant) != (ssize_t)sizeof(regrown))
+        fail("large sparse regrown pread");
+    if (memcmp(regrown, expected_regrown, sizeof(expected_regrown)) != 0) {
+        fprintf(stderr, "truncated data reappeared after sparse regrow\n");
+        exit(1);
+    }
+    if (fsync(fd) != 0 || close(fd) != 0) fail("sync large sparse");
+}
+
 static void test_rename_noreplace(const char *root) {
     char source[4096], target[4096];
     make_path(source, sizeof(source), root, "noreplace-source");
@@ -320,6 +369,7 @@ int main(int argc, char **argv) {
     test_rename_open(argv[1]);
     test_append(argv[1]);
     test_truncate(argv[1]);
+    test_large_sparse(argv[1]);
     test_rename_noreplace(argv[1]);
     test_directory_iteration(argv[1]);
     test_statfs_and_unsupported(argv[1]);

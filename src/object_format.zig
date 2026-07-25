@@ -48,6 +48,7 @@ pub const ObjectHead = struct {
     allocated_bytes: u64,
     metadata: metadata.Metadata,
     stored_chunk_size: u32 = chunk_size,
+    data_generation: u64 = 1,
 
     pub fn encode(value: ObjectHead) [head_encoded_size]u8 {
         var bytes: [head_encoded_size]u8 = @splat(0);
@@ -61,6 +62,7 @@ pub const ObjectHead = struct {
         const metadata_bytes = value.metadata.encode();
         @memcpy(bytes[56..120], &metadata_bytes);
         putInt(u32, &bytes, 120, value.stored_chunk_size);
+        putInt(u64, &bytes, 124, value.data_generation);
         putInt(u32, &bytes, 188, checksum(bytes[0..188]));
         return bytes;
     }
@@ -76,19 +78,33 @@ pub const ObjectHead = struct {
         const stored_chunk_size = getInt(u32, bytes, 120);
         if (stored_chunk_size == 0 or stored_chunk_size > 2_147_483_647)
             return error.InvalidObjectHead;
+        const generation = getInt(u64, bytes, 32);
+        const data_generation = getInt(u64, bytes, 124);
+        if (data_generation == 0 or data_generation > generation) return error.InvalidObjectHead;
         return .{
             .object_id = bytes[16..32].*,
-            .generation = getInt(u64, bytes, 32),
+            .generation = generation,
             .logical_size = logical_size,
             .allocated_bytes = getInt(u64, bytes, 48),
             .metadata = try metadata.Metadata.decode(bytes[56..120]),
             .stored_chunk_size = stored_chunk_size,
+            .data_generation = data_generation,
         };
     }
 };
 
 pub fn formatObjectId(id: ObjectId, buffer: *[32]u8) []const u8 {
     return std.fmt.bufPrint(buffer, "{x}", .{id}) catch unreachable;
+}
+
+pub fn parseObjectId(value: []const u8) !ObjectId {
+    if (value.len != 32) return error.InvalidObjectId;
+    var id: ObjectId = undefined;
+    for (&id, 0..) |*byte, index| {
+        byte.* = std.fmt.parseInt(u8, value[index * 2 .. index * 2 + 2], 16) catch
+            return error.InvalidObjectId;
+    }
+    return id;
 }
 
 fn checksum(bytes: []const u8) u32 {
@@ -136,6 +152,7 @@ test "object head preserves 63-bit logical size" {
     const decoded = try ObjectHead.decode(&value.encode());
     try std.testing.expectEqual(max_file_size, decoded.logical_size);
     try std.testing.expectEqual(value.generation, decoded.generation);
+    try std.testing.expectEqual(value.data_generation, decoded.data_generation);
     try std.testing.expectEqualSlices(u8, &value.object_id, &decoded.object_id);
     try std.testing.expectEqual(value.metadata.mode, decoded.metadata.mode);
 }
@@ -144,4 +161,9 @@ test "object id has fixed lowercase hexadecimal representation" {
     var buffer: [32]u8 = undefined;
     const id: ObjectId = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     try std.testing.expectEqualStrings("000102030405060708090a0b0c0d0e0f", formatObjectId(id, &buffer));
+    try std.testing.expectEqualSlices(
+        u8,
+        &id,
+        &(try parseObjectId("000102030405060708090a0b0c0d0e0f")),
+    );
 }

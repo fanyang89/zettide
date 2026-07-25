@@ -95,7 +95,7 @@ fn infoCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     try stdout.print("\nCapacity: {Bi:.2}\n", .{volume.header.logical_size});
     try stdout.print("Block size: {d}\n", .{volume.header.block_size});
     try stdout.print("Blocks: {d}\n", .{volume.header.block_count});
-    try stdout.print("Maximum file size: {Bi:.2}\n", .{volume.header.file_max});
+    try stdout.print("Maximum file size: {Bi:.2}\n", .{volume.header.user_file_max});
     try stdout.writeAll("Case-sensitive: yes\nEncrypted: no\n");
 }
 
