@@ -422,6 +422,12 @@ participate in the current write set. Control write readiness requires the curre
 the exact authority tail. Data access is computed separately from available non-joining data members:
 maintenance can remain writable while replica or EC width forces user data read-only.
 
+The dynamic generation coordinator claims a writable `PoolMemberSet` and opens only its current
+active voters, at most three participants regardless of total Pool size. It uses the topology's
+dynamic quorum for exact prepare and commit acknowledgements and emits a version 2 certificate.
+Prepare quorum failure or unknown commit outcome sticky-freezes the coordinator and revokes the
+member set's write-ready histories until full reopen, matching the fixed-v1 failure boundary.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.

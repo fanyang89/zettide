@@ -1,4 +1,5 @@
 const std = @import("std");
+const control_record = @import("control_record.zig");
 const journal = @import("journal.zig");
 const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
@@ -41,6 +42,7 @@ pub const PoolMemberSet = struct {
     authority_state: ?pool_authority.Authority = null,
     control_write_state: ?ControlWriteReady = null,
     data_access_state: pool_policy.DataAccess = .unavailable,
+    coordinator_state: std.atomic.Value(u8) = .init(0),
 
     pub fn open(
         io: std.Io,
@@ -123,7 +125,62 @@ pub const PoolMemberSet = struct {
         return error.MemberUnavailable;
     }
 
+    pub fn claimCoordinator(self: *PoolMemberSet) !void {
+        if (self.coordinator_state.cmpxchgStrong(0, 1, .acq_rel, .acquire)) |state|
+            return if (state == 2) error.MemberSetClosed else error.CoordinatorAlreadyOpen;
+    }
+
+    pub fn releaseCoordinator(self: *PoolMemberSet) void {
+        const previous = self.coordinator_state.swap(0, .acq_rel);
+        std.debug.assert(previous == 1);
+    }
+
+    pub fn beginControlMutation(self: *PoolMemberSet) void {
+        self.control_write_state = null;
+        for (&self.histories) |*maybe_history| {
+            if (maybe_history.*) |*history| history.deinit();
+            maybe_history.* = null;
+        }
+    }
+
+    pub fn noteControlFailure(self: *PoolMemberSet, index: usize) void {
+        self.statuses[index] = .stale;
+    }
+
+    pub fn noteCommittedGeneration(
+        self: *PoolMemberSet,
+        record: control_record.Record,
+        active_members: [max_member_count]bool,
+        active_count: u16,
+    ) void {
+        const previous = self.authority_state.?;
+        self.authority_state = .{
+            .kind = .generation_commit,
+            .history_digest = record.history_digest,
+            .data_root_digest = record.data_root_digest,
+            .topology = previous.topology,
+            .layout = previous.layout,
+            .membership_epoch = record.membership_epoch,
+            .writer_term = record.writer_term,
+            .generation = record.generation,
+            .witness_count = active_count,
+            .administrative_recovery = previous.administrative_recovery,
+        };
+        self.control_write_state = .{
+            .tail_history_digest = record.history_digest,
+            .active_members = active_members,
+            .active_count = active_count,
+        };
+        for (active_members[0..self.supplied_count], 0..) |active, index| {
+            if (active) self.statuses[index] = .active_voter;
+        }
+    }
+
     pub fn close(self: *PoolMemberSet) !void {
+        if (self.coordinator_state.cmpxchgStrong(0, 2, .acq_rel, .acquire)) |state| {
+            if (state == 1) return error.CoordinatorActive;
+            return;
+        }
         var first_error: ?anyerror = null;
         for (&self.histories) |*maybe_history| {
             if (maybe_history.*) |*history| history.deinit();
@@ -140,7 +197,9 @@ pub const PoolMemberSet = struct {
     }
 
     pub fn deinit(self: *PoolMemberSet) void {
-        self.close() catch {};
+        self.close() catch |err| {
+            if (err == error.CoordinatorActive) @panic("PoolMemberSet deinitialized with active coordinator");
+        };
     }
 
     fn classifyMembers(self: *PoolMemberSet, intent: OpenIntent) void {
