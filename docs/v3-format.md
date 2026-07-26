@@ -385,6 +385,13 @@ Prepare records directly extend the selected authority, commits directly extend 
 membership operation preserves writer term, generation, data root, and layout digest. Certificate
 validity alone still does not prove that the commit itself reached authority quorum.
 
+Bootstrap authority requires two independent observations of the same shared event: the target
+joining member must retain it as local sequence one, and the current topology's voters must retain
+it on control quorum. The target is never counted as its own voter witness. Every retained raw slot
+is re-decoded, must directly extend the selected authority, and must preserve membership epoch,
+writer term, generation, data root, topology, and layout. Header-to-birth-topology binding is proven
+by the target's successful journal scan before its retained history participates in this check.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.
