@@ -214,6 +214,44 @@ pub const PoolMemberSet = struct {
         }
     }
 
+    pub fn noteCommittedBootstrap(
+        self: *PoolMemberSet,
+        record: control_record.Record,
+        target_member: member_api.Member,
+        target_history: journal.HistoryScan,
+        active_members: [max_member_count]bool,
+        active_count: u16,
+    ) !usize {
+        if (self.supplied_count == max_member_count) return error.TooManyPoolMembers;
+        const index = self.supplied_count;
+        self.members[index] = target_member;
+        self.histories[index] = target_history;
+        self.statuses[index] = .authority;
+        self.supplied_count += 1;
+        const previous = self.authority_state.?;
+        self.authority_state = .{
+            .kind = .member_bootstrap,
+            .history_digest = record.history_digest,
+            .data_root_digest = record.data_root_digest,
+            .topology = previous.topology,
+            .layout = previous.layout,
+            .membership_epoch = record.membership_epoch,
+            .writer_term = record.writer_term,
+            .generation = record.generation,
+            .witness_count = active_count,
+            .administrative_recovery = previous.administrative_recovery,
+        };
+        self.control_write_state = .{
+            .tail_history_digest = record.history_digest,
+            .active_members = active_members,
+            .active_count = active_count,
+        };
+        for (active_members[0..self.supplied_count], 0..) |active, member_index| {
+            if (active) self.statuses[member_index] = .active_voter;
+        }
+        return index;
+    }
+
     pub fn close(self: *PoolMemberSet) !void {
         if (self.coordinator_state.cmpxchgStrong(0, 2, .acq_rel, .acquire)) |state| {
             if (state == 1) return error.CoordinatorActive;

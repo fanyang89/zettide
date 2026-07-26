@@ -435,6 +435,14 @@ until its retained history starts with its target bootstrap record and its tail 
 current selected authority. Promotion to voter additionally requires that caught-up member to join
 the transaction's new-voter quorum.
 
+Bootstrap is a separate replicated transaction after the joining topology commits. The coordinator
+first exact-prepares the shared event on current voters, durably creates the target member with that
+event as local sequence one, verifies the target by a full history scan, then appends to every
+prepared voter. Voter quorum plus the target copy installs bootstrap authority and admits the open
+member into `PoolMemberSet`; voter quorum failure freezes the coordinator and leaves only detached
+diagnostic evidence. A later promotion transaction can then include the caught-up target in its new
+voter quorum.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.

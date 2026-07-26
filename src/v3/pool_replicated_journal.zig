@@ -17,6 +17,12 @@ pub const CommitResult = struct {
     degraded: bool,
 };
 
+pub const BootstrapResult = struct {
+    record: control_record.Record,
+    target_index: usize,
+    voter_ack_count: u16,
+};
+
 const Participant = struct {
     set_index: usize,
     journal: journal_api.Journal,
@@ -338,6 +344,104 @@ pub const ReplicatedJournal = struct {
             .committed_members = committed_members,
             .committed_count = countTrue(commit_successes[0..self.participant_count]),
             .degraded = active_count < voterCount(proposal.topology),
+        };
+    }
+
+    pub fn bootstrapMember(
+        self: *ReplicatedJournal,
+        allocator: std.mem.Allocator,
+        location: pool_member_set.Location,
+        header: member_format.Header,
+        bootstrap_record: control_record.Record,
+        options: member_api.CreateOptions,
+    ) !BootstrapResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.CoordinatorClosed;
+        if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.set.supplied_count == pool_member_set.max_member_count)
+            return error.TooManyPoolMembers;
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        const evidence = try member_bootstrap.validateTargetFirstRecord(header, bootstrap_record);
+        if (!std.meta.eql(evidence.topology, authority.topology) or
+            !std.meta.eql(evidence.layout, authority.layout)) return error.BootstrapAuthorityMismatch;
+        if (!std.mem.eql(u8, &bootstrap_record.previous_history_digest, &authority.history_digest) or
+            bootstrap_record.membership_epoch != authority.membership_epoch or
+            bootstrap_record.writer_term != authority.writer_term or
+            bootstrap_record.generation != authority.generation or
+            !std.mem.eql(u8, &bootstrap_record.data_root_digest, &authority.data_root_digest))
+            return error.BootstrapAuthorityMismatch;
+        for (self.set.members[0..self.set.supplied_count]) |*maybe_member| {
+            const member = if (maybe_member.*) |*value| value else continue;
+            if (std.mem.eql(u8, &member.header().member_id, &evidence.target_member_id))
+                return error.MemberAlreadyPresent;
+        }
+
+        var prepared: [max_control_participant_count]?journal_api.PreparedAppend = @splat(null);
+        var target_count: u16 = 0;
+        for (0..self.participant_count) |index| {
+            const participant = &(self.participants[index].?);
+            if (!participant.active) continue;
+            const state = try participant.journal.state();
+            if (state.physical_frontier == state.slot_count) continue;
+            prepared[index] = try participant.journal.prepareExact(
+                try participant.journal.tailToken(),
+                bootstrap_record,
+            );
+            if (!std.mem.eql(u8, &prepared[index].?.record.history_digest, &bootstrap_record.history_digest))
+                return error.BootstrapHistoryDiverged;
+            target_count += 1;
+        }
+        if (target_count < authority.topology.quorum) return error.InsufficientJournalCapacity;
+
+        var target_member = try member_api.createJoiningAt(
+            self.io,
+            location.parent,
+            location.basename,
+            header,
+            bootstrap_record,
+            options,
+        );
+        var target_transferred = false;
+        errdefer if (!target_transferred) target_member.deinit();
+        var target_history = try journal_api.scanHistory(allocator, &target_member);
+        var history_transferred = false;
+        errdefer if (!history_transferred) target_history.deinit();
+
+        self.set.beginControlMutation();
+        var voter_ack_count: u16 = 0;
+        var active_members: [pool_member_set.max_member_count]bool = @splat(false);
+        var committed_record: ?control_record.Record = null;
+        for (0..self.participant_count) |index| {
+            const participant = &(self.participants[index].?);
+            const item = prepared[index] orelse continue;
+            const result = participant.journal.appendPrepared(&item) catch {
+                participant.active = false;
+                self.set.noteControlFailure(participant.set_index);
+                continue;
+            };
+            active_members[participant.set_index] = true;
+            voter_ack_count += 1;
+            if (committed_record == null) committed_record = result.record;
+        }
+        if (voter_ack_count < authority.topology.quorum) {
+            self.frozen.store(true, .release);
+            return error.BootstrapQuorumFailed;
+        }
+        const committed = committed_record.?;
+        const target_index = try self.set.noteCommittedBootstrap(
+            committed,
+            target_member,
+            target_history,
+            active_members,
+            voter_ack_count,
+        );
+        target_transferred = true;
+        history_transferred = true;
+        return .{
+            .record = committed,
+            .target_index = target_index,
+            .voter_ack_count = voter_ack_count,
         };
     }
 
@@ -708,11 +812,83 @@ test "one-member coordinator commits generation and membership then reopens" {
         error.MemberBootstrapRequired,
         membership_coordinator.commitMembership(promotion_prepare),
     );
+
+    const bootstrap_evidence: member_bootstrap.Evidence = .{
+        .target_member_id = id(5),
+        .target_slot = 19,
+        .topology = joining_authority.topology,
+        .layout = joining_authority.layout,
+    };
+    const joining_header: member_format.Header = .{
+        .header_sequence = 1,
+        .incompat_features = member_format.dynamic_pool_incompat_feature,
+        .set_id = joining_authority.topology.set_id,
+        .member_id = id(5),
+        .member_slot = 19,
+        .member_count = joining_authority.topology.member_count,
+        .role_flags = member_format.data_role,
+        .created_ns = 2,
+        .member_bytes = 3 * 1024 * 1024,
+        .logical_capacity = 1024 * 1024,
+        .control = .{ .offset = 64 * 1024, .length = 64 * 1024 },
+        .metadata = .{ .offset = 1024 * 1024, .length = 256 * 1024 },
+        .data = .{ .offset = 2 * 1024 * 1024, .length = 1024 * 1024 },
+        .metadata_block_size = 4096,
+        .metadata_read_size = 512,
+        .metadata_program_size = 512,
+        .chunk_size = 1024 * 1024,
+        .metadata_format_version = 1,
+        .object_format_version = 1,
+        .layout_format_version = member_format.dynamic_layout_format_version,
+        .control_record_format_version = 1,
+        .label = try member_format.Label.init("joining-pool-member"),
+        .genesis_topology_digest = try pool_topology.digest(joining_authority.topology),
+    };
+    var bootstrap_record: control_record.Record = .{
+        .kind = control_record.member_bootstrap_kind,
+        .local_sequence = 1,
+        .membership_epoch = joining_authority.membership_epoch,
+        .writer_term = joining_authority.writer_term,
+        .generation = joining_authority.generation,
+        .set_id = joining_authority.topology.set_id,
+        .member_id = id(5),
+        .mount_session_id = @splat(0),
+        .transaction_id = id(10),
+        .previous_record_digest = @splat(0),
+        .previous_history_digest = joining_authority.history_digest,
+        .data_root_digest = joining_authority.data_root_digest,
+        .topology_digest = try pool_topology.digest(joining_authority.topology),
+        .layout_digest = try pool_layout.digest(joining_authority.layout),
+        .payload = try member_bootstrap.makePayload(bootstrap_evidence),
+    };
+    bootstrap_record.history_digest = try control_record.historyDigest(bootstrap_record);
+    const bootstrap_result = try membership_coordinator.bootstrapMember(
+        std.testing.allocator,
+        .{ .parent = tmp.dir, .basename = "joining" },
+        joining_header,
+        bootstrap_record,
+        .{},
+    );
+    try std.testing.expectEqual(@as(u16, 1), bootstrap_result.voter_ack_count);
+
+    const promotion_result = try membership_coordinator.commitMembership(promotion_prepare);
+    try std.testing.expectEqual(@as(u16, 2), promotion_result.committed_count);
+    try std.testing.expectEqual(@as(u16, 2), reopened.controlWriteReady().?.active_count);
     membership_coordinator.close();
     try reopened.close();
 
-    var recovered = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .read_only);
+    const recovered_locations = [_]pool_member_set.Location{
+        .{ .parent = tmp.dir, .basename = "member" },
+        .{ .parent = tmp.dir, .basename = "joining" },
+    };
+    var recovered = try pool_member_set.open(
+        std.testing.io,
+        std.testing.allocator,
+        &recovered_locations,
+        .read_only,
+    );
     defer recovered.deinit();
     try std.testing.expectEqual(pool_authority.Kind.membership_commit, recovered.authority().?.kind);
     try std.testing.expectEqual(@as(u16, 2), recovered.authority().?.topology.member_count);
+    try std.testing.expectEqual(pool_topology.MemberState.active, recovered.authority().?.topology.members[1].state);
 }
