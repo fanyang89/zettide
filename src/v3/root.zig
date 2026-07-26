@@ -5,6 +5,7 @@ pub const journal = @import("journal.zig");
 pub const layout = @import("layout.zig");
 pub const member = @import("member.zig");
 pub const member_format = @import("member_format.zig");
+pub const member_bootstrap = @import("member_bootstrap.zig");
 pub const member_set = @import("member_set.zig");
 pub const membership = @import("membership.zig");
 pub const pool_policy = @import("pool_policy.zig");
@@ -22,6 +23,7 @@ test {
     _ = layout;
     _ = member;
     _ = member_format;
+    _ = member_bootstrap;
     _ = member_set;
     _ = membership;
     _ = pool_policy;

@@ -18,6 +18,7 @@ pub const membership_commit_kind: u16 = 6;
 pub const mount_dirty_kind: u16 = 7;
 pub const clean_shutdown_kind: u16 = 8;
 pub const checkpoint_kind: u16 = 9;
+pub const member_bootstrap_kind: u16 = 10;
 
 pub const certificate_size: usize = 192;
 pub const certificate_checksum_offset: usize = 0xbc;
@@ -89,6 +90,15 @@ pub const CommitCertificate = struct {
 
 pub fn encode(record: Record) ![encoded_size]u8 {
     try validatePolicy(record);
+    return encodeValidated(record);
+}
+
+pub fn encodeDynamicPool(record: Record) ![encoded_size]u8 {
+    try validateDynamicPoolPolicy(record);
+    return encodeValidated(record);
+}
+
+fn encodeValidated(record: Record) ![encoded_size]u8 {
     if (!std.mem.eql(u8, &record.history_digest, &(try historyDigest(record))))
         return error.HistoryDigestMismatch;
 
@@ -225,6 +235,14 @@ pub fn validatePolicy(record: Record) !void {
         @memcpy(&bytes, record.payload.slice());
         _ = try decodeCertificate(&bytes);
     }
+}
+
+pub fn validateDynamicPoolPolicy(record: Record) !void {
+    if (record.kind != member_bootstrap_kind) return validatePolicy(record);
+    try validateStructural(record);
+    if (codec.isZero(&record.previous_history_digest) or
+        codec.isZero(&record.transaction_id) or !codec.isZero(&record.mount_session_id) or
+        record.payload.len == 0) return error.InvalidMemberBootstrapRecord;
 }
 
 fn validateStructural(record: Record) !void {

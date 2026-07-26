@@ -354,6 +354,21 @@ incompat feature, records its birth topology member count and digest, uses layou
 and binds its stable slot and role flags to its birth descriptor. These birth fields never claim the
 member's current role after later membership transitions.
 
+### Member Bootstrap
+
+A member added after genesis does not create a private genesis. Control kind `10` is a dynamic-Pool
+member-bootstrap event shared by the current voter quorum and the target joining member. Its
+3584-byte `DDVBOOT1` payload identifies the target member and stable slot and embeds the exact
+current 3200-byte topology and 256-byte layout. The topology starts at offset `0x040`, the layout at
+offset `0x0cc0`, reserved bytes are zero, and the final field is CRC32C over bytes `[0, 3580)`.
+
+The target must be a joining non-voter in the embedded topology. Its local bootstrap copy is record
+sequence one with a zero local predecessor but a nonzero shared-history predecessor. Existing voters
+append the same semantic event to their local chains. Member ID, local sequence, and local predecessor
+are excluded from shared history hashing, so voter and target copies converge on one history digest.
+The target header binds its birth topology digest, member count, slot, role flags, and chunk geometry
+to this payload. The fixed-v1 control policy continues to reject kind `10`.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.
