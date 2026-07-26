@@ -139,12 +139,14 @@ the physical file length must exactly equal the selected header's `member_bytes`
 
 Region I/O uses offsets relative to the control, metadata, or data region and cannot cross a
 region boundary. Empty I/O is valid at a region end. Reads are exact; an unexpected end is
-`TruncatedMember`. Writes require writable mode. Write and whole-file sync operations are
-serialized, and a write is dirty before the underlying I/O starts. Any injected or real write or
-sync failure freezes future writes and syncs while reads remain available. A dirty, unfrozen close
-syncs the file. Close always releases the lock and file resource, reports the first durability
-error, and is idempotent. This boundary performs no journal scan and defines no member creation
-API.
+`TruncatedMember`. Reads, writes, whole-file syncs, and close are serialized by one member mutex so
+close cannot release the file handle during I/O. Writes require writable mode. After lifecycle and
+boundary validation, an empty write succeeds without dirtying the member, consuming a fault, or
+issuing file I/O. A nonempty write is dirty before the underlying I/O starts. Any injected or real
+write or sync failure freezes future writes and syncs while reads remain available. A dirty,
+unfrozen close syncs the file. Close waits for the member mutex without cancellation, always
+releases the lock and file resource, reports the first durability error, and is idempotent. This
+boundary performs no journal scan and defines no member creation API.
 
 ## Topology Record
 

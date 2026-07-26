@@ -64,8 +64,7 @@ fn matches(target: ?u64, current: u64) bool {
 
 pub const Member = struct {
     io: Io,
-    file_handle_storage: [@sizeOf(File.Handle)]u8,
-    file_nonblocking: bool,
+    file: File,
     selected_header: member_format.Header,
     selected_source: SourceSlot,
     degraded: bool,
@@ -111,8 +110,7 @@ pub const Member = struct {
 
         return .{
             .io = io,
-            .file_handle_storage = @bitCast(file.handle),
-            .file_nonblocking = file.flags.nonblocking,
+            .file = file,
             .selected_header = selection.header,
             .selected_source = selection.source,
             .degraded = selection.redundancy_degraded,
@@ -149,9 +147,12 @@ pub const Member = struct {
     }
 
     pub fn read(self: *Member, kind: RegionKind, offset: u64, buffer: []u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
         if (self.isClosed()) return error.MemberClosed;
         const file_offset = try self.position(kind, offset, buffer.len);
-        const amount = try self.rawFile().readPositionalAll(self.io, buffer, file_offset);
+        const amount = try self.file.readPositionalAll(self.io, buffer, file_offset);
         if (amount != buffer.len) return error.TruncatedMember;
     }
 
@@ -163,6 +164,7 @@ pub const Member = struct {
         if (self.open_mode != .writable) return error.ReadOnlyMember;
         if (self.isFrozen()) return error.WriteFrozen;
         const file_offset = try self.position(kind, offset, bytes.len);
+        if (bytes.len == 0) return;
         self.dirty = true;
 
         const action = if (self.fault) |fault| fault.action(.write) else .none;
@@ -171,7 +173,7 @@ pub const Member = struct {
             return error.InjectedFault;
         }
         const write_bytes = if (action == .partial) bytes[0 .. bytes.len / 2] else bytes;
-        self.rawFile().writePositionalAll(self.io, write_bytes, file_offset) catch |err| {
+        self.file.writePositionalAll(self.io, write_bytes, file_offset) catch |err| {
             self.freeze();
             return err;
         };
@@ -188,7 +190,7 @@ pub const Member = struct {
     }
 
     pub fn close(self: *Member) !void {
-        try self.mutex.lock(self.io);
+        self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.isClosed()) return;
 
@@ -203,8 +205,8 @@ pub const Member = struct {
             }
         }
         self.closed.store(true, .release);
-        self.rawFile().unlock(self.io);
-        self.rawFile().close(self.io);
+        self.file.unlock(self.io);
+        self.file.close(self.io);
         if (first_error) |err| return err;
     }
 
@@ -222,7 +224,7 @@ pub const Member = struct {
             self.freeze();
             return error.InjectedFault;
         }
-        self.rawFile().sync(self.io) catch |err| {
+        self.file.sync(self.io) catch |err| {
             self.freeze();
             return err;
         };
@@ -247,13 +249,6 @@ pub const Member = struct {
 
     fn freeze(self: *Member) void {
         self.frozen.store(true, .release);
-    }
-
-    fn rawFile(self: *const Member) File {
-        return .{
-            .handle = @bitCast(self.file_handle_storage),
-            .flags = .{ .nonblocking = self.file_nonblocking },
-        };
     }
 };
 
@@ -468,6 +463,29 @@ test "read-only and closed members reject mutations and IO" {
     try std.testing.expectError(error.MemberClosed, member.sync());
 }
 
+test "empty writes validate lifecycle without dirtying or consuming faults" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = testHeader();
+    try createRawMember(tmp.dir, "member", header, header, header.member_bytes);
+    var member = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    var fault: FaultController = .{ .fail_write_at = 0, .fail_sync_at = 0 };
+    member.setFaultController(&fault);
+
+    try member.write(.control, header.control.length, &.{});
+    try std.testing.expect(!member.isFrozen());
+    try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+    try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
+    try std.testing.expectError(error.RegionOutOfBounds, member.write(.control, header.control.length + 1, &.{}));
+    try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+    try member.close();
+    try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
+
+    var reopened = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    try reopened.close();
+    try std.testing.expectError(error.MemberClosed, member.write(.control, 0, &.{}));
+}
+
 test "region reads report truncation exactly" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -502,6 +520,7 @@ test "write faults freeze writes while preserving reads" {
         try std.testing.expectError(error.InjectedFault, member.write(.data, 0, &.{ 1, 2, 3, 4 }));
         try std.testing.expect(member.isFrozen());
         try std.testing.expectError(error.WriteFrozen, member.write(.data, 0, &.{1}));
+        try std.testing.expectError(error.WriteFrozen, member.write(.data, 0, &.{}));
         try std.testing.expectError(error.WriteFrozen, member.sync());
         var byte: [1]u8 = undefined;
         try member.read(.data, 0, &byte);
