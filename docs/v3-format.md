@@ -404,6 +404,11 @@ Pool and two attestations for two or more members. Unused attestation storage is
 canonical by member ID, and every witness is a current voter. Legacy generation commits continue to
 require the fixed two-attestation version 1 certificate.
 
+Dynamic generation evidence re-decodes the commit and every exact attested prepare from retained raw
+slots. The certificate count must equal current topology quorum, each prepare directly extends the
+selected authority, and the commit directly extends their shared prepare history. Membership,
+topology, and layout remain fixed; generation advances exactly once and writer term cannot regress.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.

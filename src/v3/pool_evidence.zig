@@ -4,6 +4,7 @@ const control_record = @import("control_record.zig");
 const journal = @import("journal.zig");
 const member_bootstrap = @import("member_bootstrap.zig");
 const membership = @import("membership.zig");
+const pool_certificate = @import("pool_certificate.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_topology = @import("pool_topology.zig");
 
@@ -26,6 +27,64 @@ pub const ValidatedMembership = struct {
     proposal: membership.Proposal,
     certificate: membership.Certificate,
 };
+
+pub fn validateGenerationCommitEvidence(
+    commit_member_id: [16]u8,
+    commit_raw_record_digest: codec.Digest,
+    histories: []const *const journal.HistoryScan,
+    topology: pool_topology.Topology,
+    authority: Authority,
+) !pool_certificate.Certificate {
+    try pool_topology.validate(topology);
+    if (authority.membership_epoch != topology.epoch or
+        !std.mem.eql(u8, &authority.topology_digest, &(try pool_topology.digest(topology))))
+        return error.AuthorityTopologyMismatch;
+    const commit_entry = try findEvidenceRecord(
+        histories,
+        commit_member_id,
+        commit_raw_record_digest,
+        error.MissingCommitMember,
+        error.MissingCommitRecord,
+    );
+    const commit = try verifiedRecord(commit_entry);
+    if (commit.kind != control_record.generation_commit_kind) return error.NotGenerationCommit;
+    if (!std.mem.eql(u8, &commit.member_id, &commit_member_id)) return error.CommitMemberMismatch;
+    if (!isVoter(topology, commit.member_id)) return error.CommitMemberIsNotVoter;
+    if (commit.membership_epoch != topology.epoch) return error.MembershipEpochMismatch;
+    if (!std.mem.eql(u8, &commit.topology_digest, &authority.topology_digest))
+        return error.TopologyDigestMismatch;
+    if (!std.mem.eql(u8, &commit.layout_digest, &authority.layout_digest))
+        return error.LayoutDigestMismatch;
+    if (authority.generation == std.math.maxInt(u64) or commit.generation != authority.generation + 1)
+        return error.UnexpectedGeneration;
+    if (commit.writer_term < authority.writer_term) return error.WriterTermRegression;
+
+    var certificate_bytes: [pool_certificate.encoded_size]u8 = undefined;
+    @memcpy(&certificate_bytes, commit.payload.slice());
+    const certificate = try pool_certificate.decode(&certificate_bytes);
+    try pool_certificate.validateAgainstTopology(certificate, topology);
+    const prepare_history_digest = certificate.attestations[0].prepare_history_digest;
+    if (!std.mem.eql(u8, &commit.previous_history_digest, &prepare_history_digest))
+        return error.CommitDoesNotExtendPrepare;
+    for (certificate.attestations[0..certificate.count]) |attestation| {
+        const prepare_entry = try findEvidenceRecord(
+            histories,
+            attestation.member_id,
+            attestation.prepare_record_digest,
+            error.MissingPrepareMember,
+            error.MissingPrepareRecord,
+        );
+        const prepare = try verifiedRecord(prepare_entry);
+        if (prepare.kind != control_record.generation_prepare_kind)
+            return error.AttestedRecordIsNotPrepare;
+        if (!std.mem.eql(u8, &prepare.member_id, &attestation.member_id))
+            return error.PrepareMemberMismatch;
+        if (!std.mem.eql(u8, &prepare.history_digest, &attestation.prepare_history_digest))
+            return error.PrepareHistoryDigestMismatch;
+        try validateGenerationPrepareCommitBinding(prepare, commit, authority.history_digest);
+    }
+    return certificate;
+}
 
 pub fn validateMembershipCommitEvidence(
     commit_member_id: [16]u8,
@@ -167,6 +226,26 @@ fn validateAuthorityBinding(record: control_record.Record, authority: Authority)
 }
 
 fn validatePrepareCommitBinding(
+    prepare: control_record.Record,
+    commit: control_record.Record,
+    authority_history_digest: codec.Digest,
+) !void {
+    if (!std.mem.eql(u8, &prepare.previous_history_digest, &authority_history_digest))
+        return error.PrepareDoesNotExtendAuthority;
+    if (!std.mem.eql(u8, &prepare.history_digest, &commit.previous_history_digest))
+        return error.CommitDoesNotExtendPrepare;
+    if (!std.mem.eql(u8, &prepare.set_id, &commit.set_id) or
+        prepare.membership_epoch != commit.membership_epoch or
+        prepare.writer_term != commit.writer_term or prepare.generation != commit.generation or
+        !std.mem.eql(u8, &prepare.mount_session_id, &commit.mount_session_id) or
+        !std.mem.eql(u8, &prepare.transaction_id, &commit.transaction_id) or
+        !std.mem.eql(u8, &prepare.data_root_digest, &commit.data_root_digest) or
+        !std.mem.eql(u8, &prepare.topology_digest, &commit.topology_digest) or
+        !std.mem.eql(u8, &prepare.layout_digest, &commit.layout_digest))
+        return error.PrepareCommitMismatch;
+}
+
+fn validateGenerationPrepareCommitBinding(
     prepare: control_record.Record,
     commit: control_record.Record,
     authority_history_digest: codec.Digest,
@@ -376,6 +455,79 @@ test "membership evidence rejects changed authority data and detached prepare" {
         error.PrepareDoesNotExtendAuthority,
         validateMembershipCommitEvidence(id(2), entries[1].raw_record_digest, &histories, current, current_authority),
     );
+}
+
+fn generationPrepareRecord(
+    topology: pool_topology.Topology,
+    current_authority: Authority,
+) !control_record.Record {
+    var record: control_record.Record = .{
+        .kind = control_record.generation_prepare_kind,
+        .local_sequence = 2,
+        .membership_epoch = topology.epoch,
+        .writer_term = current_authority.writer_term,
+        .generation = current_authority.generation + 1,
+        .set_id = topology.set_id,
+        .member_id = id(2),
+        .mount_session_id = id(4),
+        .transaction_id = id(5),
+        .previous_record_digest = @splat(0x44),
+        .previous_history_digest = current_authority.history_digest,
+        .data_root_digest = @splat(0x88),
+        .topology_digest = current_authority.topology_digest,
+        .layout_digest = current_authority.layout_digest,
+        .payload = try control_record.Payload.init("generation prepare"),
+    };
+    record.history_digest = try control_record.historyDigest(record);
+    return record;
+}
+
+fn generationCommitRecord(
+    prepare: control_record.Record,
+    prepare_raw: *const [control_record.encoded_size]u8,
+) !control_record.Record {
+    const certificate: pool_certificate.Certificate = .{
+        .count = 1,
+        .attestations = .{
+            .{
+                .member_id = prepare.member_id,
+                .prepare_record_digest = control_record.recordDigest(prepare_raw),
+                .prepare_history_digest = prepare.history_digest,
+            },
+            .{ .member_id = @splat(0), .prepare_record_digest = @splat(0), .prepare_history_digest = @splat(0) },
+        },
+    };
+    var record = prepare;
+    record.kind = control_record.generation_commit_kind;
+    record.local_sequence += 1;
+    record.previous_record_digest = control_record.recordDigest(prepare_raw);
+    record.previous_history_digest = prepare.history_digest;
+    record.payload = try control_record.Payload.init(&(try pool_certificate.encode(certificate)));
+    record.history_digest = try control_record.historyDigest(record);
+    return record;
+}
+
+test "one-member generation commit accepts a one-attestation certificate" {
+    const topology = try currentTopology();
+    const current_authority = try testAuthority(topology);
+    const prepare = try generationPrepareRecord(topology, current_authority);
+    const prepare_raw = try control_record.encodeDynamicPool(prepare);
+    const commit = try generationCommitRecord(prepare, &prepare_raw);
+    const commit_raw = try control_record.encodeDynamicPool(commit);
+    var entries = [_]journal.HistoryEntry{
+        .{ .record = prepare, .raw_record = prepare_raw, .raw_record_digest = control_record.recordDigest(&prepare_raw), .physical_slot = 1 },
+        .{ .record = commit, .raw_record = commit_raw, .raw_record_digest = control_record.recordDigest(&commit_raw), .physical_slot = 2 },
+    };
+    var member_history = testHistory(&entries);
+    const histories = [_]*const journal.HistoryScan{&member_history};
+    const certificate = try validateGenerationCommitEvidence(
+        id(2),
+        entries[1].raw_record_digest,
+        &histories,
+        topology,
+        current_authority,
+    );
+    try std.testing.expectEqual(@as(u16, 1), certificate.count);
 }
 
 fn bootstrapTopology() !pool_topology.Topology {
