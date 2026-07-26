@@ -3,8 +3,8 @@
 ## Scope
 
 This document freezes the v3 member header, topology record, replicated layout, genesis payload,
-control record, commit certificate codecs, and member-local control journal scan. It defines no
-member creation, mounting, journal append or repair, quorum authority, signatures, manifest,
+control record, commit certificate codecs, and member-local control journal scan and append. It defines no
+member creation, mounting, journal repair, quorum authority, signatures, manifest,
 erasure coding, or CLI behavior.
 A volume containing only these records is not mountable.
 
@@ -143,8 +143,10 @@ region boundary. Empty I/O is valid at a region end. Reads are exact; an unexpec
 `TruncatedMember`. Reads, writes, whole-file syncs, and close are serialized by one member mutex so
 close cannot release the file handle during I/O. Writes require writable mode. After lifecycle and
 boundary validation, an empty write succeeds without dirtying the member, consuming a fault, or
-issuing file I/O. A nonempty write is dirty before the underlying I/O starts. Any injected or real
-write or sync failure freezes future writes and syncs while reads remain available. A dirty,
+issuing file I/O. A nonempty write is dirty before the underlying I/O starts. A durable write holds
+the member mutex across the complete positional write and whole-file sync, so close cannot run
+between them; success clears the dirty state. Any injected or real write or sync failure freezes
+future writes and syncs while reads remain available. A dirty,
 unfrozen close syncs the file. Close waits for the member mutex without cancellation, always
 releases the lock and file resource, reports the first durability error, and is idempotent. This
 boundary defines no member creation API. The control journal scanner uses its exact region reads
@@ -369,6 +371,32 @@ records, either digest mismatch, or a genesis/header mismatch aborts the scan. T
 choose a longest chain, append, repair, update checkpoint hints, or determine quorum authority. A
 structurally and semantically valid final record is accepted without inferring whether another
 member acknowledged it.
+
+## Control Journal Append
+
+Each writable member has at most one active `Journal` owner. Opening that owner performs a full
+control scan and retains the resulting tail, digests, physical frontier, and damage state. Appends
+are serialized by the journal mutex and never accept a caller-supplied scan result or physical
+slot. The API does not expose overwrite, wraparound, or raw control-slot writes.
+
+An append proposal supplies record semantics and payload, but not chain authority. The journal
+replaces set ID, member ID, local sequence, previous record digest, previous history digest, and
+current history digest from the selected member header and retained tail. An empty journal accepts
+only a fully validated genesis proposal; a nonempty journal rejects another genesis. Proposal
+validation and encoding complete before any write.
+
+The append target is exactly the retained physical frontier. Interior zero or invalid slots are
+never reused, and a full journal never wraps. Read-only, closed, frozen, full, sequence-overflow,
+and unresolved-tail states reject before writing. Append does not resolve or abandon tail damage.
+The encoded slot is committed with one member durable write. Only successful write and whole-file
+sync advance the retained tail and frontier.
+
+A failed write or sync leaves the retained journal state unchanged and freezes the member. Recovery
+closes and reopens the member, then performs a new full scan: a failure before writing preserves the
+old tail, a partial slot is unresolved tail damage, and a complete valid slot is accepted even when
+the append call did not acknowledge it. Such a full-valid unacknowledged record becomes the new
+tail and can be extended normally. This is local durability only and establishes no quorum or
+authority.
 
 ## Commit Certificate
 

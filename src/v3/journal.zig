@@ -18,6 +18,83 @@ pub const ScanResult = struct {
     journal_full: bool = false,
 };
 
+pub const AppendResult = struct {
+    record: control_record.Record,
+    record_digest: codec.Digest,
+    physical_slot: u64,
+};
+
+pub const Journal = struct {
+    member: *member_api.Member,
+    scan_state: ScanResult,
+    mutex: std.Io.Mutex = .init,
+
+    pub fn open(member: *member_api.Member) !Journal {
+        return .{ .member = member, .scan_state = try scan(member) };
+    }
+
+    pub fn state(self: *Journal) !ScanResult {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+        return self.scan_state;
+    }
+
+    pub fn append(self: *Journal, proposal: control_record.Record) !AppendResult {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+
+        if (self.member.isClosed()) return error.MemberClosed;
+        if (self.member.mode() != .writable) return error.ReadOnlyMember;
+        if (self.member.isFrozen()) return error.WriteFrozen;
+        if (self.scan_state.unresolved_tail_damage) return error.UnresolvedTailDamage;
+        if (self.scan_state.journal_full) return error.JournalFull;
+
+        var record = proposal;
+        const header = self.member.header();
+        record.set_id = header.set_id;
+        record.member_id = header.member_id;
+        if (self.scan_state.tail) |tail| {
+            if (record.kind == control_record.genesis_kind) return error.SecondGenesisRecord;
+            record.local_sequence = std.math.add(u64, tail.local_sequence, 1) catch
+                return error.RecordSequenceOverflow;
+            record.previous_record_digest = self.scan_state.tail_raw_record_digest;
+            record.previous_history_digest = tail.history_digest;
+        } else {
+            if (record.kind != control_record.genesis_kind) return error.NotGenesisRecord;
+            record.local_sequence = 1;
+            record.previous_record_digest = @splat(0);
+            record.previous_history_digest = @splat(0);
+        }
+        record.history_digest = try control_record.historyDigest(record);
+
+        if (record.kind == control_record.genesis_kind) {
+            try validateGenesis(header, record);
+        } else {
+            try control_record.validatePolicy(record);
+        }
+        const encoded = try control_record.encode(record);
+        const physical_slot = self.scan_state.physical_frontier;
+        const offset = std.math.mul(u64, physical_slot, control_record.encoded_size) catch
+            return error.ControlOffsetOverflow;
+        try self.member.writeDurable(.control, offset, &encoded);
+
+        const record_digest = control_record.recordDigest(&encoded);
+        self.scan_state.tail = record;
+        self.scan_state.tail_raw_record_digest = record_digest;
+        self.scan_state.tail_physical_slot = physical_slot;
+        self.scan_state.physical_frontier = std.math.add(u64, physical_slot, 1) catch unreachable;
+        self.scan_state.journal_full = self.scan_state.physical_frontier == self.scan_state.slot_count;
+        return .{ .record = record, .record_digest = record_digest, .physical_slot = physical_slot };
+    }
+};
+
+fn validateGenesis(header: member_format.Header, record: control_record.Record) !void {
+    const payload = try genesis_payload.validateRecord(record);
+    const genesis_digest = try topology_format.digest(payload.topology);
+    try topology_format.validateMemberHeader(payload.topology, genesis_digest, header);
+    if (header.chunk_size != payload.layout.chunk_size) return error.ChunkSizeMismatch;
+}
+
 pub fn scan(member: *member_api.Member) !ScanResult {
     const header = member.header();
     const slot_count = header.control.length / control_record.encoded_size;
@@ -70,10 +147,7 @@ pub fn scan(member: *member_api.Member) !ScanResult {
             if (!std.mem.eql(u8, &record.previous_history_digest, &tail.history_digest))
                 return error.PreviousHistoryDigestMismatch;
         } else {
-            const payload = try genesis_payload.validateRecord(record);
-            const genesis_digest = try topology_format.digest(payload.topology);
-            try topology_format.validateMemberHeader(payload.topology, genesis_digest, header);
-            if (header.chunk_size != payload.layout.chunk_size) return error.ChunkSizeMismatch;
+            try validateGenesis(header, record);
         }
 
         result.interior_invalid_slot_count = std.math.add(
@@ -168,6 +242,43 @@ fn writeSlot(dir: std.Io.Dir, name: []const u8, header: member_format.Header, sl
 fn genesisBytes() ![control_record.encoded_size]u8 {
     const payload = testPayload();
     return control_record.encode(try genesis_payload.makeRecord(payload.topology.members[0].member_id, payload));
+}
+
+fn genesisProposal() !control_record.Record {
+    var record = try genesis_payload.makeRecord(@splat(0x20), testPayload());
+    record.set_id = @splat(0x81);
+    record.member_id = @splat(0x82);
+    record.local_sequence = 99;
+    record.previous_record_digest = @splat(0x83);
+    record.previous_history_digest = @splat(0x84);
+    record.history_digest = @splat(0x85);
+    return record;
+}
+
+fn writerFenceProposal(previous: control_record.Record) !control_record.Record {
+    var record: control_record.Record = .{
+        .kind = control_record.writer_fence_kind,
+        .local_sequence = 99,
+        .membership_epoch = previous.membership_epoch,
+        .writer_term = 1,
+        .generation = previous.generation,
+        .set_id = @splat(0x91),
+        .member_id = @splat(0x92),
+        .mount_session_id = @splat(0x50),
+        .transaction_id = @splat(0x60),
+        .previous_record_digest = @splat(0x93),
+        .previous_history_digest = @splat(0x94),
+        .history_digest = @splat(0x95),
+        .data_root_digest = @splat(0),
+        .topology_digest = previous.topology_digest,
+        .layout_digest = previous.layout_digest,
+    };
+    record.history_digest = try control_record.historyDigest(record);
+    return record;
+}
+
+fn appendWorker(journal: *Journal, proposal: control_record.Record) !AppendResult {
+    return journal.append(proposal);
 }
 
 fn nextRecord(previous: control_record.Record, previous_raw: *const [control_record.encoded_size]u8) !control_record.Record {
@@ -437,4 +548,168 @@ test "short reads propagate and the scanner stays inside control" {
     truncator.close(std.testing.io);
     try std.testing.expectError(error.TruncatedMember, scan(&member));
     try member.close();
+}
+
+test "journal append injects identity sequence and digests across reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try createMember(tmp.dir, "member", 3);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+    var journal = try Journal.open(&member);
+
+    const genesis = try journal.append(try genesisProposal());
+    try std.testing.expectEqual(@as(u64, 1), genesis.record.local_sequence);
+    try std.testing.expectEqual(@as(u64, 0), genesis.physical_slot);
+    try std.testing.expectEqualSlices(u8, &header.set_id, &genesis.record.set_id);
+    try std.testing.expectEqualSlices(u8, &header.member_id, &genesis.record.member_id);
+    try std.testing.expect(codec.isZero(&genesis.record.previous_record_digest));
+    try std.testing.expect(codec.isZero(&genesis.record.previous_history_digest));
+
+    const next = try journal.append(try writerFenceProposal(genesis.record));
+    try std.testing.expectEqual(@as(u64, 2), next.record.local_sequence);
+    try std.testing.expectEqual(@as(u64, 1), next.physical_slot);
+    try std.testing.expectEqualSlices(u8, &genesis.record_digest, &next.record.previous_record_digest);
+    try std.testing.expectEqualSlices(u8, &genesis.record.history_digest, &next.record.previous_history_digest);
+    try std.testing.expectEqualSlices(u8, &(try control_record.historyDigest(next.record)), &next.record.history_digest);
+    try member.close();
+
+    member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+    journal = try Journal.open(&member);
+    const state = try journal.state();
+    try std.testing.expectEqual(@as(u64, 2), state.tail.?.local_sequence);
+    try std.testing.expectEqual(@as(u64, 2), state.physical_frontier);
+    try std.testing.expectEqualSlices(u8, &next.record_digest, &state.tail_raw_record_digest);
+}
+
+test "concurrent journal appends serialize sequence and physical slots" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try createMember(tmp.dir, "member", 3);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+    var journal = try Journal.open(&member);
+    const genesis = try journal.append(try genesisProposal());
+    const proposal = try writerFenceProposal(genesis.record);
+
+    var first_future = std.testing.io.async(appendWorker, .{ &journal, proposal });
+    var first_pending = true;
+    defer if (first_pending) {
+        _ = first_future.cancel(std.testing.io) catch {};
+    };
+    var second_future = std.testing.io.async(appendWorker, .{ &journal, proposal });
+    var second_pending = true;
+    defer if (second_pending) {
+        _ = second_future.cancel(std.testing.io) catch {};
+    };
+    const first = try first_future.await(std.testing.io);
+    first_pending = false;
+    const second = try second_future.await(std.testing.io);
+    second_pending = false;
+
+    try std.testing.expect(first.record.local_sequence != second.record.local_sequence);
+    try std.testing.expect(first.physical_slot != second.physical_slot);
+    try std.testing.expectEqual(@as(u64, 3), (try journal.state()).tail.?.local_sequence);
+    try std.testing.expect((try journal.state()).journal_full);
+}
+
+test "journal appends only at frontier and rejects terminal states before IO" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try createMember(tmp.dir, "holes", 3);
+    const genesis = try genesisBytes();
+    try writeSlot(tmp.dir, "holes", header, 1, &genesis);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "holes", .writable);
+    var journal = try Journal.open(&member);
+    const appended = try journal.append(try writerFenceProposal((try journal.state()).tail.?));
+    try std.testing.expectEqual(@as(u64, 2), appended.physical_slot);
+    try std.testing.expect((try journal.state()).journal_full);
+    try std.testing.expectError(error.JournalFull, journal.append(try writerFenceProposal(appended.record)));
+    var first_slot: [control_record.encoded_size]u8 = undefined;
+    try member.read(.control, 0, &first_slot);
+    try std.testing.expect(codec.isZero(&first_slot));
+    try member.close();
+
+    _ = try createMember(tmp.dir, "invalid", 2);
+    member = try member_api.openAt(std.testing.io, tmp.dir, "invalid", .writable);
+    journal = try Journal.open(&member);
+    var fault: member_api.FaultController = .{ .fail_write_at = 0 };
+    member.setFaultController(&fault);
+    var invalid = try genesisProposal();
+    invalid.membership_epoch = 0;
+    try std.testing.expectError(error.InvalidMembershipEpoch, journal.append(invalid));
+    try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+    try std.testing.expect(!member.isFrozen());
+    journal.scan_state.tail = try control_record.decode(&genesis);
+    journal.scan_state.tail.?.local_sequence = std.math.maxInt(u64);
+    journal.scan_state.physical_frontier = 1;
+    try std.testing.expectError(error.RecordSequenceOverflow, journal.append(try writerFenceProposal(journal.scan_state.tail.?)));
+    try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+    try member.close();
+
+    const unresolved_header = try createMember(tmp.dir, "unresolved", 2);
+    try writeSlot(tmp.dir, "unresolved", unresolved_header, 1, &.{0xaa});
+    member = try member_api.openAt(std.testing.io, tmp.dir, "unresolved", .writable);
+    journal = try Journal.open(&member);
+    try std.testing.expectError(error.UnresolvedTailDamage, journal.append(try genesisProposal()));
+    try member.close();
+
+    _ = try createMember(tmp.dir, "readonly", 1);
+    member = try member_api.openAt(std.testing.io, tmp.dir, "readonly", .read_only);
+    journal = try Journal.open(&member);
+    try std.testing.expectError(error.ReadOnlyMember, journal.append(try genesisProposal()));
+    try member.close();
+}
+
+test "append failures retain state and full scan classifies physical outcome" {
+    const Case = enum { write_before, write_partial, write_after, sync_before, sync_after };
+    inline for (std.meta.tags(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        _ = try createMember(tmp.dir, "member", 3);
+        var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+        var journal = try Journal.open(&member);
+        const genesis = try journal.append(try genesisProposal());
+        const old_state = try journal.state();
+        var fault: member_api.FaultController = .{};
+        switch (case) {
+            .write_before => fault.fail_write_at = 0,
+            .write_partial => fault.fail_write_partial_at = 0,
+            .write_after => fault.fail_write_after_at = 0,
+            .sync_before => fault.fail_sync_at = 0,
+            .sync_after => fault.fail_sync_after_at = 0,
+        }
+        member.setFaultController(&fault);
+        try std.testing.expectError(error.InjectedFault, journal.append(try writerFenceProposal(genesis.record)));
+        try std.testing.expectEqual(old_state.physical_frontier, (try journal.state()).physical_frontier);
+        try std.testing.expectEqual(old_state.tail.?.local_sequence, (try journal.state()).tail.?.local_sequence);
+        try std.testing.expect(member.isFrozen());
+        try std.testing.expectError(error.WriteFrozen, member.close());
+        try member.close();
+
+        member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+        defer member.deinit();
+        journal = try Journal.open(&member);
+        const recovered = try journal.state();
+        switch (case) {
+            .write_before => {
+                try std.testing.expectEqual(@as(u64, 1), recovered.physical_frontier);
+                try std.testing.expectEqual(@as(u64, 1), recovered.tail.?.local_sequence);
+                try std.testing.expect(!recovered.unresolved_tail_damage);
+            },
+            .write_partial => {
+                try std.testing.expectEqual(@as(u64, 2), recovered.physical_frontier);
+                try std.testing.expectEqual(@as(u64, 1), recovered.tail.?.local_sequence);
+                try std.testing.expect(recovered.unresolved_tail_damage);
+            },
+            .write_after, .sync_before, .sync_after => {
+                try std.testing.expectEqual(@as(u64, 2), recovered.physical_frontier);
+                try std.testing.expectEqual(@as(u64, 2), recovered.tail.?.local_sequence);
+                try std.testing.expect(!recovered.unresolved_tail_damage);
+                const third = try journal.append(try writerFenceProposal(recovered.tail.?));
+                try std.testing.expectEqual(@as(u64, 3), third.record.local_sequence);
+                try std.testing.expect((try journal.state()).journal_full);
+            },
+        }
+    }
 }

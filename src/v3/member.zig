@@ -21,6 +21,7 @@ pub const FaultController = struct {
     fail_sync_after_at: ?u64 = null,
     write_count: u64 = 0,
     sync_count: u64 = 0,
+    pause_after_write: ?*FaultPause = null,
 
     pub fn disable(self: *FaultController) void {
         self.fail_write_at = null;
@@ -28,6 +29,7 @@ pub const FaultController = struct {
         self.fail_write_after_at = null;
         self.fail_sync_at = null;
         self.fail_sync_after_at = null;
+        self.pause_after_write = null;
     }
 
     fn action(self: *FaultController, operation: enum { write, sync }) FaultAction {
@@ -54,6 +56,11 @@ pub const FaultController = struct {
                 .none,
         };
     }
+};
+
+pub const FaultPause = struct {
+    reached: std.atomic.Value(bool) = .init(false),
+    released: std.atomic.Value(bool) = .init(false),
 };
 
 const FaultAction = enum { none, before, partial, after };
@@ -160,6 +167,18 @@ pub const Member = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
+        try self.writeLocked(kind, offset, bytes);
+    }
+
+    pub fn writeDurable(self: *Member, kind: RegionKind, offset: u64, bytes: []const u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.writeLocked(kind, offset, bytes);
+        try self.syncLocked();
+    }
+
+    fn writeLocked(self: *Member, kind: RegionKind, offset: u64, bytes: []const u8) !void {
         if (self.isClosed()) return error.MemberClosed;
         if (self.open_mode != .writable) return error.ReadOnlyMember;
         if (self.isFrozen()) return error.WriteFrozen;
@@ -176,6 +195,10 @@ pub const Member = struct {
         self.file.writePositionalAll(self.io, write_bytes, file_offset) catch |err| {
             self.freeze();
             return err;
+        };
+        if (self.fault) |fault| if (fault.pause_after_write) |pause| {
+            pause.reached.store(true, .release);
+            while (!pause.released.load(.acquire)) std.Thread.yield() catch {};
         };
         if (action == .partial or action == .after) {
             self.freeze();
@@ -571,4 +594,56 @@ test "dirty close syncs and sync failure still closes" {
     try reopened.write(.metadata, 1, &.{2});
     try reopened.close();
     try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+}
+
+fn durableWriteWorker(member: *Member) !void {
+    try member.writeDurable(.control, 0, &.{ 1, 2, 3, 4 });
+}
+
+fn closeWorker(member: *Member, started: *std.atomic.Value(bool)) !void {
+    started.store(true, .release);
+    try member.close();
+}
+
+test "durable write excludes close through write and sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = testHeader();
+    try createRawMember(tmp.dir, "member", header, header, header.member_bytes);
+    var member = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+
+    var pause: FaultPause = .{};
+    var fault: FaultController = .{ .pause_after_write = &pause };
+    member.setFaultController(&fault);
+    defer pause.released.store(true, .release);
+    var write_future = std.testing.io.async(durableWriteWorker, .{&member});
+    var write_pending = true;
+    defer if (write_pending) {
+        _ = write_future.cancel(std.testing.io) catch {};
+    };
+    while (!pause.reached.load(.acquire)) try std.Thread.yield();
+
+    var close_started: std.atomic.Value(bool) = .init(false);
+    var close_future = std.testing.io.async(closeWorker, .{ &member, &close_started });
+    var close_pending = true;
+    defer if (close_pending) {
+        _ = close_future.cancel(std.testing.io) catch {};
+    };
+    while (!close_started.load(.acquire) or member.mutex.state.load(.acquire) != .contended)
+        try std.Thread.yield();
+    try std.testing.expect(!member.isClosed());
+
+    pause.released.store(true, .release);
+    try write_future.await(std.testing.io);
+    write_pending = false;
+    try close_future.await(std.testing.io);
+    close_pending = false;
+    try std.testing.expect(member.isClosed());
+
+    const raw = try tmp.dir.openFile(std.testing.io, "member", .{});
+    defer raw.close(std.testing.io);
+    var actual: [4]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try raw.readPositionalAll(std.testing.io, &actual, header.control.offset));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, &actual);
 }
