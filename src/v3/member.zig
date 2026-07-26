@@ -1189,7 +1189,7 @@ test "durable write excludes close through write and sync" {
     var fault: FaultController = .{ .pause_after_write = &pause };
     member.setFaultController(&fault);
     defer pause.released.store(true, .release);
-    var write_future = std.testing.io.async(durableWriteWorker, .{&member});
+    var write_future = try std.testing.io.concurrent(durableWriteWorker, .{&member});
     var write_pending = true;
     defer if (write_pending) {
         _ = write_future.cancel(std.testing.io) catch {};
@@ -1197,7 +1197,7 @@ test "durable write excludes close through write and sync" {
     while (!pause.reached.load(.acquire)) try std.Thread.yield();
 
     var close_started: std.atomic.Value(bool) = .init(false);
-    var close_future = std.testing.io.async(closeWorker, .{ &member, &close_started });
+    var close_future = try std.testing.io.concurrent(closeWorker, .{ &member, &close_started });
     var close_pending = true;
     defer if (close_pending) {
         _ = close_future.cancel(std.testing.io) catch {};
