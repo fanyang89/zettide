@@ -2,9 +2,9 @@
 
 ## Scope
 
-This document freezes the v3 member header and topology record codecs. It defines no file I/O,
-member creation, mounting, topology journal, or CLI behavior. A volume containing only these
-records is not mountable.
+This document freezes the v3 member header, topology record, and replicated layout codecs. It
+defines no file I/O, member creation, mounting, topology journal, manifest, erasure coding, or
+CLI behavior. A volume containing only these records is not mountable.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
 serialized Zig or native ABI structure. Each header copy is exactly 4096 bytes.
@@ -163,3 +163,45 @@ verified genesis digest; it does not match the current topology digest after epo
 masks, creation time, logical capacity, all three region geometries, block and I/O sizes, four
 subformat versions, algorithm IDs, and label agree across the set. Header sequence and
 checkpoint hint fields are member-local and may differ.
+
+## Replica Layout
+
+A layout is a separate 256-byte envelope. Version 1 defines only replicated kind `1`, with
+exactly three replicas. All integers are little-endian. The layout contains no allocation,
+capacity reservation, manifest, placement I/O, quorum-commit, or erasure-coding state.
+
+| Offset | Width | Field |
+|---:|---:|---|
+| `0x000` | 8 | Magic `DDVLAY1\0` |
+| `0x008` | 2 | Envelope version, 1 |
+| `0x00a` | 2 | Layout kind, 1 is replicated |
+| `0x00c` | 4 | Encoded size, 256 |
+| `0x010` | 8 | Layout epoch |
+| `0x018` | 8 | Topology epoch |
+| `0x020` | 4 | Chunk size |
+| `0x024` | 2 | Target replicas, 3 |
+| `0x026` | 2 | Durable write threshold, 2 |
+| `0x028` | 2 | Read threshold, 1 |
+| `0x02a` | 2 | Member count, 3 |
+| `0x02c` | 4 | Layout flags, zero in version 1 |
+| `0x030` | 6 | Three canonical `u16` member slots, `0, 1, 2` |
+| `0x036` | 198 | Reserved; zero in version 1 |
+| `0x0fc` | 4 | CRC32C of bytes `[0, 252)` |
+
+Both epochs are nonzero. Chunk size is a power of two. Replicated layouts require the exact
+thresholds above, three unique slots covering `0..2` in ascending order, and zero flags and
+reserved bytes. The layout digest is BLAKE3-256 over canonical bytes `[0, 252)` and excludes the
+final CRC32C. The committed fixture has digest
+`40d718657f7fc9ee67045f8d3658c0a246e509fa1ae0cd770cd8f81885ffdd19`.
+
+Structural decoding preserves an unknown layout kind for diagnostics. It is not corruption:
+the separate kind policy rejects it with `UnsupportedLayoutKind` before use. A future layout
+kind requires its own defined payload and version; version 1 does not reserve speculative
+erasure-coding fields.
+
+Topology validation is pure and requires the layout topology epoch not to exceed the already
+verified current topology epoch. Every replica slot must exist and have voter control and data
+roles. Header validation is also pure: callers first verify member and genesis identity, then
+layout validation checks exactly three headers, matching chunk sizes, and supported layout
+format version. It does not select member authority. Member-file preallocation is capacity
+policy and is not encoded in the layout.

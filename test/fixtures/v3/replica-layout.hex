@@ -1,0 +1,5 @@
+# Sparse deterministic representation. Unlisted bytes are zero.
+# Each record is: byte offset, followed by contiguous lowercase hex bytes.
+0000 4444564c41593100010001000001000007000000000000000300000000000000
+0020 00001000030002000100030000000000000001000200
+00fc 881ca70e
