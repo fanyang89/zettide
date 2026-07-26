@@ -119,6 +119,48 @@ test "a disjoint write does not publish chunks from a failed generation" {
     }
 }
 
+test "a direct store write does not publish chunks from a failed generation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createPath(&tmp, &path_buffer);
+    try Volume.create(std.testing.io, path, 8 * 1024 * 1024, "DirectStoreFaultTest");
+    const failed_offset = devdrive.object_format.chunk_size - 2;
+
+    {
+        var volume = try Volume.open(std.testing.io, path, true);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        _ = try volume.writeFile(&file, "abcd", failed_offset);
+
+        var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 3 };
+        volume.device.fault = &fault;
+        try std.testing.expectError(error.InputOutput, volume.writeFile(&file, "WXYZ", failed_offset));
+        fault.disable();
+
+        const store: devdrive.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+        _ = try store.write(file.object_id, "safe", 2 * devdrive.object_format.chunk_size);
+        var actual: [4]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, failed_offset));
+        try std.testing.expectEqualStrings("abcd", &actual);
+        try volume.closeFile(&file);
+    }
+
+    {
+        var volume = try Volume.open(std.testing.io, path, false);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/data", c.LFS_O_RDONLY, 0, 0, 0);
+        var actual: [4]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, failed_offset));
+        try std.testing.expectEqualStrings("abcd", &actual);
+        try volume.closeFile(&file);
+    }
+}
+
 test "a no-op truncate does not publish chunks from a failed generation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

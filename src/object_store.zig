@@ -227,7 +227,7 @@ pub const Store = struct {
         if (end > format.max_file_size) return error.FileTooLarge;
         if (data.len == 0) return .{ .amount = 0, .head = try self.readHead(id) };
 
-        var head = try self.readHead(id);
+        var head = try self.prepareObjectTransaction(id);
         const reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
         defer std.heap.c_allocator.free(reservations);
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
@@ -269,7 +269,7 @@ pub const Store = struct {
         const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
         if (end > format.max_file_size) return error.FileTooLarge;
         if (length == 0) return .{ .payload_bytes = 0, .chunk_count = 0, .reserved = false };
-        const head = try self.prepareObjectTransaction(id);
+        const head = try self.readHead(id);
         const reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
         defer std.heap.c_allocator.free(reservations);
         var position = offset;
@@ -299,7 +299,7 @@ pub const Store = struct {
         if (length == 0) return error.InvalidArgument;
         const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
         if (end > format.max_file_size) return error.FileTooLarge;
-        var head = try self.prepareObjectTransaction(id);
+        var head = try self.readHead(id);
         const current = try self.readReservationsAlloc(head, std.heap.c_allocator);
         defer std.heap.c_allocator.free(current);
         const merged = try mergeReservationAlloc(std.heap.c_allocator, current, .{ .start = offset, .end = end });
