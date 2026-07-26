@@ -176,6 +176,44 @@ pub const PoolMemberSet = struct {
         }
     }
 
+    pub fn noteCommittedMembership(
+        self: *PoolMemberSet,
+        record: control_record.Record,
+        topology: pool_topology.Topology,
+        active_members: [max_member_count]bool,
+        active_count: u16,
+        administrative_recovery: bool,
+    ) void {
+        const previous = self.authority_state.?;
+        self.authority_state = .{
+            .kind = .membership_commit,
+            .history_digest = record.history_digest,
+            .data_root_digest = record.data_root_digest,
+            .topology = topology,
+            .layout = previous.layout,
+            .membership_epoch = record.membership_epoch,
+            .writer_term = record.writer_term,
+            .generation = record.generation,
+            .witness_count = active_count,
+            .administrative_recovery = previous.administrative_recovery or administrative_recovery,
+        };
+        self.control_write_state = .{
+            .tail_history_digest = record.history_digest,
+            .active_members = active_members,
+            .active_count = active_count,
+        };
+        for (0..self.supplied_count) |index| {
+            const member = if (self.members[index]) |*value| value else continue;
+            if (pool_topology.findMember(&topology, member.header().member_id) == null) {
+                self.statuses[index] = .removed;
+            } else if (active_members[index]) {
+                self.statuses[index] = .active_voter;
+            } else {
+                self.statuses[index] = .authority;
+            }
+        }
+    }
+
     pub fn close(self: *PoolMemberSet) !void {
         if (self.coordinator_state.cmpxchgStrong(0, 2, .acq_rel, .acquire)) |state| {
             if (state == 1) return error.CoordinatorActive;

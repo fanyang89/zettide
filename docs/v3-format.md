@@ -382,7 +382,7 @@ be a valid successor of the current topology, and its certificate must satisfy b
 quorums, or the explicit administrative-recovery rule. Every attestation resolves to the exact raw
 membership prepare on the named voter, with the exact proposal bytes and shared prepare history.
 Prepare records directly extend the selected authority, commits directly extend prepare, and the
-membership operation preserves writer term, generation, data root, and layout digest. Certificate
+membership operation preserves generation, data root, and layout digest without regressing writer term. Certificate
 validity alone still does not prove that the commit itself reached authority quorum.
 
 Bootstrap authority requires two independent observations of the same shared event: the target
@@ -427,6 +427,13 @@ active voters, at most three participants regardless of total Pool size. It uses
 dynamic quorum for exact prepare and commit acknowledgements and emits a version 2 certificate.
 Prepare quorum failure or unknown commit outcome sticky-freezes the coordinator and revokes the
 member set's write-ready histories until full reopen, matching the fixed-v1 failure boundary.
+
+Membership transactions prepare on the union of old and proposed voter sets. Normal transitions
+require both old and new prepare quorums and both old and new commit quorums; administrative recovery
+requires the new quorum and remains explicitly marked unsafe. A joining member cannot become active
+until its retained history starts with its target bootstrap record and its tail exactly matches the
+current selected authority. Promotion to voter additionally requires that caught-up member to join
+the transaction's new-voter quorum.
 
 ### Dynamic Topology Envelope
 

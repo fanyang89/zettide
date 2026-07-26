@@ -219,7 +219,8 @@ fn validateBootstrapAuthorityBinding(
 }
 
 fn validateAuthorityBinding(record: control_record.Record, authority: Authority) !void {
-    if (record.writer_term != authority.writer_term or record.generation != authority.generation or
+    if (record.writer_term < authority.writer_term) return error.WriterTermRegression;
+    if (record.generation != authority.generation or
         !std.mem.eql(u8, &record.data_root_digest, &authority.data_root_digest) or
         !std.mem.eql(u8, &record.layout_digest, &authority.layout_digest))
         return error.MembershipChangedAuthorityData;
