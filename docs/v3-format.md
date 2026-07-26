@@ -409,6 +409,13 @@ slots. The certificate count must equal current topology quorum, each prepare di
 selected authority, and the commit directly extends their shared prepare history. Membership,
 topology, and layout remain fixed; generation advances exactly once and writer term cannot regress.
 
+Dynamic authority selection starts only from a version 2 genesis observed by that topology's voter
+quorum. It then walks proven history ancestry: generation commits require current voter quorum,
+normal membership commits require both old and new voter quorums, administrative recovery requires
+new quorum, and bootstrap requires current voter quorum plus the target first-record copy. Two
+different valid children of one authority are a conflict. Epoch, generation, local sequence,
+physical frontier, and checkpoint hints are never tie-breakers.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.

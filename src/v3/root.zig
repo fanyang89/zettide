@@ -12,6 +12,7 @@ pub const pool_policy = @import("pool_policy.zig");
 pub const pool_layout = @import("pool_layout.zig");
 pub const pool_evidence = @import("pool_evidence.zig");
 pub const pool_certificate = @import("pool_certificate.zig");
+pub const pool_authority = @import("pool_authority.zig");
 pub const pool_genesis_payload = @import("pool_genesis_payload.zig");
 pub const pool_topology = @import("pool_topology.zig");
 pub const replicated_journal = @import("replicated_journal.zig");
@@ -32,6 +33,7 @@ test {
     _ = pool_layout;
     _ = pool_evidence;
     _ = pool_certificate;
+    _ = pool_authority;
     _ = pool_genesis_payload;
     _ = pool_topology;
     _ = replicated_journal;
