@@ -27,8 +27,9 @@ project conformance profile, not an operating-system POSIX certification.
 - Process-owned and open-file-description advisory record locks.
 - Mode, ownership, umask, set-id clearing, setgid directory inheritance, and
   sticky-directory protection.
-- atime, mtime, and ctime transitions using strict-atime mounts in conformance
-  tests.
+- atime advances without changing ctime for every read, readlink, and readdir
+  request delivered to the FUSE daemon; mtime and ctime follow POSIX mutation
+  rules.
 - `fsync()`, `fdatasync()`, directory synchronization, and crash recovery after
   a successful synchronization call.
 - POSIX pathname resolution, component limits, required errors, sparse files,
@@ -43,7 +44,7 @@ this base filesystem profile:
 - `flock()`
 - `O_TMPFILE`
 - `copy_file_range()`
-- Linux-specific `fallocate()` modes
+- Linux-specific `fallocate()` modes other than mode zero
 - `RENAME_EXCHANGE` and `RENAME_WHITEOUT`
 - Device nodes
 
@@ -56,8 +57,12 @@ this base filesystem profile:
   must share one FUSE inode and one kernel page cache.
 - Record locks are managed locally by the Linux VFS; the adapter does not
   negotiate remote lock capabilities.
-- The default conformance mount uses cached I/O and strict atime. Direct I/O,
-  relatime, and noatime mounts are outside the conformance profile.
+- The conformance mount uses cached I/O. Linux does not send a FUSE request for
+  a page-cache hit and libfuse does not receive an implicit atime `setattr`, so
+  persisted atime cannot advance for those unobservable accesses. Pure cache
+  hits are an explicit profile exception; direct I/O is not used to emulate
+  them because it would remove the required shared page cache and writeback
+  behavior.
 
 ## Conformance Gates
 

@@ -11,7 +11,7 @@ portable container core, but do not yet provide a WinFsp filesystem.
 - Symbolic links: create, read, follow, rename, and unlink.
 - Hard links: shared identity, persistent link counts, rename, and open-unlinked lifetime.
 - FIFOs: persistent metadata with transport managed by the Linux kernel.
-- Metadata: mode, uid, gid, birth time, ctime, mtime, and relatime atime.
+- Metadata: mode, uid, gid, birth time, ctime, mtime, and access time.
 - Namespace operations preserve open descriptors across rename and unlink.
 - Hard-linked paths report one inode number and share data, metadata, and page cache.
 - File link counts equal namespace ObjectRefs; directory counts are two plus direct subdirectories.
@@ -22,10 +22,15 @@ portable container core, but do not yet provide a WinFsp filesystem.
 - Names are case-sensitive and limited to 255 UTF-8 bytes per path component.
 - Sparse files support logical sizes up to 9,223,372,036,854,775,807 bytes.
 - Holes read as zero and do not allocate their logical length.
+- Mode-zero `fallocate` and `posix_fallocate` provide persistent sparse range
+  reservations that survive remount and are shared by hard links.
 
 Linux mounts use `default_permissions`; the kernel enforces user access before
-requests reach the filesystem. Internally, some read operations may require a
-metadata write to persist relatime.
+requests reach the filesystem. Each read, readlink, or readdir request observed
+by the daemon attempts to persist a newer atime without changing ctime. Linux
+page-cache hits do not generate FUSE requests, so those accesses cannot update
+the persisted atime while cached I/O remains enabled. An atime persistence
+failure does not turn an otherwise successful read into an error.
 
 ## Persistence
 
@@ -51,7 +56,7 @@ The Linux adapter does not currently implement:
 
 - Arbitrary extended attributes
 - Device and socket nodes
-- `fallocate`
+- Nonzero `fallocate` modes
 - `copy_file_range`
 - `flock`
 - `RENAME_EXCHANGE` and `RENAME_WHITEOUT`
