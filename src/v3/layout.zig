@@ -109,9 +109,14 @@ pub fn validateAgainstTopology(layout: Layout, topology: topology_format.Topolog
 }
 
 pub fn validateAgainstHeaders(layout: Layout, headers: []const member_format.Header) !void {
+    if (headers.len != replica_count) return error.InvalidHeaderCount;
+    try validateAgainstHeaderSubset(layout, headers);
+}
+
+pub fn validateAgainstHeaderSubset(layout: Layout, headers: []const member_format.Header) !void {
     try checkKindPolicy(layout);
     try validate(layout);
-    if (headers.len != replica_count) return error.InvalidHeaderCount;
+    if (headers.len == 0 or headers.len > replica_count) return error.InvalidHeaderCount;
     for (headers) |header| {
         if (header.chunk_size != layout.chunk_size) return error.ChunkSizeMismatch;
         if (header.layout_format_version != member_format.supported_layout_format_version)
@@ -354,6 +359,8 @@ test "header validation checks count chunk size and layout policy only" {
     var headers = try testHeaders();
     try validateAgainstHeaders(layout, &headers);
     try std.testing.expectError(error.InvalidHeaderCount, validateAgainstHeaders(layout, headers[0..2]));
+    try validateAgainstHeaderSubset(layout, headers[0..2]);
+    try std.testing.expectError(error.InvalidHeaderCount, validateAgainstHeaderSubset(layout, headers[0..0]));
     headers[1].chunk_size /= 2;
     try std.testing.expectError(error.ChunkSizeMismatch, validateAgainstHeaders(layout, &headers));
     headers = try testHeaders();

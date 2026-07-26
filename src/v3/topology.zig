@@ -92,8 +92,25 @@ pub fn validateMemberSet(
     genesis_digest: codec.Digest,
     headers: []const member_format.Header,
 ) !void {
-    try validate(topology);
     if (headers.len < member_count) return error.MissingMember;
+    if (headers.len > member_count) return error.InvalidHeaderCount;
+
+    try validateMemberSubset(topology, genesis_digest, headers);
+    var matched: [member_count]bool = @splat(false);
+    for (headers) |header| {
+        const index = findMember(topology.members, header.member_id) orelse unreachable;
+        matched[index] = true;
+    }
+    for (matched) |present| if (!present) return error.MissingMember;
+}
+
+pub fn validateMemberSubset(
+    topology: Topology,
+    genesis_digest: codec.Digest,
+    headers: []const member_format.Header,
+) !void {
+    try validate(topology);
+    if (headers.len == 0) return error.MissingMember;
     if (headers.len > member_count) return error.InvalidHeaderCount;
 
     var matched: [member_count]bool = @splat(false);
@@ -103,7 +120,6 @@ pub fn validateMemberSet(
         if (matched[index]) return error.DuplicateMember;
         matched[index] = true;
     }
-    for (matched) |present| if (!present) return error.MissingMember;
     for (headers[1..]) |header| {
         if (!staticSetFieldsEqual(headers[0], header)) return error.StaticSetFieldsMismatch;
     }
@@ -455,6 +471,13 @@ test "member header membership and topology mismatches are distinct" {
     const genesis_digest = try digest(topology);
     var headers = try testHeaders(topology);
     try std.testing.expectError(error.MissingMember, validateMemberSet(topology, genesis_digest, headers[0..2]));
+    try validateMemberSubset(topology, genesis_digest, headers[0..2]);
+    try std.testing.expectError(error.MissingMember, validateMemberSubset(topology, genesis_digest, headers[0..0]));
+    headers[1].created_ns += 1;
+    try std.testing.expectError(
+        error.StaticSetFieldsMismatch,
+        validateMemberSubset(topology, genesis_digest, headers[0..2]),
+    );
     headers[2] = headers[0];
     try std.testing.expectError(error.DuplicateMember, validateMemberSet(topology, genesis_digest, &headers));
     headers = try testHeaders(topology);

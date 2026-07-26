@@ -4,8 +4,8 @@
 
 This document freezes the v3 member header, topology record, replicated layout, genesis payload,
 control record, commit certificate codecs, member-local creation, fixed-three-member set creation,
-control journal scan, and append. It defines no mounting, existing-set open, journal repair, quorum
-authority, signatures, manifest, erasure coding, or CLI behavior.
+existing-set control authority, control journal scan, and append. It defines no volume mounting,
+journal repair, signatures, manifest, erasure coding, or CLI behavior.
 A volume containing only these records is not mountable.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
@@ -182,6 +182,42 @@ returned, retains every file whose creation was attempted, and does not attempt 
 close attempts all three member closes, reports the first error, and is idempotent. The set owns only
 the returned member handles; caller-owned directories and basename storage remain borrowed. This
 boundary does not open existing sets, select authority, establish quorum, or repair partial creation.
+
+## Member Set Open and Control Authority
+
+Existing-set open accepts three slot-indexed optional locations and acquires member locks in slot
+order. A null location is absent. A provided member that cannot open, scans unsuccessfully, or is in
+the wrong input slot is recorded in that slot's diagnostics and excluded. History allocation failure
+aborts open. Every error path releases all retained history allocations and member locks.
+
+Open has three intents. Diagnostic open requires one readable history and may return without an
+authority. Read-only open requires a genesis authority. Writable open additionally requires a
+control-write-ready quorum and never silently downgrades. The resulting owning set must be moved
+rather than copied. It exposes per-slot status, selected authority, and optional control-write state.
+An out-of-group member's writable handle is closed before successful return; its retained history is
+available only as diagnostic evidence.
+
+Genesis witnesses are unique topology slots whose accepted first records have the same shared
+history digest. At least two witnesses establish the genesis group. Selected headers are
+cross-validated for identity, static geometry, format, and layout even when the third member is
+missing. Other genesis groups are foreign. A quorum-observed membership prepare or commit is rejected
+until membership transitions have defined payload and authority semantics.
+
+Generation commits are grouped by shared history digest and count each selected member at most once.
+A group with at least two witnesses is a candidate only after its certificate resolves to exact
+prepare evidence under the selected topology. Failure to validate a quorum-observed candidate is
+fatal and cannot fall back to an older state. Candidates are ordered only by their position in an
+accepted digest chain. The unique ancestry-maximal candidate becomes authority; incomparable quorum
+candidates are conflicting authority. Generation, writer term, local sequence, physical frontier,
+and checkpoint hints are never ordering tie-breakers.
+
+Control-write-ready requires at least two writable, unfrozen selected members with no unresolved
+tail damage, available journal capacity, the selected authority in their history, and exactly equal
+tail history digests. The stable tail must currently be genesis or a generation commit; a prepare
+quorum remains recovery-only. Interior abandoned damage, zero holes, degraded header redundancy, and
+stale checkpoint hints do not independently disqualify a member. This state establishes only that a
+control journal quorum can be extended. It does not establish metadata or data-root recovery and is
+not a volume-writable claim.
 
 ## Topology Record
 
