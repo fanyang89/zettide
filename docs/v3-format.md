@@ -398,6 +398,12 @@ header A and sync, then sync the parent directory on Linux. Initial members use 
 their first record. Joining members require a fully validated target bootstrap record supplied by the
 membership coordinator; member creation never invents an authority parent or private genesis.
 
+Dynamic generation commits use a separate version 2 certificate in the existing 192-byte certificate
+envelope. It contains exactly the current topology write quorum: one attestation for a one-member
+Pool and two attestations for two or more members. Unused attestation storage is zero, witnesses are
+canonical by member ID, and every witness is a current voter. Legacy generation commits continue to
+require the fixed two-attestation version 1 certificate.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.

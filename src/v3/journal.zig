@@ -7,6 +7,7 @@ const member_api = @import("member.zig");
 const membership = @import("membership.zig");
 const pool_genesis_payload = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
+const pool_certificate = @import("pool_certificate.zig");
 const pool_topology = @import("pool_topology.zig");
 const topology_format = @import("topology.zig");
 
@@ -303,6 +304,11 @@ fn validateRecordForHeader(header: member_format.Header, record: control_record.
     try control_record.validateDynamicPoolPolicy(record);
     if (record.kind == control_record.member_bootstrap_kind)
         _ = try member_bootstrap.validateRecord(record);
+    if (record.kind == control_record.generation_commit_kind) {
+        var bytes: [pool_certificate.encoded_size]u8 = undefined;
+        @memcpy(&bytes, record.payload.slice());
+        _ = try pool_certificate.decode(&bytes);
+    }
     if (record.kind == control_record.membership_prepare_kind or
         record.kind == control_record.membership_commit_kind)
         _ = try membership.validateRecordProposal(record);

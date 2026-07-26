@@ -238,11 +238,23 @@ pub fn validatePolicy(record: Record) !void {
 }
 
 pub fn validateDynamicPoolPolicy(record: Record) !void {
-    if (record.kind != member_bootstrap_kind) return validatePolicy(record);
-    try validateStructural(record);
-    if (codec.isZero(&record.previous_history_digest) or
-        codec.isZero(&record.transaction_id) or !codec.isZero(&record.mount_session_id) or
-        record.payload.len == 0) return error.InvalidMemberBootstrapRecord;
+    if (record.kind == member_bootstrap_kind) {
+        try validateStructural(record);
+        if (codec.isZero(&record.previous_history_digest) or
+            codec.isZero(&record.transaction_id) or !codec.isZero(&record.mount_session_id) or
+            record.payload.len == 0) return error.InvalidMemberBootstrapRecord;
+        return;
+    }
+    if (record.kind == generation_commit_kind) {
+        try validateStructural(record);
+        if (codec.isZero(&record.previous_history_digest) or record.writer_term == 0 or
+            record.generation == 0 or codec.isZero(&record.mount_session_id) or
+            codec.isZero(&record.transaction_id) or codec.isZero(&record.data_root_digest))
+            return error.InvalidGenerationRecord;
+        if (record.payload.len != certificate_size) return error.InvalidCertificatePayloadLength;
+        return;
+    }
+    return validatePolicy(record);
 }
 
 fn validateStructural(record: Record) !void {
