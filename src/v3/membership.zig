@@ -174,6 +174,32 @@ pub fn makeCommitPayload(
     return control_record.Payload.init(&bytes);
 }
 
+pub fn validateRecordProposal(record: control_record.Record) !Proposal {
+    try control_record.validateDynamicPoolPolicy(record);
+    const proposal = switch (record.kind) {
+        control_record.membership_prepare_kind => blk: {
+            if (record.payload.len != proposal_size) return error.InvalidMembershipPreparePayloadLength;
+            var bytes: [proposal_size]u8 = undefined;
+            @memcpy(&bytes, record.payload.slice());
+            break :blk try decodeProposal(&bytes);
+        },
+        control_record.membership_commit_kind => blk: {
+            if (record.payload.len != commit_payload_size) return error.InvalidMembershipCommitPayloadLength;
+            var bytes: [proposal_size]u8 = undefined;
+            @memcpy(&bytes, record.payload.slice()[0..proposal_size]);
+            break :blk try decodeProposal(&bytes);
+        },
+        else => return error.NotMembershipRecord,
+    };
+    if (record.writer_term == 0 or codec.isZero(&record.mount_session_id) or
+        codec.isZero(&record.transaction_id)) return error.InvalidMembershipRecord;
+    if (!std.mem.eql(u8, &record.set_id, &proposal.topology.set_id)) return error.ForeignSet;
+    if (record.membership_epoch != proposal.topology.epoch) return error.MembershipEpochMismatch;
+    if (!std.mem.eql(u8, &record.topology_digest, &(try pool_topology.digest(proposal.topology))))
+        return error.TopologyDigestMismatch;
+    return proposal;
+}
+
 fn validateCertificate(
     current: pool_topology.Topology,
     next: pool_topology.Topology,
@@ -313,6 +339,28 @@ fn testCertificate(old: []const control_record.Attestation, new: []const control
     return result;
 }
 
+fn testMembershipRecord(proposal: Proposal, kind: u16, payload: control_record.Payload) !control_record.Record {
+    var record: control_record.Record = .{
+        .kind = kind,
+        .local_sequence = 2,
+        .membership_epoch = proposal.topology.epoch,
+        .writer_term = 1,
+        .generation = 1,
+        .set_id = proposal.topology.set_id,
+        .member_id = id(2),
+        .mount_session_id = id(7),
+        .transaction_id = id(8),
+        .previous_record_digest = @splat(0x33),
+        .previous_history_digest = @splat(0x44),
+        .data_root_digest = @splat(0x55),
+        .topology_digest = try pool_topology.digest(proposal.topology),
+        .layout_digest = @splat(0x66),
+        .payload = payload,
+    };
+    record.history_digest = try control_record.historyDigest(record);
+    return record;
+}
+
 test "membership proposal round trips a joining member" {
     const current = try topologyOne(1, @splat(0));
     const proposal = try addJoining(current);
@@ -416,4 +464,25 @@ test "proposal and certificate corruption are rejected" {
         error.CertificateChecksumMismatch,
         decodeCertificate(current, proposal.topology, .normal, &certificate_bytes),
     );
+}
+
+test "membership records bind exact proposal length epoch and topology digest" {
+    const current = try topologyOne(1, @splat(0));
+    const proposal = try addJoining(current);
+    var record = try testMembershipRecord(
+        proposal,
+        control_record.membership_prepare_kind,
+        try makePreparePayload(proposal),
+    );
+    _ = try validateRecordProposal(record);
+    record.membership_epoch += 1;
+    record.history_digest = try control_record.historyDigest(record);
+    try std.testing.expectError(error.MembershipEpochMismatch, validateRecordProposal(record));
+
+    record = try testMembershipRecord(
+        proposal,
+        control_record.membership_prepare_kind,
+        try control_record.Payload.init("short"),
+    );
+    try std.testing.expectError(error.InvalidMembershipPreparePayloadLength, validateRecordProposal(record));
 }

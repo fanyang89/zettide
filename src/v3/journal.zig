@@ -2,7 +2,12 @@ const std = @import("std");
 const codec = @import("codec.zig");
 const control_record = @import("control_record.zig");
 const genesis_payload = @import("genesis_payload.zig");
+const member_bootstrap = @import("member_bootstrap.zig");
 const member_api = @import("member.zig");
+const membership = @import("membership.zig");
+const pool_genesis_payload = @import("pool_genesis_payload.zig");
+const pool_layout = @import("pool_layout.zig");
+const pool_topology = @import("pool_topology.zig");
 const topology_format = @import("topology.zig");
 
 pub const CheckpointStatus = enum { none, valid, stale, invalid };
@@ -215,12 +220,15 @@ pub const Journal = struct {
         }
         record.history_digest = try control_record.historyDigest(record);
 
-        if (record.kind == control_record.genesis_kind) {
-            try validateGenesis(header, record);
+        if (self.scan_state.tail == null) {
+            try validateFirstRecord(header, record);
         } else {
-            try control_record.validatePolicy(record);
+            try validateRecordForHeader(header, record);
         }
-        const encoded = try control_record.encode(record);
+        const encoded = if (member_format.isDynamicPool(header))
+            try control_record.encodeDynamicPool(record)
+        else
+            try control_record.encode(record);
         const physical_slot = self.scan_state.physical_frontier;
         return .{
             .expected_tail = expected_tail orelse .{
@@ -275,6 +283,29 @@ fn validateGenesis(header: member_format.Header, record: control_record.Record) 
     const genesis_digest = try topology_format.digest(payload.topology);
     try topology_format.validateMemberHeader(payload.topology, genesis_digest, header);
     if (header.chunk_size != payload.layout.chunk_size) return error.ChunkSizeMismatch;
+}
+
+fn validateFirstRecord(header: member_format.Header, record: control_record.Record) !void {
+    if (!member_format.isDynamicPool(header)) return validateGenesis(header, record);
+    if (record.kind == control_record.genesis_kind) {
+        const payload = try pool_genesis_payload.validateRecord(record);
+        return pool_genesis_payload.validateMemberHeader(payload, header);
+    }
+    if (record.kind == control_record.member_bootstrap_kind) {
+        _ = try member_bootstrap.validateTargetFirstRecord(header, record);
+        return;
+    }
+    return error.InvalidDynamicPoolFirstRecord;
+}
+
+fn validateRecordForHeader(header: member_format.Header, record: control_record.Record) !void {
+    if (!member_format.isDynamicPool(header)) return control_record.validatePolicy(record);
+    try control_record.validateDynamicPoolPolicy(record);
+    if (record.kind == control_record.member_bootstrap_kind)
+        _ = try member_bootstrap.validateRecord(record);
+    if (record.kind == control_record.membership_prepare_kind or
+        record.kind == control_record.membership_commit_kind)
+        _ = try membership.validateRecordProposal(record);
 }
 
 pub fn scan(member: *member_api.Member) !ScanResult {
@@ -345,7 +376,7 @@ fn scanInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResult {
 
         if (result.tail) |tail| {
             if (record.kind == control_record.genesis_kind) return error.SecondGenesisRecord;
-            try control_record.validatePolicy(record);
+            try validateRecordForHeader(header, record);
             if (record.local_sequence == tail.local_sequence)
                 return error.DuplicateRecordSequence;
             if (record.local_sequence < tail.local_sequence)
@@ -358,7 +389,7 @@ fn scanInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResult {
             if (!std.mem.eql(u8, &record.previous_history_digest, &tail.history_digest))
                 return error.PreviousHistoryDigestMismatch;
         } else {
-            try validateGenesis(header, record);
+            try validateFirstRecord(header, record);
         }
 
         result.interior_invalid_slot_count = std.math.add(
@@ -597,6 +628,78 @@ fn genesisBytes() ![control_record.encoded_size]u8 {
     return control_record.encode(try genesis_payload.makeRecord(payload.topology.members[0].member_id, payload));
 }
 
+const DynamicFirstRecord = struct {
+    header: member_format.Header,
+    bytes: [control_record.encoded_size]u8,
+};
+
+fn dynamicGenesisFirstRecord() !DynamicFirstRecord {
+    const members = [_]pool_topology.Member{.{
+        .member_id = @splat(0x20),
+        .slot = 7,
+        .control_role = pool_topology.voter_role,
+        .role_flags = member_format.known_role_flags,
+    }};
+    const payload: pool_genesis_payload.GenesisPayload = .{
+        .topology = try pool_topology.Topology.init(@splat(0x10), 1, @splat(0), &members),
+        .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
+    };
+    var header = try testHeader(4);
+    header.incompat_features = member_format.dynamic_pool_incompat_feature;
+    header.member_slot = members[0].slot;
+    header.member_count = 1;
+    header.layout_format_version = member_format.dynamic_layout_format_version;
+    header.genesis_topology_digest = try pool_topology.digest(payload.topology);
+    return .{
+        .header = header,
+        .bytes = try control_record.encodeDynamicPool(try pool_genesis_payload.makeRecord(header.member_id, payload)),
+    };
+}
+
+fn dynamicBootstrapFirstRecord() !DynamicFirstRecord {
+    const members = [_]pool_topology.Member{
+        .{
+            .member_id = @splat(0x30),
+            .slot = 3,
+            .control_role = pool_topology.voter_role,
+            .role_flags = member_format.known_role_flags,
+        },
+        .{ .member_id = @splat(0x20), .slot = 19, .state = .joining },
+    };
+    const evidence: member_bootstrap.Evidence = .{
+        .target_member_id = @splat(0x20),
+        .target_slot = 19,
+        .topology = try pool_topology.Topology.init(@splat(0x10), 2, @splat(0x33), &members),
+        .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
+    };
+    var header = try testHeader(4);
+    header.incompat_features = member_format.dynamic_pool_incompat_feature;
+    header.member_slot = evidence.target_slot;
+    header.member_count = evidence.topology.member_count;
+    header.role_flags = member_format.data_role;
+    header.layout_format_version = member_format.dynamic_layout_format_version;
+    header.genesis_topology_digest = try pool_topology.digest(evidence.topology);
+    var record: control_record.Record = .{
+        .kind = control_record.member_bootstrap_kind,
+        .local_sequence = 1,
+        .membership_epoch = evidence.topology.epoch,
+        .writer_term = 1,
+        .generation = 1,
+        .set_id = evidence.topology.set_id,
+        .member_id = evidence.target_member_id,
+        .mount_session_id = @splat(0),
+        .transaction_id = @splat(0x44),
+        .previous_record_digest = @splat(0),
+        .previous_history_digest = @splat(0x55),
+        .data_root_digest = @splat(0x66),
+        .topology_digest = try pool_topology.digest(evidence.topology),
+        .layout_digest = try pool_layout.digest(evidence.layout),
+        .payload = try member_bootstrap.makePayload(evidence),
+    };
+    record.history_digest = try control_record.historyDigest(record);
+    return .{ .header = header, .bytes = try control_record.encodeDynamicPool(record) };
+}
+
 fn genesisProposal() !control_record.Record {
     var record = try genesis_payload.makeRecord(@splat(0x20), testPayload());
     record.set_id = @splat(0x81);
@@ -750,6 +853,44 @@ test "empty and complete scans derive holes frontier and full state" {
     try std.testing.expectEqualSlices(u8, &control_record.recordDigest(&second), &result.tail_raw_record_digest);
     try std.testing.expect(result.journal_full);
     try member.close();
+}
+
+test "dynamic scanner accepts pool genesis as the first record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const first = try dynamicGenesisFirstRecord();
+    try createMemberWithHeader(tmp.dir, "dynamic-genesis", first.header);
+    try writeSlot(tmp.dir, "dynamic-genesis", first.header, 0, &first.bytes);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "dynamic-genesis", .read_only);
+    defer member.deinit();
+    const result = try scan(&member);
+    try std.testing.expectEqual(control_record.genesis_kind, result.tail.?.kind);
+    try std.testing.expectEqual(@as(u64, 1), result.tail.?.local_sequence);
+}
+
+test "dynamic scanner accepts shared bootstrap as a joining member first record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const first = try dynamicBootstrapFirstRecord();
+    try createMemberWithHeader(tmp.dir, "dynamic-bootstrap", first.header);
+    try writeSlot(tmp.dir, "dynamic-bootstrap", first.header, 0, &first.bytes);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "dynamic-bootstrap", .read_only);
+    defer member.deinit();
+    const result = try scan(&member);
+    try std.testing.expectEqual(control_record.member_bootstrap_kind, result.tail.?.kind);
+    try std.testing.expect(!codec.isZero(&result.tail.?.previous_history_digest));
+}
+
+test "fixed scanner rejects dynamic bootstrap as a first record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const fixed_header = try testHeader(4);
+    const first = try dynamicBootstrapFirstRecord();
+    try createMemberWithHeader(tmp.dir, "fixed-bootstrap", fixed_header);
+    try writeSlot(tmp.dir, "fixed-bootstrap", fixed_header, 0, &first.bytes);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "fixed-bootstrap", .read_only);
+    defer member.deinit();
+    try std.testing.expectError(error.UnsupportedRecordKind, scan(&member));
 }
 
 test "valid retry proves invalid interior damage abandoned" {

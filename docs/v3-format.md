@@ -369,6 +369,14 @@ are excluded from shared history hashing, so voter and target copies converge on
 The target header binds its birth topology digest, member count, slot, role flags, and chunk geometry
 to this payload. The fixed-v1 control policy continues to reject kind `10`.
 
+Journal first-record validation is selected by the member-header profile. A legacy member still
+accepts only the version 1 genesis. A dynamic member accepts either its version 2 Pool genesis or,
+when added later, a target-bound bootstrap with a nonzero shared parent. Later dynamic records use
+the dynamic control policy; membership prepare and commit records must carry the exact proposal or
+proposal-plus-certificate payload length and bind membership epoch and topology digest to it. Local
+scan validation does not make either membership or bootstrap authoritative; cross-member quorum
+evidence remains required.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.
