@@ -520,22 +520,29 @@ fn corruptByte(dir: Io.Dir, name: []const u8, offset: u64) !void {
     try file.writePositionalAll(std.testing.io, &.{0xff}, offset);
 }
 
+const common_create_fault_points = [_]CreateFaultPoint{
+    .extent_sync,
+    .genesis_write,
+    .genesis_sync,
+    .header_b_write,
+    .header_b_sync,
+    .header_a_write,
+    .header_a_sync,
+};
+
+const linux_create_fault_points = common_create_fault_points ++ [_]CreateFaultPoint{.parent_sync};
+
+fn expectedCreateFaultPoints() []const CreateFaultPoint {
+    return if (builtin.os.tag == .linux) &linux_create_fault_points else &common_create_fault_points;
+}
+
 test "create publishes genesis then B then A with exact durability stages" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const header = try testCreateHeader(0);
     var fault: CreateFaultController = .{};
     var member = try createAt(std.testing.io, tmp.dir, "member", header, testCreatePayload(), .{ .fault = &fault });
-    try std.testing.expectEqualSlices(CreateFaultPoint, &.{
-        .extent_sync,
-        .genesis_write,
-        .genesis_sync,
-        .header_b_write,
-        .header_b_sync,
-        .header_a_write,
-        .header_a_sync,
-        .parent_sync,
-    }, fault.events());
+    try std.testing.expectEqualSlices(CreateFaultPoint, expectedCreateFaultPoints(), fault.events());
     try std.testing.expectEqual(SourceSlot.a, member.source());
     try std.testing.expect(!member.redundancyDegraded());
     try std.testing.expect(!member.dirty);
@@ -560,27 +567,40 @@ test "create faults retain files with publication-state recovery" {
             defer tmp.cleanup();
             const header = try testCreateHeader(0);
             var fault: CreateFaultController = .{ .fail = .{ .point = point, .action = action } };
-            try std.testing.expectError(
-                error.InjectedCreateFault,
-                createAt(std.testing.io, tmp.dir, "member", header, testCreatePayload(), .{ .fault = &fault }),
-            );
-
-            const retained = try tmp.dir.openFile(std.testing.io, "member", .{});
-            retained.close(std.testing.io);
-            const no_header = point == .extent_sync or point == .genesis_write or point == .genesis_sync or
-                (point == .header_b_write and action != .after);
-            if (no_header) {
-                try std.testing.expectError(
-                    error.NoValidMemberHeader,
-                    openAt(std.testing.io, tmp.dir, "member", .read_only),
+            if (builtin.os.tag != .linux and point == .parent_sync) {
+                var member = try createAt(
+                    std.testing.io,
+                    tmp.dir,
+                    "member",
+                    header,
+                    testCreatePayload(),
+                    .{ .fault = &fault },
                 );
+                try std.testing.expectEqualSlices(CreateFaultPoint, expectedCreateFaultPoints(), fault.events());
+                try member.close();
             } else {
-                var reopened = try openAt(std.testing.io, tmp.dir, "member", .read_only);
-                const only_b = point == .header_b_write or point == .header_b_sync or
-                    (point == .header_a_write and action != .after);
-                try std.testing.expectEqual(only_b, reopened.redundancyDegraded());
-                try std.testing.expectEqual(if (only_b) SourceSlot.b else SourceSlot.a, reopened.source());
-                try reopened.close();
+                try std.testing.expectError(
+                    error.InjectedCreateFault,
+                    createAt(std.testing.io, tmp.dir, "member", header, testCreatePayload(), .{ .fault = &fault }),
+                );
+
+                const retained = try tmp.dir.openFile(std.testing.io, "member", .{});
+                retained.close(std.testing.io);
+                const no_header = point == .extent_sync or point == .genesis_write or point == .genesis_sync or
+                    (point == .header_b_write and action != .after);
+                if (no_header) {
+                    try std.testing.expectError(
+                        error.NoValidMemberHeader,
+                        openAt(std.testing.io, tmp.dir, "member", .read_only),
+                    );
+                } else {
+                    var reopened = try openAt(std.testing.io, tmp.dir, "member", .read_only);
+                    const only_b = point == .header_b_write or point == .header_b_sync or
+                        (point == .header_a_write and action != .after);
+                    try std.testing.expectEqual(only_b, reopened.redundancyDegraded());
+                    try std.testing.expectEqual(if (only_b) SourceSlot.b else SourceSlot.a, reopened.source());
+                    try reopened.close();
+                }
             }
         }
     }
