@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document freezes the v3 member header and genesis topology codecs. It defines no file I/O,
+This document freezes the v3 member header and topology record codecs. It defines no file I/O,
 member creation, mounting, topology journal, or CLI behavior. A volume containing only these
 records is not mountable.
 
@@ -121,11 +121,11 @@ comparison excludes only header sequence, checkpoint offset, checkpoint local re
 checkpoint digest, and the final CRC. With equal static fields, the higher sequence wins. Equal
 sequences with different checkpoint semantics are ambiguous; identical copies select A.
 
-## Genesis Topology
+## Topology Record
 
-The genesis topology is a separate 512-byte record. It defines exactly three initial members
-and does not define topology journal I/O, quorum selection, or membership transitions. All
-integers are little-endian.
+A topology is a separate 512-byte record. It defines exactly three members and does not define
+topology journal I/O, quorum selection, or membership transitions. All integers are
+little-endian. The committed fixture is an epoch 1 genesis topology example.
 
 | Offset | Width | Field |
 |---:|---:|---|
@@ -157,7 +157,9 @@ the final CRC32C. The committed topology fixture has digest
 `af1b230be435c77b3f1ca3064bd757df027bc7c1863bc1ae66e528dc2258a107`.
 
 Member-header cross-validation is independent of input order and requires exactly one header
-for each topology member. Identity, slot, member count, role flags, and genesis topology digest
-must match. Feature masks, creation time, logical capacity, all three region geometries, block
-and I/O sizes, four subformat versions, algorithm IDs, and label must agree across the set.
-Header sequence and checkpoint hint fields are member-local and may differ.
+for each member in the current topology. Identity, slot, member count, and role flags match the
+current topology. Each header's genesis topology digest matches a separately supplied, already
+verified genesis digest; it does not match the current topology digest after epoch 1. Feature
+masks, creation time, logical capacity, all three region geometries, block and I/O sizes, four
+subformat versions, algorithm IDs, and label agree across the set. Header sequence and
+checkpoint hint fields are member-local and may differ.

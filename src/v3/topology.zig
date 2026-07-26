@@ -87,12 +87,15 @@ pub fn digest(topology: Topology) !codec.Digest {
     return codec.blake3(bytes[0..checksum_offset]);
 }
 
-pub fn validateMemberSet(topology: Topology, headers: []const member_format.Header) !void {
+pub fn validateMemberSet(
+    topology: Topology,
+    genesis_digest: codec.Digest,
+    headers: []const member_format.Header,
+) !void {
     try validate(topology);
     if (headers.len < member_count) return error.MissingMember;
     if (headers.len > member_count) return error.InvalidHeaderCount;
 
-    const topology_digest = try digest(topology);
     var matched: [member_count]bool = @splat(false);
     for (headers) |header| {
         if (!std.mem.eql(u8, &header.set_id, &topology.set_id)) return error.ForeignSet;
@@ -102,8 +105,8 @@ pub fn validateMemberSet(topology: Topology, headers: []const member_format.Head
         const member = topology.members[index];
         if (header.member_slot != member.slot or header.member_count != member_count or
             header.role_flags != member.role_flags) return error.MemberHeaderMismatch;
-        if (!std.mem.eql(u8, &header.genesis_topology_digest, &topology_digest))
-            return error.TopologyDigestMismatch;
+        if (!std.mem.eql(u8, &header.genesis_topology_digest, &genesis_digest))
+            return error.GenesisTopologyDigestMismatch;
     }
     for (matched) |present| if (!present) return error.MissingMember;
     for (headers[1..]) |header| {
@@ -388,6 +391,7 @@ test "corrupt framing checksum version and padding are rejected" {
 
 test "member header validation is order independent" {
     const topology = testTopology();
+    const genesis_digest = try digest(topology);
     const headers = try testHeaders(topology);
     const permutations = [_][member_count]usize{
         .{ 0, 1, 2 }, .{ 0, 2, 1 }, .{ 1, 0, 2 },
@@ -397,37 +401,51 @@ test "member header validation is order independent" {
         const ordered = [_]member_format.Header{
             headers[permutation[0]], headers[permutation[1]], headers[permutation[2]],
         };
-        try validateMemberSet(topology, &ordered);
+        try validateMemberSet(topology, genesis_digest, &ordered);
     }
 }
 
 test "member header membership and topology mismatches are distinct" {
     const topology = testTopology();
+    const genesis_digest = try digest(topology);
     var headers = try testHeaders(topology);
-    try std.testing.expectError(error.MissingMember, validateMemberSet(topology, headers[0..2]));
+    try std.testing.expectError(error.MissingMember, validateMemberSet(topology, genesis_digest, headers[0..2]));
     headers[2] = headers[0];
-    try std.testing.expectError(error.DuplicateMember, validateMemberSet(topology, &headers));
+    try std.testing.expectError(error.DuplicateMember, validateMemberSet(topology, genesis_digest, &headers));
     headers = try testHeaders(topology);
     headers[2].member_id = @splat(0x99);
-    try std.testing.expectError(error.ForeignMember, validateMemberSet(topology, &headers));
+    try std.testing.expectError(error.ForeignMember, validateMemberSet(topology, genesis_digest, &headers));
     headers = try testHeaders(topology);
     headers[2].set_id[0] ^= 1;
-    try std.testing.expectError(error.ForeignSet, validateMemberSet(topology, &headers));
+    try std.testing.expectError(error.ForeignSet, validateMemberSet(topology, genesis_digest, &headers));
     headers = try testHeaders(topology);
     headers[2].member_slot = headers[1].member_slot;
-    try std.testing.expectError(error.MemberHeaderMismatch, validateMemberSet(topology, &headers));
+    try std.testing.expectError(error.MemberHeaderMismatch, validateMemberSet(topology, genesis_digest, &headers));
     headers = try testHeaders(topology);
     headers[2].genesis_topology_digest[0] ^= 1;
-    try std.testing.expectError(error.TopologyDigestMismatch, validateMemberSet(topology, &headers));
+    try std.testing.expectError(error.GenesisTopologyDigestMismatch, validateMemberSet(topology, genesis_digest, &headers));
+}
 
-    var next = topology;
-    next.epoch = 2;
-    next.parent_digest = try digest(topology);
-    try std.testing.expectError(error.TopologyDigestMismatch, validateMemberSet(next, &(try testHeaders(topology))));
+test "current topology digest is separate from genesis identity" {
+    const genesis = testTopology();
+    const genesis_digest = try digest(genesis);
+    const headers = try testHeaders(genesis);
+    var current = genesis;
+    current.epoch = 2;
+    current.parent_digest = genesis_digest;
+    try validateMemberSet(current, genesis_digest, &headers);
+
+    var wrong_genesis_digest = genesis_digest;
+    wrong_genesis_digest[0] ^= 1;
+    try std.testing.expectError(
+        error.GenesisTopologyDigestMismatch,
+        validateMemberSet(current, wrong_genesis_digest, &headers),
+    );
 }
 
 test "all set-level static fields are cross-validated" {
     const topology = testTopology();
+    const genesis_digest = try digest(topology);
     const base = try testHeaders(topology);
     inline for (.{
         "compat_features",               "ro_compat_features", "incompat_features",       "created_ns",            "logical_capacity",
@@ -441,21 +459,22 @@ test "all set-level static fields are cross-validated" {
             codec.Region => value.length += 1,
             else => value.* += 1,
         }
-        try std.testing.expectError(error.StaticSetFieldsMismatch, validateMemberSet(topology, &headers));
+        try std.testing.expectError(error.StaticSetFieldsMismatch, validateMemberSet(topology, genesis_digest, &headers));
     }
     var headers = base;
     headers[1].label = try member_format.Label.init("different-label");
-    try std.testing.expectError(error.StaticSetFieldsMismatch, validateMemberSet(topology, &headers));
+    try std.testing.expectError(error.StaticSetFieldsMismatch, validateMemberSet(topology, genesis_digest, &headers));
 }
 
 test "member-local sequence and checkpoint differences are accepted" {
     const topology = testTopology();
+    const genesis_digest = try digest(topology);
     var headers = try testHeaders(topology);
     headers[1].header_sequence += 1;
     headers[1].checkpoint_offset = headers[1].control.offset;
     headers[1].checkpoint_record_sequence = 19;
     headers[1].checkpoint_record_digest = @splat(0x5a);
-    try validateMemberSet(topology, &headers);
+    try validateMemberSet(topology, genesis_digest, &headers);
 }
 
 test "all single byte mutations are detected without checksum repair" {
