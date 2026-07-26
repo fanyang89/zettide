@@ -9,11 +9,37 @@ pub const data_role: u32 = 2;
 pub const known_role_flags: u32 = metadata_role | data_role;
 pub const checksum_crc32c: u16 = 1;
 pub const digest_blake3_256: u16 = 1;
+pub const supported_metadata_format_version: u16 = 1;
+pub const supported_object_format_version: u16 = 1;
+pub const supported_layout_format_version: u16 = 1;
+pub const supported_control_record_format_version: u16 = 1;
 pub const supported_compat_features: u64 = 0;
 pub const supported_ro_compat_features: u64 = 0;
 pub const supported_incompat_features: u64 = 0;
 
 const magic = [8]u8{ 'D', 'D', 'V', 'M', 'E', 'M', '3', 0 };
+
+pub const Label = struct {
+    bytes: [127]u8 = @splat(0),
+    length: u7 = 0,
+
+    pub fn init(value: []const u8) !Label {
+        if (value.len > 127 or !std.unicode.utf8ValidateSlice(value)) return error.InvalidLabel;
+        var label: Label = .{};
+        @memcpy(label.bytes[0..value.len], value);
+        label.length = @intCast(value.len);
+        return label;
+    }
+
+    pub fn slice(self: *const Label) []const u8 {
+        return self.bytes[0..self.length];
+    }
+
+    fn validate(self: *const Label) !void {
+        if (!std.unicode.utf8ValidateSlice(self.slice()) or
+            !codec.isZero(self.bytes[self.length..])) return error.InvalidLabel;
+    }
+};
 
 pub const Header = struct {
     header_sequence: u64,
@@ -41,7 +67,7 @@ pub const Header = struct {
     control_record_format_version: u16,
     checksum_algorithm: u16 = checksum_crc32c,
     digest_algorithm: u16 = digest_blake3_256,
-    label: []const u8,
+    label: Label,
     genesis_topology_digest: codec.Digest,
     checkpoint_offset: u64 = 0,
     checkpoint_record_sequence: u64 = 0,
@@ -55,6 +81,22 @@ pub fn checkFeaturePolicy(header: Header, mode: OpenMode) !void {
         return error.UnsupportedIncompatFeature;
     if (mode == .writable and header.ro_compat_features & ~supported_ro_compat_features != 0)
         return error.UnsupportedReadOnlyFeature;
+}
+
+pub fn checkFormatPolicy(header: Header) !void {
+    if (header.metadata_format_version != supported_metadata_format_version)
+        return error.UnsupportedMetadataFormat;
+    if (header.object_format_version != supported_object_format_version)
+        return error.UnsupportedObjectFormat;
+    if (header.layout_format_version != supported_layout_format_version)
+        return error.UnsupportedLayoutFormat;
+    if (header.control_record_format_version != supported_control_record_format_version)
+        return error.UnsupportedControlRecordFormat;
+}
+
+pub fn checkOpenPolicy(header: Header, mode: OpenMode) !void {
+    try checkFormatPolicy(header);
+    try checkFeaturePolicy(header, mode);
 }
 
 pub fn encode(header: Header) ![encoded_size]u8 {
@@ -89,8 +131,9 @@ pub fn encode(header: Header) ![encoded_size]u8 {
     codec.putInt(u16, &bytes, 0x0b6, header.control_record_format_version);
     codec.putInt(u16, &bytes, 0x0b8, header.checksum_algorithm);
     codec.putInt(u16, &bytes, 0x0ba, header.digest_algorithm);
-    codec.putInt(u16, &bytes, 0x0bc, @intCast(header.label.len));
-    @memcpy(bytes[0x0c0..][0..header.label.len], header.label);
+    const label = header.label.slice();
+    codec.putInt(u16, &bytes, 0x0bc, @intCast(label.len));
+    @memcpy(bytes[0x0c0..][0..label.len], label);
     @memcpy(bytes[0x140..0x160], &header.genesis_topology_digest);
     codec.putInt(u64, &bytes, 0x160, header.checkpoint_offset);
     codec.putInt(u64, &bytes, 0x168, header.checkpoint_record_sequence);
@@ -111,8 +154,7 @@ pub fn decode(bytes: *const [encoded_size]u8) !Header {
     const label_length = codec.getInt(u16, bytes, 0x0bc);
     if (label_length > 127) return error.InvalidLabel;
     if (!codec.isZero(bytes[0x0c0 + label_length .. 0x140])) return error.NonZeroLabelPadding;
-    const label = bytes[0x0c0..][0..label_length];
-    if (!std.unicode.utf8ValidateSlice(label)) return error.InvalidLabel;
+    const label = try Label.init(bytes[0x0c0..][0..label_length]);
 
     const header: Header = .{
         .header_sequence = codec.getInt(u64, bytes, 0x010),
@@ -159,7 +201,7 @@ fn validate(header: Header) !void {
     if (header.role_flags != known_role_flags) return error.InvalidRoleFlags;
     if (header.checksum_algorithm != checksum_crc32c or header.digest_algorithm != digest_blake3_256)
         return error.UnsupportedAlgorithm;
-    if (header.label.len > 127 or !std.unicode.utf8ValidateSlice(header.label)) return error.InvalidLabel;
+    try header.label.validate();
     if (codec.isZero(&header.genesis_topology_digest)) return error.InvalidTopologyDigest;
     if (!std.math.isPowerOfTwo(header.metadata_block_size) or
         !std.math.isPowerOfTwo(header.metadata_read_size) or
@@ -245,22 +287,13 @@ fn staticEqual(a: Header, b: Header) bool {
     b_copy.checkpoint_record_sequence = 0;
     a_copy.checkpoint_record_digest = @splat(0);
     b_copy.checkpoint_record_digest = @splat(0);
-    return headerEqual(a_copy, b_copy);
+    return std.meta.eql(a_copy, b_copy);
 }
 
 fn mutableEqual(a: Header, b: Header) bool {
     return a.checkpoint_offset == b.checkpoint_offset and
         a.checkpoint_record_sequence == b.checkpoint_record_sequence and
         std.mem.eql(u8, &a.checkpoint_record_digest, &b.checkpoint_record_digest);
-}
-
-fn headerEqual(a: Header, b: Header) bool {
-    inline for (std.meta.fields(Header)) |field| {
-        if (field.type == []const u8) {
-            if (!std.mem.eql(u8, @field(a, field.name), @field(b, field.name))) return false;
-        } else if (!std.meta.eql(@field(a, field.name), @field(b, field.name))) return false;
-    }
-    return true;
 }
 
 fn putRegion(bytes: []u8, offset: usize, region: codec.Region) void {
@@ -292,7 +325,7 @@ fn testHeader() Header {
         .object_format_version = 1,
         .layout_format_version = 1,
         .control_record_format_version = 1,
-        .label = "golden-member",
+        .label = Label.init("golden-member") catch unreachable,
         .genesis_topology_digest = .{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f },
         .checkpoint_offset = 0x11000,
         .checkpoint_record_sequence = 9,
@@ -302,6 +335,18 @@ fn testHeader() Header {
 
 fn fixChecksum(bytes: *[encoded_size]u8) void {
     codec.putInt(u32, bytes, checksum_offset, codec.crc32c(bytes[0..checksum_offset]));
+}
+
+fn decodeTestHeaderFromLocalBytes() !Header {
+    const bytes = try encode(testHeader());
+    return decode(&bytes);
+}
+
+fn expectUnsupportedFormat(header: Header, expected: anyerror) !void {
+    const bytes = try encode(header);
+    const decoded = try decode(&bytes);
+    try std.testing.expectError(expected, checkOpenPolicy(decoded, .read_only));
+    try std.testing.expectError(expected, checkOpenPolicy(decoded, .writable));
 }
 
 test "exact offsets and canonical round trip" {
@@ -392,6 +437,16 @@ test "golden fixture and fingerprint" {
     try std.testing.expectEqualSlices(u8, &fixture, &(try encode(decoded)));
 }
 
+test "decoded labels own their bytes" {
+    var bytes = try encode(testHeader());
+    const decoded = try decode(&bytes);
+    @memset(&bytes, 0xa5);
+    try std.testing.expectEqualStrings("golden-member", decoded.label.slice());
+
+    const returned = try decodeTestHeaderFromLocalBytes();
+    try std.testing.expectEqualStrings("golden-member", returned.label.slice());
+}
+
 test "corrupt framing and padding are rejected" {
     const canonical = try encode(testHeader());
     const cases = [_]struct { offset: usize, expected: anyerror }{
@@ -429,8 +484,7 @@ test "identity role algorithm label and geometry validation" {
     header.digest_algorithm = 2;
     try std.testing.expectError(error.UnsupportedAlgorithm, encode(header));
     header = testHeader();
-    header.label = "\xff";
-    try std.testing.expectError(error.InvalidLabel, encode(header));
+    try std.testing.expectError(error.InvalidLabel, Label.init("\xff"));
     header = testHeader();
     header.metadata.offset += 4096;
     try std.testing.expectError(error.InvalidGeometry, encode(header));
@@ -470,6 +524,24 @@ test "feature policy matrix" {
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .writable));
     const bytes = try encode(header);
     _ = try decode(&bytes);
+}
+
+test "subformat policy rejects each unknown version for every open mode" {
+    var header = testHeader();
+    header.metadata_format_version = 2;
+    try expectUnsupportedFormat(header, error.UnsupportedMetadataFormat);
+
+    header = testHeader();
+    header.object_format_version = 2;
+    try expectUnsupportedFormat(header, error.UnsupportedObjectFormat);
+
+    header = testHeader();
+    header.layout_format_version = 2;
+    try expectUnsupportedFormat(header, error.UnsupportedLayoutFormat);
+
+    header = testHeader();
+    header.control_record_format_version = 2;
+    try expectUnsupportedFormat(header, error.UnsupportedControlRecordFormat);
 }
 
 test "A/B selection preserves structural conflicts" {

@@ -59,6 +59,10 @@ The committed golden fixture is a sparse hex representation of all 4096 bytes. U
 are zero. Its canonical BLAKE3-256 fingerprint is
 `ac09bf5b06bcc8bbdb092530a7a199032e10eefb917b593ddb4591c464db5946`.
 
+Decoded headers own their label in a fixed-capacity value. Decoding copies label bytes; no label
+slice refers to the input header buffer. Label construction validates UTF-8 and canonicalizes
+unused capacity to zero.
+
 ## Geometry
 
 The control region starts at 64 KiB, is 4096-byte aligned, and contains at least one 4096-byte
@@ -94,6 +98,17 @@ Open-mode policy is evaluated separately:
 | Incompatible | Reject | Reject |
 
 The initial supported masks are zero.
+
+## Subformat Policy
+
+Structural decoding preserves metadata, object, layout, and control-record format versions even
+when they are unknown. This keeps unsupported values available for diagnostics and A/B static
+comparison. It does not imply that an unknown subformat can be used.
+
+The initial supported value for each of the four subformat versions is exactly 1. Before either
+read-only or writable use, open policy rejects an unsupported metadata, object, layout, or
+control-record format with a distinct error. Subformat policy is independent of feature-bit
+policy; callers use the combined open policy before accessing a member.
 
 ## A/B Selection
 
