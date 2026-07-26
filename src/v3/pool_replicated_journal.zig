@@ -7,6 +7,7 @@ const membership = @import("membership.zig");
 const pool_authority = @import("pool_authority.zig");
 const pool_certificate = @import("pool_certificate.zig");
 const pool_member_set = @import("pool_member_set.zig");
+const pool_policy = @import("pool_policy.zig");
 
 const max_control_participant_count: usize = 6;
 
@@ -35,6 +36,7 @@ pub const ReplicatedJournal = struct {
     participants: [max_control_participant_count]?Participant = @splat(null),
     participant_count: usize = 0,
     quorum: u16,
+    recovery_only: bool,
     mutex: std.Io.Mutex = .init,
     frozen: std.atomic.Value(bool) = .init(false),
     closed: bool = false,
@@ -48,6 +50,7 @@ pub const ReplicatedJournal = struct {
             .io = io,
             .set = set,
             .quorum = authority.topology.quorum,
+            .recovery_only = set.isRecoveryOnly(),
         };
         errdefer coordinator.closeParticipants();
         for (ready.active_members[0..set.supplied_count], 0..) |active, set_index| {
@@ -60,7 +63,8 @@ pub const ReplicatedJournal = struct {
             };
             coordinator.participant_count += 1;
         }
-        if (coordinator.participant_count < coordinator.quorum) return error.WriteQuorumUnavailable;
+        const open_quorum: u16 = if (coordinator.recovery_only) 1 else coordinator.quorum;
+        if (coordinator.participant_count < open_quorum) return error.WriteQuorumUnavailable;
         return coordinator;
     }
 
@@ -72,6 +76,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         if (prepare_proposal.kind != control_record.generation_prepare_kind)
             return error.NotGenerationPrepare;
         const authority = self.set.authority() orelse return error.MissingAuthority;
@@ -198,6 +203,8 @@ pub const ReplicatedJournal = struct {
             return error.NotMembershipPrepare;
         const authority = self.set.authority() orelse return error.MissingAuthority;
         const proposal = try membership.validateRecordProposal(prepare_proposal);
+        if (self.recovery_only and proposal.mode != .administrative_recovery)
+            return error.AdministrativeRecoveryRequired;
         try membership.validateTransition(authority.topology, proposal);
         try self.validatePromotions(authority.topology, proposal.topology, authority.history_digest);
         if (prepare_proposal.generation != authority.generation or
@@ -359,6 +366,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         if (self.set.supplied_count == pool_member_set.max_member_count)
             return error.TooManyPoolMembers;
         const authority = self.set.authority() orelse return error.MissingAuthority;
@@ -891,4 +899,109 @@ test "one-member coordinator commits generation and membership then reopens" {
     try std.testing.expectEqual(pool_authority.Kind.membership_commit, recovered.authority().?.kind);
     try std.testing.expectEqual(@as(u16, 2), recovered.authority().?.topology.member_count);
     try std.testing.expectEqual(pool_topology.MemberState.active, recovered.authority().?.topology.members[1].state);
+}
+
+test "administrative recovery converts a lost two-of-two quorum to one-of-one" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const members = [_]pool_topology.Member{
+        .{ .member_id = id(2), .slot = 7, .control_role = pool_topology.voter_role, .role_flags = member_format.known_role_flags },
+        .{ .member_id = id(3), .slot = 11, .control_role = pool_topology.voter_role, .role_flags = member_format.known_role_flags },
+    };
+    const payload: pool_genesis.GenesisPayload = .{
+        .topology = try pool_topology.Topology.init(id(1), 1, @splat(0), &members),
+        .layout = try pool_layout.Layout.init(.replicated, 1, 1, 1024 * 1024),
+    };
+    const names = [_][]const u8{ "survivor", "lost" };
+    for (names, 0..) |name, index| {
+        const header: member_format.Header = .{
+            .header_sequence = 1,
+            .incompat_features = member_format.dynamic_pool_incompat_feature,
+            .set_id = payload.topology.set_id,
+            .member_id = members[index].member_id,
+            .member_slot = members[index].slot,
+            .member_count = 2,
+            .role_flags = member_format.known_role_flags,
+            .created_ns = 1,
+            .member_bytes = 3 * 1024 * 1024,
+            .logical_capacity = 1024 * 1024,
+            .control = .{ .offset = 64 * 1024, .length = 64 * 1024 },
+            .metadata = .{ .offset = 1024 * 1024, .length = 256 * 1024 },
+            .data = .{ .offset = 2 * 1024 * 1024, .length = 1024 * 1024 },
+            .metadata_block_size = 4096,
+            .metadata_read_size = 512,
+            .metadata_program_size = 512,
+            .chunk_size = 1024 * 1024,
+            .metadata_format_version = 1,
+            .object_format_version = 1,
+            .layout_format_version = member_format.dynamic_layout_format_version,
+            .control_record_format_version = 1,
+            .label = try member_format.Label.init("recovery-test"),
+            .genesis_topology_digest = try pool_topology.digest(payload.topology),
+        };
+        var member = try member_api.createPoolAt(std.testing.io, tmp.dir, name, header, payload, .{});
+        try member.close();
+    }
+
+    const survivor_location: pool_member_set.Location = .{ .parent = tmp.dir, .basename = names[0] };
+    const survivor_locations = [_]pool_member_set.Location{survivor_location};
+    try std.testing.expectError(
+        error.NoGenesisQuorum,
+        pool_member_set.open(std.testing.io, std.testing.allocator, &survivor_locations, .writable),
+    );
+    var recovery_set = try pool_member_set.openAdministrativeRecovery(
+        std.testing.io,
+        std.testing.allocator,
+        survivor_location,
+        id(2),
+    );
+    defer recovery_set.deinit();
+    try std.testing.expect(recovery_set.isRecoveryOnly());
+    var recovery_coordinator = try open(std.testing.io, &recovery_set);
+    defer recovery_coordinator.deinit();
+    const current = recovery_set.authority().?;
+    const survivor = [_]pool_topology.Member{members[0]};
+    const recovery_proposal: membership.Proposal = .{
+        .mode = .administrative_recovery,
+        .topology = try pool_topology.Topology.init(
+            current.topology.set_id,
+            current.topology.epoch + 1,
+            try pool_topology.digest(current.topology),
+            &survivor,
+        ),
+    };
+    var prepare: control_record.Record = .{
+        .kind = control_record.membership_prepare_kind,
+        .local_sequence = 99,
+        .membership_epoch = recovery_proposal.topology.epoch,
+        .writer_term = 1,
+        .generation = current.generation,
+        .set_id = current.topology.set_id,
+        .member_id = id(9),
+        .mount_session_id = id(6),
+        .transaction_id = id(7),
+        .previous_record_digest = @splat(0x11),
+        .previous_history_digest = @splat(0x22),
+        .data_root_digest = current.data_root_digest,
+        .topology_digest = try pool_topology.digest(recovery_proposal.topology),
+        .layout_digest = try pool_layout.digest(current.layout),
+        .payload = try membership.makePreparePayload(recovery_proposal),
+    };
+    prepare.history_digest = try control_record.historyDigest(prepare);
+    const result = try recovery_coordinator.commitMembership(prepare);
+    try std.testing.expectEqual(@as(u16, 1), result.committed_count);
+    recovery_coordinator.close();
+    try recovery_set.close();
+
+    var recovered = try pool_member_set.open(
+        std.testing.io,
+        std.testing.allocator,
+        &survivor_locations,
+        .writable,
+    );
+    defer recovered.deinit();
+    try std.testing.expect(!recovered.isRecoveryOnly());
+    try std.testing.expectEqual(@as(u16, 1), recovered.authority().?.topology.member_count);
+    try std.testing.expectEqual(@as(u16, 1), recovered.controlWriteReady().?.active_count);
+    try std.testing.expectEqual(pool_policy.DataAccess.read_only, recovered.dataAccess());
 }

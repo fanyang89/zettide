@@ -443,6 +443,13 @@ member into `PoolMemberSet`; voter quorum failure freezes the coordinator and le
 diagnostic evidence. A later promotion transaction can then include the caught-up target in its new
 voter quorum.
 
+Losing an old quorum requires a separate administrative-recovery open with exactly one explicitly
+trusted survivor. Local replay verifies every retained raw record and exact local prepare/commit
+chain, rejects an unresolved or uncommitted tail, and exposes a recovery-only coordinator. That
+coordinator rejects generation, bootstrap, and normal membership operations; it can only commit an
+`administrative_recovery` topology using the new quorum. After that commit, ordinary open may use the
+new topology quorum as a recovery root even though the original genesis quorum is unavailable.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.

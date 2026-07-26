@@ -2,6 +2,7 @@ const std = @import("std");
 const codec = @import("codec.zig");
 const control_record = @import("control_record.zig");
 const journal = @import("journal.zig");
+const member_bootstrap = @import("member_bootstrap.zig");
 const membership = @import("membership.zig");
 const pool_certificate = @import("pool_certificate.zig");
 const pool_evidence = @import("pool_evidence.zig");
@@ -38,7 +39,10 @@ pub const Authority = struct {
 
 pub fn select(histories: []const *const journal.HistoryScan) !Authority {
     try validateUniqueHistories(histories);
-    var authority = try selectGenesis(histories);
+    var authority = selectGenesis(histories) catch |err| switch (err) {
+        error.NoGenesisQuorum => return selectRecoveryRoot(histories),
+        else => return err,
+    };
     while (true) {
         var next: ?Authority = null;
         for (histories) |history| {
@@ -55,6 +59,178 @@ pub fn select(histories: []const *const journal.HistoryScan) !Authority {
         }
         authority = next orelse return authority;
     }
+}
+
+pub fn selectAdministrativeRecovery(history: *const journal.HistoryScan) !Authority {
+    if (history.entries().len == 0) return error.MissingGenesis;
+    const genesis = try verifiedWitness(history, &history.entries()[0]);
+    if (genesis.kind != control_record.genesis_kind) return error.MissingGenesis;
+    const payload = try pool_genesis.validateRecord(genesis);
+    if (!isVoter(payload.topology, history.member_id)) return error.TrustedMemberIsNotVoter;
+    var authority: Authority = .{
+        .kind = .genesis,
+        .history_digest = genesis.history_digest,
+        .data_root_digest = genesis.data_root_digest,
+        .topology = payload.topology,
+        .layout = payload.layout,
+        .membership_epoch = genesis.membership_epoch,
+        .writer_term = genesis.writer_term,
+        .generation = genesis.generation,
+        .witness_count = 1,
+    };
+    for (history.entries()[1..]) |*entry| {
+        const record = try verifiedWitness(history, entry);
+        switch (record.kind) {
+            control_record.generation_commit_kind => authority = try replayLocalGeneration(history, authority, record),
+            control_record.membership_commit_kind => authority = try replayLocalMembership(history, authority, record),
+            control_record.member_bootstrap_kind => authority = try replayLocalBootstrap(authority, record),
+            else => {},
+        }
+    }
+    const tail = history.scan_result.tail orelse return error.MissingGenesis;
+    if (!std.mem.eql(u8, &tail.history_digest, &authority.history_digest))
+        return error.RecoveryTailIsNotCommitted;
+    if (!isVoter(authority.topology, history.member_id)) return error.TrustedMemberIsNotCurrentVoter;
+    return authority;
+}
+
+fn selectRecoveryRoot(histories: []const *const journal.HistoryScan) !Authority {
+    var selected: ?Authority = null;
+    for (histories) |history| {
+        const candidate = selectAdministrativeRecovery(history) catch continue;
+        if (!candidate.administrative_recovery) continue;
+        const witnesses = try countVoterWitnesses(
+            histories,
+            candidate.history_digest,
+            control_record.membership_commit_kind,
+            candidate.topology,
+        );
+        if (witnesses < candidate.topology.quorum) continue;
+        var witnessed = candidate;
+        witnessed.witness_count = witnesses;
+        if (selected) |current| {
+            if (!std.mem.eql(u8, &current.history_digest, &witnessed.history_digest))
+                return error.ConflictingRecoveryAuthority;
+        } else {
+            selected = witnessed;
+        }
+    }
+    return selected orelse error.NoGenesisQuorum;
+}
+
+fn replayLocalGeneration(
+    history: *const journal.HistoryScan,
+    current: Authority,
+    commit: control_record.Record,
+) !Authority {
+    const prepare_entry = history.findHistoryDigest(commit.previous_history_digest) orelse
+        return error.MissingLocalPrepare;
+    const prepare = try verifiedWitness(history, prepare_entry);
+    if (prepare.kind != control_record.generation_prepare_kind) return error.AttestedRecordIsNotPrepare;
+    if (!std.mem.eql(u8, &prepare.previous_history_digest, &current.history_digest) or
+        !std.mem.eql(u8, &prepare.history_digest, &commit.previous_history_digest))
+        return error.DetachedLocalCommit;
+    try validateLocalPrepareCommit(prepare, commit);
+    if (commit.membership_epoch != current.membership_epoch or
+        !std.mem.eql(u8, &commit.topology_digest, &(try pool_topology.digest(current.topology))) or
+        !std.mem.eql(u8, &commit.layout_digest, &(try pool_layout.digest(current.layout))))
+        return error.GenerationChangedConfiguration;
+    if (current.generation == std.math.maxInt(u64) or commit.generation != current.generation + 1)
+        return error.UnexpectedGeneration;
+    if (commit.writer_term < current.writer_term) return error.WriterTermRegression;
+    var certificate_bytes: [pool_certificate.encoded_size]u8 = undefined;
+    @memcpy(&certificate_bytes, commit.payload.slice());
+    const certificate = try pool_certificate.decode(&certificate_bytes);
+    try pool_certificate.validateAgainstTopology(certificate, current.topology);
+    return .{
+        .kind = .generation_commit,
+        .history_digest = commit.history_digest,
+        .data_root_digest = commit.data_root_digest,
+        .topology = current.topology,
+        .layout = current.layout,
+        .membership_epoch = commit.membership_epoch,
+        .writer_term = commit.writer_term,
+        .generation = commit.generation,
+        .witness_count = 1,
+        .administrative_recovery = current.administrative_recovery,
+    };
+}
+
+fn replayLocalMembership(
+    history: *const journal.HistoryScan,
+    current: Authority,
+    commit: control_record.Record,
+) !Authority {
+    const prepare_entry = history.findHistoryDigest(commit.previous_history_digest) orelse
+        return error.MissingLocalPrepare;
+    const prepare = try verifiedWitness(history, prepare_entry);
+    if (prepare.kind != control_record.membership_prepare_kind)
+        return error.AttestedRecordIsNotMembershipPrepare;
+    if (!std.mem.eql(u8, &prepare.previous_history_digest, &current.history_digest) or
+        !std.mem.eql(u8, &prepare.history_digest, &commit.previous_history_digest))
+        return error.DetachedLocalCommit;
+    try validateLocalPrepareCommit(prepare, commit);
+    const proposal = try membership.validateRecordProposal(commit);
+    _ = try membership.validateRecordProposal(prepare);
+    try membership.validateTransition(current.topology, proposal);
+    if (!std.mem.eql(u8, prepare.payload.slice(), commit.payload.slice()[0..membership.proposal_size]))
+        return error.MembershipProposalMismatch;
+    var certificate_bytes: [membership.certificate_size]u8 = undefined;
+    @memcpy(&certificate_bytes, commit.payload.slice()[membership.proposal_size..]);
+    _ = try membership.decodeCertificate(current.topology, proposal.topology, proposal.mode, &certificate_bytes);
+    if (commit.generation != current.generation or
+        !std.mem.eql(u8, &commit.data_root_digest, &current.data_root_digest) or
+        !std.mem.eql(u8, &commit.layout_digest, &(try pool_layout.digest(current.layout))))
+        return error.MembershipChangedAuthorityData;
+    if (commit.writer_term < current.writer_term) return error.WriterTermRegression;
+    return .{
+        .kind = .membership_commit,
+        .history_digest = commit.history_digest,
+        .data_root_digest = commit.data_root_digest,
+        .topology = proposal.topology,
+        .layout = current.layout,
+        .membership_epoch = commit.membership_epoch,
+        .writer_term = commit.writer_term,
+        .generation = commit.generation,
+        .witness_count = 1,
+        .administrative_recovery = current.administrative_recovery or
+            proposal.mode == .administrative_recovery,
+    };
+}
+
+fn replayLocalBootstrap(current: Authority, record: control_record.Record) !Authority {
+    if (!std.mem.eql(u8, &record.previous_history_digest, &current.history_digest))
+        return error.BootstrapDoesNotExtendAuthority;
+    const evidence = try member_bootstrap.validateRecord(record);
+    if (!std.meta.eql(evidence.topology, current.topology) or !std.meta.eql(evidence.layout, current.layout) or
+        record.membership_epoch != current.membership_epoch or record.writer_term != current.writer_term or
+        record.generation != current.generation or
+        !std.mem.eql(u8, &record.data_root_digest, &current.data_root_digest))
+        return error.BootstrapChangedAuthority;
+    return .{
+        .kind = .member_bootstrap,
+        .history_digest = record.history_digest,
+        .data_root_digest = record.data_root_digest,
+        .topology = current.topology,
+        .layout = current.layout,
+        .membership_epoch = record.membership_epoch,
+        .writer_term = record.writer_term,
+        .generation = record.generation,
+        .witness_count = 1,
+        .administrative_recovery = current.administrative_recovery,
+    };
+}
+
+fn validateLocalPrepareCommit(prepare: control_record.Record, commit: control_record.Record) !void {
+    if (!std.mem.eql(u8, &prepare.set_id, &commit.set_id) or
+        prepare.membership_epoch != commit.membership_epoch or
+        prepare.writer_term != commit.writer_term or prepare.generation != commit.generation or
+        !std.mem.eql(u8, &prepare.mount_session_id, &commit.mount_session_id) or
+        !std.mem.eql(u8, &prepare.transaction_id, &commit.transaction_id) or
+        !std.mem.eql(u8, &prepare.data_root_digest, &commit.data_root_digest) or
+        !std.mem.eql(u8, &prepare.topology_digest, &commit.topology_digest) or
+        !std.mem.eql(u8, &prepare.layout_digest, &commit.layout_digest))
+        return error.PrepareCommitMismatch;
 }
 
 fn selectGenesis(histories: []const *const journal.HistoryScan) !Authority {
@@ -265,6 +441,11 @@ fn validateUniqueHistories(histories: []const *const journal.HistoryScan) !void 
                 return error.DuplicateMemberHistory;
         }
     }
+}
+
+fn isVoter(topology: pool_topology.Topology, member_id: [16]u8) bool {
+    const member = pool_topology.findMember(&topology, member_id) orelse return false;
+    return member.control_role == pool_topology.voter_role;
 }
 
 fn id(value: u8) [16]u8 {
