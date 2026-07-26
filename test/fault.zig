@@ -298,7 +298,7 @@ test "a disjoint write does not publish chunks from a failed generation" {
     }
 }
 
-test "a direct store write does not publish chunks from a failed generation" {
+test "a frozen device rejects direct store writes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -339,6 +339,61 @@ test "a direct store write does not publish chunks from a failed generation" {
         var actual: [4]u8 = undefined;
         try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, failed_offset));
         try std.testing.expectEqualStrings("abcd", &actual);
+        try volume.closeFile(&file);
+    }
+}
+
+test "a direct store write removes rolled-back future chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createPath(&tmp, &path_buffer);
+    try Volume.create(std.testing.io, path, 8 * 1024 * 1024, "DirectStoreRecoveryTest");
+    const future_offset = 0;
+    const disjoint_offset = 2 * devdrive.object_format.chunk_size;
+    const committed_offset = 3 * devdrive.object_format.chunk_size;
+
+    {
+        var volume = try Volume.open(std.testing.io, path, true);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        _ = try volume.writeFile(&file, "committed", committed_offset);
+        try volume.syncFile(&file);
+
+        const store: devdrive.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+        const old_head = try store.readHead(file.object_id);
+        const future = try store.write(file.object_id, "future", future_offset);
+        try std.testing.expect(future.head.data_generation > old_head.data_generation);
+        var future_actual: [6]u8 = undefined;
+        try std.testing.expectEqual(future_actual.len, try store.read(file.object_id, &future_actual, future_offset));
+        try std.testing.expectEqualStrings("future", &future_actual);
+        try store.writeHead(old_head);
+        _ = try store.write(file.object_id, "safe", disjoint_offset);
+
+        var actual: [6]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try store.read(file.object_id, &actual, future_offset));
+        try std.testing.expectEqualSlices(u8, &@as([6]u8, @splat(0)), &actual);
+        var committed: [9]u8 = undefined;
+        try std.testing.expectEqual(committed.len, try store.read(file.object_id, &committed, committed_offset));
+        try std.testing.expectEqualStrings("committed", &committed);
+        try volume.sync();
+        try volume.closeFile(&file);
+    }
+
+    {
+        var volume = try Volume.open(std.testing.io, path, false);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/data", c.LFS_O_RDONLY, 0, 0, 0);
+        var actual: [6]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, future_offset));
+        try std.testing.expectEqualSlices(u8, &@as([6]u8, @splat(0)), &actual);
+        var committed: [9]u8 = undefined;
+        try std.testing.expectEqual(committed.len, try volume.readFile(&file, &committed, committed_offset));
+        try std.testing.expectEqualStrings("committed", &committed);
         try volume.closeFile(&file);
     }
 }
