@@ -155,6 +155,10 @@ pub const Volume = struct {
         return self.reservation_blocks;
     }
 
+    pub fn isWriteFrozen(self: *const Volume) bool {
+        return self.device.isWriteFrozen();
+    }
+
     pub fn stat(self: *Volume, path: [*:0]const u8) !NodeInfo {
         var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
@@ -246,6 +250,7 @@ pub const Volume = struct {
         if (info.type != c.LFS_TYPE_DIR) {
             try self.object_transaction_mutex.lock(self.io);
             defer self.object_transaction_mutex.unlock(self.io);
+            try self.ensureWritesAllowed();
             const object_ref = try self.store().readRef(path);
             try self.store().updateMetadata(object_ref.object_id, value);
             self.updateOpenMetadata(object_ref.object_id, value);
@@ -483,6 +488,7 @@ pub const Volume = struct {
         if (flags & c.LFS_O_TRUNC == 0) return self.openObjectUnlocked(handle, object_id, flags);
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         return self.openObjectUnlocked(handle, object_id, flags);
     }
 
@@ -528,6 +534,7 @@ pub const Volume = struct {
         if (!handle.writable) return error.AccessDenied;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         const effective_offset = if (handle.append)
             (try self.store().readHead(handle.object_id)).logical_size
         else
@@ -547,6 +554,7 @@ pub const Volume = struct {
         if (!handle.writable) return error.AccessDenied;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         const old_head = try self.store().readHead(handle.object_id);
         const head = try self.store().truncate(handle.object_id, size);
         try self.replaceReservation(old_head, head);
@@ -560,6 +568,7 @@ pub const Volume = struct {
         if (end > object_format.max_file_size) return error.FileTooLarge;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         const old_head = try self.store().readHead(handle.object_id);
         const proposed = try self.store().reservationProposal(handle.object_id, offset, length);
         const old_blocks = try self.reservationBlocks(old_head);
@@ -578,6 +587,7 @@ pub const Volume = struct {
     pub fn syncFile(self: *Volume, handle: *FileHandle) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         self.device.sync() catch return error.InputOutput;
         handle.original_metadata = handle.metadata;
     }
@@ -585,12 +595,14 @@ pub const Volume = struct {
     pub fn sync(self: *Volume) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         self.device.sync() catch return error.InputOutput;
     }
 
     pub fn persistMetadata(self: *Volume, handle: *FileHandle) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         try self.store().updateMetadata(handle.object_id, handle.metadata);
         self.updateOpenMetadata(handle.object_id, handle.metadata);
         handle.original_metadata = handle.metadata;
@@ -599,6 +611,7 @@ pub const Volume = struct {
     pub fn setObjectMetadata(self: *Volume, object_id: object_format.ObjectId, value: metadata.Metadata) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         try self.store().updateMetadata(object_id, value);
         self.updateOpenMetadata(object_id, value);
     }
@@ -610,6 +623,7 @@ pub const Volume = struct {
     ) !object_format.ObjectHead {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
         const head = try self.store().patchMetadata(object_id, patch);
         self.updateOpenMetadata(object_id, head.metadata);
         return head;
@@ -673,6 +687,10 @@ pub const Volume = struct {
 
     fn store(self: *Volume) object_store.Store {
         return .{ .io = self.io, .lfs = &self.lfs };
+    }
+
+    fn ensureWritesAllowed(self: *const Volume) !void {
+        if (self.isWriteFrozen()) return error.VolumeFrozen;
     }
 
     fn collectReservationBlocks(self: *Volume) !u64 {

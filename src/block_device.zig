@@ -16,6 +16,7 @@ pub const FileBlockDevice = struct {
     block_count: u32,
     mutex: Io.Mutex = .init,
     fault: ?*FaultController = null,
+    write_frozen: std.atomic.Value(bool) = .init(false),
 
     pub fn init(io: Io, file: File, header: container.Header) FileBlockDevice {
         return .{
@@ -28,21 +29,54 @@ pub const FileBlockDevice = struct {
     }
 
     pub fn read(self: *FileBlockDevice, block: u32, offset: u32, buffer: []u8) !void {
-        if (self.fault) |fault| if (fault.fail(.read)) return error.InjectedFault;
+        if (self.fault) |fault| if (fault.action(.read) == .before) return error.InjectedFault;
         const file_offset = try self.position(block, offset, buffer.len);
         const amount = try self.file.readPositionalAll(self.io, buffer, file_offset);
         if (amount != buffer.len) return error.UnexpectedEndOfFile;
     }
 
     pub fn program(self: *FileBlockDevice, block: u32, offset: u32, data: []const u8) !void {
-        if (self.fault) |fault| if (fault.fail(.program)) return error.InjectedFault;
+        if (self.isWriteFrozen()) return error.WriteFrozen;
         const file_offset = try self.position(block, offset, data.len);
-        try self.file.writePositionalAll(self.io, data, file_offset);
+        const action = if (self.fault) |fault| fault.action(.program) else .none;
+        if (action == .before or (action == .partial and data.len < 2)) {
+            self.freezeWrites();
+            return error.InjectedFault;
+        }
+        const write_data = if (action == .partial) data[0 .. data.len / 2] else data;
+        self.file.writePositionalAll(self.io, write_data, file_offset) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
+        if (action == .partial or action == .after) {
+            self.freezeWrites();
+            return error.InjectedFault;
+        }
     }
 
     pub fn sync(self: *FileBlockDevice) !void {
-        if (self.fault) |fault| if (fault.fail(.sync)) return error.InjectedFault;
-        try self.file.sync(self.io);
+        if (self.isWriteFrozen()) return error.WriteFrozen;
+        const action = if (self.fault) |fault| fault.action(.sync) else .none;
+        if (action == .before) {
+            self.freezeWrites();
+            return error.InjectedFault;
+        }
+        self.file.sync(self.io) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
+        if (action == .after) {
+            self.freezeWrites();
+            return error.InjectedFault;
+        }
+    }
+
+    pub fn isWriteFrozen(self: *const FileBlockDevice) bool {
+        return self.write_frozen.load(.acquire);
+    }
+
+    fn freezeWrites(self: *FileBlockDevice) void {
+        self.write_frozen.store(true, .release);
     }
 
     fn position(self: *const FileBlockDevice, block: u32, offset: u32, len: usize) !u64 {
@@ -117,7 +151,10 @@ pub const FileBlockDevice = struct {
 pub const FaultController = struct {
     fail_read_at: ?u64 = null,
     fail_program_at: ?u64 = null,
+    fail_program_partial_at: ?u64 = null,
+    fail_program_after_at: ?u64 = null,
     fail_sync_at: ?u64 = null,
+    fail_sync_after_at: ?u64 = null,
     read_count: u64 = 0,
     program_count: u64 = 0,
     sync_count: u64 = 0,
@@ -125,20 +162,45 @@ pub const FaultController = struct {
     pub fn disable(self: *FaultController) void {
         self.fail_read_at = null;
         self.fail_program_at = null;
+        self.fail_program_partial_at = null;
+        self.fail_program_after_at = null;
         self.fail_sync_at = null;
+        self.fail_sync_after_at = null;
     }
 
-    fn fail(self: *FaultController, operation: enum { read, program, sync }) bool {
-        const target, const count = switch (operation) {
-            .read => .{ self.fail_read_at, &self.read_count },
-            .program => .{ self.fail_program_at, &self.program_count },
-            .sync => .{ self.fail_sync_at, &self.sync_count },
+    fn action(self: *FaultController, operation: enum { read, program, sync }) FaultAction {
+        const count = switch (operation) {
+            .read => &self.read_count,
+            .program => &self.program_count,
+            .sync => &self.sync_count,
         };
         const current = count.*;
         count.* += 1;
-        return target != null and target.? == current;
+        return switch (operation) {
+            .read => if (matches(self.fail_read_at, current)) .before else .none,
+            .program => if (matches(self.fail_program_at, current))
+                .before
+            else if (matches(self.fail_program_partial_at, current))
+                .partial
+            else if (matches(self.fail_program_after_at, current))
+                .after
+            else
+                .none,
+            .sync => if (matches(self.fail_sync_at, current))
+                .before
+            else if (matches(self.fail_sync_after_at, current))
+                .after
+            else
+                .none,
+        };
     }
 };
+
+const FaultAction = enum { none, before, partial, after };
+
+fn matches(target: ?u64, current: u64) bool {
+    return target != null and target.? == current;
+}
 
 fn lookaheadSize(block_count: u32) u32 {
     const bytes = std.math.divCeil(u32, block_count, 8) catch unreachable;
