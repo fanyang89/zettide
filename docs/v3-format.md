@@ -416,6 +416,12 @@ new quorum, and bootstrap requires current voter quorum plus the target first-re
 different valid children of one authority are a conflict. Epoch, generation, local sequence,
 physical frontier, and checkpoint hints are never tie-breakers.
 
+`PoolMemberSet.open` accepts up to 96 supplied dynamic members, scans every readable history, and
+selects authority by the graph above before classifying members. Removed and stale members never
+participate in the current write set. Control write readiness requires the current voter quorum at
+the exact authority tail. Data access is computed separately from available non-joining data members:
+maintenance can remain writable while replica or EC width forces user data read-only.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.
