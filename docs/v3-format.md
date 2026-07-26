@@ -91,7 +91,12 @@ other role bits. The genesis topology digest is nonzero.
 
 The checkpoint fields are member-local scan hints only. They are not commit, generation, or
 topology authority. With no hint, offset, sequence, and digest are all zero. With a hint, the
-offset is 4096-byte aligned inside the control region, and sequence and digest are nonzero.
+offset is 4096-byte aligned inside the control region, and sequence and digest are nonzero. A
+checkpoint publication increments the header sequence, writes the non-selected A/B copy, and
+whole-file syncs it before changing the in-memory selected copy. Publication never overwrites the
+currently selected copy. A successful publication therefore alternates copies and repairs degraded
+header redundancy. A write or sync failure freezes the member and retains the old in-memory header,
+source, and degradation state; a complete newer header may still be selected after reopen.
 
 ## Feature Policy
 
@@ -362,8 +367,14 @@ The committed control-record fixture has record digest
 The member-local scanner reads every 4096-byte slot in the control region. An all-zero slot is a
 hole, not an end marker. A nonzero slot advances the physical frontier to one past its slot, so the
 frontier is one past the highest nonzero slot and the journal is full exactly when the frontier
-equals the slot count. Zero holes are zero slots below that frontier. The checkpoint header fields
-are ignored; they are hints and cannot skip a scan prefix or establish authority.
+equals the slot count. Zero holes are zero slots below that frontier. A checkpoint hint never skips
+a slot or establishes commit, generation, topology, or chain authority. The full scan reports
+`none` for a zero hint trio; `valid` when the hinted slot is an accepted checkpoint with matching
+set and member identity, local sequence, and raw record digest and remains the tail; `stale` when
+such a checkpoint is followed by another accepted record; and `invalid` for a zero, structurally
+invalid, wrong-kind, wrong-sequence, or wrong-digest hinted slot. Hint failure alone does not fail
+the scan. A decoded hinted slot still follows ordinary hard-failure rules for foreign identity,
+semantic errors, or chain errors.
 
 A nonzero slot that fails structural control-record decoding is counted as invalid and consumed,
 then scanning continues. A later accepted record that directly extends the preceding accepted
@@ -408,7 +419,8 @@ An append proposal supplies record semantics and payload, but not chain authorit
 replaces set ID, member ID, local sequence, previous record digest, previous history digest, and
 current history digest from the selected member header and retained tail. An empty journal accepts
 only a fully validated genesis proposal; a nonempty journal rejects another genesis. Proposal
-validation and encoding complete before any write.
+validation and encoding complete before any write. Ordinary append rejects checkpoint records;
+callers use the explicit checkpoint API.
 
 The append target is exactly the retained physical frontier. Interior zero or invalid slots are
 never reused, and a full journal never wraps. Read-only, closed, frozen, full, sequence-overflow,
@@ -422,6 +434,14 @@ old tail, a partial slot is unresolved tail damage, and a complete valid slot is
 the append call did not acknowledge it. Such a full-valid unacknowledged record becomes the new
 tail and can be extended normally. This is local durability only and establishes no quorum or
 authority.
+
+The checkpoint API runs under the journal mutex. It first performs the same durable record append
+and advances retained journal state, then publishes the checkpoint hint through the member's A/B
+header protocol. A record write or sync failure leaves the header untouched. A subsequent header
+write or sync failure returns an error and freezes the member, but the durable checkpoint remains
+the retained journal tail and is never rolled back. Reopen selects whichever old or fully published
+header copy is valid and always performs a full scan. Header sequence overflow is rejected before
+header I/O, after the checkpoint record has become durable.
 
 ## Commit Certificate
 

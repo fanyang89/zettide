@@ -5,6 +5,8 @@ const genesis_payload = @import("genesis_payload.zig");
 const member_api = @import("member.zig");
 const topology_format = @import("topology.zig");
 
+pub const CheckpointStatus = enum { none, valid, stale, invalid };
+
 pub const ScanResult = struct {
     tail: ?control_record.Record = null,
     tail_raw_record_digest: codec.Digest = @splat(0),
@@ -16,6 +18,7 @@ pub const ScanResult = struct {
     interior_invalid_slot_count: u64 = 0,
     unresolved_tail_damage: bool = false,
     journal_full: bool = false,
+    checkpoint_status: CheckpointStatus = .none,
 };
 
 pub const AppendResult = struct {
@@ -69,6 +72,31 @@ pub const Journal = struct {
 
         if (self.closed) return error.JournalClosed;
         if (self.member.isClosed()) return error.MemberClosed;
+        if (proposal.kind == control_record.checkpoint_kind) return error.UseCheckpointApi;
+        return self.appendLocked(proposal);
+    }
+
+    pub fn checkpoint(self: *Journal, proposal: control_record.Record) !AppendResult {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+
+        if (self.closed) return error.JournalClosed;
+        if (self.member.isClosed()) return error.MemberClosed;
+        if (proposal.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
+        const appended = try self.appendLocked(proposal);
+        const header = self.member.header();
+        const relative_offset = std.math.mul(u64, appended.physical_slot, control_record.encoded_size) catch
+            return error.ControlOffsetOverflow;
+        const absolute_offset = std.math.add(u64, header.control.offset, relative_offset) catch
+            return error.ControlOffsetOverflow;
+        try self.member.publishCheckpoint(absolute_offset, appended.record.local_sequence, appended.record_digest);
+        self.scan_state.checkpoint_status = .valid;
+        return appended;
+    }
+
+    fn appendLocked(self: *Journal, proposal: control_record.Record) !AppendResult {
+        if (self.closed) return error.JournalClosed;
+        if (self.member.isClosed()) return error.MemberClosed;
         if (self.member.mode() != .writable) return error.ReadOnlyMember;
         if (self.member.isFrozen()) return error.WriteFrozen;
         if (self.scan_state.unresolved_tail_damage) return error.UnresolvedTailDamage;
@@ -109,6 +137,7 @@ pub const Journal = struct {
         self.scan_state.tail_physical_slot = physical_slot;
         self.scan_state.physical_frontier = std.math.add(u64, physical_slot, 1) catch unreachable;
         self.scan_state.journal_full = self.scan_state.physical_frontier == self.scan_state.slot_count;
+        if (self.scan_state.checkpoint_status == .valid) self.scan_state.checkpoint_status = .stale;
         return .{ .record = record, .record_digest = record_digest, .physical_slot = physical_slot };
     }
 };
@@ -124,6 +153,12 @@ pub fn scan(member: *member_api.Member) !ScanResult {
     const header = member.header();
     const slot_count = header.control.length / control_record.encoded_size;
     var result: ScanResult = .{ .slot_count = slot_count };
+    const hint_slot: ?u64 = if (header.checkpoint_offset == 0)
+        null
+    else
+        (header.checkpoint_offset - header.control.offset) / control_record.encoded_size;
+    if (hint_slot != null) result.checkpoint_status = .invalid;
+    var matched_hint = false;
     var pending_zero_slots: u64 = 0;
     var pending_invalid_slots: u64 = 0;
 
@@ -184,6 +219,16 @@ pub fn scan(member: *member_api.Member) !ScanResult {
         result.tail = record;
         result.tail_raw_record_digest = control_record.recordDigest(&raw);
         result.tail_physical_slot = slot;
+        if (hint_slot == slot and
+            record.kind == control_record.checkpoint_kind and
+            record.local_sequence == header.checkpoint_record_sequence and
+            std.mem.eql(u8, &result.tail_raw_record_digest, &header.checkpoint_record_digest))
+        {
+            matched_hint = true;
+            result.checkpoint_status = .valid;
+        } else if (matched_hint) {
+            result.checkpoint_status = .stale;
+        }
     }
 
     result.unresolved_tail_damage = pending_invalid_slots != 0;
@@ -270,6 +315,14 @@ fn writeSlot(dir: std.Io.Dir, name: []const u8, header: member_format.Header, sl
     );
 }
 
+fn writeHeaders(dir: std.Io.Dir, name: []const u8, header: member_format.Header) !void {
+    const file = try dir.openFile(std.testing.io, name, .{ .mode = .read_write });
+    defer file.close(std.testing.io);
+    const bytes = try member_format.encode(header);
+    try file.writePositionalAll(std.testing.io, &bytes, 0);
+    try file.writePositionalAll(std.testing.io, &bytes, member_format.encoded_size);
+}
+
 fn genesisBytes() ![control_record.encoded_size]u8 {
     const payload = testPayload();
     return control_record.encode(try genesis_payload.makeRecord(payload.topology.members[0].member_id, payload));
@@ -304,6 +357,13 @@ fn writerFenceProposal(previous: control_record.Record) !control_record.Record {
         .topology_digest = previous.topology_digest,
         .layout_digest = previous.layout_digest,
     };
+    record.history_digest = try control_record.historyDigest(record);
+    return record;
+}
+
+fn checkpointProposal(previous: control_record.Record) !control_record.Record {
+    var record = try writerFenceProposal(previous);
+    record.kind = control_record.checkpoint_kind;
     record.history_digest = try control_record.historyDigest(record);
     return record;
 }
@@ -867,4 +927,187 @@ test "journal releases its claim after the member closes first" {
     journal.close();
     try member.claimJournal();
     member.releaseJournal();
+}
+
+test "full scan classifies checkpoint hints without changing scan results" {
+    const Case = enum { zero, corrupt, wrong_kind, wrong_sequence, wrong_digest };
+    inline for (std.meta.tags(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var header = try createInitializedMember(tmp.dir, "member", 2);
+        if (case == .corrupt) try writeSlot(tmp.dir, "member", header, 1, &.{0xaa});
+
+        var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+        var without_hint = try scan(&member);
+        try std.testing.expectEqual(CheckpointStatus.none, without_hint.checkpoint_status);
+        try member.close();
+
+        var hinted_raw: [control_record.encoded_size]u8 = undefined;
+        const hinted_slot: u64 = if (case == .zero or case == .corrupt) 1 else 0;
+        if (hinted_slot == 0) {
+            hinted_raw = try genesisBytes();
+        } else {
+            @memset(&hinted_raw, 0);
+        }
+        header.checkpoint_offset = header.control.offset + hinted_slot * control_record.encoded_size;
+        header.checkpoint_record_sequence = if (case == .wrong_sequence) 2 else 1;
+        header.checkpoint_record_digest = if (case == .wrong_digest or case == .zero or case == .corrupt)
+            @splat(0x55)
+        else
+            control_record.recordDigest(&hinted_raw);
+        try writeHeaders(tmp.dir, "member", header);
+
+        member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+        defer member.deinit();
+        var with_hint = try scan(&member);
+        try std.testing.expectEqual(CheckpointStatus.invalid, with_hint.checkpoint_status);
+        without_hint.checkpoint_status = .none;
+        with_hint.checkpoint_status = .none;
+        try std.testing.expectEqualDeep(without_hint, with_hint);
+    }
+}
+
+test "checkpoint publication alternates headers and refreshes stale hints" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try createInitializedMember(tmp.dir, "member", 5);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+    var journal = try Journal.open(&member);
+
+    const first_proposal = try checkpointProposal((try journal.state()).tail.?);
+    try std.testing.expectError(error.UseCheckpointApi, journal.append(first_proposal));
+    try std.testing.expectError(error.NotCheckpointRecord, journal.checkpoint(try writerFenceProposal((try journal.state()).tail.?)));
+    const first = try journal.checkpoint(first_proposal);
+    try std.testing.expectEqual(member_api.SourceSlot.b, member.source());
+    try std.testing.expectEqual(@as(u64, 2), member.header().header_sequence);
+    try std.testing.expectEqual(CheckpointStatus.valid, (try journal.state()).checkpoint_status);
+    try std.testing.expectEqual(CheckpointStatus.valid, (try scan(&member)).checkpoint_status);
+
+    const ordinary = try journal.append(try writerFenceProposal(first.record));
+    try std.testing.expectEqual(CheckpointStatus.stale, (try journal.state()).checkpoint_status);
+    try std.testing.expectEqual(CheckpointStatus.stale, (try scan(&member)).checkpoint_status);
+    const second = try journal.checkpoint(try checkpointProposal(ordinary.record));
+    try std.testing.expectEqual(member_api.SourceSlot.a, member.source());
+    try std.testing.expectEqual(@as(u64, 3), member.header().header_sequence);
+    try std.testing.expectEqual(CheckpointStatus.valid, (try journal.state()).checkpoint_status);
+    try std.testing.expectEqualSlices(u8, &second.record_digest, &member.header().checkpoint_record_digest);
+    journal.close();
+    try member.close();
+
+    member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+    defer member.deinit();
+    try std.testing.expectEqual(member_api.SourceSlot.a, member.source());
+    try std.testing.expectEqual(@as(u64, 3), member.header().header_sequence);
+    const rescanned = try scan(&member);
+    try std.testing.expectEqual(CheckpointStatus.valid, rescanned.checkpoint_status);
+    try std.testing.expectEqual(second.record.local_sequence, rescanned.tail.?.local_sequence);
+}
+
+test "checkpoint header faults retain durable journal state and old selection" {
+    const Case = enum { write_before, write_partial, write_after, sync_before, sync_after };
+    inline for (std.meta.tags(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        _ = try createInitializedMember(tmp.dir, "member", 3);
+        var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+        var journal = try Journal.open(&member);
+        var fault: member_api.FaultController = .{};
+        switch (case) {
+            .write_before => fault.fail_write_at = 1,
+            .write_partial => fault.fail_write_partial_at = 1,
+            .write_after => fault.fail_write_after_at = 1,
+            .sync_before => fault.fail_sync_at = 1,
+            .sync_after => fault.fail_sync_after_at = 1,
+        }
+        member.setFaultController(&fault);
+
+        try std.testing.expectError(
+            error.InjectedFault,
+            journal.checkpoint(try checkpointProposal((try journal.state()).tail.?)),
+        );
+        const retained = try journal.state();
+        try std.testing.expectEqual(@as(u64, 2), retained.tail.?.local_sequence);
+        try std.testing.expectEqual(@as(u64, 2), retained.physical_frontier);
+        try std.testing.expect(member.isFrozen());
+        try std.testing.expectEqual(member_api.SourceSlot.a, member.source());
+        try std.testing.expectEqual(@as(u64, 1), member.header().header_sequence);
+        journal.close();
+        try std.testing.expectError(error.WriteFrozen, member.close());
+        try member.close();
+
+        member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+        defer member.deinit();
+        const complete_header = case == .write_after or case == .sync_before or case == .sync_after;
+        try std.testing.expectEqual(if (complete_header) member_api.SourceSlot.b else member_api.SourceSlot.a, member.source());
+        const recovered = try scan(&member);
+        try std.testing.expectEqual(@as(u64, 2), recovered.tail.?.local_sequence);
+        try std.testing.expectEqual(
+            if (complete_header) CheckpointStatus.valid else CheckpointStatus.none,
+            recovered.checkpoint_status,
+        );
+    }
+}
+
+test "checkpoint record sync failure never starts header publication" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try createInitializedMember(tmp.dir, "member", 2);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+    var journal = try Journal.open(&member);
+    defer journal.deinit();
+    const old_state = try journal.state();
+    var fault: member_api.FaultController = .{ .fail_sync_at = 0 };
+    member.setFaultController(&fault);
+
+    try std.testing.expectError(
+        error.InjectedFault,
+        journal.checkpoint(try checkpointProposal(old_state.tail.?)),
+    );
+    try std.testing.expectEqual(@as(u64, 1), fault.write_count);
+    try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+    try std.testing.expectEqualDeep(old_state, try journal.state());
+    try std.testing.expectEqual(@as(u64, 1), member.header().header_sequence);
+    try std.testing.expectEqual(member_api.SourceSlot.a, member.source());
+}
+
+test "checkpoint header overflow occurs after durable append and before header IO" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try createInitializedMember(tmp.dir, "member", 2);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+    var journal = try Journal.open(&member);
+    defer journal.deinit();
+    member.selected_header.header_sequence = std.math.maxInt(u64);
+    var fault: member_api.FaultController = .{};
+    member.setFaultController(&fault);
+
+    try std.testing.expectError(
+        error.HeaderSequenceOverflow,
+        journal.checkpoint(try checkpointProposal((try journal.state()).tail.?)),
+    );
+    try std.testing.expectEqual(@as(u64, 2), (try journal.state()).tail.?.local_sequence);
+    try std.testing.expectEqual(@as(u64, 1), fault.write_count);
+    try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+    try std.testing.expect(!member.isFrozen());
+}
+
+test "checkpoint publication repairs a degraded header pair" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try createInitializedMember(tmp.dir, "member", 2);
+    const file = try tmp.dir.openFile(std.testing.io, "member", .{ .mode = .read_write });
+    try file.writePositionalAll(std.testing.io, &.{0xff}, member_format.encoded_size);
+    file.close(std.testing.io);
+
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+    try std.testing.expect(member.redundancyDegraded());
+    try std.testing.expectEqual(member_api.SourceSlot.a, member.source());
+    var journal = try Journal.open(&member);
+    defer journal.deinit();
+    _ = try journal.checkpoint(try checkpointProposal((try journal.state()).tail.?));
+    try std.testing.expectEqual(member_api.SourceSlot.b, member.source());
+    try std.testing.expect(!member.redundancyDegraded());
 }

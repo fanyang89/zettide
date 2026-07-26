@@ -278,6 +278,36 @@ pub const Member = struct {
         try self.syncLocked();
     }
 
+    pub fn publishCheckpoint(
+        self: *Member,
+        absolute_offset: u64,
+        record_sequence: u64,
+        record_digest: codec.Digest,
+    ) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.isClosed()) return error.MemberClosed;
+        if (self.open_mode != .writable) return error.ReadOnlyMember;
+        if (self.isFrozen()) return error.WriteFrozen;
+
+        var next_header = self.selected_header;
+        next_header.header_sequence = std.math.add(u64, next_header.header_sequence, 1) catch
+            return error.HeaderSequenceOverflow;
+        next_header.checkpoint_offset = absolute_offset;
+        next_header.checkpoint_record_sequence = record_sequence;
+        next_header.checkpoint_record_digest = record_digest;
+        const encoded = try member_format.encode(next_header);
+        const target: SourceSlot = if (self.selected_source == .a) .b else .a;
+        const file_offset: u64 = if (target == .a) 0 else member_format.encoded_size;
+
+        try self.writeHeaderLocked(file_offset, &encoded);
+        try self.syncLocked();
+        self.selected_header = next_header;
+        self.selected_source = target;
+        self.degraded = false;
+    }
+
     fn writeLocked(self: *Member, kind: RegionKind, offset: u64, bytes: []const u8) !void {
         if (self.isClosed()) return error.MemberClosed;
         if (self.open_mode != .writable) return error.ReadOnlyMember;
@@ -299,6 +329,24 @@ pub const Member = struct {
         if (self.fault) |fault| if (fault.pause_after_write) |pause| {
             pause.reached.store(true, .release);
             while (!pause.released.load(.acquire)) std.Thread.yield() catch {};
+        };
+        if (action == .partial or action == .after) {
+            self.freeze();
+            return error.InjectedFault;
+        }
+    }
+
+    fn writeHeaderLocked(self: *Member, offset: u64, bytes: []const u8) !void {
+        self.dirty = true;
+        const action = if (self.fault) |fault| fault.action(.write) else .none;
+        if (action == .before) {
+            self.freeze();
+            return error.InjectedFault;
+        }
+        const write_bytes = if (action == .partial) bytes[0 .. bytes.len / 2] else bytes;
+        self.file.writePositionalAll(self.io, write_bytes, offset) catch |err| {
+            self.freeze();
+            return err;
         };
         if (action == .partial or action == .after) {
             self.freeze();
