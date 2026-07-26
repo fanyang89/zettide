@@ -1,0 +1,402 @@
+const std = @import("std");
+const codec = @import("codec.zig");
+const control_record = @import("control_record.zig");
+const genesis_payload = @import("genesis_payload.zig");
+const member_api = @import("member.zig");
+
+pub const ScanResult = struct {
+    tail: ?control_record.Record = null,
+    tail_raw_record_digest: codec.Digest = @splat(0),
+    tail_physical_slot: ?u64 = null,
+    physical_frontier: u64 = 0,
+    slot_count: u64,
+    zero_hole_count: u64 = 0,
+    invalid_slot_count: u64 = 0,
+    interior_invalid_slot_count: u64 = 0,
+    unresolved_tail_damage: bool = false,
+    journal_full: bool = false,
+};
+
+pub fn scan(member: *member_api.Member) !ScanResult {
+    const header = member.header();
+    const slot_count = header.control.length / control_record.encoded_size;
+    var result: ScanResult = .{ .slot_count = slot_count };
+    var pending_zero_slots: u64 = 0;
+    var pending_invalid_slots: u64 = 0;
+
+    for (0..slot_count) |slot_index| {
+        const slot: u64 = @intCast(slot_index);
+        const offset = std.math.mul(u64, slot, control_record.encoded_size) catch
+            return error.ControlOffsetOverflow;
+        var raw: [control_record.encoded_size]u8 = undefined;
+        try member.read(.control, offset, &raw);
+
+        if (codec.isZero(&raw)) {
+            pending_zero_slots = std.math.add(u64, pending_zero_slots, 1) catch
+                return error.ScanCountOverflow;
+            continue;
+        }
+
+        result.physical_frontier = std.math.add(u64, slot, 1) catch
+            return error.ControlFrontierOverflow;
+        result.zero_hole_count = std.math.add(u64, result.zero_hole_count, pending_zero_slots) catch
+            return error.ScanCountOverflow;
+        pending_zero_slots = 0;
+
+        const record = control_record.decode(&raw) catch {
+            result.invalid_slot_count = std.math.add(u64, result.invalid_slot_count, 1) catch
+                return error.ScanCountOverflow;
+            pending_invalid_slots = std.math.add(u64, pending_invalid_slots, 1) catch
+                return error.ScanCountOverflow;
+            continue;
+        };
+
+        if (!std.mem.eql(u8, &record.set_id, &header.set_id)) return error.ForeignSet;
+        if (!std.mem.eql(u8, &record.member_id, &header.member_id)) return error.ForeignMember;
+
+        if (result.tail) |tail| {
+            if (record.kind == control_record.genesis_kind) return error.SecondGenesisRecord;
+            try control_record.validatePolicy(record);
+            if (record.local_sequence == tail.local_sequence)
+                return error.DuplicateRecordSequence;
+            if (record.local_sequence < tail.local_sequence)
+                return error.RecordSequenceRegression;
+            const expected_sequence = std.math.add(u64, tail.local_sequence, 1) catch
+                return error.RecordSequenceGap;
+            if (record.local_sequence != expected_sequence) return error.RecordSequenceGap;
+            if (!std.mem.eql(u8, &record.previous_record_digest, &result.tail_raw_record_digest))
+                return error.PreviousRecordDigestMismatch;
+            if (!std.mem.eql(u8, &record.previous_history_digest, &tail.history_digest))
+                return error.PreviousHistoryDigestMismatch;
+        } else {
+            _ = try genesis_payload.validateRecord(record);
+        }
+
+        result.interior_invalid_slot_count = std.math.add(
+            u64,
+            result.interior_invalid_slot_count,
+            pending_invalid_slots,
+        ) catch return error.ScanCountOverflow;
+        pending_invalid_slots = 0;
+        result.tail = record;
+        result.tail_raw_record_digest = control_record.recordDigest(&raw);
+        result.tail_physical_slot = slot;
+    }
+
+    result.unresolved_tail_damage = pending_invalid_slots != 0;
+    result.journal_full = result.physical_frontier == result.slot_count;
+    return result;
+}
+
+const member_format = @import("member_format.zig");
+const topology_format = @import("topology.zig");
+
+fn testPayload() genesis_payload.GenesisPayload {
+    return .{
+        .topology = .{
+            .set_id = @splat(0x10),
+            .epoch = 1,
+            .parent_digest = @splat(0),
+            .members = .{
+                .{ .member_id = @splat(0x20), .slot = 0 },
+                .{ .member_id = @splat(0x30), .slot = 1 },
+                .{ .member_id = @splat(0x40), .slot = 2 },
+            },
+        },
+        .layout = .{ .layout_epoch = 1, .topology_epoch = 1, .chunk_size = 1024 * 1024 },
+    };
+}
+
+fn testHeader(slot_count: u64) !member_format.Header {
+    const payload = testPayload();
+    const control_end = 64 * 1024 + slot_count * control_record.encoded_size;
+    const metadata_offset = try codec.alignForward(control_end, 1024 * 1024);
+    const metadata_end = metadata_offset + 256 * 1024;
+    const data_offset = try codec.alignForward(metadata_end, 1024 * 1024);
+    return .{
+        .header_sequence = 1,
+        .set_id = payload.topology.set_id,
+        .member_id = payload.topology.members[0].member_id,
+        .member_slot = 0,
+        .created_ns = 1,
+        .member_bytes = data_offset + 1024 * 1024,
+        .logical_capacity = 1024 * 1024,
+        .control = .{ .offset = 64 * 1024, .length = slot_count * control_record.encoded_size },
+        .metadata = .{ .offset = metadata_offset, .length = 256 * 1024 },
+        .data = .{ .offset = data_offset, .length = 1024 * 1024 },
+        .metadata_block_size = 4096,
+        .metadata_read_size = 512,
+        .metadata_program_size = 512,
+        .chunk_size = 1024 * 1024,
+        .metadata_format_version = 1,
+        .object_format_version = 1,
+        .layout_format_version = 1,
+        .control_record_format_version = 1,
+        .label = try member_format.Label.init("journal-test"),
+        .genesis_topology_digest = try topology_format.digest(payload.topology),
+    };
+}
+
+fn createMember(dir: std.Io.Dir, name: []const u8, slot_count: u64) !member_format.Header {
+    const header = try testHeader(slot_count);
+    const file = try dir.createFile(std.testing.io, name, .{ .read = true });
+    defer file.close(std.testing.io);
+    const bytes = try member_format.encode(header);
+    try file.writePositionalAll(std.testing.io, &bytes, 0);
+    try file.writePositionalAll(std.testing.io, &bytes, member_format.encoded_size);
+    try file.setLength(std.testing.io, header.member_bytes);
+    return header;
+}
+
+fn writeSlot(dir: std.Io.Dir, name: []const u8, header: member_format.Header, slot: u64, bytes: []const u8) !void {
+    const file = try dir.openFile(std.testing.io, name, .{ .mode = .read_write });
+    defer file.close(std.testing.io);
+    try file.writePositionalAll(
+        std.testing.io,
+        bytes,
+        header.control.offset + slot * control_record.encoded_size,
+    );
+}
+
+fn genesisBytes() ![control_record.encoded_size]u8 {
+    const payload = testPayload();
+    return control_record.encode(try genesis_payload.makeRecord(payload.topology.members[0].member_id, payload));
+}
+
+fn nextRecord(previous: control_record.Record, previous_raw: *const [control_record.encoded_size]u8) !control_record.Record {
+    var record: control_record.Record = .{
+        .kind = control_record.writer_fence_kind,
+        .local_sequence = previous.local_sequence + 1,
+        .membership_epoch = previous.membership_epoch,
+        .writer_term = 1,
+        .generation = previous.generation,
+        .set_id = previous.set_id,
+        .member_id = previous.member_id,
+        .mount_session_id = @splat(0x50),
+        .transaction_id = @splat(0x60),
+        .previous_record_digest = control_record.recordDigest(previous_raw),
+        .previous_history_digest = previous.history_digest,
+        .data_root_digest = @splat(0),
+        .topology_digest = previous.topology_digest,
+        .layout_digest = previous.layout_digest,
+    };
+    record.history_digest = try control_record.historyDigest(record);
+    return record;
+}
+
+fn fixChecksum(bytes: *[control_record.encoded_size]u8) void {
+    codec.putInt(
+        u32,
+        bytes,
+        control_record.checksum_offset,
+        codec.crc32c(bytes[0..control_record.checksum_offset]),
+    );
+}
+
+fn mutateDecodedRecord(
+    base: [control_record.encoded_size]u8,
+    record: control_record.Record,
+) [control_record.encoded_size]u8 {
+    var bytes = base;
+    codec.putInt(u16, &bytes, 0x00a, record.kind);
+    codec.putInt(u64, &bytes, 0x020, record.membership_epoch);
+    @memcpy(bytes[0x0b8..0x0d8], &record.history_digest);
+    codec.putInt(u16, &bytes, 0xff0, record.kind);
+    fixChecksum(&bytes);
+    return bytes;
+}
+
+test "empty and complete scans derive holes frontier and full state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try createMember(tmp.dir, "member", 5);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+    var result = try scan(&member);
+    try std.testing.expect(result.tail == null);
+    try std.testing.expectEqual(@as(u64, 0), result.physical_frontier);
+    try std.testing.expectEqual(@as(u64, 0), result.zero_hole_count);
+    try std.testing.expect(!result.unresolved_tail_damage);
+    try member.close();
+
+    const genesis = try genesisBytes();
+    const genesis_record = try control_record.decode(&genesis);
+    const second = try control_record.encode(try nextRecord(genesis_record, &genesis));
+    try writeSlot(tmp.dir, "member", header, 1, &genesis);
+    try writeSlot(tmp.dir, "member", header, 4, &second);
+    member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+    result = try scan(&member);
+    try std.testing.expectEqual(@as(u64, 2), result.tail.?.local_sequence);
+    try std.testing.expectEqual(@as(?u64, 4), result.tail_physical_slot);
+    try std.testing.expectEqual(@as(u64, 5), result.physical_frontier);
+    try std.testing.expectEqual(@as(u64, 3), result.zero_hole_count);
+    try std.testing.expectEqualSlices(u8, &control_record.recordDigest(&second), &result.tail_raw_record_digest);
+    try std.testing.expect(result.journal_full);
+    try member.close();
+}
+
+test "valid retry proves invalid interior damage abandoned" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try createMember(tmp.dir, "member", 5);
+    const genesis = try genesisBytes();
+    const genesis_record = try control_record.decode(&genesis);
+    const second_record = try nextRecord(genesis_record, &genesis);
+    const second = try control_record.encode(second_record);
+    const third = try control_record.encode(try nextRecord(second_record, &second));
+    try writeSlot(tmp.dir, "member", header, 0, &genesis);
+    try writeSlot(tmp.dir, "member", header, 1, &.{0xaa});
+    try writeSlot(tmp.dir, "member", header, 2, &second);
+    try writeSlot(tmp.dir, "member", header, 4, &third);
+
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+    defer member.deinit();
+    const result = try scan(&member);
+    try std.testing.expectEqual(@as(u64, 3), result.tail.?.local_sequence);
+    try std.testing.expectEqual(@as(u64, 1), result.zero_hole_count);
+    try std.testing.expectEqual(@as(u64, 1), result.invalid_slot_count);
+    try std.testing.expectEqual(@as(u64, 1), result.interior_invalid_slot_count);
+    try std.testing.expect(!result.unresolved_tail_damage);
+}
+
+test "trailing and only invalid slots remain unresolved" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var header = try createMember(tmp.dir, "trailing", 3);
+    const genesis = try genesisBytes();
+    try writeSlot(tmp.dir, "trailing", header, 0, &genesis);
+    try writeSlot(tmp.dir, "trailing", header, 2, &.{0xaa});
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "trailing", .read_only);
+    var result = try scan(&member);
+    try std.testing.expect(result.unresolved_tail_damage);
+    try std.testing.expectEqual(@as(u64, 0), result.interior_invalid_slot_count);
+    try member.close();
+
+    header = try createMember(tmp.dir, "invalid", 2);
+    try writeSlot(tmp.dir, "invalid", header, 1, &.{0xbb});
+    member = try member_api.openAt(std.testing.io, tmp.dir, "invalid", .read_only);
+    result = try scan(&member);
+    try std.testing.expect(result.tail == null);
+    try std.testing.expect(result.unresolved_tail_damage);
+    try std.testing.expectEqual(@as(u64, 1), result.invalid_slot_count);
+    try std.testing.expectEqual(@as(u64, 2), result.physical_frontier);
+    try member.close();
+}
+
+test "decoded duplicate gap and digest violations hard fail" {
+    const Case = enum { duplicate, gap, record_digest, history_digest, second_genesis };
+    inline for (std.meta.tags(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const header = try createMember(tmp.dir, "member", 2);
+        const genesis = try genesisBytes();
+        const genesis_record = try control_record.decode(&genesis);
+        var record = try nextRecord(genesis_record, &genesis);
+        switch (case) {
+            .duplicate => {
+                record.local_sequence = 1;
+                record.previous_record_digest = @splat(0);
+            },
+            .gap => record.local_sequence = 3,
+            .record_digest => record.previous_record_digest[0] ^= 1,
+            .history_digest => record.previous_history_digest[0] ^= 1,
+            .second_genesis => record = genesis_record,
+        }
+        record.history_digest = try control_record.historyDigest(record);
+        const bytes = try control_record.encode(record);
+        try writeSlot(tmp.dir, "member", header, 0, &genesis);
+        try writeSlot(tmp.dir, "member", header, 1, &bytes);
+        var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+        defer member.deinit();
+        const expected = switch (case) {
+            .duplicate => error.DuplicateRecordSequence,
+            .gap => error.RecordSequenceGap,
+            .record_digest => error.PreviousRecordDigestMismatch,
+            .history_digest => error.PreviousHistoryDigestMismatch,
+            .second_genesis => error.SecondGenesisRecord,
+        };
+        try std.testing.expectError(expected, scan(&member));
+    }
+}
+
+test "decoded sequence regression hard fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try createMember(tmp.dir, "member", 3);
+    const genesis = try genesisBytes();
+    const genesis_record = try control_record.decode(&genesis);
+    const second_record = try nextRecord(genesis_record, &genesis);
+    const second = try control_record.encode(second_record);
+    var regressed = second_record;
+    regressed.local_sequence = 1;
+    regressed.previous_record_digest = @splat(0);
+    regressed.history_digest = try control_record.historyDigest(regressed);
+    const regression = try control_record.encode(regressed);
+    try writeSlot(tmp.dir, "member", header, 0, &genesis);
+    try writeSlot(tmp.dir, "member", header, 1, &second);
+    try writeSlot(tmp.dir, "member", header, 2, &regression);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+    defer member.deinit();
+    try std.testing.expectError(error.RecordSequenceRegression, scan(&member));
+}
+
+test "decoded identity kind semantic and initial record violations hard fail" {
+    const Case = enum { foreign_set, foreign_member, unknown_kind, semantic, non_genesis_first };
+    inline for (std.meta.tags(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const header = try createMember(tmp.dir, "member", 1);
+        const genesis = try genesisBytes();
+        var record = try control_record.decode(&genesis);
+        const raw = switch (case) {
+            .foreign_set => raw: {
+                record.set_id = @splat(0x71);
+                record.history_digest = try control_record.historyDigest(record);
+                break :raw try control_record.encode(record);
+            },
+            .foreign_member => raw: {
+                record.member_id = @splat(0x72);
+                break :raw try control_record.encode(record);
+            },
+            .unknown_kind => raw: {
+                record.kind = 0x7777;
+                record.history_digest = try control_record.historyDigest(record);
+                break :raw mutateDecodedRecord(genesis, record);
+            },
+            .semantic => raw: {
+                record.membership_epoch = 2;
+                record.history_digest = try control_record.historyDigest(record);
+                break :raw mutateDecodedRecord(genesis, record);
+            },
+            .non_genesis_first => try control_record.encode(try nextRecord(record, &genesis)),
+        };
+        try writeSlot(tmp.dir, "member", header, 0, &raw);
+        var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+        defer member.deinit();
+        const expected = switch (case) {
+            .foreign_set => error.ForeignSet,
+            .foreign_member => error.ForeignMember,
+            .unknown_kind => error.UnsupportedRecordKind,
+            .semantic => error.InvalidGenesisRecord,
+            .non_genesis_first => error.NotGenesisRecord,
+        };
+        try std.testing.expectError(expected, scan(&member));
+    }
+}
+
+test "short reads propagate and the scanner stays inside control" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try createMember(tmp.dir, "member", 1);
+    const raw = try tmp.dir.openFile(std.testing.io, "member", .{ .mode = .read_write });
+    try raw.writePositionalAll(std.testing.io, &.{0xcc}, header.metadata.offset);
+    raw.close(std.testing.io);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+    const result = try scan(&member);
+    try std.testing.expectEqual(@as(u64, 0), result.physical_frontier);
+
+    const truncator = try tmp.dir.openFile(std.testing.io, "member", .{ .mode = .read_write });
+    try truncator.setLength(std.testing.io, header.control.offset + control_record.encoded_size - 1);
+    truncator.close(std.testing.io);
+    try std.testing.expectError(error.TruncatedMember, scan(&member));
+    try member.close();
+}

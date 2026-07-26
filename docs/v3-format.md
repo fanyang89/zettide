@@ -3,8 +3,9 @@
 ## Scope
 
 This document freezes the v3 member header, topology record, replicated layout, genesis payload,
-control record, and commit certificate codecs. It defines no file I/O, member creation, mounting,
-journal scan or append, quorum authority, signatures, manifest, erasure coding, or CLI behavior.
+control record, commit certificate codecs, and member-local control journal scan. It defines no
+member creation, mounting, journal append or repair, quorum authority, signatures, manifest,
+erasure coding, or CLI behavior.
 A volume containing only these records is not mountable.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
@@ -146,7 +147,8 @@ issuing file I/O. A nonempty write is dirty before the underlying I/O starts. An
 write or sync failure freezes future writes and syncs while reads remain available. A dirty,
 unfrozen close syncs the file. Close waits for the member mutex without cancellation, always
 releases the lock and file resource, reports the first durability error, and is idempotent. This
-boundary performs no journal scan and defines no member creation API.
+boundary defines no member creation API. The control journal scanner uses its exact region reads
+but never writes through it.
 
 ## Topology Record
 
@@ -336,6 +338,33 @@ decode verify the stored value against this canonical calculation.
 
 The committed control-record fixture has record digest
 `d6d8f95afb52b9b488823c3380eff25e97b649b970fb7d5e92598ed49d93f785`.
+
+## Control Journal Scan
+
+The member-local scanner reads every 4096-byte slot in the control region. An all-zero slot is a
+hole, not an end marker. A nonzero slot advances the physical frontier to one past its slot, so the
+frontier is one past the highest nonzero slot and the journal is full exactly when the frontier
+equals the slot count. Zero holes are zero slots below that frontier. The checkpoint header fields
+are ignored; they are hints and cannot skip a scan prefix or establish authority.
+
+A nonzero slot that fails structural control-record decoding is counted as invalid and consumed,
+then scanning continues. A later accepted record that directly extends the preceding accepted
+record proves intervening invalid slots to be abandoned interior damage. Invalid slots not followed
+by such an accepted extension are unresolved tail damage. An empty journal containing only invalid
+slots therefore has no tail and has unresolved tail damage. Callers must not treat unresolved tail
+damage as writable space.
+
+Every decoded record is a hard validation boundary. Its set and member IDs must match the selected
+member header, its kind and semantic policy must be supported, and its stored history digest has
+already passed structural decoding. The first accepted record must be a fully validated genesis at
+local sequence 1, including its embedded topology and layout. A later genesis is invalid.
+Subsequent local sequences must increase by exactly one, their previous history digest must equal
+the preceding accepted history digest, and their previous record digest must equal BLAKE3-256 of
+bytes `[0, 4092)` from the preceding accepted slot as read. Duplicate, regressed, or gapped
+sequences, foreign identity, unsupported or semantically invalid records, and either digest
+mismatch abort the scan. The scanner does not choose a longest chain, append, repair, update
+checkpoint hints, or determine quorum authority. A structurally and semantically valid final record
+is accepted without inferring whether another member acknowledged it.
 
 ## Commit Certificate
 
