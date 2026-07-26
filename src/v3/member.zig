@@ -81,6 +81,7 @@ pub const Member = struct {
     dirty: bool = false,
     frozen: std.atomic.Value(bool) = .init(false),
     closed: std.atomic.Value(bool) = .init(false),
+    journal_claimed: std.atomic.Value(bool) = .init(false),
 
     pub fn openAt(io: Io, parent: Io.Dir, basename: []const u8, open_mode: OpenMode) !Member {
         if (!validBasename(basename)) return error.InvalidBasename;
@@ -151,6 +152,15 @@ pub const Member = struct {
 
     pub fn setFaultController(self: *Member, fault: ?*FaultController) void {
         self.fault = fault;
+    }
+
+    pub fn claimJournal(self: *Member) !void {
+        if (self.journal_claimed.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
+            return error.JournalAlreadyOpen;
+    }
+
+    pub fn releaseJournal(self: *Member) void {
+        self.journal_claimed.store(false, .release);
     }
 
     pub fn read(self: *Member, kind: RegionKind, offset: u64, buffer: []u8) !void {

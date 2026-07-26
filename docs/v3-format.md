@@ -374,10 +374,14 @@ member acknowledged it.
 
 ## Control Journal Append
 
-Each writable member has at most one active `Journal` owner. Opening that owner performs a full
-control scan and retains the resulting tail, digests, physical frontier, and damage state. Appends
-are serialized by the journal mutex and never accept a caller-supplied scan result or physical
-slot. The API does not expose overwrite, wraparound, or raw control-slot writes.
+Each member enforces at most one active `Journal` owner with an atomic runtime claim. Opening a
+journal claims the member before performing a full control scan and releases the claim if scanning
+fails. A journal retains the resulting tail, digests, physical frontier, and damage state. Appends
+and state snapshots are serialized by the journal mutex and never accept a caller-supplied scan
+result or physical slot. The API does not expose overwrite, wraparound, or raw control-slot writes.
+Journal close is idempotent and releases the member claim, allowing a new owner to open and rescan.
+A closed journal rejects append and state operations. If the member closes first, the journal can
+only be closed or deinitialized; its close still releases the claim.
 
 An append proposal supplies record semantics and payload, but not chain authority. The journal
 replaces set ID, member ID, local sequence, previous record digest, previous history digest, and
