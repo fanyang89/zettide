@@ -2,9 +2,10 @@
 
 ## Scope
 
-This document freezes the v3 member header, topology record, and replicated layout codecs. It
-defines no file I/O, member creation, mounting, topology journal, manifest, erasure coding, or
-CLI behavior. A volume containing only these records is not mountable.
+This document freezes the v3 member header, topology record, replicated layout, control record,
+and commit certificate codecs. It defines no file I/O, member creation, mounting, journal scan or
+append, quorum authority, signatures, manifest, erasure coding, or CLI behavior. A volume
+containing only these records is not mountable.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
 serialized Zig or native ABI structure. Each header copy is exactly 4096 bytes.
@@ -205,3 +206,91 @@ roles. Header validation is also pure: callers first verify member and genesis i
 layout validation checks exactly three headers, matching chunk sizes, and supported layout
 format version. It does not select member authority. Member-file preallocation is capacity
 policy and is not encoded in the layout.
+
+## Control Record
+
+A control record is exactly 4096 bytes. Its codec and validation are pure: they perform no
+journal I/O, recovery scanning, quorum selection, or authority decisions. All integers are
+little-endian.
+
+| Offset | Width | Field |
+|---:|---:|---|
+| `0x000` | 8 | Magic `DDVCTL1\0` |
+| `0x008` | 2 | Envelope version, 1 |
+| `0x00a` | 2 | Record kind |
+| `0x00c` | 4 | Encoded size, 4096 |
+| `0x010` | 2 | Header size, 320 |
+| `0x012` | 2 | Header flags, zero |
+| `0x014` | 4 | Payload length, at most 3752 |
+| `0x018` | 8 | Local record sequence |
+| `0x020` | 8 | Membership epoch |
+| `0x028` | 8 | Writer term |
+| `0x030` | 8 | Generation |
+| `0x038` | 16 | Set ID |
+| `0x048` | 16 | Member ID |
+| `0x058` | 16 | Mount session ID |
+| `0x068` | 16 | Transaction ID |
+| `0x078` | 32 | Previous local record digest |
+| `0x098` | 32 | Previous history digest |
+| `0x0b8` | 32 | Current history digest |
+| `0x0d8` | 32 | Data root digest |
+| `0x0f8` | 32 | Topology digest |
+| `0x118` | 32 | Layout digest |
+| `0x138` | 8 | Reserved, zero |
+| `0x140` | 3752 | Payload followed by zero padding through `0xfe8` |
+| `0xfe8` | 8 | Repeated local sequence |
+| `0xff0` | 2 | Repeated record kind |
+| `0xff2` | 2 | Footer flags, zero |
+| `0xff4` | 4 | Repeated payload length |
+| `0xff8` | 4 | Footer magic `CTL!` |
+| `0xffc` | 4 | CRC32C of bytes `[0, 4092)` |
+
+The record digest is BLAKE3-256 over canonical bytes `[0, 4092)` and excludes only the final
+CRC. Decoding copies the payload into a fixed-capacity owned value. Unused owned capacity and
+wire padding are zero.
+
+Kinds have stable values: genesis `1`, writer fence `2`, generation prepare `3`, generation
+commit `4`, membership prepare `5`, membership commit `6`, mount dirty `7`, clean shutdown `8`,
+and checkpoint `9`. Structural decoding preserves unknown kinds. Separate kind policy rejects
+them before use.
+
+Sequence and membership epoch are nonzero. Set and member IDs are nonzero and distinct.
+Topology and layout digests are nonzero. Sequence 1 has a zero previous local record digest;
+later sequences have a nonzero digest. Genesis has zero term, generation, session, transaction,
+previous history, and data root. Other kinds have a nonzero previous history. Generation prepare
+and commit additionally have nonzero term, generation, session, transaction, and data root.
+
+The history digest is BLAKE3-256 over the following concatenation, with integers in
+little-endian: the 16-byte domain `DDVCTL1-HISTORY\0`, kind, set ID, membership epoch, writer
+term, generation, mount session ID, transaction ID, previous history digest, data root digest,
+topology digest, layout digest, payload length, and payload. It excludes member ID, local
+sequence, previous local record digest, stored current history digest, footer, and CRC. Encode and
+decode verify the stored value against this canonical calculation.
+
+The committed control-record fixture has record digest
+`d6d8f95afb52b9b488823c3380eff25e97b649b970fb7d5e92598ed49d93f785`.
+
+## Commit Certificate
+
+A generation commit payload is exactly one 192-byte commit certificate. Generation prepare
+payloads remain opaque.
+
+| Offset | Width | Field |
+|---:|---:|---|
+| `0x00` | 8 | Magic `DDVCERT1` |
+| `0x08` | 2 | Version, 1 |
+| `0x0a` | 2 | Attestation count, 2 |
+| `0x0c` | 4 | Flags, zero |
+| `0x10` | 80 | Attestation A |
+| `0x60` | 80 | Attestation B |
+| `0xb0` | 12 | Reserved, zero |
+| `0xbc` | 4 | CRC32C of bytes `[0, 188)` |
+
+Each attestation contains a 16-byte member ID, a 32-byte prepare record digest, and a 32-byte
+prepare history digest. Encoding orders attestations by ascending member ID. Member IDs are
+distinct, all digests are nonzero, and both prepare history digests are identical. The
+certificate digest is BLAKE3-256 over bytes `[0, 188)` and excludes the CRC. Pure topology
+validation requires both members to be current voters. This is a two-voter crash and hardware
+integrity check, not a signature, Byzantine proof, journal operation, or quorum authority claim.
+The committed certificate fixture has certificate digest
+`081fc29e4f925cdf4f24d638c0e14b23c1d5c0447f481ae1b75dd765e9868e07`.
