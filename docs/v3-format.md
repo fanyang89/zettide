@@ -256,7 +256,8 @@ them before use.
 
 Sequence and membership epoch are nonzero. Set and member IDs are nonzero and distinct.
 Topology and layout digests are nonzero. Sequence 1 has a zero previous local record digest;
-later sequences have a nonzero digest. Genesis has zero term, generation, session, transaction,
+later sequences have a nonzero digest. Genesis is membership epoch 1 and local sequence 1, so its
+previous local record digest is zero. It also has zero term, generation, session, transaction,
 previous history, and data root. Other kinds have a nonzero previous history. Generation prepare
 and commit additionally have nonzero term, generation, session, transaction, and data root.
 

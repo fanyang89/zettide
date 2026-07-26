@@ -206,7 +206,8 @@ pub fn validatePolicy(record: Record) !void {
     try checkKindPolicy(record);
     try validateStructural(record);
     if (record.kind == genesis_kind) {
-        if (record.writer_term != 0 or record.generation != 0 or
+        if (record.membership_epoch != 1 or record.local_sequence != 1 or
+            record.writer_term != 0 or record.generation != 0 or
             !codec.isZero(&record.mount_session_id) or !codec.isZero(&record.transaction_id) or
             !codec.isZero(&record.previous_history_digest) or !codec.isZero(&record.data_root_digest))
             return error.InvalidGenesisRecord;
@@ -486,6 +487,31 @@ test "unknown kind structural decode is separate from policy" {
     record = try decode(&bytes);
     try std.testing.expectEqual(@as(u16, 0x7777), record.kind);
     try std.testing.expectError(error.UnsupportedRecordKind, validatePolicy(record));
+}
+
+test "genesis policy requires initial epoch and local sequence" {
+    var genesis = try testRecord(genesis_kind);
+    genesis.local_sequence = 1;
+    genesis.membership_epoch = 1;
+    genesis.writer_term = 0;
+    genesis.generation = 0;
+    genesis.mount_session_id = @splat(0);
+    genesis.transaction_id = @splat(0);
+    genesis.previous_record_digest = @splat(0);
+    genesis.previous_history_digest = @splat(0);
+    genesis.data_root_digest = @splat(0);
+    genesis.history_digest = try historyDigest(genesis);
+    const bytes = try encode(genesis);
+    try validatePolicy(try decode(&bytes));
+
+    var wrong_epoch = genesis;
+    wrong_epoch.membership_epoch = 2;
+    try std.testing.expectError(error.InvalidGenesisRecord, validatePolicy(wrong_epoch));
+
+    var wrong_sequence = genesis;
+    wrong_sequence.local_sequence = 2;
+    wrong_sequence.previous_record_digest = @splat(1);
+    try std.testing.expectError(error.InvalidGenesisRecord, validatePolicy(wrong_sequence));
 }
 
 test "record framing chain and semantic policy failures" {
