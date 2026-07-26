@@ -23,6 +23,7 @@ pub const Volume = struct {
     link_counts: std.AutoHashMap(object_format.ObjectId, u64),
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
     reservation_blocks: u64 = 0,
+    object_transaction_mutex: Io.Mutex,
 
     pub fn create(io: Io, path: []const u8, logical_size: u64, label: []const u8) !void {
         var header = try container.Header.init(io, logical_size, label);
@@ -102,6 +103,7 @@ pub const Volume = struct {
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.reservation_blocks = 0;
+        result.object_transaction_mutex = .init;
         return result;
     }
 
@@ -242,6 +244,8 @@ pub const Volume = struct {
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
         if (info.type != c.LFS_TYPE_DIR) {
+            try self.object_transaction_mutex.lock(self.io);
+            defer self.object_transaction_mutex.unlock(self.io);
             const object_ref = try self.store().readRef(path);
             try self.store().updateMetadata(object_ref.object_id, value);
             self.updateOpenMetadata(object_ref.object_id, value);
@@ -476,6 +480,13 @@ pub const Volume = struct {
     }
 
     pub fn openObject(self: *Volume, handle: *FileHandle, object_id: object_format.ObjectId, flags: c_int) !void {
+        if (flags & c.LFS_O_TRUNC == 0) return self.openObjectUnlocked(handle, object_id, flags);
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        return self.openObjectUnlocked(handle, object_id, flags);
+    }
+
+    fn openObjectUnlocked(self: *Volume, handle: *FileHandle, object_id: object_format.ObjectId, flags: c_int) !void {
         const old_head = try self.store().readHead(object_id);
         const head = if (flags & c.LFS_O_TRUNC != 0) try self.store().truncate(object_id, 0) else old_head;
         if (flags & c.LFS_O_TRUNC != 0) try self.replaceReservation(old_head, head);
@@ -515,6 +526,8 @@ pub const Volume = struct {
 
     pub fn writeFile(self: *Volume, handle: *FileHandle, data: []const u8, offset: u64) !usize {
         if (!handle.writable) return error.AccessDenied;
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         const effective_offset = if (handle.append)
             (try self.store().readHead(handle.object_id)).logical_size
         else
@@ -532,6 +545,8 @@ pub const Volume = struct {
 
     pub fn truncateFile(self: *Volume, handle: *FileHandle, size: u64) !void {
         if (!handle.writable) return error.AccessDenied;
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         const old_head = try self.store().readHead(handle.object_id);
         const head = try self.store().truncate(handle.object_id, size);
         try self.replaceReservation(old_head, head);
@@ -543,6 +558,8 @@ pub const Volume = struct {
         if (length == 0) return error.InvalidArgument;
         const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
         if (end > object_format.max_file_size) return error.FileTooLarge;
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         const old_head = try self.store().readHead(handle.object_id);
         const proposed = try self.store().reservationProposal(handle.object_id, offset, length);
         const old_blocks = try self.reservationBlocks(old_head);
@@ -559,21 +576,29 @@ pub const Volume = struct {
     }
 
     pub fn syncFile(self: *Volume, handle: *FileHandle) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         self.device.sync() catch return error.InputOutput;
         handle.original_metadata = handle.metadata;
     }
 
     pub fn sync(self: *Volume) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         self.device.sync() catch return error.InputOutput;
     }
 
     pub fn persistMetadata(self: *Volume, handle: *FileHandle) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         try self.store().updateMetadata(handle.object_id, handle.metadata);
         self.updateOpenMetadata(handle.object_id, handle.metadata);
         handle.original_metadata = handle.metadata;
     }
 
     pub fn setObjectMetadata(self: *Volume, object_id: object_format.ObjectId, value: metadata.Metadata) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         try self.store().updateMetadata(object_id, value);
         self.updateOpenMetadata(object_id, value);
     }
@@ -583,6 +608,8 @@ pub const Volume = struct {
         object_id: object_format.ObjectId,
         patch: metadata.Patch,
     ) !object_format.ObjectHead {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         const head = try self.store().patchMetadata(object_id, patch);
         self.updateOpenMetadata(object_id, head.metadata);
         return head;

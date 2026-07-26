@@ -21,6 +21,15 @@ fn openVolume(path: []const u8) !Volume {
     return Volume.open(std.testing.io, path, true);
 }
 
+fn writeFileWorker(
+    volume: *Volume,
+    handle: *FileHandle,
+    completed: *std.atomic.Value(bool),
+) !usize {
+    defer completed.store(true, .release);
+    return volume.writeFile(handle, "serialized", 0);
+}
+
 fn readReservations(
     volume: *Volume,
     object_id: devdrive.object_format.ObjectId,
@@ -545,6 +554,51 @@ test "two writable handles preserve non-overlapping writes" {
     try std.testing.expectEqual(actual.len, try volume.readFile(&reader, &actual, 0));
     try std.testing.expectEqualStrings("AABB", &actual);
     try volume.closeFile(&reader);
+}
+
+test "write waits for the object transaction lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/contended", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+
+    try volume.object_transaction_mutex.lock(std.testing.io);
+    var mutex_locked = true;
+    defer if (mutex_locked) volume.object_transaction_mutex.unlock(std.testing.io);
+
+    var completed: std.atomic.Value(bool) = .init(false);
+    var future = std.testing.io.async(writeFileWorker, .{ &volume, &file, &completed });
+    var future_pending = true;
+    defer if (future_pending) {
+        if (mutex_locked) {
+            volume.object_transaction_mutex.unlock(std.testing.io);
+            mutex_locked = false;
+        }
+        _ = future.cancel(std.testing.io) catch 0;
+    };
+
+    while (volume.object_transaction_mutex.state.load(.acquire) != .contended) {
+        try std.testing.expect(!completed.load(.acquire));
+        try std.Thread.yield();
+    }
+    try std.testing.expect(!completed.load(.acquire));
+
+    volume.object_transaction_mutex.unlock(std.testing.io);
+    mutex_locked = false;
+    const result = future.await(std.testing.io);
+    future_pending = false;
+    try std.testing.expectEqual(@as(usize, "serialized".len), try result);
+
+    var actual: ["serialized".len]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+    try std.testing.expectEqualStrings("serialized", &actual);
+    try volume.closeFile(&file);
 }
 
 test "metadata patches preserve two-handle write and truncate updates" {
