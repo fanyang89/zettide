@@ -5,6 +5,7 @@ pub const journal = @import("journal.zig");
 pub const layout = @import("layout.zig");
 pub const member = @import("member.zig");
 pub const member_format = @import("member_format.zig");
+pub const member_set = @import("member_set.zig");
 pub const topology = @import("topology.zig");
 
 test {
@@ -15,5 +16,6 @@ test {
     _ = layout;
     _ = member;
     _ = member_format;
+    _ = member_set;
     _ = topology;
 }

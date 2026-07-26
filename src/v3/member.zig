@@ -137,8 +137,8 @@ pub const Member = struct {
         genesis_payload: genesis_payload_format.GenesisPayload,
         options: CreateOptions,
     ) !Member {
-        if (!validBasename(basename)) return error.InvalidBasename;
-        const encoded_header = try validateCreate(initial_header, genesis_payload);
+        try validateCreateAt(basename, initial_header, genesis_payload);
+        const encoded_header = try member_format.encode(initial_header);
         const genesis_record = try genesis_payload_format.makeRecord(initial_header.member_id, genesis_payload);
         const encoded_genesis = try control_record.encode(genesis_record);
 
@@ -438,11 +438,13 @@ pub fn createAt(
     return Member.createAt(io, parent, basename, header, genesis_payload, options);
 }
 
-fn validateCreate(
+pub fn validateCreateAt(
+    basename: []const u8,
     header: member_format.Header,
     genesis_payload: genesis_payload_format.GenesisPayload,
-) ![member_format.encoded_size]u8 {
-    const encoded_header = try member_format.encode(header);
+) !void {
+    if (!validBasename(basename)) return error.InvalidBasename;
+    _ = try member_format.encode(header);
     if (header.header_sequence != 1) return error.InvalidInitialHeaderSequence;
     if (header.checkpoint_offset != 0 or header.checkpoint_record_sequence != 0 or
         !codec.isZero(&header.checkpoint_record_digest)) return error.InvalidInitialCheckpoint;
@@ -454,7 +456,6 @@ fn validateCreate(
     if (header.chunk_size != genesis_payload.layout.chunk_size) return error.ChunkSizeMismatch;
     const record = try genesis_payload_format.makeRecord(header.member_id, genesis_payload);
     _ = try genesis_payload_format.validateRecord(record);
-    return encoded_header;
 }
 
 fn createWrite(

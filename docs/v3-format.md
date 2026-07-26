@@ -3,9 +3,9 @@
 ## Scope
 
 This document freezes the v3 member header, topology record, replicated layout, genesis payload,
-control record, commit certificate codecs, and member-local creation, control journal scan, and append. It defines no
-member-set creation, mounting, journal repair, quorum authority, signatures, manifest,
-erasure coding, or CLI behavior.
+control record, commit certificate codecs, member-local creation, fixed-three-member set creation,
+control journal scan, and append. It defines no mounting, existing-set open, journal repair, quorum
+authority, signatures, manifest, erasure coding, or CLI behavior.
 A volume containing only these records is not mountable.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
@@ -172,6 +172,16 @@ diagnosis or recovery; it never unlinks. A Linux parent-directory sync failure c
 complete member that can
 be reopened. Other targets skip parent-directory sync, so successful return does not guarantee
 directory-entry durability there. The control journal scanner uses exact region reads.
+
+The fixed-three-member creation boundary accepts three borrowed directory handles and basenames in
+topology slot order. Before creating any file, it validates every member input and cross-validates
+the complete header set against the genesis topology and layout. Reusing the same borrowed directory
+handle and basename for multiple slots is rejected. It then creates members in slot order using the
+single-member durability protocol. A failure closes and unlocks every member already
+returned, retains every file whose creation was attempted, and does not attempt later slots. Set
+close attempts all three member closes, reports the first error, and is idempotent. The set owns only
+the returned member handles; caller-owned directories and basename storage remain borrowed. This
+boundary does not open existing sets, select authority, establish quorum, or repair partial creation.
 
 ## Topology Record
 
