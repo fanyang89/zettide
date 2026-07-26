@@ -340,6 +340,20 @@ write threshold `k+m`. These values are canonical and cannot be reduced after me
 access is read-write only when active members meet full profile width, read-only while only the read
 threshold remains, and unavailable below the read threshold.
 
+### Dynamic Pool Genesis
+
+Dynamic Pools use a separate 3520-byte `DDVGEN2\0` genesis payload containing one canonical
+3200-byte topology and one canonical 256-byte dynamic layout. The topology and layout start at
+offsets `0x020` and `0x0ca0`; bytes after the layout through offset 3516 are reserved and zero. The
+final field is CRC32C over bytes `[0, 3516)`. The topology and layout must both be epoch 1, every
+initial member must be active, and the topology has a zero parent digest.
+
+Every initial member receives the same shared genesis history but a member-local record identity.
+Non-voter data members are valid genesis members. A dynamic member header sets the dynamic-Pool
+incompat feature, records its birth topology member count and digest, uses layout format version 2,
+and binds its stable slot and role flags to its birth descriptor. These birth fields never claim the
+member's current role after later membership transitions.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.

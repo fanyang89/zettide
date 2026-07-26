@@ -777,7 +777,7 @@ test "open selects independent headers and enforces policy and exact length" {
     try createRawMember(tmp.dir, "member", unsupported, unsupported, unsupported.member_bytes);
     try std.testing.expectError(error.UnsupportedMetadataFormat, openAt(std.testing.io, tmp.dir, "member", .read_only));
     unsupported = header;
-    unsupported.incompat_features = 1;
+    unsupported.incompat_features = 2;
     try createRawMember(tmp.dir, "member", unsupported, unsupported, unsupported.member_bytes);
     try std.testing.expectError(error.UnsupportedIncompatFeature, openAt(std.testing.io, tmp.dir, "member", .read_only));
     unsupported = header;

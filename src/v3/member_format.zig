@@ -12,10 +12,13 @@ pub const digest_blake3_256: u16 = 1;
 pub const supported_metadata_format_version: u16 = 1;
 pub const supported_object_format_version: u16 = 1;
 pub const supported_layout_format_version: u16 = 1;
+pub const dynamic_layout_format_version: u16 = 2;
 pub const supported_control_record_format_version: u16 = 1;
 pub const supported_compat_features: u64 = 0;
 pub const supported_ro_compat_features: u64 = 0;
-pub const supported_incompat_features: u64 = 0;
+pub const dynamic_pool_incompat_feature: u64 = 1 << 0;
+pub const supported_incompat_features: u64 = dynamic_pool_incompat_feature;
+pub const max_dynamic_member_count: u16 = 96;
 
 const magic = [8]u8{ 'D', 'D', 'V', 'M', 'E', 'M', '3', 0 };
 
@@ -76,6 +79,10 @@ pub const Header = struct {
 
 pub const OpenMode = enum { read_only, writable };
 
+pub fn isDynamicPool(header: Header) bool {
+    return header.incompat_features & dynamic_pool_incompat_feature != 0;
+}
+
 pub fn checkFeaturePolicy(header: Header, mode: OpenMode) !void {
     if (header.incompat_features & ~supported_incompat_features != 0)
         return error.UnsupportedIncompatFeature;
@@ -88,7 +95,11 @@ pub fn checkFormatPolicy(header: Header) !void {
         return error.UnsupportedMetadataFormat;
     if (header.object_format_version != supported_object_format_version)
         return error.UnsupportedObjectFormat;
-    if (header.layout_format_version != supported_layout_format_version)
+    const expected_layout_version: u16 = if (isDynamicPool(header))
+        dynamic_layout_format_version
+    else
+        supported_layout_format_version;
+    if (header.layout_format_version != expected_layout_version)
         return error.UnsupportedLayoutFormat;
     if (header.control_record_format_version != supported_control_record_format_version)
         return error.UnsupportedControlRecordFormat;
@@ -196,9 +207,16 @@ pub fn validate(header: Header) !void {
     if (header.header_sequence == 0) return error.InvalidSequence;
     if (codec.isZero(&header.set_id) or codec.isZero(&header.member_id) or
         std.mem.eql(u8, &header.set_id, &header.member_id)) return error.InvalidIdentity;
-    if (header.member_count != initial_member_count or header.member_slot >= initial_member_count)
-        return error.InvalidMemberPlacement;
-    if (header.role_flags != known_role_flags) return error.InvalidRoleFlags;
+    if (isDynamicPool(header)) {
+        if (header.member_count == 0 or header.member_count > max_dynamic_member_count)
+            return error.InvalidMemberPlacement;
+        if (header.role_flags & ~known_role_flags != 0 or header.role_flags & data_role == 0)
+            return error.InvalidRoleFlags;
+    } else {
+        if (header.member_count != initial_member_count or header.member_slot >= initial_member_count)
+            return error.InvalidMemberPlacement;
+        if (header.role_flags != known_role_flags) return error.InvalidRoleFlags;
+    }
     if (header.checksum_algorithm != checksum_crc32c or header.digest_algorithm != digest_blake3_256)
         return error.UnsupportedAlgorithm;
     try header.label.validate();
@@ -527,11 +545,45 @@ test "feature policy matrix" {
     header.ro_compat_features = 1;
     try checkFeaturePolicy(header, .read_only);
     try std.testing.expectError(error.UnsupportedReadOnlyFeature, checkFeaturePolicy(header, .writable));
-    header.incompat_features = 1;
+    header.incompat_features = 2;
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .read_only));
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .writable));
     const bytes = try encode(header);
     _ = try decode(&bytes);
+}
+
+test "dynamic pool feature gates sparse placement data-only roles and layout v2" {
+    var header = testHeader();
+    header.incompat_features = dynamic_pool_incompat_feature;
+    header.member_count = 12;
+    header.member_slot = 77;
+    header.role_flags = data_role;
+    header.layout_format_version = dynamic_layout_format_version;
+    try validate(header);
+    try checkOpenPolicy(header, .writable);
+    const bytes = try encode(header);
+    const decoded = try decode(&bytes);
+    try std.testing.expect(isDynamicPool(decoded));
+
+    header.member_count = 0;
+    try std.testing.expectError(error.InvalidMemberPlacement, validate(header));
+    header.member_count = max_dynamic_member_count + 1;
+    try std.testing.expectError(error.InvalidMemberPlacement, validate(header));
+    header.member_count = 12;
+    header.role_flags = metadata_role;
+    try std.testing.expectError(error.InvalidRoleFlags, validate(header));
+}
+
+test "legacy headers do not silently accept dynamic placement or layout" {
+    var header = testHeader();
+    header.member_slot = 77;
+    try std.testing.expectError(error.InvalidMemberPlacement, validate(header));
+    header = testHeader();
+    header.role_flags = data_role;
+    try std.testing.expectError(error.InvalidRoleFlags, validate(header));
+    header = testHeader();
+    header.layout_format_version = dynamic_layout_format_version;
+    try std.testing.expectError(error.UnsupportedLayoutFormat, checkOpenPolicy(header, .read_only));
 }
 
 test "subformat policy rejects each unknown version for every open mode" {
