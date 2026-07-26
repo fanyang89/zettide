@@ -323,6 +323,23 @@ permitted when control quorum is available. Falling below the read threshold mak
 The runtime never automatically lowers replica count, changes an EC profile, or changes protection
 mode after forced member removal.
 
+### Dynamic Pool Layout
+
+Dynamic Pools use a separate 256-byte version 2 layout envelope with magic `DDVLAY2\0`. Unlike the
+fixed-three version 1 replica layout, it stores a protection profile and does not embed member slots.
+Topology determines eligible data members, so adding or removing a member does not implicitly change
+the protection profile. The envelope stores layout and source topology epochs, chunk size, data and
+parity fragment counts, durable write threshold, read threshold, and zero flags. Bytes `[48, 252)`
+are reserved and zero; the final field is CRC32C of bytes `[0, 252)`. Its digest is BLAKE3-256 over
+the same range.
+
+Kinds are unprotected `1`, replicated `2`, and erasure coded `3`. Unprotected is exactly `1+0` with
+write and read threshold one. Replicated is exactly three copies, durable threshold two, and read
+threshold one. EC requires nonzero `k` data and `m` parity fragments, read threshold `k`, and durable
+write threshold `k+m`. These values are canonical and cannot be reduced after member loss. Pool data
+access is read-write only when active members meet full profile width, read-only while only the read
+threshold remains, and unavailable below the read threshold.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.
