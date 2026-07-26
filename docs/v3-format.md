@@ -3,8 +3,8 @@
 ## Scope
 
 This document freezes the v3 member header, topology record, replicated layout, genesis payload,
-control record, commit certificate codecs, and member-local control journal scan and append. It defines no
-member creation, mounting, journal repair, quorum authority, signatures, manifest,
+control record, commit certificate codecs, and member-local creation, control journal scan, and append. It defines no
+member-set creation, mounting, journal repair, quorum authority, signatures, manifest,
 erasure coding, or CLI behavior.
 A volume containing only these records is not mountable.
 
@@ -130,8 +130,8 @@ sequences with different checkpoint semantics are ambiguous; identical copies se
 
 ## Member File Boundary
 
-The v3 member API opens an existing file relative to a directory using a single-component
-basename. It does not create member files or expose the underlying file handle. Read-only opens
+The v3 member API opens or exclusively creates a file relative to a caller-owned directory using a
+single-component basename. It does not expose the underlying file handle. Read-only opens
 take a shared non-blocking advisory lock; writable opens take an exclusive non-blocking lock.
 Header A at offset 0 and header B at offset 4096 are read and decoded independently after locking.
 A single valid copy permits a degraded open. When neither copy is valid, the first transport read
@@ -149,8 +149,24 @@ between them; success clears the dirty state. Any injected or real write or sync
 future writes and syncs while reads remain available. A dirty,
 unfrozen close syncs the file. Close waits for the member mutex without cancellation, always
 releases the lock and file resource, reports the first durability error, and is idempotent. This
-boundary defines no member creation API. The control journal scanner uses its exact region reads
-but never writes through it.
+boundary also supports initialized member creation. Create validates the complete header and genesis
+payload before filesystem mutation. The initial header must have sequence 1, a zero checkpoint trio,
+writable feature and subformat policy, and `member_bytes` no larger than `maxInt(i64)`. Genesis
+topology identity, member placement and roles, topology digest, layout, and chunk size must match the
+header. Creation uses exclusive create and an exclusive non-blocking lock, so an existing path is
+reported as `PathAlreadyExists` without truncation.
+
+After extending the file, create publishes in this exact durability order: whole-file sync, write the
+member-local genesis to control slot 0, whole-file sync, write header B at offset 4096, whole-file
+sync, write header A at offset 0, whole-file sync, then on Linux sync the parent directory. The Linux
+step opens and closes a sync-capable `.` duplicate relative to the borrowed `Dir`; it never closes or
+takes ownership of the caller's handle. Thus no normally openable header exists before genesis is
+durable, and B is recoverable before A is published. A successful create returns a writable, clean,
+nondegraded member selected from A. Every failure unlocks and closes but retains the created file for
+diagnosis or recovery; it never unlinks. A Linux parent-directory sync failure can therefore leave a
+complete member that can
+be reopened. Other targets skip parent-directory sync, so successful return does not guarantee
+directory-entry durability there. The control journal scanner uses exact region reads.
 
 ## Topology Record
 
@@ -376,7 +392,12 @@ member acknowledged it.
 
 Each member enforces at most one active `Journal` owner with an atomic runtime claim. Opening a
 journal claims the member before performing a full control scan and releases the claim if scanning
-fails. A journal retains the resulting tail, digests, physical frontier, and damage state. Appends
+or open policy fails. A journal requires a valid genesis: an empty journal is `MissingGenesis`, and
+one containing only invalid records is `JournalNeedsRecovery`. Writable open also rejects any
+unresolved tail damage with `JournalNeedsRecovery`; read-only open accepts valid genesis plus
+unresolved tail damage for diagnostics. `Member.openAt` remains a low-level header and file boundary,
+so operational callers complete open with `Journal.open`. A journal retains the resulting tail,
+digests, physical frontier, and damage state. Appends
 and state snapshots are serialized by the journal mutex and never accept a caller-supplied scan
 result or physical slot. The API does not expose overwrite, wraparound, or raw control-slot writes.
 Journal close is idempotent and releases the member claim, allowing a new owner to open and rescan.

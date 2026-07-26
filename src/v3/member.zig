@@ -1,11 +1,57 @@
 const std = @import("std");
+const builtin = @import("builtin");
+const codec = @import("codec.zig");
+const control_record = @import("control_record.zig");
+const genesis_payload_format = @import("genesis_payload.zig");
 const member_format = @import("member_format.zig");
+const topology_format = @import("topology.zig");
 
 const Io = std.Io;
 const File = Io.File;
 
 pub const OpenMode = member_format.OpenMode;
 pub const SourceSlot = member_format.SourceSlot;
+
+pub const CreateFaultPoint = enum {
+    extent_sync,
+    genesis_write,
+    genesis_sync,
+    header_b_write,
+    header_b_sync,
+    header_a_write,
+    header_a_sync,
+    parent_sync,
+};
+
+pub const CreateFaultAction = enum { before, partial, after };
+
+pub const CreateFault = struct {
+    point: CreateFaultPoint,
+    action: CreateFaultAction,
+};
+
+pub const CreateFaultController = struct {
+    fail: ?CreateFault = null,
+    observed: [8]CreateFaultPoint = undefined,
+    observed_count: usize = 0,
+
+    fn action(self: *CreateFaultController, point: CreateFaultPoint) ?CreateFaultAction {
+        if (self.observed_count < self.observed.len) {
+            self.observed[self.observed_count] = point;
+            self.observed_count += 1;
+        }
+        if (self.fail) |fault| if (fault.point == point) return fault.action;
+        return null;
+    }
+
+    pub fn events(self: *const CreateFaultController) []const CreateFaultPoint {
+        return self.observed[0..self.observed_count];
+    }
+};
+
+pub const CreateOptions = struct {
+    fault: ?*CreateFaultController = null,
+};
 
 pub const RegionKind = enum {
     control,
@@ -82,6 +128,50 @@ pub const Member = struct {
     frozen: std.atomic.Value(bool) = .init(false),
     closed: std.atomic.Value(bool) = .init(false),
     journal_claimed: std.atomic.Value(bool) = .init(false),
+
+    pub fn createAt(
+        io: Io,
+        parent: Io.Dir,
+        basename: []const u8,
+        initial_header: member_format.Header,
+        genesis_payload: genesis_payload_format.GenesisPayload,
+        options: CreateOptions,
+    ) !Member {
+        if (!validBasename(basename)) return error.InvalidBasename;
+        const encoded_header = try validateCreate(initial_header, genesis_payload);
+        const genesis_record = try genesis_payload_format.makeRecord(initial_header.member_id, genesis_payload);
+        const encoded_genesis = try control_record.encode(genesis_record);
+
+        const file = try parent.createFile(io, basename, .{
+            .read = true,
+            .exclusive = true,
+            .lock = .exclusive,
+            .lock_nonblocking = true,
+        });
+        errdefer {
+            file.unlock(io);
+            file.close(io);
+        }
+
+        try file.setLength(io, initial_header.member_bytes);
+        try createSync(file, io, options.fault, .extent_sync);
+        try createWrite(file, io, initial_header.control.offset, &encoded_genesis, options.fault, .genesis_write);
+        try createSync(file, io, options.fault, .genesis_sync);
+        try createWrite(file, io, member_format.encoded_size, &encoded_header, options.fault, .header_b_write);
+        try createSync(file, io, options.fault, .header_b_sync);
+        try createWrite(file, io, 0, &encoded_header, options.fault, .header_a_write);
+        try createSync(file, io, options.fault, .header_a_sync);
+        if (builtin.os.tag == .linux) try createParentSync(parent, io, options.fault);
+
+        return .{
+            .io = io,
+            .file = file,
+            .selected_header = initial_header,
+            .selected_source = .a,
+            .degraded = false,
+            .open_mode = .writable,
+        };
+    }
 
     pub fn openAt(io: Io, parent: Io.Dir, basename: []const u8, open_mode: OpenMode) !Member {
         if (!validBasename(basename)) return error.InvalidBasename;
@@ -289,6 +379,68 @@ pub fn openAt(io: Io, parent: Io.Dir, basename: []const u8, mode: OpenMode) !Mem
     return Member.openAt(io, parent, basename, mode);
 }
 
+pub fn createAt(
+    io: Io,
+    parent: Io.Dir,
+    basename: []const u8,
+    header: member_format.Header,
+    genesis_payload: genesis_payload_format.GenesisPayload,
+    options: CreateOptions,
+) !Member {
+    return Member.createAt(io, parent, basename, header, genesis_payload, options);
+}
+
+fn validateCreate(
+    header: member_format.Header,
+    genesis_payload: genesis_payload_format.GenesisPayload,
+) ![member_format.encoded_size]u8 {
+    const encoded_header = try member_format.encode(header);
+    if (header.header_sequence != 1) return error.InvalidInitialHeaderSequence;
+    if (header.checkpoint_offset != 0 or header.checkpoint_record_sequence != 0 or
+        !codec.isZero(&header.checkpoint_record_digest)) return error.InvalidInitialCheckpoint;
+    try member_format.checkOpenPolicy(header, .writable);
+    if (header.member_bytes > std.math.maxInt(i64)) return error.MemberTooLarge;
+
+    const genesis_digest = try topology_format.digest(genesis_payload.topology);
+    try topology_format.validateMemberHeader(genesis_payload.topology, genesis_digest, header);
+    if (header.chunk_size != genesis_payload.layout.chunk_size) return error.ChunkSizeMismatch;
+    const record = try genesis_payload_format.makeRecord(header.member_id, genesis_payload);
+    _ = try genesis_payload_format.validateRecord(record);
+    return encoded_header;
+}
+
+fn createWrite(
+    file: File,
+    io: Io,
+    offset: u64,
+    bytes: []const u8,
+    fault: ?*CreateFaultController,
+    point: CreateFaultPoint,
+) !void {
+    const action = if (fault) |controller| controller.action(point) else null;
+    if (action == .before) return error.InjectedCreateFault;
+    const write_bytes = if (action == .partial) bytes[0 .. bytes.len / 2] else bytes;
+    try file.writePositionalAll(io, write_bytes, offset);
+    if (action == .partial or action == .after) return error.InjectedCreateFault;
+}
+
+fn createSync(file: File, io: Io, fault: ?*CreateFaultController, point: CreateFaultPoint) !void {
+    const action = if (fault) |controller| controller.action(point) else null;
+    if (action == .before) return error.InjectedCreateFault;
+    try file.sync(io);
+    if (action == .partial or action == .after) return error.InjectedCreateFault;
+}
+
+fn createParentSync(parent: Io.Dir, io: Io, fault: ?*CreateFaultController) !void {
+    const action = if (fault) |controller| controller.action(.parent_sync) else null;
+    if (action == .before) return error.InjectedCreateFault;
+    const syncable_parent = try parent.openDir(io, ".", .{ .iterate = true });
+    defer syncable_parent.close(io);
+    const directory_file: File = .{ .handle = syncable_parent.handle, .flags = .{ .nonblocking = false } };
+    try directory_file.sync(io);
+    if (action == .partial or action == .after) return error.InjectedCreateFault;
+}
+
 fn validBasename(name: []const u8) bool {
     return name.len != 0 and
         !std.mem.eql(u8, name, ".") and
@@ -328,6 +480,32 @@ fn testHeader() member_format.Header {
     };
 }
 
+fn testCreatePayload() genesis_payload_format.GenesisPayload {
+    return .{
+        .topology = .{
+            .set_id = @splat(0x10),
+            .epoch = 1,
+            .parent_digest = @splat(0),
+            .members = .{
+                .{ .member_id = @splat(0x20), .slot = 0 },
+                .{ .member_id = @splat(0x30), .slot = 1 },
+                .{ .member_id = @splat(0x40), .slot = 2 },
+            },
+        },
+        .layout = .{ .layout_epoch = 1, .topology_epoch = 1, .chunk_size = 1024 * 1024 },
+    };
+}
+
+fn testCreateHeader(slot: u16) !member_format.Header {
+    const payload = testCreatePayload();
+    var header = testHeader();
+    header.set_id = payload.topology.set_id;
+    header.member_id = payload.topology.members[slot].member_id;
+    header.member_slot = slot;
+    header.genesis_topology_digest = try topology_format.digest(payload.topology);
+    return header;
+}
+
 fn createRawMember(dir: Io.Dir, name: []const u8, a: member_format.Header, b: member_format.Header, length: u64) !void {
     const file = try dir.createFile(std.testing.io, name, .{ .read = true });
     defer file.close(std.testing.io);
@@ -340,6 +518,140 @@ fn corruptByte(dir: Io.Dir, name: []const u8, offset: u64) !void {
     const file = try dir.openFile(std.testing.io, name, .{ .mode = .read_write });
     defer file.close(std.testing.io);
     try file.writePositionalAll(std.testing.io, &.{0xff}, offset);
+}
+
+test "create publishes genesis then B then A with exact durability stages" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try testCreateHeader(0);
+    var fault: CreateFaultController = .{};
+    var member = try createAt(std.testing.io, tmp.dir, "member", header, testCreatePayload(), .{ .fault = &fault });
+    try std.testing.expectEqualSlices(CreateFaultPoint, &.{
+        .extent_sync,
+        .genesis_write,
+        .genesis_sync,
+        .header_b_write,
+        .header_b_sync,
+        .header_a_write,
+        .header_a_sync,
+        .parent_sync,
+    }, fault.events());
+    try std.testing.expectEqual(SourceSlot.a, member.source());
+    try std.testing.expect(!member.redundancyDegraded());
+    try std.testing.expect(!member.dirty);
+
+    var raw_genesis: [control_record.encoded_size]u8 = undefined;
+    try member.read(.control, 0, &raw_genesis);
+    const genesis = try control_record.decode(&raw_genesis);
+    _ = try genesis_payload_format.validateRecord(genesis);
+    try std.testing.expectEqualSlices(u8, &header.member_id, &genesis.member_id);
+    try member.close();
+
+    var reopened = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    try std.testing.expectEqual(SourceSlot.a, reopened.source());
+    try std.testing.expect(!reopened.redundancyDegraded());
+    try reopened.close();
+}
+
+test "create faults retain files with publication-state recovery" {
+    inline for (std.meta.tags(CreateFaultPoint)) |point| {
+        inline for (std.meta.tags(CreateFaultAction)) |action| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const header = try testCreateHeader(0);
+            var fault: CreateFaultController = .{ .fail = .{ .point = point, .action = action } };
+            try std.testing.expectError(
+                error.InjectedCreateFault,
+                createAt(std.testing.io, tmp.dir, "member", header, testCreatePayload(), .{ .fault = &fault }),
+            );
+
+            const retained = try tmp.dir.openFile(std.testing.io, "member", .{});
+            retained.close(std.testing.io);
+            const no_header = point == .extent_sync or point == .genesis_write or point == .genesis_sync or
+                (point == .header_b_write and action != .after);
+            if (no_header) {
+                try std.testing.expectError(
+                    error.NoValidMemberHeader,
+                    openAt(std.testing.io, tmp.dir, "member", .read_only),
+                );
+            } else {
+                var reopened = try openAt(std.testing.io, tmp.dir, "member", .read_only);
+                const only_b = point == .header_b_write or point == .header_b_sync or
+                    (point == .header_a_write and action != .after);
+                try std.testing.expectEqual(only_b, reopened.redundancyDegraded());
+                try std.testing.expectEqual(if (only_b) SourceSlot.b else SourceSlot.a, reopened.source());
+                try reopened.close();
+            }
+        }
+    }
+}
+
+test "create rejects invalid input before creation and preserves existing paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const payload = testCreatePayload();
+    const header = try testCreateHeader(0);
+
+    for ([_][]const u8{ "", ".", "..", "a/b", "a\\b", "a\x00b" }) |name|
+        try std.testing.expectError(error.InvalidBasename, createAt(std.testing.io, tmp.dir, name, header, payload, .{}));
+
+    const existing = try tmp.dir.createFile(std.testing.io, "existing", .{ .read = true });
+    try existing.writePositionalAll(std.testing.io, "sentinel", 0);
+    existing.close(std.testing.io);
+    try std.testing.expectError(
+        error.PathAlreadyExists,
+        createAt(std.testing.io, tmp.dir, "existing", header, payload, .{}),
+    );
+    const sentinel = try tmp.dir.openFile(std.testing.io, "existing", .{});
+    defer sentinel.close(std.testing.io);
+    var actual: [8]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try sentinel.readPositionalAll(std.testing.io, &actual, 0));
+    try std.testing.expectEqualSlices(u8, "sentinel", &actual);
+
+    var sequence = header;
+    sequence.header_sequence = 2;
+    try std.testing.expectError(
+        error.InvalidInitialHeaderSequence,
+        createAt(std.testing.io, tmp.dir, "sequence", sequence, payload, .{}),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "sequence", .{}));
+
+    var checkpoint = header;
+    checkpoint.checkpoint_offset = header.control.offset;
+    checkpoint.checkpoint_record_sequence = 1;
+    checkpoint.checkpoint_record_digest = @splat(1);
+    try std.testing.expectError(
+        error.InvalidInitialCheckpoint,
+        createAt(std.testing.io, tmp.dir, "checkpoint", checkpoint, payload, .{}),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "checkpoint", .{}));
+
+    var wrong_member = header;
+    wrong_member.member_id = payload.topology.members[1].member_id;
+    try std.testing.expectError(
+        error.MemberHeaderMismatch,
+        createAt(std.testing.io, tmp.dir, "identity", wrong_member, payload, .{}),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "identity", .{}));
+
+    var wrong_chunk = header;
+    wrong_chunk.chunk_size = 2 * 1024 * 1024;
+    wrong_chunk.data.length = wrong_chunk.chunk_size;
+    wrong_chunk.member_bytes = wrong_chunk.data.offset + wrong_chunk.data.length;
+    try std.testing.expectError(
+        error.ChunkSizeMismatch,
+        createAt(std.testing.io, tmp.dir, "chunk", wrong_chunk, payload, .{}),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "chunk", .{}));
+
+    var too_large = header;
+    too_large.data.length = @as(u64, std.math.maxInt(i64)) + 1;
+    too_large.member_bytes = too_large.data.offset + too_large.data.length;
+    try std.testing.expectError(
+        error.MemberTooLarge,
+        createAt(std.testing.io, tmp.dir, "large", too_large, payload, .{}),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "large", .{}));
 }
 
 test "open selects independent headers and enforces policy and exact length" {

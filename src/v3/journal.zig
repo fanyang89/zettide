@@ -33,7 +33,14 @@ pub const Journal = struct {
     pub fn open(member: *member_api.Member) !Journal {
         try member.claimJournal();
         errdefer member.releaseJournal();
-        return .{ .member = member, .scan_state = try scan(member) };
+        const scan_state = try scan(member);
+        if (scan_state.tail == null) {
+            if (scan_state.unresolved_tail_damage) return error.JournalNeedsRecovery;
+            return error.MissingGenesis;
+        }
+        if (member.mode() == .writable and scan_state.unresolved_tail_damage)
+            return error.JournalNeedsRecovery;
+        return .{ .member = member, .scan_state = scan_state };
     }
 
     pub fn state(self: *Journal) !ScanResult {
@@ -235,6 +242,12 @@ fn testHeader(slot_count: u64) !member_format.Header {
 fn createMember(dir: std.Io.Dir, name: []const u8, slot_count: u64) !member_format.Header {
     const header = try testHeader(slot_count);
     try createMemberWithHeader(dir, name, header);
+    return header;
+}
+
+fn createInitializedMember(dir: std.Io.Dir, name: []const u8, slot_count: u64) !member_format.Header {
+    const header = try createMember(dir, name, slot_count);
+    try writeSlot(dir, name, header, 0, &(try genesisBytes()));
     return header;
 }
 
@@ -571,23 +584,17 @@ test "short reads propagate and the scanner stays inside control" {
 test "journal append injects identity sequence and digests across reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const header = try createMember(tmp.dir, "member", 3);
+    _ = try createInitializedMember(tmp.dir, "member", 3);
     var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
     var journal = try Journal.open(&member);
 
-    const genesis = try journal.append(try genesisProposal());
-    try std.testing.expectEqual(@as(u64, 1), genesis.record.local_sequence);
-    try std.testing.expectEqual(@as(u64, 0), genesis.physical_slot);
-    try std.testing.expectEqualSlices(u8, &header.set_id, &genesis.record.set_id);
-    try std.testing.expectEqualSlices(u8, &header.member_id, &genesis.record.member_id);
-    try std.testing.expect(codec.isZero(&genesis.record.previous_record_digest));
-    try std.testing.expect(codec.isZero(&genesis.record.previous_history_digest));
-
-    const next = try journal.append(try writerFenceProposal(genesis.record));
+    const initial = try journal.state();
+    try std.testing.expectEqual(@as(u64, 1), initial.tail.?.local_sequence);
+    const next = try journal.append(try writerFenceProposal(initial.tail.?));
     try std.testing.expectEqual(@as(u64, 2), next.record.local_sequence);
     try std.testing.expectEqual(@as(u64, 1), next.physical_slot);
-    try std.testing.expectEqualSlices(u8, &genesis.record_digest, &next.record.previous_record_digest);
-    try std.testing.expectEqualSlices(u8, &genesis.record.history_digest, &next.record.previous_history_digest);
+    try std.testing.expectEqualSlices(u8, &initial.tail_raw_record_digest, &next.record.previous_record_digest);
+    try std.testing.expectEqualSlices(u8, &initial.tail.?.history_digest, &next.record.previous_history_digest);
     try std.testing.expectEqualSlices(u8, &(try control_record.historyDigest(next.record)), &next.record.history_digest);
     journal.close();
     try member.close();
@@ -605,13 +612,12 @@ test "journal append injects identity sequence and digests across reopen" {
 test "concurrent journal appends serialize sequence and physical slots" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    _ = try createMember(tmp.dir, "member", 3);
+    _ = try createInitializedMember(tmp.dir, "member", 3);
     var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
     defer member.deinit();
     var journal = try Journal.open(&member);
     defer journal.deinit();
-    const genesis = try journal.append(try genesisProposal());
-    const proposal = try writerFenceProposal(genesis.record);
+    const proposal = try writerFenceProposal((try journal.state()).tail.?);
 
     var first_future = std.testing.io.async(appendWorker, .{ &journal, proposal });
     var first_pending = true;
@@ -652,17 +658,16 @@ test "journal appends only at frontier and rejects terminal states before IO" {
     journal.close();
     try member.close();
 
-    _ = try createMember(tmp.dir, "invalid", 2);
+    _ = try createInitializedMember(tmp.dir, "invalid", 2);
     member = try member_api.openAt(std.testing.io, tmp.dir, "invalid", .writable);
     journal = try Journal.open(&member);
     var fault: member_api.FaultController = .{ .fail_write_at = 0 };
     member.setFaultController(&fault);
-    var invalid = try genesisProposal();
+    var invalid = try writerFenceProposal((try journal.state()).tail.?);
     invalid.membership_epoch = 0;
     try std.testing.expectError(error.InvalidMembershipEpoch, journal.append(invalid));
     try std.testing.expectEqual(@as(u64, 0), fault.write_count);
     try std.testing.expect(!member.isFrozen());
-    journal.scan_state.tail = try control_record.decode(&genesis);
     journal.scan_state.tail.?.local_sequence = std.math.maxInt(u64);
     journal.scan_state.physical_frontier = 1;
     try std.testing.expectError(error.RecordSequenceOverflow, journal.append(try writerFenceProposal(journal.scan_state.tail.?)));
@@ -670,19 +675,15 @@ test "journal appends only at frontier and rejects terminal states before IO" {
     journal.close();
     try member.close();
 
-    const unresolved_header = try createMember(tmp.dir, "unresolved", 2);
+    const unresolved_header = try createInitializedMember(tmp.dir, "unresolved", 2);
     try writeSlot(tmp.dir, "unresolved", unresolved_header, 1, &.{0xaa});
     member = try member_api.openAt(std.testing.io, tmp.dir, "unresolved", .writable);
-    journal = try Journal.open(&member);
-    try std.testing.expectError(error.UnresolvedTailDamage, journal.append(try genesisProposal()));
-    journal.close();
+    try std.testing.expectError(error.JournalNeedsRecovery, Journal.open(&member));
     try member.close();
 
     _ = try createMember(tmp.dir, "readonly", 1);
     member = try member_api.openAt(std.testing.io, tmp.dir, "readonly", .read_only);
-    journal = try Journal.open(&member);
-    try std.testing.expectError(error.ReadOnlyMember, journal.append(try genesisProposal()));
-    journal.close();
+    try std.testing.expectError(error.MissingGenesis, Journal.open(&member));
     try member.close();
 }
 
@@ -691,10 +692,9 @@ test "append failures retain state and full scan classifies physical outcome" {
     inline for (std.meta.tags(Case)) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        _ = try createMember(tmp.dir, "member", 3);
+        _ = try createInitializedMember(tmp.dir, "member", 3);
         var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
         var journal = try Journal.open(&member);
-        const genesis = try journal.append(try genesisProposal());
         const old_state = try journal.state();
         var fault: member_api.FaultController = .{};
         switch (case) {
@@ -705,7 +705,7 @@ test "append failures retain state and full scan classifies physical outcome" {
             .sync_after => fault.fail_sync_after_at = 0,
         }
         member.setFaultController(&fault);
-        try std.testing.expectError(error.InjectedFault, journal.append(try writerFenceProposal(genesis.record)));
+        try std.testing.expectError(error.InjectedFault, journal.append(try writerFenceProposal(old_state.tail.?)));
         try std.testing.expectEqual(old_state.physical_frontier, (try journal.state()).physical_frontier);
         try std.testing.expectEqual(old_state.tail.?.local_sequence, (try journal.state()).tail.?.local_sequence);
         try std.testing.expect(member.isFrozen());
@@ -715,6 +715,12 @@ test "append failures retain state and full scan classifies physical outcome" {
 
         member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
         defer member.deinit();
+        if (case == .write_partial) {
+            try std.testing.expectError(error.JournalNeedsRecovery, Journal.open(&member));
+            try std.testing.expectError(error.JournalNeedsRecovery, Journal.open(&member));
+            try member.close();
+            member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+        }
         journal = try Journal.open(&member);
         const recovered = try journal.state();
         switch (case) {
@@ -744,24 +750,24 @@ test "append failures retain state and full scan classifies physical outcome" {
 test "member enforces one journal owner and close permits a rescanned owner" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    _ = try createMember(tmp.dir, "member", 2);
+    _ = try createInitializedMember(tmp.dir, "member", 2);
     var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
     defer member.deinit();
     var journal = try Journal.open(&member);
-    const genesis = try journal.append(try genesisProposal());
+    const genesis = try journal.state();
 
     try std.testing.expectError(error.JournalAlreadyOpen, Journal.open(&member));
     journal.close();
     journal.close();
     try std.testing.expectError(error.JournalClosed, journal.state());
-    try std.testing.expectError(error.JournalClosed, journal.append(try writerFenceProposal(genesis.record)));
+    try std.testing.expectError(error.JournalClosed, journal.append(try writerFenceProposal(genesis.tail.?)));
 
     var reopened = try Journal.open(&member);
     defer reopened.deinit();
     const state = try reopened.state();
     try std.testing.expectEqual(@as(u64, 1), state.tail.?.local_sequence);
     try std.testing.expectEqual(@as(u64, 1), state.physical_frontier);
-    try std.testing.expectEqualSlices(u8, &genesis.record_digest, &state.tail_raw_record_digest);
+    try std.testing.expectEqualSlices(u8, &genesis.tail_raw_record_digest, &state.tail_raw_record_digest);
 }
 
 test "failed journal scan releases the member claim" {
@@ -781,10 +787,76 @@ test "failed journal scan releases the member claim" {
     journal.close();
 }
 
+test "journal open requires genesis and gates unresolved damage by mode" {
+    const Case = enum { empty, only_invalid, unresolved };
+    inline for (std.meta.tags(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const header = switch (case) {
+            .empty, .only_invalid => try createMember(tmp.dir, "member", 2),
+            .unresolved => try createInitializedMember(tmp.dir, "member", 2),
+        };
+        if (case != .empty) try writeSlot(tmp.dir, "member", header, 1, &.{0xaa});
+
+        inline for (.{ member_format.OpenMode.read_only, member_format.OpenMode.writable }) |mode| {
+            var member = try member_api.openAt(std.testing.io, tmp.dir, "member", mode);
+            defer member.deinit();
+            if (case == .unresolved and mode == .read_only) {
+                var journal = try Journal.open(&member);
+                try std.testing.expect((try journal.state()).unresolved_tail_damage);
+                journal.close();
+            } else {
+                const expected = if (case == .empty) error.MissingGenesis else error.JournalNeedsRecovery;
+                try std.testing.expectError(expected, Journal.open(&member));
+                try std.testing.expectError(expected, Journal.open(&member));
+            }
+            try member.close();
+        }
+    }
+}
+
+test "created members open journals with shared history and local record digests" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const payload = testPayload();
+    var histories: [3]codec.Digest = undefined;
+    var records: [3]codec.Digest = undefined;
+
+    inline for (0..3) |slot| {
+        var header = try testHeader(2);
+        header.member_id = payload.topology.members[slot].member_id;
+        header.member_slot = slot;
+        const name: []const u8 = switch (slot) {
+            0 => "member0",
+            1 => "member1",
+            2 => "member2",
+            else => unreachable,
+        };
+        var member = try member_api.createAt(std.testing.io, tmp.dir, name, header, payload, .{});
+        var journal = try Journal.open(&member);
+        const state = try journal.state();
+        histories[slot] = state.tail.?.history_digest;
+        records[slot] = state.tail_raw_record_digest;
+        journal.close();
+        try member.close();
+
+        member = try member_api.openAt(std.testing.io, tmp.dir, name, .writable);
+        journal = try Journal.open(&member);
+        try std.testing.expectEqualSlices(u8, &histories[slot], &(try journal.state()).tail.?.history_digest);
+        journal.close();
+        try member.close();
+    }
+    try std.testing.expectEqualSlices(u8, &histories[0], &histories[1]);
+    try std.testing.expectEqualSlices(u8, &histories[1], &histories[2]);
+    try std.testing.expect(!std.mem.eql(u8, &records[0], &records[1]));
+    try std.testing.expect(!std.mem.eql(u8, &records[1], &records[2]));
+    try std.testing.expect(!std.mem.eql(u8, &records[0], &records[2]));
+}
+
 test "journal releases its claim after the member closes first" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    _ = try createMember(tmp.dir, "member", 1);
+    _ = try createInitializedMember(tmp.dir, "member", 1);
     var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
     var journal = try Journal.open(&member);
 
