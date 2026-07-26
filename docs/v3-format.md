@@ -343,6 +343,27 @@ Version 2 is currently a pure format and policy boundary. It does not by itself 
 transition or let a joining disk establish authority. Membership prepare/commit evidence and member
 bootstrap validation remain required before the runtime may open a dynamic Pool.
 
+### Membership Transition Payloads
+
+A membership prepare carries a 3220-byte `DDVMEM1\0` proposal containing transition mode and one
+canonical version 2 topology. The proposed epoch is exactly one greater than the current epoch and
+its parent digest is the exact current topology digest. Existing member slots never change. A new
+member enters as a non-voting `joining` member. Normal removal requires an active member to become
+`draining` in an earlier committed transition. Joining members can become active after bootstrap;
+draining can be cancelled by returning to active.
+
+A normal membership commit appends a 500-byte `DDVMCER1` certificate to the exact proposal, producing
+a 3720-byte control payload. The certificate contains one old-config quorum and one new-config quorum
+of prepare attestations. Each group is independently ordered by member ID and every witness must be
+a voter in that configuration. All attestations bind the same prepare history. A member present in
+both voter sets appears once in each group because it proves both quorum predicates.
+
+Forced removal is encoded as `administrative_recovery`, never as a normal transition. Its certificate
+contains no old-config witnesses and requires the complete new-config quorum. This deliberately
+records that old quorum safety was bypassed; applying administrative recovery independently to both
+sides of a partition can fork the Pool and is outside ordinary fault-tolerance guarantees. Runtime
+authorization and new-member bootstrap are separate from this pure codec.
+
 Topology validation is pure and requires the layout topology epoch not to exceed the already
 verified current topology epoch. Every replica slot must exist and have voter control and data
 roles. Header validation is also pure: callers first verify member and genesis identity, then
