@@ -127,6 +127,25 @@ comparison excludes only header sequence, checkpoint offset, checkpoint local re
 checkpoint digest, and the final CRC. With equal static fields, the higher sequence wins. Equal
 sequences with different checkpoint semantics are ambiguous; identical copies select A.
 
+## Member File Boundary
+
+The v3 member API opens an existing file relative to a directory using a single-component
+basename. It does not create member files or expose the underlying file handle. Read-only opens
+take a shared non-blocking advisory lock; writable opens take an exclusive non-blocking lock.
+Header A at offset 0 and header B at offset 4096 are read and decoded independently after locking.
+A single valid copy permits a degraded open. When neither copy is valid, the first transport read
+error takes precedence over `NoValidMemberHeader`. Open policy is checked after A/B selection, and
+the physical file length must exactly equal the selected header's `member_bytes` value.
+
+Region I/O uses offsets relative to the control, metadata, or data region and cannot cross a
+region boundary. Empty I/O is valid at a region end. Reads are exact; an unexpected end is
+`TruncatedMember`. Writes require writable mode. Write and whole-file sync operations are
+serialized, and a write is dirty before the underlying I/O starts. Any injected or real write or
+sync failure freezes future writes and syncs while reads remain available. A dirty, unfrozen close
+syncs the file. Close always releases the lock and file resource, reports the first durability
+error, and is idempotent. This boundary performs no journal scan and defines no member creation
+API.
+
 ## Topology Record
 
 A topology is a separate 512-byte record. It defines exactly three members and does not define
