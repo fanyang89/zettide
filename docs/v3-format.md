@@ -392,6 +392,12 @@ is re-decoded, must directly extend the selected authority, and must preserve me
 writer term, generation, data root, topology, and layout. Header-to-birth-topology binding is proven
 by the target's successful journal scan before its retained history participates in this check.
 
+Dynamic member creation uses the same publication sequence as legacy creation: preallocate and sync
+the complete member extent, durably write the first control record, publish header B and sync, publish
+header A and sync, then sync the parent directory on Linux. Initial members use dynamic genesis as
+their first record. Joining members require a fully validated target bootstrap record supplied by the
+membership coordinator; member creation never invents an authority parent or private genesis.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.

@@ -3,7 +3,11 @@ const builtin = @import("builtin");
 const codec = @import("codec.zig");
 const control_record = @import("control_record.zig");
 const genesis_payload_format = @import("genesis_payload.zig");
+const member_bootstrap = @import("member_bootstrap.zig");
 const member_format = @import("member_format.zig");
+const pool_genesis_payload = @import("pool_genesis_payload.zig");
+const pool_layout = @import("pool_layout.zig");
+const pool_topology = @import("pool_topology.zig");
 const topology_format = @import("topology.zig");
 
 const Io = std.Io;
@@ -138,9 +142,47 @@ pub const Member = struct {
         options: CreateOptions,
     ) !Member {
         try validateCreateAt(basename, initial_header, genesis_payload);
-        const encoded_header = try member_format.encode(initial_header);
         const genesis_record = try genesis_payload_format.makeRecord(initial_header.member_id, genesis_payload);
         const encoded_genesis = try control_record.encode(genesis_record);
+        return createWithFirstRecord(io, parent, basename, initial_header, &encoded_genesis, options);
+    }
+
+    pub fn createPoolAt(
+        io: Io,
+        parent: Io.Dir,
+        basename: []const u8,
+        initial_header: member_format.Header,
+        genesis_payload: pool_genesis_payload.GenesisPayload,
+        options: CreateOptions,
+    ) !Member {
+        try validateCreatePoolAt(basename, initial_header, genesis_payload);
+        const genesis_record = try pool_genesis_payload.makeRecord(initial_header.member_id, genesis_payload);
+        const encoded_genesis = try control_record.encodeDynamicPool(genesis_record);
+        return createWithFirstRecord(io, parent, basename, initial_header, &encoded_genesis, options);
+    }
+
+    pub fn createJoiningAt(
+        io: Io,
+        parent: Io.Dir,
+        basename: []const u8,
+        initial_header: member_format.Header,
+        bootstrap_record: control_record.Record,
+        options: CreateOptions,
+    ) !Member {
+        try validateCreateJoiningAt(basename, initial_header, bootstrap_record);
+        const encoded_bootstrap = try control_record.encodeDynamicPool(bootstrap_record);
+        return createWithFirstRecord(io, parent, basename, initial_header, &encoded_bootstrap, options);
+    }
+
+    fn createWithFirstRecord(
+        io: Io,
+        parent: Io.Dir,
+        basename: []const u8,
+        initial_header: member_format.Header,
+        first_record: *const [control_record.encoded_size]u8,
+        options: CreateOptions,
+    ) !Member {
+        const encoded_header = try member_format.encode(initial_header);
 
         const file = try parent.createFile(io, basename, .{
             .read = true,
@@ -155,7 +197,7 @@ pub const Member = struct {
 
         try file.setLength(io, initial_header.member_bytes);
         try createSync(file, io, options.fault, .extent_sync);
-        try createWrite(file, io, initial_header.control.offset, &encoded_genesis, options.fault, .genesis_write);
+        try createWrite(file, io, initial_header.control.offset, first_record, options.fault, .genesis_write);
         try createSync(file, io, options.fault, .genesis_sync);
         try createWrite(file, io, member_format.encoded_size, &encoded_header, options.fault, .header_b_write);
         try createSync(file, io, options.fault, .header_b_sync);
@@ -438,11 +480,64 @@ pub fn createAt(
     return Member.createAt(io, parent, basename, header, genesis_payload, options);
 }
 
+pub fn createPoolAt(
+    io: Io,
+    parent: Io.Dir,
+    basename: []const u8,
+    header: member_format.Header,
+    genesis_payload: pool_genesis_payload.GenesisPayload,
+    options: CreateOptions,
+) !Member {
+    return Member.createPoolAt(io, parent, basename, header, genesis_payload, options);
+}
+
+pub fn createJoiningAt(
+    io: Io,
+    parent: Io.Dir,
+    basename: []const u8,
+    header: member_format.Header,
+    bootstrap_record: control_record.Record,
+    options: CreateOptions,
+) !Member {
+    return Member.createJoiningAt(io, parent, basename, header, bootstrap_record, options);
+}
+
 pub fn validateCreateAt(
     basename: []const u8,
     header: member_format.Header,
     genesis_payload: genesis_payload_format.GenesisPayload,
 ) !void {
+    try validateInitialCreate(basename, header);
+    if (member_format.isDynamicPool(header)) return error.LegacyMemberRequired;
+
+    const genesis_digest = try topology_format.digest(genesis_payload.topology);
+    try topology_format.validateMemberHeader(genesis_payload.topology, genesis_digest, header);
+    if (header.chunk_size != genesis_payload.layout.chunk_size) return error.ChunkSizeMismatch;
+    const record = try genesis_payload_format.makeRecord(header.member_id, genesis_payload);
+    _ = try genesis_payload_format.validateRecord(record);
+}
+
+pub fn validateCreatePoolAt(
+    basename: []const u8,
+    header: member_format.Header,
+    genesis_payload: pool_genesis_payload.GenesisPayload,
+) !void {
+    try validateInitialCreate(basename, header);
+    try pool_genesis_payload.validateMemberHeader(genesis_payload, header);
+    const record = try pool_genesis_payload.makeRecord(header.member_id, genesis_payload);
+    _ = try pool_genesis_payload.validateRecord(record);
+}
+
+pub fn validateCreateJoiningAt(
+    basename: []const u8,
+    header: member_format.Header,
+    bootstrap_record: control_record.Record,
+) !void {
+    try validateInitialCreate(basename, header);
+    _ = try member_bootstrap.validateTargetFirstRecord(header, bootstrap_record);
+}
+
+fn validateInitialCreate(basename: []const u8, header: member_format.Header) !void {
     if (!validBasename(basename)) return error.InvalidBasename;
     _ = try member_format.encode(header);
     if (header.header_sequence != 1) return error.InvalidInitialHeaderSequence;
@@ -450,12 +545,6 @@ pub fn validateCreateAt(
         !codec.isZero(&header.checkpoint_record_digest)) return error.InvalidInitialCheckpoint;
     try member_format.checkOpenPolicy(header, .writable);
     if (header.member_bytes > std.math.maxInt(i64)) return error.MemberTooLarge;
-
-    const genesis_digest = try topology_format.digest(genesis_payload.topology);
-    try topology_format.validateMemberHeader(genesis_payload.topology, genesis_digest, header);
-    if (header.chunk_size != genesis_payload.layout.chunk_size) return error.ChunkSizeMismatch;
-    const record = try genesis_payload_format.makeRecord(header.member_id, genesis_payload);
-    _ = try genesis_payload_format.validateRecord(record);
 }
 
 fn createWrite(
@@ -555,6 +644,74 @@ fn testCreateHeader(slot: u16) !member_format.Header {
     return header;
 }
 
+fn testPoolCreate() !struct { member_format.Header, pool_genesis_payload.GenesisPayload } {
+    const members = [_]pool_topology.Member{.{
+        .member_id = @splat(0x20),
+        .slot = 7,
+        .control_role = pool_topology.voter_role,
+        .role_flags = member_format.known_role_flags,
+    }};
+    const payload: pool_genesis_payload.GenesisPayload = .{
+        .topology = try pool_topology.Topology.init(@splat(0x10), 1, @splat(0), &members),
+        .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
+    };
+    var header = testHeader();
+    header.incompat_features = member_format.dynamic_pool_incompat_feature;
+    header.set_id = payload.topology.set_id;
+    header.member_id = members[0].member_id;
+    header.member_slot = members[0].slot;
+    header.member_count = 1;
+    header.layout_format_version = member_format.dynamic_layout_format_version;
+    header.genesis_topology_digest = try pool_topology.digest(payload.topology);
+    return .{ header, payload };
+}
+
+fn testJoiningCreate() !struct { member_format.Header, control_record.Record } {
+    const members = [_]pool_topology.Member{
+        .{
+            .member_id = @splat(0x30),
+            .slot = 3,
+            .control_role = pool_topology.voter_role,
+            .role_flags = member_format.known_role_flags,
+        },
+        .{ .member_id = @splat(0x20), .slot = 19, .state = .joining },
+    };
+    const evidence: member_bootstrap.Evidence = .{
+        .target_member_id = @splat(0x20),
+        .target_slot = 19,
+        .topology = try pool_topology.Topology.init(@splat(0x10), 2, @splat(0x33), &members),
+        .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
+    };
+    var header = testHeader();
+    header.incompat_features = member_format.dynamic_pool_incompat_feature;
+    header.set_id = evidence.topology.set_id;
+    header.member_id = evidence.target_member_id;
+    header.member_slot = evidence.target_slot;
+    header.member_count = evidence.topology.member_count;
+    header.role_flags = member_format.data_role;
+    header.layout_format_version = member_format.dynamic_layout_format_version;
+    header.genesis_topology_digest = try pool_topology.digest(evidence.topology);
+    var record: control_record.Record = .{
+        .kind = control_record.member_bootstrap_kind,
+        .local_sequence = 1,
+        .membership_epoch = evidence.topology.epoch,
+        .writer_term = 1,
+        .generation = 1,
+        .set_id = evidence.topology.set_id,
+        .member_id = evidence.target_member_id,
+        .mount_session_id = @splat(0),
+        .transaction_id = @splat(0x44),
+        .previous_record_digest = @splat(0),
+        .previous_history_digest = @splat(0x55),
+        .data_root_digest = @splat(0x66),
+        .topology_digest = try pool_topology.digest(evidence.topology),
+        .layout_digest = try pool_layout.digest(evidence.layout),
+        .payload = try member_bootstrap.makePayload(evidence),
+    };
+    record.history_digest = try control_record.historyDigest(record);
+    return .{ header, record };
+}
+
 fn createRawMember(dir: Io.Dir, name: []const u8, a: member_format.Header, b: member_format.Header, length: u64) !void {
     const file = try dir.createFile(std.testing.io, name, .{ .read = true });
     defer file.close(std.testing.io);
@@ -607,6 +764,30 @@ test "create publishes genesis then B then A with exact durability stages" {
     try std.testing.expectEqual(SourceSlot.a, reopened.source());
     try std.testing.expect(!reopened.redundancyDegraded());
     try reopened.close();
+}
+
+test "dynamic create publishes pool genesis with the same durability order" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input = try testPoolCreate();
+    var fault: CreateFaultController = .{};
+    var member = try createPoolAt(std.testing.io, tmp.dir, "pool-member", input[0], input[1], .{ .fault = &fault });
+    defer member.deinit();
+    try std.testing.expectEqualSlices(CreateFaultPoint, expectedCreateFaultPoints(), fault.events());
+    var raw: [control_record.encoded_size]u8 = undefined;
+    try member.read(.control, 0, &raw);
+    _ = try pool_genesis_payload.validateRecord(try control_record.decode(&raw));
+}
+
+test "joining create publishes target bootstrap as its first record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input = try testJoiningCreate();
+    var member = try createJoiningAt(std.testing.io, tmp.dir, "joining-member", input[0], input[1], .{});
+    defer member.deinit();
+    var raw: [control_record.encoded_size]u8 = undefined;
+    try member.read(.control, 0, &raw);
+    _ = try member_bootstrap.validateTargetFirstRecord(input[0], try control_record.decode(&raw));
 }
 
 test "create faults retain files with publication-state recovery" {
