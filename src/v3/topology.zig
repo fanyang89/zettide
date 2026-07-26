@@ -98,20 +98,30 @@ pub fn validateMemberSet(
 
     var matched: [member_count]bool = @splat(false);
     for (headers) |header| {
-        if (!std.mem.eql(u8, &header.set_id, &topology.set_id)) return error.ForeignSet;
+        try validateMemberHeader(topology, genesis_digest, header);
         const index = findMember(topology.members, header.member_id) orelse return error.ForeignMember;
         if (matched[index]) return error.DuplicateMember;
         matched[index] = true;
-        const member = topology.members[index];
-        if (header.member_slot != member.slot or header.member_count != member_count or
-            header.role_flags != member.role_flags) return error.MemberHeaderMismatch;
-        if (!std.mem.eql(u8, &header.genesis_topology_digest, &genesis_digest))
-            return error.GenesisTopologyDigestMismatch;
     }
     for (matched) |present| if (!present) return error.MissingMember;
     for (headers[1..]) |header| {
         if (!staticSetFieldsEqual(headers[0], header)) return error.StaticSetFieldsMismatch;
     }
+}
+
+pub fn validateMemberHeader(
+    topology: Topology,
+    genesis_digest: codec.Digest,
+    header: member_format.Header,
+) !void {
+    try validate(topology);
+    if (!std.mem.eql(u8, &header.set_id, &topology.set_id)) return error.ForeignSet;
+    const index = findMember(topology.members, header.member_id) orelse return error.ForeignMember;
+    const member = topology.members[index];
+    if (header.member_slot != member.slot or header.member_count != member_count or
+        header.role_flags != member.role_flags) return error.MemberHeaderMismatch;
+    if (!std.mem.eql(u8, &header.genesis_topology_digest, &genesis_digest))
+        return error.GenesisTopologyDigestMismatch;
 }
 
 fn validate(topology: Topology) !void {
@@ -403,6 +413,41 @@ test "member header validation is order independent" {
         };
         try validateMemberSet(topology, genesis_digest, &ordered);
     }
+}
+
+test "single member header is cross-validated independently" {
+    const topology = testTopology();
+    const genesis_digest = try digest(topology);
+    const base = try testHeader(topology, topology.members[0]);
+    try validateMemberHeader(topology, genesis_digest, base);
+
+    var invalid_topology = topology;
+    invalid_topology.quorum = 1;
+    try std.testing.expectError(error.InvalidQuorum, validateMemberHeader(invalid_topology, genesis_digest, base));
+
+    var header = base;
+    header.set_id[0] ^= 1;
+    try std.testing.expectError(error.ForeignSet, validateMemberHeader(topology, genesis_digest, header));
+
+    header = base;
+    header.member_id = @splat(0x99);
+    try std.testing.expectError(error.ForeignMember, validateMemberHeader(topology, genesis_digest, header));
+
+    header = base;
+    header.member_slot = topology.members[1].slot;
+    try std.testing.expectError(error.MemberHeaderMismatch, validateMemberHeader(topology, genesis_digest, header));
+
+    header = base;
+    header.member_count -= 1;
+    try std.testing.expectError(error.MemberHeaderMismatch, validateMemberHeader(topology, genesis_digest, header));
+
+    header = base;
+    header.role_flags = member_format.metadata_role;
+    try std.testing.expectError(error.MemberHeaderMismatch, validateMemberHeader(topology, genesis_digest, header));
+
+    header = base;
+    header.genesis_topology_digest[0] ^= 1;
+    try std.testing.expectError(error.GenesisTopologyDigestMismatch, validateMemberHeader(topology, genesis_digest, header));
 }
 
 test "member header membership and topology mismatches are distinct" {

@@ -192,7 +192,7 @@ pub fn decode(bytes: *const [encoded_size]u8) !Header {
     return header;
 }
 
-fn validate(header: Header) !void {
+pub fn validate(header: Header) !void {
     if (header.header_sequence == 0) return error.InvalidSequence;
     if (codec.isZero(&header.set_id) or codec.isZero(&header.member_id) or
         std.mem.eql(u8, &header.set_id, &header.member_id)) return error.InvalidIdentity;
@@ -495,6 +495,14 @@ test "identity role algorithm label and geometry validation" {
     header.metadata_block_size = 256 * 1024;
     header.metadata.length = 256 * 1024;
     try std.testing.expectError(error.InvalidGeometry, encode(header));
+}
+
+test "public validation accepts headers and reports structural errors" {
+    try validate(testHeader());
+
+    var header = testHeader();
+    header.header_sequence = 0;
+    try std.testing.expectError(error.InvalidSequence, validate(header));
 }
 
 test "checkpoint combinations" {

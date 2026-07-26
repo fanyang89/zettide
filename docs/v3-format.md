@@ -64,6 +64,11 @@ Decoded headers own their label in a fixed-capacity value. Decoding copies label
 slice refers to the input header buffer. Label construction validates UTF-8 and canonicalizes
 unused capacity to zero.
 
+`member_format.validate` is the public structural validation contract for an in-memory header.
+Encoding and decoding use the same function, so direct validation applies the identical identity,
+placement, role, algorithm, label, geometry, and checkpoint rules without changing wire bytes.
+It does not apply open policy or establish topology authority.
+
 ## Geometry
 
 The control region starts at 64 KiB, is 4096-byte aligned, and contains at least one 4096-byte
@@ -157,13 +162,17 @@ digest. The topology digest is BLAKE3-256 over canonical bytes `[0, 508)` and do
 the final CRC32C. The committed topology fixture has digest
 `af1b230be435c77b3f1ca3064bd757df027bc7c1863bc1ae66e528dc2258a107`.
 
-Member-header cross-validation is independent of input order and requires exactly one header
-for each member in the current topology. Identity, slot, member count, and role flags match the
-current topology. Each header's genesis topology digest matches a separately supplied, already
-verified genesis digest; it does not match the current topology digest after epoch 1. Feature
-masks, creation time, logical capacity, all three region geometries, block and I/O sizes, four
-subformat versions, algorithm IDs, and label agree across the set. Header sequence and
-checkpoint hint fields are member-local and may differ.
+`validateMemberHeader` validates the supplied topology and cross-validates one structurally valid
+header against it. Set ID, member identity and slot, member count, role flags, and a separately
+supplied, already verified genesis digest must match. The genesis digest does not match the current
+topology digest after epoch 1. This single-member operation does not require all three members and
+does not determine quorum or authority.
+
+`validateMemberSet` reuses single-member cross-validation and additionally requires exactly one
+header for each member, independent of input order. Feature masks, creation time, logical capacity,
+all three region geometries, block and I/O sizes, four subformat versions, algorithm IDs, and label
+agree across the set. Header sequence and checkpoint hint fields are member-local and may differ.
+Structural validation, set completeness, and open policy remain separate contracts.
 
 ## Replica Layout
 
