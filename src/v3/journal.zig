@@ -3,6 +3,7 @@ const codec = @import("codec.zig");
 const control_record = @import("control_record.zig");
 const genesis_payload = @import("genesis_payload.zig");
 const member_api = @import("member.zig");
+const topology_format = @import("topology.zig");
 
 pub const ScanResult = struct {
     tail: ?control_record.Record = null,
@@ -69,7 +70,10 @@ pub fn scan(member: *member_api.Member) !ScanResult {
             if (!std.mem.eql(u8, &record.previous_history_digest, &tail.history_digest))
                 return error.PreviousHistoryDigestMismatch;
         } else {
-            _ = try genesis_payload.validateRecord(record);
+            const payload = try genesis_payload.validateRecord(record);
+            const genesis_digest = try topology_format.digest(payload.topology);
+            try topology_format.validateMemberHeader(payload.topology, genesis_digest, header);
+            if (header.chunk_size != payload.layout.chunk_size) return error.ChunkSizeMismatch;
         }
 
         result.interior_invalid_slot_count = std.math.add(
@@ -89,7 +93,6 @@ pub fn scan(member: *member_api.Member) !ScanResult {
 }
 
 const member_format = @import("member_format.zig");
-const topology_format = @import("topology.zig");
 
 fn testPayload() genesis_payload.GenesisPayload {
     return .{
@@ -139,13 +142,17 @@ fn testHeader(slot_count: u64) !member_format.Header {
 
 fn createMember(dir: std.Io.Dir, name: []const u8, slot_count: u64) !member_format.Header {
     const header = try testHeader(slot_count);
+    try createMemberWithHeader(dir, name, header);
+    return header;
+}
+
+fn createMemberWithHeader(dir: std.Io.Dir, name: []const u8, header: member_format.Header) !void {
     const file = try dir.createFile(std.testing.io, name, .{ .read = true });
     defer file.close(std.testing.io);
     const bytes = try member_format.encode(header);
     try file.writePositionalAll(std.testing.io, &bytes, 0);
     try file.writePositionalAll(std.testing.io, &bytes, member_format.encoded_size);
     try file.setLength(std.testing.io, header.member_bytes);
-    return header;
 }
 
 fn writeSlot(dir: std.Io.Dir, name: []const u8, header: member_format.Header, slot: u64, bytes: []const u8) !void {
@@ -378,6 +385,37 @@ test "decoded identity kind semantic and initial record violations hard fail" {
             .unknown_kind => error.UnsupportedRecordKind,
             .semantic => error.InvalidGenesisRecord,
             .non_genesis_first => error.NotGenesisRecord,
+        };
+        try std.testing.expectError(expected, scan(&member));
+    }
+}
+
+test "genesis binds topology identity placement and layout to the member header" {
+    const Case = enum { genesis_digest, member_slot, member_role, chunk_size };
+    inline for (std.meta.tags(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var header = try testHeader(1);
+        switch (case) {
+            .genesis_digest => header.genesis_topology_digest[0] ^= 1,
+            .member_slot => header.member_slot = 1,
+            .member_role => {},
+            .chunk_size => {
+                header.chunk_size = 2 * 1024 * 1024;
+                header.data.length = header.chunk_size;
+                header.member_bytes = header.data.offset + header.data.length;
+            },
+        }
+        try createMemberWithHeader(tmp.dir, "member", header);
+        const genesis = try genesisBytes();
+        try writeSlot(tmp.dir, "member", header, 0, &genesis);
+        var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+        defer member.deinit();
+        if (case == .member_role) member.selected_header.role_flags = member_format.metadata_role;
+        const expected = switch (case) {
+            .genesis_digest => error.GenesisTopologyDigestMismatch,
+            .member_slot, .member_role => error.MemberHeaderMismatch,
+            .chunk_size => error.ChunkSizeMismatch,
         };
         try std.testing.expectError(expected, scan(&member));
     }

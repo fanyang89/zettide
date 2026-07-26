@@ -357,14 +357,18 @@ damage as writable space.
 Every decoded record is a hard validation boundary. Its set and member IDs must match the selected
 member header, its kind and semantic policy must be supported, and its stored history digest has
 already passed structural decoding. The first accepted record must be a fully validated genesis at
-local sequence 1, including its embedded topology and layout. A later genesis is invalid.
-Subsequent local sequences must increase by exactly one, their previous history digest must equal
-the preceding accepted history digest, and their previous record digest must equal BLAKE3-256 of
-bytes `[0, 4092)` from the preceding accepted slot as read. Duplicate, regressed, or gapped
-sequences, foreign identity, unsupported or semantically invalid records, and either digest
-mismatch abort the scan. The scanner does not choose a longest chain, append, repair, update
-checkpoint hints, or determine quorum authority. A structurally and semantically valid final record
-is accepted without inferring whether another member acknowledged it.
+local sequence 1, including its embedded topology and layout. The scanner computes the canonical
+genesis topology digest and validates the selected header against that topology and digest. This
+binds the header's set ID, member ID, member slot, role flags, member count, and genesis topology
+digest back to the decoded genesis payload. The header chunk size must also equal the genesis layout
+chunk size. A later genesis is invalid. Subsequent local sequences must increase by exactly one,
+their previous history digest must equal the preceding accepted history digest, and their previous
+record digest must equal BLAKE3-256 of bytes `[0, 4092)` from the preceding accepted slot as read.
+Duplicate, regressed, or gapped sequences, foreign identity, unsupported or semantically invalid
+records, either digest mismatch, or a genesis/header mismatch aborts the scan. The scanner does not
+choose a longest chain, append, repair, update checkpoint hints, or determine quorum authority. A
+structurally and semantically valid final record is accepted without inferring whether another
+member acknowledged it.
 
 ## Commit Certificate
 
