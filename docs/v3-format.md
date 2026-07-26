@@ -2,10 +2,10 @@
 
 ## Scope
 
-This document freezes the v3 member header, topology record, replicated layout, control record,
-and commit certificate codecs. It defines no file I/O, member creation, mounting, journal scan or
-append, quorum authority, signatures, manifest, erasure coding, or CLI behavior. A volume
-containing only these records is not mountable.
+This document freezes the v3 member header, topology record, replicated layout, genesis payload,
+control record, and commit certificate codecs. It defines no file I/O, member creation, mounting,
+journal scan or append, quorum authority, signatures, manifest, erasure coding, or CLI behavior.
+A volume containing only these records is not mountable.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
 serialized Zig or native ABI structure. Each header copy is exactly 4096 bytes.
@@ -215,6 +215,41 @@ roles. Header validation is also pure: callers first verify member and genesis i
 layout validation checks exactly three headers, matching chunk sizes, and supported layout
 format version. It does not select member authority. Member-file preallocation is capacity
 policy and is not encoded in the layout.
+
+## Genesis Payload
+
+The genesis payload is an owned 1024-byte envelope containing the canonical epoch 1 topology and
+replicated layout. It is the exact payload of every member-local genesis control record. It does
+not add authority, quorum selection, file creation, or journal I/O.
+
+| Offset | Width | Field |
+|---:|---:|---|
+| `0x000` | 8 | Magic `DDVGEN1\0` |
+| `0x008` | 2 | Format version, 1 |
+| `0x00a` | 2 | Flags, zero |
+| `0x00c` | 4 | Encoded size, 1024 |
+| `0x010` | 4 | Topology length, 512 |
+| `0x014` | 4 | Layout length, 256 |
+| `0x018` | 8 | Reserved, zero |
+| `0x020` | 512 | Canonical topology bytes |
+| `0x220` | 256 | Canonical layout bytes |
+| `0x320` | 220 | Reserved, zero |
+| `0x3fc` | 4 | CRC32C of bytes `[0, 1020)` |
+
+Decoding requires exactly 1024 bytes and rejects both truncation and trailing bytes. It copies the
+embedded records into owned topology and layout values. The topology must be epoch 1 with a zero
+parent digest. The layout must be epoch 1, refer to topology epoch 1, use replicated kind `1`, and
+pass topology validation. The genesis payload digest is BLAKE3-256 over bytes `[0, 1020)` and does
+not add a control-record field. The committed fixture has payload digest
+`e8102b500fbc4f4685e9bb6460817ff3905d70889fbdfc8e4e8cc8e0cc5790a2`.
+
+`makeRecord` creates a member-local genesis control record with sequence and membership epoch 1
+and all required genesis fields zero. Its set ID and topology and layout digests come from the
+payload. The member must exist in the topology and have voter control and data roles.
+`validateRecord` applies control-record policy, requires an exact genesis payload, cross-validates
+set and member identity, and verifies both canonical embedded-record digests. The three member
+records share one history digest because member-local identity is excluded from control history,
+while their complete record digests remain distinct.
 
 ## Control Record
 
