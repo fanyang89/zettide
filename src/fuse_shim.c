@@ -2,23 +2,23 @@
 
 #include <stdlib.h>
 
-int devdrive_fuse_get_flags(const struct fuse_file_info *file_info) {
+int zettide_fuse_get_flags(const struct fuse_file_info *file_info) {
     return file_info->flags;
 }
 
-uint64_t devdrive_fuse_get_handle(const struct fuse_file_info *file_info) {
+uint64_t zettide_fuse_get_handle(const struct fuse_file_info *file_info) {
     return file_info->fh;
 }
 
-void devdrive_fuse_set_handle(struct fuse_file_info *file_info, uint64_t handle) {
+void zettide_fuse_set_handle(struct fuse_file_info *file_info, uint64_t handle) {
     file_info->fh = handle;
 }
 
-void devdrive_fuse_set_direct_io(struct fuse_file_info *file_info) {
+void zettide_fuse_set_direct_io(struct fuse_file_info *file_info) {
     file_info->direct_io = 1;
 }
 
-int devdrive_fuse_configure_connection(struct fuse_conn_info *connection) {
+int zettide_fuse_configure_connection(struct fuse_conn_info *connection) {
     connection->want &= ~(FUSE_CAP_POSIX_LOCKS | FUSE_CAP_FLOCK_LOCKS |
                           FUSE_CAP_HANDLE_KILLPRIV);
 #ifdef FUSE_CAP_HANDLE_KILLPRIV_V2
@@ -30,7 +30,7 @@ int devdrive_fuse_configure_connection(struct fuse_conn_info *connection) {
     return 1;
 }
 
-int devdrive_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations, void *user_data) {
+int zettide_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations, void *user_data) {
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
     struct fuse_cmdline_opts options = {0};
     struct fuse_session *session = NULL;

@@ -14,13 +14,13 @@ external_initialize pjdfstest "$mode" "$exe" 512MiB
 external_require_identity_switch
 external_validate_manifest "$script_dir/pjdfstest-cases.tsv"
 
-source_root=${DEVDRIVE_EXTERNAL_ROOT:-"$script_dir/.prepared"}/pjdfstest
+source_root=${ZETTIDE_EXTERNAL_ROOT:-"$script_dir/.prepared"}/pjdfstest
 external_verify_pin "$source_root" ededbeb2b44929972898afb87474b0937f78a877
 [[ -x "$source_root/pjdfstest" ]] || external_skip_or_fail "pjdfstest is not built; run test/external/prepare.sh"
 command -v prove >/dev/null || external_skip_or_fail "prove is unavailable"
 command -v openssl >/dev/null || external_skip_or_fail "openssl is unavailable"
 
-DEVDRIVE_ALLOW_OTHER=1
+ZETTIDE_ALLOW_OTHER=1
 external_start_mount
 while IFS=$'\t' read -r classification case_name contract reason extra; do
     [[ -n "$classification" && ${classification:0:1} != "#" ]] || continue

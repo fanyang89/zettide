@@ -2,7 +2,7 @@
 set -euo pipefail
 
 exe=$1
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/devdrive-cli.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/zettide-cli.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 image="$tmp/image with spaces.ddv"
@@ -12,6 +12,10 @@ info=$("$exe" info "$image")
 [[ "$info" == *"Capacity: 1.00MiB"* ]]
 [[ "$info" == *"Encrypted: no"* ]]
 "$exe" check "$image" | grep -q '^Filesystem traversal succeeded:'
+
+default_image="$tmp/default-label.ddv"
+"$exe" create "$default_image" --size 1MiB >/dev/null
+"$exe" info "$default_image" | grep -q '^Label: Zettide$'
 
 if "$exe" create "$image" --size 1MiB >/dev/null 2>&1; then
     echo "duplicate create unexpectedly succeeded" >&2

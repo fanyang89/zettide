@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 destination=${1:-"$script_dir/.prepared"}
-jobs=${DEVDRIVE_PREPARE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')}
+jobs=${ZETTIDE_PREPARE_JOBS:-${DEVDRIVE_PREPARE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2')}}
 
 command -v git >/dev/null
 command -v make >/dev/null
@@ -39,11 +39,11 @@ while IFS=$'\t' read -r suite url commit license extra; do
     fetch_suite "$suite" "$url" "$commit"
 done <"$script_dir/suites.tsv"
 
-xfstests_patch="$script_dir/xfstests-fuse-devdrive.patch"
+xfstests_patch="$script_dir/xfstests-fuse-zettide.patch"
 if git -C "$destination/xfstests" apply --check "$xfstests_patch"; then
     git -C "$destination/xfstests" apply "$xfstests_patch"
 elif ! git -C "$destination/xfstests" apply --reverse --check "$xfstests_patch"; then
-    echo "xfstests DevDrive FUSE patch does not apply cleanly" >&2
+    echo "xfstests Zettide FUSE patch does not apply cleanly" >&2
     exit 1
 fi
 
@@ -62,7 +62,7 @@ fi
 )
 
 ltp_root="$destination/ltp"
-ltp_bin="$ltp_root/.devdrive-bin"
+ltp_bin="$ltp_root/.zettide-bin"
 mkdir -p "$ltp_bin"
 while IFS=$'\t' read -r classification case_name contract reason extra; do
     [[ -n "$classification" && ${classification:0:1} != "#" ]] || continue

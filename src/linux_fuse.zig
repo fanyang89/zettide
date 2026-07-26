@@ -308,7 +308,7 @@ const FuseDirectoryHandle = struct {
 
 pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bool) !void {
     const allocator = std.heap.c_allocator;
-    const program = try allocator.dupeZ(u8, "devdrive");
+    const program = try allocator.dupeZ(u8, "zettide");
     defer allocator.free(program);
     const foreground = try allocator.dupeZ(u8, "-f");
     defer allocator.free(foreground);
@@ -362,7 +362,7 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bo
     operations.fsyncdir = fsyncDirectory;
     operations.create = create;
 
-    const result = c.devdrive_fuse_main(argv.len, &argv, &operations, &state);
+    const result = c.zettide_fuse_main(argv.len, &argv, &operations, &state);
     if (result != 0) return error.FuseMountFailed;
 }
 
@@ -384,7 +384,7 @@ fn stateFor(req: c.fuse_req_t) *MountState {
 
 fn initialize(userdata: ?*anyopaque, connection: ?*c.struct_fuse_conn_info) callconv(.c) void {
     const state: *MountState = @ptrCast(@alignCast(userdata.?));
-    state.writeback_cache = c.devdrive_fuse_configure_connection(connection.?) != 0;
+    state.writeback_cache = c.zettide_fuse_configure_connection(connection.?) != 0;
 }
 
 fn lookup(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8) callconv(.c) void {
@@ -746,7 +746,7 @@ fn create(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
         return replyError(req, errnoValue(err));
     const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
     const context = c.fuse_req_ctx(req).?;
-    const host_flags = c.devdrive_fuse_get_flags(fi.?);
+    const host_flags = c.zettide_fuse_get_flags(fi.?);
     var flags: c_int = switch (host_flags & 3) {
         0 => lfs.LFS_O_RDONLY,
         else => lfs.LFS_O_RDWR,
@@ -776,8 +776,8 @@ fn create(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
     state.open_files = handle;
     node.open_count += 1;
     node.lookup_count += 1;
-    c.devdrive_fuse_set_handle(fi.?, @intFromPtr(handle));
-    if (!state.writeback_cache) c.devdrive_fuse_set_direct_io(fi.?);
+    c.zettide_fuse_set_handle(fi.?, @intFromPtr(handle));
+    if (!state.writeback_cache) c.zettide_fuse_set_direct_io(fi.?);
     var entry: c.struct_fuse_entry_param = undefined;
     fillEntry(&entry, node, info);
     _ = c.fuse_reply_create(req, &entry, fi.?);
@@ -785,7 +785,7 @@ fn create(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
 
 fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.struct_fuse_file_info) void {
     const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
-    const host_flags = c.devdrive_fuse_get_flags(fi);
+    const host_flags = c.zettide_fuse_get_flags(fi);
     const flags: c_int = if (state.writeback_cache)
         lfs.LFS_O_RDWR
     else switch (host_flags & 3) {
@@ -806,8 +806,8 @@ fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.stru
     handle.next = state.open_files;
     state.open_files = handle;
     node.open_count += 1;
-    c.devdrive_fuse_set_handle(fi, @intFromPtr(handle));
-    if (!state.writeback_cache) c.devdrive_fuse_set_direct_io(fi);
+    c.zettide_fuse_set_handle(fi, @intFromPtr(handle));
+    if (!state.writeback_cache) c.zettide_fuse_set_direct_io(fi);
     _ = c.fuse_reply_open(req, fi);
 }
 
@@ -904,7 +904,7 @@ fn openDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_i
     handle.parent_id = if (state.findEntryForInode(node)) |dentry| dentry.parent.id else c.FUSE_ROOT_ID;
     node.cached_info = handle.directory.info;
     node.open_count += 1;
-    c.devdrive_fuse_set_handle(fi.?, @intFromPtr(handle));
+    c.zettide_fuse_set_handle(fi.?, @intFromPtr(handle));
     _ = c.fuse_reply_open(req, fi.?);
 }
 
@@ -1126,11 +1126,11 @@ fn now(io: Io) i64 {
 }
 
 fn fuseFileHandle(file_info: *c.struct_fuse_file_info) *FuseFileHandle {
-    return @ptrFromInt(c.devdrive_fuse_get_handle(file_info));
+    return @ptrFromInt(c.zettide_fuse_get_handle(file_info));
 }
 
 fn fuseDirectoryHandle(file_info: *c.struct_fuse_file_info) *FuseDirectoryHandle {
-    return @ptrFromInt(c.devdrive_fuse_get_handle(file_info));
+    return @ptrFromInt(c.zettide_fuse_get_handle(file_info));
 }
 
 fn replyError(req: c.fuse_req_t, value: c_int) void {

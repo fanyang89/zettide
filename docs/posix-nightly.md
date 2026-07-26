@@ -23,9 +23,9 @@ bash test/external/prepare.sh
 
 The script initializes one checkout per suite under
 `test/external/.prepared/`, fetches only the explicit commit, checks detached
-HEAD, and builds the required tools. Set `DEVDRIVE_PREPARE_JOBS` to control
+HEAD, and builds the required tools. Set `ZETTIDE_PREPARE_JOBS` to control
 parallel builds or pass another destination as the first argument. Set
-`DEVDRIVE_EXTERNAL_ROOT` to that destination when running tests.
+`ZETTIDE_EXTERNAL_ROOT` to that destination when running tests.
 
 This is the only step that accesses the network. Test runners verify each local
 HEAD against the pin and never invoke package managers, Git fetch, or other
@@ -60,16 +60,18 @@ zig build -j1 test-posix-nightly \
 
 Modes are `off`, `auto`, and `required`. Privileged runners re-exec themselves
 through passwordless `sudo -n` when necessary; they never prompt. They first
-verify identity switching on the host, then run against an isolated DevDrive
+verify identity switching on the host, then run against an isolated Zettide
 image. An EXIT trap attempts a normal unmount, bounded wait, lazy detach, and
 process termination in that order.
 
 The aggregate nightly target uses `-j1` because xfstests identifies its test
-filesystem by mount source and must not overlap another DevDrive mount.
+filesystem by mount source and must not overlap another Zettide mount.
 
-Set `DEVDRIVE_TEST_LOG_DIR` to retain suite, mount, and xfstests result logs.
-Set `DEVDRIVE_KEEP_TEST_ARTIFACTS=1` to retain a failed runner's temporary image
+Set `ZETTIDE_TEST_LOG_DIR` to retain suite, mount, and xfstests result logs.
+Set `ZETTIDE_KEEP_TEST_ARTIFACTS=1` to retain a failed runner's temporary image
 and mount log. Retained images can contain test-created ownership and mode data.
+The test runners continue to accept the former `DEVDRIVE_*` variable names as
+compatibility aliases; new automation should use `ZETTIDE_*`.
 
 The nightly workflow is scheduled and manually dispatchable. It prepares the
 pinned sources before invoking required mode and uploads logs even when the gate

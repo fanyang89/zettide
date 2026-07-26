@@ -13,7 +13,7 @@ external_mode=$mode
 external_require_root "$@"
 external_initialize permissions "$mode" "$exe" 256MiB
 external_require_identity_switch
-DEVDRIVE_ALLOW_OTHER=1
+ZETTIDE_ALLOW_OTHER=1
 external_start_mount
 timeout 60 "$probe" "$external_mount_dir"
 external_stop_mount

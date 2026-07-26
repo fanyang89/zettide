@@ -17,9 +17,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      DEVDRIVE_EXTERNAL_ROOT: ${{ github.workspace }}/test/external/.prepared
-      DEVDRIVE_TEST_LOG_DIR: ${{ github.workspace }}/test-results
-      DEVDRIVE_KEEP_TEST_ARTIFACTS: "1"
+      ZETTIDE_EXTERNAL_ROOT: ${{ github.workspace }}/test/external/.prepared
+      ZETTIDE_TEST_LOG_DIR: ${{ github.workspace }}/test-results
+      ZETTIDE_KEEP_TEST_ARTIFACTS: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -42,10 +42,10 @@ jobs:
 
       - name: Prepare pinned suites
         run: |
-          mkdir -p "$DEVDRIVE_TEST_LOG_DIR"
+          mkdir -p "$ZETTIDE_TEST_LOG_DIR"
           set -o pipefail
-          bash test/external/prepare.sh "$DEVDRIVE_EXTERNAL_ROOT" \
-            2>&1 | tee "$DEVDRIVE_TEST_LOG_DIR/prepare.log"
+          bash test/external/prepare.sh "$ZETTIDE_EXTERNAL_ROOT" \
+            2>&1 | tee "$ZETTIDE_TEST_LOG_DIR/prepare.log"
 
       - name: Run nightly gates
         run: |
@@ -54,7 +54,7 @@ jobs:
             -Dfuse-tests=required \
             -Dexternal-tests=required \
             -Dprivileged-tests=required \
-            2>&1 | tee "$DEVDRIVE_TEST_LOG_DIR/nightly.log"
+            2>&1 | tee "$ZETTIDE_TEST_LOG_DIR/nightly.log"
 
       - name: Upload logs
         if: always()

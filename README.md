@@ -1,6 +1,6 @@
-# DevDrive
+# Zettide
 
-DevDrive is an experimental cross-platform, single-file development volume
+Zettide is an experimental cross-platform, single-file development volume
 built on [littlefs](https://github.com/littlefs-project/littlefs). Containers
 have a fixed logical capacity, can be sparse on the host filesystem, and reserve
 format space for future authenticated encryption.
@@ -49,8 +49,8 @@ are unavailable.
 
 The external gates compile pinned source snapshots from libfuse and xfstests
 stored under `vendor/`. `test-libfuse` runs the syscall cases that match the
-declared DevDrive semantics. `test-fsx` runs deterministic 10,000-operation
-buffered and mmap I/O workloads with two seeds. Set `DEVDRIVE_FSX_OPS=100000`
+declared Zettide semantics. `test-fsx` runs deterministic 10,000-operation
+buffered and mmap I/O workloads with two seeds. Set `ZETTIDE_FSX_OPS=100000`
 for a longer stress run. These gates have the same Linux FUSE requirements as `test-fuse`
 and are not part of the default `test` or `ci` targets.
 
@@ -72,13 +72,13 @@ pins, manifests, and log controls are documented in
 ## Usage
 
 ```sh
-devdrive create workspace.ddv --size 16GiB --label Workspace
-devdrive info workspace.ddv
-devdrive check workspace.ddv
+zettide create workspace.ddv --size 16GiB --label Workspace
+zettide info workspace.ddv
+zettide check workspace.ddv
 mkdir workspace
-devdrive mount workspace.ddv workspace
+zettide mount workspace.ddv workspace
 # From another terminal:
-devdrive unmount workspace
+zettide unmount workspace
 ```
 
 ## Format limits

@@ -7,5 +7,5 @@ index 268c5aab..9b5e87af 100644
      _df_device $1 | $AWK_PROG '{ print $2 }' | \
          sed -e 's/nfs4/nfs/' -e 's/fuse.glusterfs/glusterfs/' \
 -            -e 's/fuse.ceph-fuse/ceph-fuse/'
-+            -e 's/fuse.ceph-fuse/ceph-fuse/' -e 's/fuse.devdrive/fuse/'
++            -e 's/fuse.ceph-fuse/ceph-fuse/' -e 's/fuse.zettide/fuse/'
  }

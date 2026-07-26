@@ -13,13 +13,13 @@ pub fn build(b: *std.Build) void {
 
     const portable_core = createCoreModule(b, target, optimize, false);
     const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux);
-    const exe = createExecutable(b, "devdrive", target, optimize, app_core);
+    const exe = createExecutable(b, "zettide", target, optimize, app_core);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run devdrive");
+    const run_step = b.step("run", "Run zettide");
     run_step.dependOn(&run_cmd.step);
 
     const core_tests = b.addTest(.{ .root_module = portable_core });
@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "devdrive", .module = portable_core }},
+            .imports = &.{.{ .name = "zettide", .module = portable_core }},
         }),
     });
     const run_image_tests = b.addRunArtifact(image_tests);
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "devdrive", .module = portable_core }},
+            .imports = &.{.{ .name = "zettide", .module = portable_core }},
         }),
     });
     const run_fault_tests = b.addRunArtifact(fault_tests);
@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
         .abi = .gnu,
     });
     const windows_core = createCoreModule(b, windows_target, optimize, false);
-    const windows_exe = createExecutable(b, "devdrive-windows-check", windows_target, optimize, windows_core);
+    const windows_exe = createExecutable(b, "zettide-windows-check", windows_target, optimize, windows_core);
     cross_step.dependOn(&windows_exe.step);
 
     const test_step = b.step("test", "Run unit, image, and CLI tests");
@@ -207,7 +207,7 @@ fn createExecutable(
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "devdrive", .module = core }},
+            .imports = &.{.{ .name = "zettide", .module = core }},
         }),
     });
 }

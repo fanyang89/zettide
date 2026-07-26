@@ -1,9 +1,9 @@
 const std = @import("std");
-const devdrive = @import("devdrive");
-const Volume = devdrive.volume.Volume;
-const FileHandle = devdrive.volume.FileHandle;
-const DirectoryHandle = devdrive.volume.DirectoryHandle;
-const c = devdrive.volume.c;
+const zettide = @import("zettide");
+const Volume = zettide.volume.Volume;
+const FileHandle = zettide.volume.FileHandle;
+const DirectoryHandle = zettide.volume.DirectoryHandle;
+const c = zettide.volume.c;
 
 fn fullImagePath(tmp: *std.testing.TmpDir, buffer: []u8) ![]const u8 {
     const root_length = try tmp.dir.realPath(std.testing.io, buffer);
@@ -32,12 +32,12 @@ fn writeFileWorker(
 
 fn readReservations(
     volume: *Volume,
-    object_id: devdrive.object_format.ObjectId,
+    object_id: zettide.object_format.ObjectId,
 ) !struct {
-    head: devdrive.object_format.ObjectHead,
-    intervals: []devdrive.object_format.ReservationInterval,
+    head: zettide.object_format.ObjectHead,
+    intervals: []zettide.object_format.ReservationInterval,
 } {
-    const store: devdrive.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+    const store: zettide.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
     const head = try store.readHead(object_id);
     return .{
         .head = head,
@@ -124,7 +124,7 @@ test "read-only close does not issue a write sync" {
     var volume = try Volume.open(std.testing.io, path, false);
     defer volume.deinit();
     try volume.mount();
-    var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 0 };
+    var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 0 };
     volume.device.fault = &fault;
     try volume.close();
     try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
@@ -176,7 +176,7 @@ test "files support 63-bit sparse offsets without allocating holes" {
 
         const info = try volume.statFile(&file);
         try std.testing.expectEqual(distant_offset + 5, info.size);
-        try std.testing.expect(info.allocated_bytes < 2 * devdrive.object_format.chunk_size);
+        try std.testing.expect(info.allocated_bytes < 2 * zettide.object_format.chunk_size);
 
         var boundary: [8]u8 = undefined;
         try std.testing.expectEqual(boundary.len, try volume.readFile(&file, &boundary, distant_offset - 3));
@@ -191,14 +191,14 @@ test "files support 63-bit sparse offsets without allocating holes" {
         try std.testing.expectEqual(regrown.len, try volume.readFile(&file, &regrown, distant_offset));
         try std.testing.expectEqualSlices(u8, &[_]u8{ 'r', 'i', 0, 0, 0 }, &regrown);
 
-        try volume.truncateFile(&file, devdrive.object_format.max_file_size);
+        try volume.truncateFile(&file, zettide.object_format.max_file_size);
         try std.testing.expectEqual(
-            devdrive.object_format.max_file_size,
+            zettide.object_format.max_file_size,
             (try volume.statFile(&file)).size,
         );
         try std.testing.expectError(
             error.FileTooLarge,
-            volume.writeFile(&file, "x", devdrive.object_format.max_file_size),
+            volume.writeFile(&file, "x", zettide.object_format.max_file_size),
         );
         try volume.syncFile(&file);
         try volume.closeFile(&file);
@@ -209,8 +209,8 @@ test "files support 63-bit sparse offsets without allocating holes" {
         defer volume.deinit();
         try volume.mount();
         const info = try volume.stat("/sparse");
-        try std.testing.expectEqual(devdrive.object_format.max_file_size, info.size);
-        try std.testing.expect(info.allocated_bytes < 2 * devdrive.object_format.chunk_size);
+        try std.testing.expectEqual(zettide.object_format.max_file_size, info.size);
+        try std.testing.expect(info.allocated_bytes < 2 * zettide.object_format.chunk_size);
     }
 }
 
@@ -257,7 +257,7 @@ test "writable mount reclaims objects orphaned by a crashed open handle" {
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
-    var orphan_id: devdrive.object_format.ObjectId = undefined;
+    var orphan_id: zettide.object_format.ObjectId = undefined;
 
     {
         var volume = try openVolume(path);
@@ -277,7 +277,7 @@ test "writable mount reclaims objects orphaned by a crashed open handle" {
         try volume.mount();
         var id_buffer: [32]u8 = undefined;
         var internal_path: [128:0]u8 = @splat(0);
-        const id = devdrive.object_format.formatObjectId(orphan_id, &id_buffer);
+        const id = zettide.object_format.formatObjectId(orphan_id, &id_buffer);
         const value = try std.fmt.bufPrint(internal_path[0..128], "/system/objects/{s}", .{id});
         internal_path[value.len] = 0;
         var info: c.struct_lfs_info = undefined;
@@ -330,7 +330,7 @@ test "directory identity survives rename and container reopen" {
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
-    var expected_identity: devdrive.object_format.ObjectId = undefined;
+    var expected_identity: zettide.object_format.ObjectId = undefined;
 
     {
         var volume = try openVolume(path);
@@ -362,17 +362,17 @@ test "directories from old images receive a compatible persistent identity" {
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
-    var expected_identity: devdrive.object_format.ObjectId = undefined;
+    var expected_identity: zettide.object_format.ObjectId = undefined;
 
     {
         var volume = try openVolume(path);
         defer volume.deinit();
         try volume.mount();
         try volume.makeDirectory("/legacy-directory", 0o40755, 1, 2);
-        try devdrive.volume.checkLfs(c.lfs_removeattr(
+        try zettide.volume.checkLfs(c.lfs_removeattr(
             &volume.lfs,
             "/namespace/legacy-directory",
-            devdrive.metadata.directory_identity_attribute_type,
+            zettide.metadata.directory_identity_attribute_type,
         ));
     }
 
@@ -381,13 +381,13 @@ test "directories from old images receive a compatible persistent identity" {
         defer volume.deinit();
         try volume.mount();
         _ = try volume.stat("/legacy-directory");
-        var stored_identity: devdrive.object_format.ObjectId = undefined;
+        var stored_identity: zettide.object_format.ObjectId = undefined;
         try std.testing.expectEqual(
             @as(c_int, c.LFS_ERR_NOATTR),
             c.lfs_getattr(
                 &volume.lfs,
                 "/namespace/legacy-directory",
-                devdrive.metadata.directory_identity_attribute_type,
+                zettide.metadata.directory_identity_attribute_type,
                 &stored_identity,
                 stored_identity.len,
             ),
@@ -399,13 +399,13 @@ test "directories from old images receive a compatible persistent identity" {
         defer volume.deinit();
         try volume.mount();
         expected_identity = (try volume.stat("/legacy-directory")).identity;
-        var stored_identity: devdrive.object_format.ObjectId = undefined;
+        var stored_identity: zettide.object_format.ObjectId = undefined;
         try std.testing.expectEqual(
             @as(c_int, stored_identity.len),
             c.lfs_getattr(
                 &volume.lfs,
                 "/namespace/legacy-directory",
-                devdrive.metadata.directory_identity_attribute_type,
+                zettide.metadata.directory_identity_attribute_type,
                 &stored_identity,
                 stored_identity.len,
             ),
@@ -552,16 +552,16 @@ test "corrupt metadata is reported instead of replaced with defaults" {
     try volume.openFile(&file, "/corrupt", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
     try volume.closeFile(&file);
 
-    const corrupt: [devdrive.object_format.ref_encoded_size]u8 = @splat(0xa5);
+    const corrupt: [zettide.object_format.ref_encoded_size]u8 = @splat(0xa5);
     var raw_file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
-    try devdrive.volume.checkLfs(c.lfs_file_open(
+    try zettide.volume.checkLfs(c.lfs_file_open(
         &volume.lfs,
         &raw_file,
         "/namespace/corrupt",
         c.LFS_O_WRONLY | c.LFS_O_TRUNC,
     ));
-    try devdrive.volume.checkLfs(c.lfs_file_write(&volume.lfs, &raw_file, &corrupt, corrupt.len));
-    try devdrive.volume.checkLfs(c.lfs_file_close(&volume.lfs, &raw_file));
+    try zettide.volume.checkLfs(c.lfs_file_write(&volume.lfs, &raw_file, &corrupt, corrupt.len));
+    try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &raw_file));
     try std.testing.expectError(error.InvalidObjectRef, volume.stat("/corrupt"));
     try std.testing.expectError(
         error.InvalidObjectRef,
@@ -721,7 +721,7 @@ test "futimens-style patch is visible to every open handle" {
     const mode_head = try volume.patchObjectMetadata(second.object_id, .{ .mode = 0o620 });
     try std.testing.expectEqual(times_head.metadata.atime_ns, mode_head.metadata.atime_ns);
     try std.testing.expectEqual(times_head.metadata.mtime_ns, mode_head.metadata.mtime_ns);
-    try std.testing.expectEqual(devdrive.metadata.Kind.file, mode_head.metadata.kind);
+    try std.testing.expectEqual(zettide.metadata.Kind.file, mode_head.metadata.kind);
     try std.testing.expectEqual(birthtime, mode_head.metadata.birthtime_ns);
     try std.testing.expectEqual(@as(u32, 0xa5), mode_head.metadata.windows_attributes);
     try std.testing.expect(mode_head.metadata.ctime_ns > times_head.metadata.ctime_ns);
@@ -773,7 +773,7 @@ test "high-offset fallocate reserves only its sparse interval" {
     defer volume.deinit();
     try volume.mount();
 
-    const offset = 8 * devdrive.object_format.chunk_size;
+    const offset = 8 * zettide.object_format.chunk_size;
     var file: FileHandle = undefined;
     try volume.openFile(&file, "/high-offset", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
     try volume.fallocateFile(&file, offset, 4096);
@@ -800,7 +800,7 @@ test "fallocate merges overlaps and keeps disjoint hole writes unreserved" {
 
     var file: FileHandle = undefined;
     try volume.openFile(&file, "/intervals", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
-    const chunk = devdrive.object_format.chunk_size;
+    const chunk = zettide.object_format.chunk_size;
     try volume.fallocateFile(&file, chunk + 4096, 4096);
     try volume.fallocateFile(&file, chunk, 4096);
     try volume.fallocateFile(&file, chunk + 2048, 8192);
@@ -812,7 +812,7 @@ test "fallocate merges overlaps and keeps disjoint hole writes unreserved" {
     try std.testing.expectEqual(@as(usize, 13), stored.intervals.len);
     try std.testing.expectEqual(@as(u64, chunk), stored.intervals[0].start);
     try std.testing.expectEqual(@as(u64, chunk + 10 * 1024), stored.intervals[0].end);
-    const store: devdrive.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+    const store: zettide.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
     try std.testing.expect((try store.writeFootprint(file.object_id, chunk + 1024, 4096)).reserved);
     try std.testing.expect(!(try store.writeFootprint(file.object_id, 2 * chunk, 4096)).reserved);
     try std.testing.expect(!(try store.writeFootprint(file.object_id, chunk + 8192, 2 * chunk)).reserved);
@@ -824,7 +824,7 @@ test "reservation sidecar selection persists and recovery removes unselected ver
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try createVolume(&tmp, &path_buffer, 8 * 1024 * 1024);
-    var object_id: devdrive.object_format.ObjectId = undefined;
+    var object_id: zettide.object_format.ObjectId = undefined;
     var selected_generation: u64 = 0;
 
     {
@@ -842,7 +842,7 @@ test "reservation sidecar selection persists and recovery removes unselected ver
 
         var id_buffer: [32]u8 = undefined;
         var orphan_path: [160:0]u8 = @splat(0);
-        const id = devdrive.object_format.formatObjectId(object_id, &id_buffer);
+        const id = zettide.object_format.formatObjectId(object_id, &id_buffer);
         const value = try std.fmt.bufPrint(
             orphan_path[0..160],
             "/system/objects/{s}/reservation-{x:0>16}",
@@ -850,13 +850,13 @@ test "reservation sidecar selection persists and recovery removes unselected ver
         );
         orphan_path[value.len] = 0;
         var orphan: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
-        try devdrive.volume.checkLfs(c.lfs_file_open(
+        try zettide.volume.checkLfs(c.lfs_file_open(
             &volume.lfs,
             &orphan,
             &orphan_path,
             c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
         ));
-        try devdrive.volume.checkLfs(c.lfs_file_close(&volume.lfs, &orphan));
+        try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &orphan));
         try volume.closeFile(&file);
     }
 
@@ -871,7 +871,7 @@ test "reservation sidecar selection persists and recovery removes unselected ver
 
         var id_buffer: [32]u8 = undefined;
         var orphan_path: [160:0]u8 = @splat(0);
-        const id = devdrive.object_format.formatObjectId(object_id, &id_buffer);
+        const id = zettide.object_format.formatObjectId(object_id, &id_buffer);
         const value = try std.fmt.bufPrint(
             orphan_path[0..160],
             "/system/objects/{s}/reservation-{x:0>16}",
@@ -930,7 +930,7 @@ test "fallocate reservations persist, isolate space, share links, and release" {
         const block: [4096]u8 = @splat(0x5a);
         var index: u64 = 0;
         while (index < 4096) : (index += 1) {
-            _ = volume.writeFile(&hog, &block, index * devdrive.object_format.chunk_size) catch |err| switch (err) {
+            _ = volume.writeFile(&hog, &block, index * zettide.object_format.chunk_size) catch |err| switch (err) {
                 error.NoSpaceLeft => break,
                 else => return err,
             };
@@ -1020,7 +1020,7 @@ test "fallocate rejects ranges beyond the supported file size" {
     try volume.openFile(&file, "/invalid-reservation", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
     try std.testing.expectError(
         error.FileTooLarge,
-        volume.fallocateFile(&file, devdrive.object_format.max_file_size, 1),
+        volume.fallocateFile(&file, zettide.object_format.max_file_size, 1),
     );
     try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
     try std.testing.expectError(error.InvalidArgument, volume.fallocateFile(&file, 0, 0));
@@ -1058,7 +1058,7 @@ test "hard links persist and keep objects alive through final unlink" {
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
-    var object_id: devdrive.object_format.ObjectId = undefined;
+    var object_id: zettide.object_format.ObjectId = undefined;
 
     {
         var volume = try openVolume(path);
@@ -1096,7 +1096,7 @@ test "hard links persist and keep objects alive through final unlink" {
 
         var id_buffer: [32]u8 = undefined;
         var object_path: [128:0]u8 = @splat(0);
-        const id = devdrive.object_format.formatObjectId(object_id, &id_buffer);
+        const id = zettide.object_format.formatObjectId(object_id, &id_buffer);
         const value = try std.fmt.bufPrint(object_path[0..128], "/system/objects/{s}", .{id});
         object_path[value.len] = 0;
         var info: c.struct_lfs_info = undefined;
@@ -1168,13 +1168,13 @@ test "directory link counts and FIFO metadata persist" {
         defer volume.deinit();
         try volume.mount();
         const info = try volume.stat("/pipe");
-        try std.testing.expectEqual(devdrive.metadata.Kind.fifo, info.metadata.kind);
+        try std.testing.expectEqual(zettide.metadata.Kind.fifo, info.metadata.kind);
         try std.testing.expectEqual(@as(u32, 0o010640), info.metadata.mode);
         try std.testing.expectEqual(@as(u32, 12), info.metadata.uid);
         try std.testing.expectEqual(@as(u32, 34), info.metadata.gid);
         try std.testing.expectEqual(@as(u64, 1), info.nlink);
         const legacy_link = try volume.stat("/legacy-link");
-        try std.testing.expectEqual(devdrive.metadata.Kind.symlink, legacy_link.metadata.kind);
+        try std.testing.expectEqual(zettide.metadata.Kind.symlink, legacy_link.metadata.kind);
         var target: [6]u8 = undefined;
         try std.testing.expectEqual(target.len, try volume.readObject(legacy_link.object_id.?, &target, 0));
         try std.testing.expectEqualStrings("target", &target);
@@ -1276,26 +1276,26 @@ test "writable mount removes stale temporary ObjectRef files" {
         try volume.mount();
         var file: FileHandle = undefined;
         try volume.openFile(&file, "/persistent", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
-        const object_ref: devdrive.object_format.ObjectRef = .{
+        const object_ref: zettide.object_format.ObjectRef = .{
             .kind = .file,
             .object_id = file.object_id,
         };
         try volume.closeFile(&file);
 
         var id_buffer: [32]u8 = undefined;
-        const id = devdrive.object_format.formatObjectId(object_ref.object_id, &id_buffer);
+        const id = zettide.object_format.formatObjectId(object_ref.object_id, &id_buffer);
         const value = try std.fmt.bufPrint(temporary_path[0..128], "/system/tmp/{s}.ref", .{id});
         temporary_path[value.len] = 0;
         const bytes = object_ref.encode();
         var raw_file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
-        try devdrive.volume.checkLfs(c.lfs_file_open(
+        try zettide.volume.checkLfs(c.lfs_file_open(
             &volume.lfs,
             &raw_file,
             &temporary_path,
             c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
         ));
-        try devdrive.volume.checkLfs(c.lfs_file_write(&volume.lfs, &raw_file, &bytes, bytes.len));
-        try devdrive.volume.checkLfs(c.lfs_file_close(&volume.lfs, &raw_file));
+        try zettide.volume.checkLfs(c.lfs_file_write(&volume.lfs, &raw_file, &bytes, bytes.len));
+        try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &raw_file));
     }
 
     {

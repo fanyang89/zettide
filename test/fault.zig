@@ -1,8 +1,8 @@
 const std = @import("std");
-const devdrive = @import("devdrive");
-const Volume = devdrive.volume.Volume;
-const FileHandle = devdrive.volume.FileHandle;
-const c = devdrive.volume.c;
+const zettide = @import("zettide");
+const Volume = zettide.volume.Volume;
+const FileHandle = zettide.volume.FileHandle;
+const c = zettide.volume.c;
 
 fn createPath(tmp: *std.testing.TmpDir, buffer: []u8) ![]const u8 {
     const root_length = try tmp.dir.realPath(std.testing.io, buffer);
@@ -23,15 +23,15 @@ fn expectReopen(path: []const u8) !void {
 test "block device program faults have deterministic side effects" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var header = try devdrive.container.Header.init(std.testing.io, 1024 * 1024, "ProgramFaults");
+    var header = try zettide.container.Header.init(std.testing.io, 1024 * 1024, "ProgramFaults");
     header.state = .ready;
 
     {
         const file = try tmp.dir.createFile(std.testing.io, "before.ddv", .{ .read = true });
         defer file.close(std.testing.io);
         try file.setLength(std.testing.io, header.payload_start + header.logical_size);
-        var device = devdrive.block_device.FileBlockDevice.init(std.testing.io, file, header);
-        var fault: devdrive.block_device.FaultController = .{
+        var device = zettide.block_device.FileBlockDevice.init(std.testing.io, file, header);
+        var fault: zettide.block_device.FaultController = .{
             .fail_program_at = 0,
             .fail_program_partial_at = 0,
             .fail_program_after_at = 0,
@@ -49,8 +49,8 @@ test "block device program faults have deterministic side effects" {
         const file = try tmp.dir.createFile(std.testing.io, "partial.ddv", .{ .read = true });
         defer file.close(std.testing.io);
         try file.setLength(std.testing.io, header.payload_start + header.logical_size);
-        var device = devdrive.block_device.FileBlockDevice.init(std.testing.io, file, header);
-        var fault: devdrive.block_device.FaultController = .{ .fail_program_partial_at = 0 };
+        var device = zettide.block_device.FileBlockDevice.init(std.testing.io, file, header);
+        var fault: zettide.block_device.FaultController = .{ .fail_program_partial_at = 0 };
         device.fault = &fault;
         try std.testing.expectError(error.InjectedFault, device.program(0, 0, "abcde"));
         try std.testing.expect(device.isWriteFrozen());
@@ -66,8 +66,8 @@ test "block device program faults have deterministic side effects" {
         const file = try tmp.dir.createFile(std.testing.io, "after.ddv", .{ .read = true });
         defer file.close(std.testing.io);
         try file.setLength(std.testing.io, header.payload_start + header.logical_size);
-        var device = devdrive.block_device.FileBlockDevice.init(std.testing.io, file, header);
-        var fault: devdrive.block_device.FaultController = .{ .fail_program_after_at = 0 };
+        var device = zettide.block_device.FileBlockDevice.init(std.testing.io, file, header);
+        var fault: zettide.block_device.FaultController = .{ .fail_program_after_at = 0 };
         device.fault = &fault;
         try std.testing.expectError(error.InjectedFault, device.program(0, 0, "abcde"));
         try std.testing.expect(device.isWriteFrozen());
@@ -80,7 +80,7 @@ test "block device program faults have deterministic side effects" {
 test "a real block device program error freezes writes but permits reads" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var header = try devdrive.container.Header.init(std.testing.io, 1024 * 1024, "RealFaults");
+    var header = try zettide.container.Header.init(std.testing.io, 1024 * 1024, "RealFaults");
     header.state = .ready;
 
     {
@@ -89,7 +89,7 @@ test "a real block device program error freezes writes but permits reads" {
         setup.close(std.testing.io);
         const file = try tmp.dir.openFile(std.testing.io, "readonly.ddv", .{ .mode = .read_only });
         defer file.close(std.testing.io);
-        var device = devdrive.block_device.FileBlockDevice.init(std.testing.io, file, header);
+        var device = zettide.block_device.FileBlockDevice.init(std.testing.io, file, header);
         device.program(0, 0, "data") catch {};
         try std.testing.expect(device.isWriteFrozen());
         var actual: [4]u8 = undefined;
@@ -103,14 +103,14 @@ test "caller and read failures do not freeze writes" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "non-write-faults.ddv", .{ .read = true });
     defer file.close(std.testing.io);
-    var header = try devdrive.container.Header.init(std.testing.io, 1024 * 1024, "NonWriteFaults");
+    var header = try zettide.container.Header.init(std.testing.io, 1024 * 1024, "NonWriteFaults");
     header.state = .ready;
     try file.setLength(std.testing.io, header.payload_start + header.logical_size);
-    var device = devdrive.block_device.FileBlockDevice.init(std.testing.io, file, header);
+    var device = zettide.block_device.FileBlockDevice.init(std.testing.io, file, header);
 
     try std.testing.expectError(error.OutOfBounds, device.program(header.block_count, 0, "data"));
     try std.testing.expect(!device.isWriteFrozen());
-    var fault: devdrive.block_device.FaultController = .{ .fail_read_at = 0 };
+    var fault: zettide.block_device.FaultController = .{ .fail_read_at = 0 };
     device.fault = &fault;
     var actual: [4]u8 = undefined;
     try std.testing.expectError(error.InjectedFault, device.read(0, 0, &actual));
@@ -133,7 +133,7 @@ test "a failed sync freezes writes until the volume is reopened" {
         try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
         _ = try volume.writeFile(&file, "durable", 0);
 
-        var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 0 };
+        var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 0 };
         volume.device.fault = &fault;
         try std.testing.expectError(error.InputOutput, volume.syncFile(&file));
         try std.testing.expect(file.open);
@@ -174,7 +174,7 @@ test "an after-side-effect sync is durable but freezes the volume" {
         var file: FileHandle = undefined;
         try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
         _ = try volume.writeFile(&file, "durable", 0);
-        var fault: devdrive.block_device.FaultController = .{ .fail_sync_after_at = 0 };
+        var fault: zettide.block_device.FaultController = .{ .fail_sync_after_at = 0 };
         volume.device.fault = &fault;
         try std.testing.expectError(error.InputOutput, volume.syncFile(&file));
         try std.testing.expect(volume.isWriteFrozen());
@@ -209,7 +209,7 @@ test "close releases resources after before and after sync failures" {
         var volume = try Volume.open(std.testing.io, path, true);
         defer volume.deinit();
         try volume.mount();
-        var fault: devdrive.block_device.FaultController = .{};
+        var fault: zettide.block_device.FaultController = .{};
         if (after_side_effect) {
             fault.fail_sync_after_at = fault.sync_count;
         } else {
@@ -234,7 +234,7 @@ test "frozen close reports the first error and releases resources" {
     var volume = try Volume.open(std.testing.io, path, true);
     defer volume.deinit();
     try volume.mount();
-    var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 0 };
+    var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 0 };
     volume.device.fault = &fault;
     try std.testing.expectError(error.InputOutput, volume.sync());
     fault.disable();
@@ -279,7 +279,7 @@ test "partial and after-side-effect programs freeze all volume mutations" {
         _ = try volume.writeFile(&file, "original", 0);
         try volume.syncFile(&file);
 
-        var fault: devdrive.block_device.FaultController = .{};
+        var fault: zettide.block_device.FaultController = .{};
         switch (action) {
             .partial => fault.fail_program_partial_at = 0,
             .after => fault.fail_program_after_at = 0,
@@ -312,10 +312,10 @@ test "a failed multi-chunk write leaves the published generation unchanged" {
     try volume.mount();
     var file: FileHandle = undefined;
     try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
-    const offset = devdrive.object_format.chunk_size - 2;
+    const offset = zettide.object_format.chunk_size - 2;
     _ = try volume.writeFile(&file, "abcd", offset);
 
-    var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 1 };
+    var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 1 };
     volume.device.fault = &fault;
     try std.testing.expectError(error.InputOutput, volume.writeFile(&file, "WXYZ", offset));
     try std.testing.expect(volume.isWriteFrozen());
@@ -335,7 +335,7 @@ test "a disjoint write does not publish chunks from a failed generation" {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try createPath(&tmp, &path_buffer);
     try Volume.create(std.testing.io, path, 8 * 1024 * 1024, "DisjointFaultTest");
-    const failed_offset = devdrive.object_format.chunk_size - 2;
+    const failed_offset = zettide.object_format.chunk_size - 2;
 
     {
         var volume = try Volume.open(std.testing.io, path, true);
@@ -345,14 +345,14 @@ test "a disjoint write does not publish chunks from a failed generation" {
         try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
         _ = try volume.writeFile(&file, "abcd", failed_offset);
 
-        var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 1 };
+        var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 1 };
         volume.device.fault = &fault;
         try std.testing.expectError(error.InputOutput, volume.writeFile(&file, "WXYZ", failed_offset));
         fault.disable();
 
         try std.testing.expectError(
             error.VolumeFrozen,
-            volume.writeFile(&file, "safe", 2 * devdrive.object_format.chunk_size),
+            volume.writeFile(&file, "safe", 2 * zettide.object_format.chunk_size),
         );
         var actual: [4]u8 = undefined;
         try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, failed_offset));
@@ -379,7 +379,7 @@ test "a frozen device rejects direct store writes" {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try createPath(&tmp, &path_buffer);
     try Volume.create(std.testing.io, path, 8 * 1024 * 1024, "DirectStoreFaultTest");
-    const failed_offset = devdrive.object_format.chunk_size - 2;
+    const failed_offset = zettide.object_format.chunk_size - 2;
 
     {
         var volume = try Volume.open(std.testing.io, path, true);
@@ -389,15 +389,15 @@ test "a frozen device rejects direct store writes" {
         try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
         _ = try volume.writeFile(&file, "abcd", failed_offset);
 
-        var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 3 };
+        var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 3 };
         volume.device.fault = &fault;
         try std.testing.expectError(error.InputOutput, volume.writeFile(&file, "WXYZ", failed_offset));
         fault.disable();
 
-        const store: devdrive.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+        const store: zettide.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
         try std.testing.expectError(
             error.InputOutput,
-            store.write(file.object_id, "safe", 2 * devdrive.object_format.chunk_size),
+            store.write(file.object_id, "safe", 2 * zettide.object_format.chunk_size),
         );
         var actual: [4]u8 = undefined;
         try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, failed_offset));
@@ -425,8 +425,8 @@ test "a direct store write removes rolled-back future chunks" {
     const path = try createPath(&tmp, &path_buffer);
     try Volume.create(std.testing.io, path, 8 * 1024 * 1024, "DirectStoreRecoveryTest");
     const future_offset = 0;
-    const disjoint_offset = 2 * devdrive.object_format.chunk_size;
-    const committed_offset = 3 * devdrive.object_format.chunk_size;
+    const disjoint_offset = 2 * zettide.object_format.chunk_size;
+    const committed_offset = 3 * zettide.object_format.chunk_size;
 
     {
         var volume = try Volume.open(std.testing.io, path, true);
@@ -437,7 +437,7 @@ test "a direct store write removes rolled-back future chunks" {
         _ = try volume.writeFile(&file, "committed", committed_offset);
         try volume.syncFile(&file);
 
-        const store: devdrive.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+        const store: zettide.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
         const old_head = try store.readHead(file.object_id);
         const future = try store.write(file.object_id, "future", future_offset);
         try std.testing.expect(future.head.data_generation > old_head.data_generation);
@@ -479,8 +479,8 @@ test "a no-op truncate does not publish chunks from a failed generation" {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try createPath(&tmp, &path_buffer);
     try Volume.create(std.testing.io, path, 8 * 1024 * 1024, "TruncateFaultTest");
-    const failed_offset = devdrive.object_format.chunk_size - 2;
-    const logical_size = devdrive.object_format.chunk_size + 2;
+    const failed_offset = zettide.object_format.chunk_size - 2;
+    const logical_size = zettide.object_format.chunk_size + 2;
 
     {
         var volume = try Volume.open(std.testing.io, path, true);
@@ -490,7 +490,7 @@ test "a no-op truncate does not publish chunks from a failed generation" {
         try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
         _ = try volume.writeFile(&file, "abcd", failed_offset);
 
-        var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 1 };
+        var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 1 };
         volume.device.fault = &fault;
         try std.testing.expectError(error.InputOutput, volume.writeFile(&file, "WXYZ", failed_offset));
         fault.disable();

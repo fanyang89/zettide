@@ -16,7 +16,7 @@ source "$script_dir/common.sh"
 external_initialize fsx "$mode" "$exe" 256MiB
 external_start_mount
 
-operations=${DEVDRIVE_FSX_OPS:-10000}
+operations=${ZETTIDE_FSX_OPS:-${DEVDRIVE_FSX_OPS:-10000}}
 run_fsx() {
     local profile=$1
     local seed=$2

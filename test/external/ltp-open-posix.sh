@@ -11,9 +11,9 @@ external_mode=$mode
 external_initialize ltp-open-posix "$mode" "$exe" 512MiB
 external_validate_manifest "$script_dir/ltp-open-posix-cases.tsv"
 
-source_root=${DEVDRIVE_EXTERNAL_ROOT:-"$script_dir/.prepared"}/ltp
+source_root=${ZETTIDE_EXTERNAL_ROOT:-"$script_dir/.prepared"}/ltp
 external_verify_pin "$source_root" 6a60ae592cd375f004df0694efc7d50ddae9aa5e
-binary_root="$source_root/.devdrive-bin"
+binary_root="$source_root/.zettide-bin"
 [[ -d "$binary_root" ]] || external_skip_or_fail "LTP Open POSIX cases are not built; run test/external/prepare.sh"
 
 external_start_mount

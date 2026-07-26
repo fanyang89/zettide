@@ -23,7 +23,7 @@ command -v mountpoint >/dev/null || skip_or_fail "mountpoint is unavailable"
 [[ -x "$probe" ]] || skip_or_fail "syscall probe was not built"
 [[ -x "$durability_probe" ]] || skip_or_fail "durability probe was not built"
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/devdrive-fuse.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/zettide-fuse.XXXXXX")
 image="$tmp/image.ddv"
 mount_dir="$tmp/mount"
 log="$tmp/mount.log"

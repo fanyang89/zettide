@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+ZETTIDE_EXTERNAL_ROOT=${ZETTIDE_EXTERNAL_ROOT:-${DEVDRIVE_EXTERNAL_ROOT:-}}
+ZETTIDE_KEEP_TEST_ARTIFACTS=${ZETTIDE_KEEP_TEST_ARTIFACTS:-${DEVDRIVE_KEEP_TEST_ARTIFACTS:-0}}
+ZETTIDE_TEST_LOG_DIR=${ZETTIDE_TEST_LOG_DIR:-${DEVDRIVE_TEST_LOG_DIR:-}}
+ZETTIDE_ALLOW_OTHER=${ZETTIDE_ALLOW_OTHER:-${DEVDRIVE_ALLOW_OTHER:-0}}
+
 external_skip_or_fail() {
     local reason=$1
     if [[ "$external_mode" == required ]]; then
@@ -15,7 +20,7 @@ external_require_root() {
     if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
         local environment=(env "PATH=$PATH")
         local name
-        for name in DEVDRIVE_EXTERNAL_ROOT DEVDRIVE_KEEP_TEST_ARTIFACTS DEVDRIVE_TEST_LOG_DIR; do
+        for name in ZETTIDE_EXTERNAL_ROOT ZETTIDE_KEEP_TEST_ARTIFACTS ZETTIDE_TEST_LOG_DIR; do
             if [[ -v $name ]]; then
                 environment+=("$name=${!name}")
             fi
@@ -69,9 +74,9 @@ external_initialize() {
     command -v fusermount3 >/dev/null || external_skip_or_fail "fusermount3 is unavailable"
     command -v mountpoint >/dev/null || external_skip_or_fail "mountpoint is unavailable"
     command -v timeout >/dev/null || external_skip_or_fail "timeout is unavailable"
-    [[ -x "$external_exe" ]] || external_skip_or_fail "devdrive executable was not built"
+    [[ -x "$external_exe" ]] || external_skip_or_fail "zettide executable was not built"
 
-    external_tmp=$(mktemp -d "${TMPDIR:-/tmp}/devdrive-$external_suite.XXXXXX")
+    external_tmp=$(mktemp -d "${TMPDIR:-/tmp}/zettide-$external_suite.XXXXXX")
     external_image="$external_tmp/image.ddv"
     external_mount_dir="$external_tmp/mount"
     external_mount_log="$external_tmp/mount.log"
@@ -79,9 +84,9 @@ external_initialize() {
     chmod 0711 "$external_tmp"
     mkdir "$external_mount_dir"
     "$external_exe" create "$external_image" --size "$external_image_size" --label "External Test" >/dev/null
-    if [[ -n ${DEVDRIVE_TEST_LOG_DIR:-} ]]; then
-        mkdir -p "$DEVDRIVE_TEST_LOG_DIR"
-        exec > >(tee "$DEVDRIVE_TEST_LOG_DIR/$external_suite.log") 2>&1
+    if [[ -n $ZETTIDE_TEST_LOG_DIR ]]; then
+        mkdir -p "$ZETTIDE_TEST_LOG_DIR"
+        exec > >(tee "$ZETTIDE_TEST_LOG_DIR/$external_suite.log") 2>&1
     fi
     trap external_cleanup EXIT INT TERM
 }
@@ -102,7 +107,7 @@ external_cleanup() {
     trap - EXIT INT TERM
     set +e
     if [[ $status -ne 0 && -s "$external_mount_log" ]]; then
-        printf '%s\n' "--- devdrive mount log ---" >&2
+        printf '%s\n' "--- zettide mount log ---" >&2
         command cat "$external_mount_log" >&2
     fi
     external_force_unmount
@@ -116,10 +121,10 @@ external_cleanup() {
         kill -KILL "$external_mount_pid" 2>/dev/null
         wait "$external_mount_pid" 2>/dev/null
     fi
-    if [[ -n ${DEVDRIVE_TEST_LOG_DIR:-} && -s "$external_mount_log" ]]; then
-        cp "$external_mount_log" "$DEVDRIVE_TEST_LOG_DIR/$external_suite-mount.log"
+    if [[ -n $ZETTIDE_TEST_LOG_DIR && -s "$external_mount_log" ]]; then
+        cp "$external_mount_log" "$ZETTIDE_TEST_LOG_DIR/$external_suite-mount.log"
     fi
-    if [[ $status -ne 0 && ${DEVDRIVE_KEEP_TEST_ARTIFACTS:-0} == 1 ]]; then
+    if [[ $status -ne 0 && $ZETTIDE_KEEP_TEST_ARTIFACTS == 1 ]]; then
         echo "$external_suite test artifacts retained at $external_tmp" >&2
     else
         rm -rf "$external_tmp"
@@ -142,7 +147,7 @@ external_force_unmount() {
 external_start_mount() {
     : >"$external_mount_log"
     local mount_args=(mount "$external_image" "$external_mount_dir")
-    [[ ${DEVDRIVE_ALLOW_OTHER:-0} != 1 ]] || mount_args+=(--allow-other)
+    [[ $ZETTIDE_ALLOW_OTHER != 1 ]] || mount_args+=(--allow-other)
     "$external_exe" "${mount_args[@]}" >"$external_mount_log" 2>&1 &
     external_mount_pid=$!
     local attempt

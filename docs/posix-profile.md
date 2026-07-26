@@ -1,6 +1,6 @@
 # POSIX.1-2024 Filesystem Profile
 
-This document defines the filesystem semantics that the DevDrive Linux FUSE
+This document defines the filesystem semantics that the Zettide Linux FUSE
 adapter must provide before it can be described as POSIX-compatible. It is a
 project conformance profile, not an operating-system POSIX certification.
 

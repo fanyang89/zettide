@@ -1,6 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
-const devdrive = @import("devdrive");
+const zettide = @import("zettide");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -39,20 +39,20 @@ fn mountCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     const allow_other = args.len == 3 and std.mem.eql(u8, args[2], "--allow-other");
     if (args.len == 3 and !allow_other) return error.UnknownOption;
     if (@import("builtin").os.tag != .linux) return error.MountNotImplemented;
-    var volume = try devdrive.volume.Volume.open(io, args[0], true);
+    var volume = try zettide.volume.Volume.open(io, args[0], true);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
     try volume.mount();
     try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
     try stdout.flush();
-    try devdrive.linux_fuse.mount(&volume, args[1], allow_other);
+    try zettide.linux_fuse.mount(&volume, args[1], allow_other);
     try volume.close();
 }
 
 fn unmountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len != 1) return error.InvalidArguments;
     if (@import("builtin").os.tag != .linux) return error.UnmountNotImplemented;
-    try devdrive.linux_fuse.unmount(allocator, io, args[0]);
+    try zettide.linux_fuse.unmount(allocator, io, args[0]);
     try stdout.print("Unmounted {s}\n", .{args[0]});
 }
 
@@ -60,14 +60,14 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len == 0) return error.MissingContainerPath;
     const path = args[0];
     var size: ?u64 = null;
-    var label: []const u8 = "DevDrive";
+    var label: []const u8 = "Zettide";
     var index: usize = 1;
     while (index < args.len) {
         const option = args[index];
         if (std.mem.eql(u8, option, "--size")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
-            size = try devdrive.size.parse(args[index]);
+            size = try zettide.size.parse(args[index]);
         } else if (std.mem.eql(u8, option, "--label")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -79,13 +79,13 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     }
 
     const logical_size = size orelse return error.MissingSize;
-    try devdrive.volume.Volume.create(io, path, logical_size, label);
+    try zettide.volume.Volume.create(io, path, logical_size, label);
     try stdout.print("Created {s} ({Bi:.2})\n", .{ path, logical_size });
 }
 
 fn infoCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len != 1) return error.InvalidArguments;
-    var volume = try devdrive.volume.Volume.open(io, args[0], false);
+    var volume = try zettide.volume.Volume.open(io, args[0], false);
     defer volume.deinit();
 
     try stdout.print("Path: {s}\n", .{args[0]});
@@ -105,7 +105,7 @@ fn infoCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
 
 fn checkCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len != 1) return error.InvalidArguments;
-    var volume = try devdrive.volume.Volume.open(io, args[0], false);
+    var volume = try zettide.volume.Volume.open(io, args[0], false);
     defer volume.deinit();
     try volume.mount();
     const result = try volume.check();
@@ -119,11 +119,11 @@ fn checkCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
 fn usage(writer: *Io.Writer) !void {
     try writer.writeAll(
         \\Usage:
-        \\  devdrive create <container> --size <size> [--label <label>]
-        \\  devdrive info <container>
-        \\  devdrive check <container>
-        \\  devdrive mount <container> <mountpoint> [--allow-other]
-        \\  devdrive unmount <mountpoint>
+        \\  zettide create <container> --size <size> [--label <label>]
+        \\  zettide info <container>
+        \\  zettide check <container>
+        \\  zettide mount <container> <mountpoint> [--allow-other]
+        \\  zettide unmount <mountpoint>
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
         \\

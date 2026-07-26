@@ -14,7 +14,7 @@ external_initialize xfstests "$mode" "$exe" 1GiB
 external_validate_manifest "$script_dir/xfstests-cases.tsv"
 command -v findmnt >/dev/null || external_skip_or_fail "findmnt is unavailable"
 
-source_root=${DEVDRIVE_EXTERNAL_ROOT:-"$script_dir/.prepared"}/xfstests
+source_root=${ZETTIDE_EXTERNAL_ROOT:-"$script_dir/.prepared"}/xfstests
 external_verify_pin "$source_root" acb6d4cb84205a8e3f19ca470cfcf7bf6d93a509
 [[ -x "$source_root/check" && -x "$source_root/src/locktest" && -x "$source_root/src/t_ofd_locks" ]] || \
     external_skip_or_fail "xfstests is not built; run test/external/prepare.sh"
@@ -47,8 +47,8 @@ EOF
         echo "required xfstests case did not run: $case_name" >&2
         case_status=1
     fi
-    if [[ -n ${DEVDRIVE_TEST_LOG_DIR:-} && -d "$results" ]]; then
-        archive="$DEVDRIVE_TEST_LOG_DIR/xfstests-${case_name//\//-}"
+    if [[ -n $ZETTIDE_TEST_LOG_DIR && -d "$results" ]]; then
+        archive="$ZETTIDE_TEST_LOG_DIR/xfstests-${case_name//\//-}"
         rm -rf "$archive"
         cp -a "$results" "$archive"
     fi

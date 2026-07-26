@@ -1,6 +1,6 @@
 # Filesystem Semantics
 
-This document defines the behavior covered by the DevDrive test suites. Linux
+This document defines the behavior covered by the Zettide test suites. Linux
 FUSE is the only mount adapter currently implemented. Windows builds verify the
 portable container core, but do not yet provide a WinFsp filesystem.
 
@@ -44,7 +44,7 @@ persistent authority. Legacy images whose symlinks use file-kind ObjectRefs
 remain readable because node behavior comes from persisted object metadata.
 
 FIFO objects persist type, mode, ownership, and timestamps. Linux VFS manages
-their blocking and byte transport; DevDrive does not store FIFO payload data.
+their blocking and byte transport; Zettide does not store FIFO payload data.
 
 The `check` command validates both container headers, mounts the filesystem, and
 traverses allocated blocks. It is a structural readability check, not a repair

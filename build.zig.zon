@@ -1,7 +1,7 @@
 .{
-    .name = .devdrive,
+    .name = .zettide,
     .version = "0.1.0",
-    .fingerprint = 0x9b49fe24fcea3ff8,
+    .fingerprint = 0x1e0d74edc2740ecd,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
