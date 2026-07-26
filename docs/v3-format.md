@@ -301,6 +301,28 @@ the separate kind policy rejects it with `UnsupportedLayoutKind` before use. A f
 kind requires its own defined payload and version; version 1 does not reserve speculative
 erasure-coding fields.
 
+## Dynamic Pool Policy
+
+The fixed-three version 1 topology and replica-layout codecs remain unchanged for compatibility.
+The dynamic Pool runtime uses a separate policy boundary that future membership and layout formats
+must satisfy. A Pool contains one or more members. A one-member Pool uses one control voter and a
+write quorum of one, a two-member Pool uses two voters and a write quorum of two, and a Pool with
+three or more members uses exactly three voters and a write quorum of two. Additional members are
+data members and do not increase control quorum.
+
+The Pool protection profile is fixed until an explicit data migration commits a replacement layout.
+Unprotected data has width one. Replicated data has width three, durable write threshold two, and
+read threshold one. An erasure-coded profile has fixed `k+m` width, read threshold `k`, and requires
+all `k+m` shards to be durable before acknowledging a write so that the configured parity tolerance
+exists immediately after acknowledgement.
+
+User-data write readiness is distinct from control write readiness. If active data members fall
+below replica count or EC width, the Pool rejects user writes and remains read-only while the read
+threshold is available. Maintenance control writes, member addition, repair, and rebalance remain
+permitted when control quorum is available. Falling below the read threshold makes data unavailable.
+The runtime never automatically lowers replica count, changes an EC profile, or changes protection
+mode after forced member removal.
+
 Topology validation is pure and requires the layout topology epoch not to exceed the already
 verified current topology epoch. Every replica slot must exist and have voter control and data
 roles. Header validation is also pure: callers first verify member and genesis identity, then

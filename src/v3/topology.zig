@@ -1,12 +1,20 @@
 const std = @import("std");
 const codec = @import("codec.zig");
 const member_format = @import("member_format.zig");
+const pool_policy = @import("pool_policy.zig");
 
 pub const encoded_size: usize = 512;
 pub const checksum_offset: usize = 0x1fc;
 pub const member_count: usize = 3;
 pub const control_write_quorum: u16 = 2;
 pub const voter_role: u8 = 1;
+pub const non_voter_role: u8 = 0;
+
+pub const ControlPolicy = pool_policy.ControlPolicy;
+
+pub fn controlPolicy(pool_member_count: usize) !ControlPolicy {
+    return pool_policy.controlPolicy(pool_member_count);
+}
 
 const magic = [8]u8{ 'D', 'D', 'V', 'T', 'O', 'P', '1', 0 };
 const format_version: u16 = 1;
@@ -371,6 +379,13 @@ test "identity placement epoch quorum role and flags validation" {
     topology = testTopology();
     topology.flags = 1;
     try std.testing.expectError(error.InvalidTopologyFlags, encode(topology));
+}
+
+test "dynamic pool control policy is independent of legacy topology codec" {
+    try std.testing.expectEqual(ControlPolicy{ .voter_count = 1, .write_quorum = 1 }, try controlPolicy(1));
+    try std.testing.expectEqual(ControlPolicy{ .voter_count = 2, .write_quorum = 2 }, try controlPolicy(2));
+    try std.testing.expectEqual(ControlPolicy{ .voter_count = 3, .write_quorum = 2 }, try controlPolicy(3));
+    try std.testing.expectEqual(ControlPolicy{ .voter_count = 3, .write_quorum = 2 }, try controlPolicy(12));
 }
 
 test "parent digest follows epoch rules" {
