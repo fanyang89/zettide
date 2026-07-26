@@ -1,10 +1,10 @@
-# DevDrive v3 Member Header Format
+# DevDrive v3 On-Disk Formats
 
 ## Scope
 
-This document freezes the v3 member header codec. It defines no file I/O, member creation,
-mounting, topology journal, or CLI behavior. A volume containing only this header is not
-mountable.
+This document freezes the v3 member header and genesis topology codecs. It defines no file I/O,
+member creation, mounting, topology journal, or CLI behavior. A volume containing only these
+records is not mountable.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
 serialized Zig or native ABI structure. Each header copy is exactly 4096 bytes.
@@ -120,3 +120,44 @@ conflict rejects both copies, so a higher sequence cannot replace identity or ge
 comparison excludes only header sequence, checkpoint offset, checkpoint local record sequence,
 checkpoint digest, and the final CRC. With equal static fields, the higher sequence wins. Equal
 sequences with different checkpoint semantics are ambiguous; identical copies select A.
+
+## Genesis Topology
+
+The genesis topology is a separate 512-byte record. It defines exactly three initial members
+and does not define topology journal I/O, quorum selection, or membership transitions. All
+integers are little-endian.
+
+| Offset | Width | Field |
+|---:|---:|---|
+| `0x000` | 8 | Magic `DDVTOP1\0` |
+| `0x008` | 2 | Format version, 1 |
+| `0x00a` | 2 | Header size, 80 |
+| `0x00c` | 4 | Encoded size, 512 |
+| `0x010` | 16 | Set ID |
+| `0x020` | 8 | Topology epoch |
+| `0x028` | 32 | Parent topology digest |
+| `0x048` | 2 | Control write quorum, 2 |
+| `0x04a` | 2 | Member count, 3 |
+| `0x04c` | 4 | Topology flags, zero in version 1 |
+| `0x050` | 96 | Three canonical member descriptors |
+| `0x0b0` | 332 | Reserved; zero in version 1 |
+| `0x1fc` | 4 | CRC32C of bytes `[0, 508)` |
+
+Each 32-byte descriptor contains a 16-byte member ID, a `u16` slot at byte 16, a control role
+at byte 18, one reserved zero byte, `u32` role flags at byte 20, and eight reserved zero bytes.
+The only version 1 control role is voter (`1`). Role flags are exactly metadata and data (`3`),
+matching the member header.
+
+Encoding sorts descriptors by slot. Slots are unique and cover `0..2`, so caller order cannot
+change the encoded bytes. Decoding rejects descriptors that are not already in canonical slot
+order. Set and member IDs are nonzero, member IDs are unique and differ from the set ID, and all
+reserved bytes are zero. Epoch 1 has a zero parent digest; later epochs have a nonzero parent
+digest. The topology digest is BLAKE3-256 over canonical bytes `[0, 508)` and does not include
+the final CRC32C. The committed topology fixture has digest
+`af1b230be435c77b3f1ca3064bd757df027bc7c1863bc1ae66e528dc2258a107`.
+
+Member-header cross-validation is independent of input order and requires exactly one header
+for each topology member. Identity, slot, member count, role flags, and genesis topology digest
+must match. Feature masks, creation time, logical capacity, all three region geometries, block
+and I/O sizes, four subformat versions, algorithm IDs, and label must agree across the set.
+Header sequence and checkpoint hint fields are member-local and may differ.
