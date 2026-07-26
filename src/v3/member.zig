@@ -64,7 +64,8 @@ fn matches(target: ?u64, current: u64) bool {
 
 pub const Member = struct {
     io: Io,
-    file: File,
+    file_handle_storage: [@sizeOf(File.Handle)]u8,
+    file_nonblocking: bool,
     selected_header: member_format.Header,
     selected_source: SourceSlot,
     degraded: bool,
@@ -110,7 +111,8 @@ pub const Member = struct {
 
         return .{
             .io = io,
-            .file = file,
+            .file_handle_storage = @bitCast(file.handle),
+            .file_nonblocking = file.flags.nonblocking,
             .selected_header = selection.header,
             .selected_source = selection.source,
             .degraded = selection.redundancy_degraded,
@@ -149,7 +151,7 @@ pub const Member = struct {
     pub fn read(self: *Member, kind: RegionKind, offset: u64, buffer: []u8) !void {
         if (self.isClosed()) return error.MemberClosed;
         const file_offset = try self.position(kind, offset, buffer.len);
-        const amount = try self.file.readPositionalAll(self.io, buffer, file_offset);
+        const amount = try self.rawFile().readPositionalAll(self.io, buffer, file_offset);
         if (amount != buffer.len) return error.TruncatedMember;
     }
 
@@ -169,7 +171,7 @@ pub const Member = struct {
             return error.InjectedFault;
         }
         const write_bytes = if (action == .partial) bytes[0 .. bytes.len / 2] else bytes;
-        self.file.writePositionalAll(self.io, write_bytes, file_offset) catch |err| {
+        self.rawFile().writePositionalAll(self.io, write_bytes, file_offset) catch |err| {
             self.freeze();
             return err;
         };
@@ -201,8 +203,8 @@ pub const Member = struct {
             }
         }
         self.closed.store(true, .release);
-        self.file.unlock(self.io);
-        self.file.close(self.io);
+        self.rawFile().unlock(self.io);
+        self.rawFile().close(self.io);
         if (first_error) |err| return err;
     }
 
@@ -220,7 +222,7 @@ pub const Member = struct {
             self.freeze();
             return error.InjectedFault;
         }
-        self.file.sync(self.io) catch |err| {
+        self.rawFile().sync(self.io) catch |err| {
             self.freeze();
             return err;
         };
@@ -245,6 +247,13 @@ pub const Member = struct {
 
     fn freeze(self: *Member) void {
         self.frozen.store(true, .release);
+    }
+
+    fn rawFile(self: *const Member) File {
+        return .{
+            .handle = @bitCast(self.file_handle_storage),
+            .flags = .{ .nonblocking = self.file_nonblocking },
+        };
     }
 };
 
