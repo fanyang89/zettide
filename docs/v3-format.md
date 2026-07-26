@@ -409,6 +409,15 @@ choose a longest chain, append, repair, update checkpoint hints, or determine qu
 structurally and semantically valid final record is accepted without inferring whether another
 member acknowledged it.
 
+Callers that need cross-member recovery evidence can request an allocator-owned history scan. It
+uses the same full-scan rules and result as the member-local scanner while retaining every accepted
+record, its raw record digest, and its physical slot in chain order. Zero holes and structurally
+invalid slots are represented only by the ordinary scan counters; they are not history entries.
+History lookup supports both shared history digest and member-local raw record digest. Releasing the
+history frees its complete slot-capacity allocation. The owning history value must be moved rather
+than copied; evidence validation borrows pointers to it. Collecting evidence does not select
+authority.
+
 ## Control Journal Append
 
 Each member enforces at most one active `Journal` owner with an atomic runtime claim. Opening a
@@ -457,6 +466,17 @@ header I/O, after the checkpoint record has become durable.
 
 A generation commit payload is exactly one 192-byte commit certificate. Generation prepare
 payloads remain opaque.
+
+Generation commit evidence validation requires both attested member histories. Each attestation
+must resolve to the exact raw digest of an accepted generation prepare on the named topology voter,
+and both prepares must have the attested shared history digest. The commit must directly extend that
+prepare history and match its set, membership epoch, writer term, generation, mount session,
+transaction, data root, topology, and layout fields. Its set, membership epoch, and topology digest
+must also match the topology used to validate the certificate. The validator locates the commit by
+member ID and raw digest in a borrowed history; detached records are not accepted. It re-decodes each
+retained raw slot, recomputes its raw digest, and checks the cached record before using the evidence.
+This proves certificate integrity and prepare/commit binding only; it does not prove that the commit
+itself reached quorum.
 
 | Offset | Width | Field |
 |---:|---:|---|

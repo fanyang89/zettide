@@ -27,6 +27,44 @@ pub const AppendResult = struct {
     physical_slot: u64,
 };
 
+pub const HistoryEntry = struct {
+    record: control_record.Record,
+    raw_record: [control_record.encoded_size]u8,
+    raw_record_digest: codec.Digest,
+    physical_slot: u64,
+};
+
+pub const HistoryScan = struct {
+    scan_result: ScanResult,
+    member_id: [16]u8,
+    storage: []HistoryEntry,
+    entry_count: usize,
+    allocator: std.mem.Allocator,
+
+    pub fn entries(self: *const HistoryScan) []const HistoryEntry {
+        return self.storage[0..self.entry_count];
+    }
+
+    pub fn findHistoryDigest(self: *const HistoryScan, digest: codec.Digest) ?*const HistoryEntry {
+        for (self.entries()) |*entry| {
+            if (std.mem.eql(u8, &entry.record.history_digest, &digest)) return entry;
+        }
+        return null;
+    }
+
+    pub fn findRawRecordDigest(self: *const HistoryScan, digest: codec.Digest) ?*const HistoryEntry {
+        for (self.entries()) |*entry| {
+            if (std.mem.eql(u8, &entry.raw_record_digest, &digest)) return entry;
+        }
+        return null;
+    }
+
+    pub fn deinit(self: *HistoryScan) void {
+        self.allocator.free(self.storage);
+        self.* = undefined;
+    }
+};
+
 pub const Journal = struct {
     member: *member_api.Member,
     scan_state: ScanResult,
@@ -150,6 +188,29 @@ fn validateGenesis(header: member_format.Header, record: control_record.Record) 
 }
 
 pub fn scan(member: *member_api.Member) !ScanResult {
+    return scanInto(member, null);
+}
+
+pub fn scanHistory(allocator: std.mem.Allocator, member: *member_api.Member) !HistoryScan {
+    const header = member.header();
+    const slot_count = header.control.length / control_record.encoded_size;
+    const storage = try allocator.alloc(
+        HistoryEntry,
+        std.math.cast(usize, slot_count) orelse return error.JournalTooLarge,
+    );
+    errdefer allocator.free(storage);
+    var history: HistoryScan = .{
+        .scan_result = undefined,
+        .member_id = header.member_id,
+        .storage = storage,
+        .entry_count = 0,
+        .allocator = allocator,
+    };
+    history.scan_result = try scanInto(member, &history);
+    return history;
+}
+
+fn scanInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResult {
     const header = member.header();
     const slot_count = header.control.length / control_record.encoded_size;
     var result: ScanResult = .{ .slot_count = slot_count };
@@ -216,9 +277,20 @@ pub fn scan(member: *member_api.Member) !ScanResult {
             pending_invalid_slots,
         ) catch return error.ScanCountOverflow;
         pending_invalid_slots = 0;
+        const raw_record_digest = control_record.recordDigest(&raw);
         result.tail = record;
-        result.tail_raw_record_digest = control_record.recordDigest(&raw);
+        result.tail_raw_record_digest = raw_record_digest;
         result.tail_physical_slot = slot;
+        if (history) |evidence| {
+            std.debug.assert(evidence.entry_count < evidence.storage.len);
+            evidence.storage[evidence.entry_count] = .{
+                .record = record,
+                .raw_record = raw,
+                .raw_record_digest = raw_record_digest,
+                .physical_slot = slot,
+            };
+            evidence.entry_count += 1;
+        }
         if (hint_slot == slot and
             record.kind == control_record.checkpoint_kind and
             record.local_sequence == header.checkpoint_record_sequence and
@@ -234,6 +306,113 @@ pub fn scan(member: *member_api.Member) !ScanResult {
     result.unresolved_tail_damage = pending_invalid_slots != 0;
     result.journal_full = result.physical_frontier == result.slot_count;
     return result;
+}
+
+pub fn validateGenerationCommitEvidence(
+    commit_member_id: [16]u8,
+    commit_raw_record_digest: codec.Digest,
+    histories: []const *const HistoryScan,
+    topology: topology_format.Topology,
+) !control_record.CommitCertificate {
+    const commit_entry = try findEvidenceRecord(
+        histories,
+        commit_member_id,
+        commit_raw_record_digest,
+        error.MissingCommitMember,
+        error.MissingCommitRecord,
+    );
+    const commit = try verifiedRecord(commit_entry);
+    if (commit.kind != control_record.generation_commit_kind) return error.NotGenerationCommit;
+    if (!std.mem.eql(u8, &commit.member_id, &commit_member_id))
+        return error.CommitMemberMismatch;
+    var commit_member_is_voter = false;
+    for (topology.members) |topology_member| {
+        if (!std.mem.eql(u8, &topology_member.member_id, &commit.member_id)) continue;
+        if (topology_member.control_role != topology_format.voter_role)
+            return error.CommitMemberIsNotVoter;
+        commit_member_is_voter = true;
+        break;
+    }
+    if (!commit_member_is_voter) return error.CommitMemberNotInTopology;
+    var certificate_bytes: [control_record.certificate_size]u8 = undefined;
+    if (commit.payload.len != certificate_bytes.len) return error.InvalidCertificatePayloadLength;
+    @memcpy(&certificate_bytes, commit.payload.slice());
+    const certificate = try control_record.decodeCertificate(&certificate_bytes);
+    try control_record.validateAgainstTopology(certificate, topology);
+    if (!std.mem.eql(u8, &commit.set_id, &topology.set_id)) return error.ForeignSet;
+    if (commit.membership_epoch != topology.epoch) return error.MembershipEpochMismatch;
+    if (!std.mem.eql(u8, &commit.topology_digest, &(try topology_format.digest(topology))))
+        return error.TopologyDigestMismatch;
+
+    const prepare_history_digest = certificate.attestations[0].prepare_history_digest;
+    if (!std.mem.eql(u8, &commit.previous_history_digest, &prepare_history_digest))
+        return error.CommitDoesNotExtendPrepare;
+
+    for (certificate.attestations) |attestation| {
+        const prepare_entry = try findEvidenceRecord(
+            histories,
+            attestation.member_id,
+            attestation.prepare_record_digest,
+            error.MissingPrepareMember,
+            error.MissingPrepareRecord,
+        );
+        const prepare = try verifiedRecord(prepare_entry);
+        if (prepare.kind != control_record.generation_prepare_kind)
+            return error.AttestedRecordIsNotPrepare;
+        if (!std.mem.eql(u8, &prepare.member_id, &attestation.member_id))
+            return error.PrepareMemberMismatch;
+        if (!std.mem.eql(u8, &prepare.history_digest, &attestation.prepare_history_digest))
+            return error.PrepareHistoryDigestMismatch;
+        try validatePrepareCommitBinding(&prepare, &commit);
+    }
+    return certificate;
+}
+
+fn findEvidenceRecord(
+    histories: []const *const HistoryScan,
+    member_id: [16]u8,
+    raw_record_digest: codec.Digest,
+    missing_member_error: anyerror,
+    missing_record_error: anyerror,
+) !*const HistoryEntry {
+    var matching_history: ?*const HistoryScan = null;
+    for (histories) |history| {
+        if (!std.mem.eql(u8, &history.member_id, &member_id)) continue;
+        if (matching_history != null) return error.DuplicateMemberHistory;
+        matching_history = history;
+    }
+    const history = matching_history orelse return missing_member_error;
+    return history.findRawRecordDigest(raw_record_digest) orelse missing_record_error;
+}
+
+fn verifiedRecord(entry: *const HistoryEntry) !control_record.Record {
+    if (!std.mem.eql(
+        u8,
+        &entry.raw_record_digest,
+        &control_record.recordDigest(&entry.raw_record),
+    )) return error.EvidenceRecordDigestMismatch;
+    const record = try control_record.decode(&entry.raw_record);
+    try control_record.validatePolicy(record);
+    if (!std.meta.eql(record, entry.record)) return error.EvidenceRecordMismatch;
+    return record;
+}
+
+fn validatePrepareCommitBinding(
+    prepare: *const control_record.Record,
+    commit: *const control_record.Record,
+) !void {
+    if (!std.mem.eql(u8, &prepare.history_digest, &commit.previous_history_digest))
+        return error.CommitDoesNotExtendPrepare;
+    if (!std.mem.eql(u8, &prepare.set_id, &commit.set_id) or
+        prepare.membership_epoch != commit.membership_epoch or
+        prepare.writer_term != commit.writer_term or
+        prepare.generation != commit.generation or
+        !std.mem.eql(u8, &prepare.mount_session_id, &commit.mount_session_id) or
+        !std.mem.eql(u8, &prepare.transaction_id, &commit.transaction_id) or
+        !std.mem.eql(u8, &prepare.data_root_digest, &commit.data_root_digest) or
+        !std.mem.eql(u8, &prepare.topology_digest, &commit.topology_digest) or
+        !std.mem.eql(u8, &prepare.layout_digest, &commit.layout_digest))
+        return error.PrepareCommitMismatch;
 }
 
 const member_format = @import("member_format.zig");
@@ -393,6 +572,46 @@ fn nextRecord(previous: control_record.Record, previous_raw: *const [control_rec
     return record;
 }
 
+fn generationPrepare(
+    genesis: control_record.Record,
+    genesis_raw: *const [control_record.encoded_size]u8,
+) !control_record.Record {
+    var record: control_record.Record = .{
+        .kind = control_record.generation_prepare_kind,
+        .local_sequence = 2,
+        .membership_epoch = genesis.membership_epoch,
+        .writer_term = 1,
+        .generation = 1,
+        .set_id = genesis.set_id,
+        .member_id = genesis.member_id,
+        .mount_session_id = @splat(0x50),
+        .transaction_id = @splat(0x60),
+        .previous_record_digest = control_record.recordDigest(genesis_raw),
+        .previous_history_digest = genesis.history_digest,
+        .data_root_digest = @splat(0x70),
+        .topology_digest = genesis.topology_digest,
+        .layout_digest = genesis.layout_digest,
+        .payload = try control_record.Payload.init("generation prepare"),
+    };
+    record.history_digest = try control_record.historyDigest(record);
+    return record;
+}
+
+fn generationCommit(
+    prepare: control_record.Record,
+    prepare_raw: *const [control_record.encoded_size]u8,
+    certificate: control_record.CommitCertificate,
+) !control_record.Record {
+    var record = prepare;
+    record.kind = control_record.generation_commit_kind;
+    record.local_sequence += 1;
+    record.previous_record_digest = control_record.recordDigest(prepare_raw);
+    record.previous_history_digest = prepare.history_digest;
+    record.payload = try control_record.Payload.init(&(try control_record.encodeCertificate(certificate)));
+    record.history_digest = try control_record.historyDigest(record);
+    return record;
+}
+
 fn fixChecksum(bytes: *[control_record.encoded_size]u8) void {
     codec.putInt(
         u32,
@@ -465,6 +684,156 @@ test "valid retry proves invalid interior damage abandoned" {
     try std.testing.expectEqual(@as(u64, 1), result.invalid_slot_count);
     try std.testing.expectEqual(@as(u64, 1), result.interior_invalid_slot_count);
     try std.testing.expect(!result.unresolved_tail_damage);
+}
+
+test "history scan retains every accepted record and supports digest lookup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try createMember(tmp.dir, "member", 5);
+    const genesis = try genesisBytes();
+    const genesis_record = try control_record.decode(&genesis);
+    const second_record = try nextRecord(genesis_record, &genesis);
+    const second = try control_record.encode(second_record);
+    const third = try control_record.encode(try nextRecord(second_record, &second));
+    try writeSlot(tmp.dir, "member", header, 0, &genesis);
+    try writeSlot(tmp.dir, "member", header, 1, &.{0xaa});
+    try writeSlot(tmp.dir, "member", header, 2, &second);
+    try writeSlot(tmp.dir, "member", header, 4, &third);
+
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .read_only);
+    defer member.deinit();
+    var history = try scanHistory(std.testing.allocator, &member);
+    defer history.deinit();
+    const entries = history.entries();
+    try std.testing.expectEqual(@as(usize, 3), entries.len);
+    try std.testing.expectEqual(@as(u64, 0), entries[0].physical_slot);
+    try std.testing.expectEqual(@as(u64, 2), entries[1].physical_slot);
+    try std.testing.expectEqual(@as(u64, 4), entries[2].physical_slot);
+    try std.testing.expectEqualDeep(history.scan_result, try scan(&member));
+    try std.testing.expectEqual(
+        entries[1].physical_slot,
+        history.findHistoryDigest(entries[1].record.history_digest).?.physical_slot,
+    );
+    try std.testing.expectEqual(
+        entries[2].physical_slot,
+        history.findRawRecordDigest(entries[2].raw_record_digest).?.physical_slot,
+    );
+    try std.testing.expect(history.findHistoryDigest(@splat(0xff)) == null);
+    try std.testing.expect(history.findRawRecordDigest(@splat(0xee)) == null);
+}
+
+test "generation commit evidence binds two exact prepare records" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const payload = testPayload();
+    var genesis_records: [3]control_record.Record = undefined;
+    var genesis_raw: [3][control_record.encoded_size]u8 = undefined;
+    var prepare_records: [3]control_record.Record = undefined;
+    var prepare_raw: [3][control_record.encoded_size]u8 = undefined;
+
+    for (0..3) |slot| {
+        const member_id = payload.topology.members[slot].member_id;
+        genesis_records[slot] = try genesis_payload.makeRecord(member_id, payload);
+        genesis_raw[slot] = try control_record.encode(genesis_records[slot]);
+        prepare_records[slot] = try generationPrepare(genesis_records[slot], &genesis_raw[slot]);
+        prepare_raw[slot] = try control_record.encode(prepare_records[slot]);
+    }
+    const certificate: control_record.CommitCertificate = .{ .attestations = .{
+        .{
+            .member_id = payload.topology.members[0].member_id,
+            .prepare_record_digest = control_record.recordDigest(&prepare_raw[0]),
+            .prepare_history_digest = prepare_records[0].history_digest,
+        },
+        .{
+            .member_id = payload.topology.members[1].member_id,
+            .prepare_record_digest = control_record.recordDigest(&prepare_raw[1]),
+            .prepare_history_digest = prepare_records[1].history_digest,
+        },
+    } };
+    const commit_record = try generationCommit(prepare_records[0], &prepare_raw[0], certificate);
+    const commit_raw = try control_record.encode(commit_record);
+    var mismatched_commit_record = try generationCommit(prepare_records[2], &prepare_raw[2], certificate);
+    mismatched_commit_record.generation += 1;
+    mismatched_commit_record.history_digest = try control_record.historyDigest(mismatched_commit_record);
+    const mismatched_commit_raw = try control_record.encode(mismatched_commit_record);
+
+    const names = [_][]const u8{ "member0", "member1", "member2" };
+    for (0..3) |slot| {
+        var header = try testHeader(3);
+        header.member_id = payload.topology.members[slot].member_id;
+        header.member_slot = @intCast(slot);
+        try createMemberWithHeader(tmp.dir, names[slot], header);
+        try writeSlot(tmp.dir, names[slot], header, 0, &genesis_raw[slot]);
+        try writeSlot(tmp.dir, names[slot], header, 1, &prepare_raw[slot]);
+    }
+    const header0 = try testHeader(3);
+    try writeSlot(tmp.dir, names[0], header0, 2, &commit_raw);
+    const header2 = try testHeader(3);
+    try writeSlot(tmp.dir, names[2], header2, 2, &mismatched_commit_raw);
+
+    var member0 = try member_api.openAt(std.testing.io, tmp.dir, names[0], .read_only);
+    defer member0.deinit();
+    var member1 = try member_api.openAt(std.testing.io, tmp.dir, names[1], .read_only);
+    defer member1.deinit();
+    var member2 = try member_api.openAt(std.testing.io, tmp.dir, names[2], .read_only);
+    defer member2.deinit();
+    var history0 = try scanHistory(std.testing.allocator, &member0);
+    defer history0.deinit();
+    var history1 = try scanHistory(std.testing.allocator, &member1);
+    defer history1.deinit();
+    var history2 = try scanHistory(std.testing.allocator, &member2);
+    defer history2.deinit();
+    const histories = [_]*const HistoryScan{ &history0, &history1, &history2 };
+    const commit_digest = control_record.recordDigest(&commit_raw);
+
+    const validated = try validateGenerationCommitEvidence(
+        history0.member_id,
+        commit_digest,
+        &histories,
+        payload.topology,
+    );
+    try std.testing.expectEqualDeep(
+        try control_record.decodeCertificate(&(try control_record.encodeCertificate(certificate))),
+        validated,
+    );
+    try std.testing.expectError(
+        error.MissingPrepareMember,
+        validateGenerationCommitEvidence(
+            history0.member_id,
+            commit_digest,
+            &.{ &history0, &history2 },
+            payload.topology,
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateMemberHistory,
+        validateGenerationCommitEvidence(
+            history0.member_id,
+            commit_digest,
+            &.{ &history0, &history0, &history1 },
+            payload.topology,
+        ),
+    );
+    try std.testing.expectError(
+        error.PrepareCommitMismatch,
+        validateGenerationCommitEvidence(
+            history2.member_id,
+            control_record.recordDigest(&mismatched_commit_raw),
+            &histories,
+            payload.topology,
+        ),
+    );
+
+    history1.storage[1].raw_record[0] ^= 1;
+    try std.testing.expectError(
+        error.EvidenceRecordDigestMismatch,
+        validateGenerationCommitEvidence(
+            history0.member_id,
+            commit_digest,
+            &histories,
+            payload.topology,
+        ),
+    );
 }
 
 test "trailing and only invalid slots remain unresolved" {
