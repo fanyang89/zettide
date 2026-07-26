@@ -7,6 +7,7 @@ pub const member = @import("member.zig");
 pub const member_format = @import("member_format.zig");
 pub const member_set = @import("member_set.zig");
 pub const pool_policy = @import("pool_policy.zig");
+pub const pool_topology = @import("pool_topology.zig");
 pub const replicated_journal = @import("replicated_journal.zig");
 pub const topology = @import("topology.zig");
 
@@ -20,6 +21,7 @@ test {
     _ = member_format;
     _ = member_set;
     _ = pool_policy;
+    _ = pool_topology;
     _ = replicated_journal;
     _ = topology;
 }

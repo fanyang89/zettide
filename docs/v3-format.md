@@ -323,6 +323,26 @@ permitted when control quorum is available. Falling below the read threshold mak
 The runtime never automatically lowers replica count, changes an EC profile, or changes protection
 mode after forced member removal.
 
+### Dynamic Topology Envelope
+
+Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.
+It supports between 1 and 96 current members without changing the frozen version 1 codec. The common
+header remains 80 bytes; member descriptors remain 32 bytes and occupy bytes `[80, 3152)`. Unused
+descriptors and bytes through offset 3196 are zero. The final four bytes are CRC32C of bytes
+`[0, 3196)`, and the topology digest is BLAKE3-256 over the same range.
+
+The version 2 header stores set ID, membership epoch, parent topology digest, control write quorum,
+current member count, and zero flags at the same offsets as version 1. Descriptors are canonically
+ordered by stable `u16` slot but slots may be sparse after removal. A descriptor stores member ID,
+slot, control role, member state, and role flags. Member states are joining `1`, active `2`, and
+draining `3`. Joining members do not count toward stable Pool width and cannot vote. Active and
+draining members determine the required control policy. Every member carries data; voters also carry
+metadata. Member IDs and slots are unique among current members.
+
+Version 2 is currently a pure format and policy boundary. It does not by itself authorize a member
+transition or let a joining disk establish authority. Membership prepare/commit evidence and member
+bootstrap validation remain required before the runtime may open a dynamic Pool.
+
 Topology validation is pure and requires the layout topology epoch not to exceed the already
 verified current topology epoch. Every replica slot must exist and have voter control and data
 roles. Header validation is also pure: callers first verify member and genesis identity, then
