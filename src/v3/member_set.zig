@@ -41,6 +41,7 @@ pub const Authority = struct {
     data_root_digest: codec.Digest,
     topology_digest: codec.Digest,
     layout_digest: codec.Digest,
+    membership_epoch: u64,
     generation: u64,
     witness_slots: u8,
 };
@@ -57,6 +58,7 @@ pub const MemberSet = struct {
     genesis_payload: ?genesis_payload_format.GenesisPayload = null,
     authority_state: ?Authority = null,
     control_write_state: ?ControlWriteReady = null,
+    coordinator_state: std.atomic.Value(u8) = .init(0),
 
     pub fn create(
         io: std.Io,
@@ -161,7 +163,51 @@ pub const MemberSet = struct {
         return self.control_write_state;
     }
 
+    pub fn noteCommittedControl(self: *MemberSet, record: control_record.Record, active_slots: u8) void {
+        self.authority_state = authorityFromRecord(.generation_commit, record, active_slots);
+        self.control_write_state = .{
+            .tail_history_digest = record.history_digest,
+            .active_slots = active_slots,
+        };
+        for (0..member_count) |slot| {
+            if (active_slots & slotBit(slot) != 0) {
+                self.slot_statuses[slot] = .active;
+            }
+        }
+    }
+
+    pub fn beginControlMutation(self: *MemberSet) void {
+        self.control_write_state = null;
+        for (&self.histories) |*maybe_history| {
+            if (maybe_history.*) |*history| history.deinit();
+            maybe_history.* = null;
+        }
+    }
+
+    pub fn noteControlFailure(self: *MemberSet, slot: usize) void {
+        self.slot_statuses[slot] = .damaged;
+    }
+
+    pub fn noteControlStale(self: *MemberSet, slot: usize) void {
+        if (std.meta.activeTag(self.slot_statuses[slot]) == .active)
+            self.slot_statuses[slot] = .stale;
+    }
+
+    pub fn claimCoordinator(self: *MemberSet) !void {
+        if (self.coordinator_state.cmpxchgStrong(0, 1, .acq_rel, .acquire)) |state|
+            return if (state == 2) error.MemberSetClosed else error.CoordinatorAlreadyOpen;
+    }
+
+    pub fn releaseCoordinator(self: *MemberSet) void {
+        const previous = self.coordinator_state.swap(0, .acq_rel);
+        std.debug.assert(previous == 1);
+    }
+
     pub fn close(self: *MemberSet) !void {
+        if (self.coordinator_state.cmpxchgStrong(0, 2, .acq_rel, .acquire)) |state| {
+            if (state == 1) return error.CoordinatorActive;
+            return;
+        }
         var first_error: ?anyerror = null;
         for (&self.histories) |*maybe_history| {
             if (maybe_history.*) |*history| history.deinit();
@@ -177,7 +223,9 @@ pub const MemberSet = struct {
     }
 
     pub fn deinit(self: *MemberSet) void {
-        self.close() catch {};
+        self.close() catch |err| {
+            if (err == error.CoordinatorActive) @panic("MemberSet deinitialized with active coordinator");
+        };
     }
 
     fn selectAuthority(self: *MemberSet, intent: OpenIntent) !void {
@@ -448,6 +496,7 @@ fn authorityFromRecord(kind: AuthorityKind, record: control_record.Record, witne
         .data_root_digest = record.data_root_digest,
         .topology_digest = record.topology_digest,
         .layout_digest = record.layout_digest,
+        .membership_epoch = record.membership_epoch,
         .generation = record.generation,
         .witness_slots = witnesses,
     };

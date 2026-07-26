@@ -487,6 +487,30 @@ byte, digest, or slot before I/O. Only an exact match proceeds to the same durab
 state update used by ordinary append. This lets a coordinator prove a common shared parent before
 any member write while preserving member-local raw chains.
 
+The fixed-three replicated coordinator exclusively claims a control-write-ready member set and opens
+member-local journals for its active slots. The set cannot close while claimed and must not move.
+Callers must not query or mutate the set while its coordinator is active; coordinator results are the
+only current control-state view until close and full reopen. Deinitializing a claimed set is a
+programming error.
+One coordinator mutex serializes the complete generation transaction with close. Before the first
+write, all participating journals must have two available slots, exact preparations must share one
+history digest, and generation, membership, topology, and layout must extend the selected authority.
+Members without two slots are excluded when two others remain.
+
+The coordinator attempts every prepared member and never cancels remaining writes after reaching a
+quorum. Two explicitly acknowledged durable prepares produce the canonical certificate. Commit is
+attempted only on members whose prepare was explicitly acknowledged, and two explicitly acknowledged
+durable commits are required for success. A single prepare failure can therefore produce a degraded
+successful commit on the other two members. Prepare quorum failure and any commit result with fewer
+than two acknowledgements sticky-freeze the coordinator; the latter is an unknown outcome because a
+failed call may still have reached durable media.
+
+Immediately before prepare I/O, the set revokes its old control-write-ready state and frees retained
+history evidence. Any member I/O failure is conservatively marked damaged. Successful commit installs
+the new authority and exact active tail; failed or unknown transactions leave the set non-write-ready
+until close and full reopen. This coordinator only commits generation control records. It does not
+establish writer fencing, data-root durability, retry idempotence, repair, or background catch-up.
+
 The append target is exactly the retained physical frontier. Interior zero or invalid slots are
 never reused, and a full journal never wraps. Read-only, closed, frozen, full, sequence-overflow,
 and unresolved-tail states reject before writing. Append does not resolve or abandon tail damage.
