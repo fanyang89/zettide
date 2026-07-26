@@ -99,6 +99,8 @@ pub fn makeRecord(member_id: [16]u8, payload: GenesisPayload) !control_record.Re
 
 pub fn validateRecord(record: control_record.Record) !GenesisPayload {
     try control_record.validatePolicy(record);
+    if (!std.mem.eql(u8, &record.history_digest, &(try control_record.historyDigest(record))))
+        return error.HistoryDigestMismatch;
     if (record.kind != control_record.genesis_kind) return error.NotGenesisRecord;
     const payload = try decode(record.payload.slice());
     try validateMember(payload, record.member_id);
@@ -263,16 +265,22 @@ test "record identity membership digests and payload length are validated" {
 
     try std.testing.expectError(error.GenesisMemberNotFound, makeRecord(@splat(0x99), payload));
     var record = base;
+    record.history_digest[0] ^= 1;
+    try std.testing.expectError(error.HistoryDigestMismatch, validateRecord(record));
+    record = base;
     record.set_id[0] ^= 1;
+    record.history_digest = try control_record.historyDigest(record);
     try std.testing.expectError(error.GenesisSetIdMismatch, validateRecord(record));
     record = base;
     record.member_id = @splat(0x99);
     try std.testing.expectError(error.GenesisMemberNotFound, validateRecord(record));
     record = base;
     record.topology_digest[0] ^= 1;
+    record.history_digest = try control_record.historyDigest(record);
     try std.testing.expectError(error.GenesisTopologyDigestMismatch, validateRecord(record));
     record = base;
     record.layout_digest[0] ^= 1;
+    record.history_digest = try control_record.historyDigest(record);
     try std.testing.expectError(error.GenesisLayoutDigestMismatch, validateRecord(record));
     record = base;
     record.payload = try control_record.Payload.init(record.payload.slice()[0 .. encoded_size - 1]);

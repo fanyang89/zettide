@@ -246,10 +246,11 @@ not add a control-record field. The committed fixture has payload digest
 `makeRecord` creates a member-local genesis control record with sequence and membership epoch 1
 and all required genesis fields zero. Its set ID and topology and layout digests come from the
 payload. The member must exist in the topology and have voter control and data roles.
-`validateRecord` applies control-record policy, requires an exact genesis payload, cross-validates
-set and member identity, and verifies both canonical embedded-record digests. The three member
-records share one history digest because member-local identity is excluded from control history,
-while their complete record digests remain distinct.
+`validateRecord` applies control-record policy and independently recomputes and verifies the
+record history digest, so callers do not need to decode the record first. It requires an exact
+genesis payload, cross-validates set and member identity, and verifies both canonical
+embedded-record digests. The three member records share one history digest because member-local
+identity is excluded from control history, while their complete record digests remain distinct.
 
 ## Control Record
 
