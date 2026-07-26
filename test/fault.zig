@@ -10,6 +10,16 @@ fn createPath(tmp: *std.testing.TmpDir, buffer: []u8) ![]const u8 {
     return buffer[0 .. root_length + suffix.len];
 }
 
+fn failLfsLock(_: ?*const c.struct_lfs_config) callconv(.c) c_int {
+    return c.LFS_ERR_CORRUPT;
+}
+
+fn expectReopen(path: []const u8) !void {
+    var reopened = try Volume.open(std.testing.io, path, true);
+    defer reopened.deinit();
+    try reopened.mount();
+}
+
 test "block device program faults have deterministic side effects" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -185,6 +195,71 @@ test "an after-side-effect sync is durable but freezes the volume" {
         try volume.sync();
         try volume.closeFile(&file);
     }
+}
+
+test "close releases resources after before and after sync failures" {
+    const after_side_effects = [_]bool{ false, true };
+    for (after_side_effects) |after_side_effect| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try createPath(&tmp, &path_buffer);
+        try Volume.create(std.testing.io, path, 1024 * 1024, "CloseSyncFault");
+
+        var volume = try Volume.open(std.testing.io, path, true);
+        defer volume.deinit();
+        try volume.mount();
+        var fault: devdrive.block_device.FaultController = .{};
+        if (after_side_effect) {
+            fault.fail_sync_after_at = fault.sync_count;
+        } else {
+            fault.fail_sync_at = fault.sync_count;
+            volume.config.lock = failLfsLock;
+        }
+        volume.device.fault = &fault;
+        try std.testing.expectError(error.InputOutput, volume.close());
+        try std.testing.expect(volume.closed);
+        try std.testing.expect(!volume.mounted);
+        try expectReopen(path);
+    }
+}
+
+test "frozen close reports the first error and releases resources" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createPath(&tmp, &path_buffer);
+    try Volume.create(std.testing.io, path, 1024 * 1024, "FrozenClose");
+
+    var volume = try Volume.open(std.testing.io, path, true);
+    defer volume.deinit();
+    try volume.mount();
+    var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 0 };
+    volume.device.fault = &fault;
+    try std.testing.expectError(error.InputOutput, volume.sync());
+    fault.disable();
+    const sync_count = fault.sync_count;
+    try std.testing.expectError(error.VolumeFrozen, volume.close());
+    try std.testing.expectEqual(sync_count, fault.sync_count);
+    try std.testing.expect(volume.isWriteFrozen());
+    try expectReopen(path);
+}
+
+test "unmount failure does not retain maps or the container lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createPath(&tmp, &path_buffer);
+    try Volume.create(std.testing.io, path, 1024 * 1024, "UnmountCloseFault");
+
+    var volume = try Volume.open(std.testing.io, path, true);
+    defer volume.deinit();
+    try volume.mount();
+    volume.config.lock = failLfsLock;
+    try std.testing.expectError(error.CorruptFilesystem, volume.close());
+    try std.testing.expect(volume.closed);
+    try std.testing.expect(!volume.mounted);
+    try expectReopen(path);
 }
 
 test "partial and after-side-effect programs freeze all volume mutations" {

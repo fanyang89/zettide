@@ -84,6 +84,52 @@ test "data and metadata survive a real container reopen" {
     }
 }
 
+test "explicit close is idempotent and persists writable data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/closed", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        _ = try volume.writeFile(&file, "persisted", 0);
+        try volume.closeFile(&file);
+        try volume.close();
+        try volume.close();
+        try std.testing.expectError(error.VolumeClosed, volume.mount());
+        try std.testing.expectError(error.VolumeClosed, volume.sync());
+    }
+
+    var reopened = try openVolume(path);
+    defer reopened.deinit();
+    try reopened.mount();
+    var file: FileHandle = undefined;
+    try reopened.openFile(&file, "/closed", c.LFS_O_RDONLY, 0, 0, 0);
+    var actual: [9]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try reopened.readFile(&file, &actual, 0));
+    try std.testing.expectEqualStrings("persisted", &actual);
+    try reopened.closeFile(&file);
+}
+
+test "read-only close does not issue a write sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+
+    var volume = try Volume.open(std.testing.io, path, false);
+    defer volume.deinit();
+    try volume.mount();
+    var fault: devdrive.block_device.FaultController = .{ .fail_sync_at = 0 };
+    volume.device.fault = &fault;
+    try volume.close();
+    try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
+}
+
 test "read write and truncate preserve boundary data" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

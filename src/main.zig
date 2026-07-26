@@ -46,6 +46,7 @@ fn mountCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
     try stdout.flush();
     try devdrive.linux_fuse.mount(&volume, args[1], allow_other);
+    try volume.close();
 }
 
 fn unmountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -99,6 +100,7 @@ fn infoCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     try stdout.print("Blocks: {d}\n", .{volume.header.block_count});
     try stdout.print("Maximum file size: {Bi:.2}\n", .{volume.header.user_file_max});
     try stdout.writeAll("Case-sensitive: yes\nEncrypted: no\n");
+    try volume.close();
 }
 
 fn checkCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -111,6 +113,7 @@ fn checkCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
         result.used_blocks,
         result.total_blocks,
     });
+    try volume.close();
 }
 
 fn usage(writer: *Io.Writer) !void {

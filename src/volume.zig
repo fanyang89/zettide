@@ -16,6 +16,7 @@ pub const Volume = struct {
     config: c.struct_lfs_config,
     lfs: c.lfs_t,
     mounted: bool = false,
+    closed: bool = false,
     fallback_uid: u32 = 0,
     fallback_gid: u32 = 0,
     writable: bool = false,
@@ -96,6 +97,7 @@ pub const Volume = struct {
         result.config = result.device.configure(header);
         result.lfs = std.mem.zeroes(c.lfs_t);
         result.mounted = false;
+        result.closed = false;
         result.fallback_uid = 0;
         result.fallback_gid = 0;
         result.writable = writable;
@@ -113,6 +115,7 @@ pub const Volume = struct {
     }
 
     pub fn mount(self: *Volume) !void {
+        if (self.closed) return error.VolumeClosed;
         if (self.mounted) return error.AlreadyMounted;
         // Moving Volume after this call is invalid because littlefs retains these pointers.
         self.config.context = &self.device;
@@ -129,14 +132,31 @@ pub const Volume = struct {
         self.reservation_blocks = try self.collectReservationBlocks();
     }
 
-    pub fn deinit(self: *Volume) void {
+    pub fn close(self: *Volume) !void {
+        if (self.closed) return;
+
+        var first_error: ?anyerror = null;
+        if (self.writable and self.mounted) {
+            self.sync() catch |err| {
+                first_error = err;
+            };
+        }
         if (self.mounted) {
-            _ = c.lfs_unmount(&self.lfs);
+            checkLfs(c.lfs_unmount(&self.lfs)) catch |err| {
+                if (first_error == null) first_error = err;
+            };
             self.mounted = false;
         }
         self.object_pins.deinit();
         self.link_counts.deinit();
         self.file.close(self.io);
+        self.closed = true;
+
+        if (first_error) |err| return err;
+    }
+
+    pub fn deinit(self: *Volume) void {
+        self.close() catch {};
     }
 
     pub fn usedBlocks(self: *Volume) !u32 {
@@ -585,6 +605,7 @@ pub const Volume = struct {
     }
 
     pub fn syncFile(self: *Volume, handle: *FileHandle) !void {
+        if (self.closed) return error.VolumeClosed;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
@@ -593,6 +614,7 @@ pub const Volume = struct {
     }
 
     pub fn sync(self: *Volume) !void {
+        if (self.closed) return error.VolumeClosed;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
@@ -676,6 +698,7 @@ pub const Volume = struct {
     }
 
     pub fn check(self: *Volume) !CheckResult {
+        if (self.closed) return error.VolumeClosed;
         if (!self.mounted) return error.NotMounted;
         var context = CheckContext{};
         try checkLfs(c.lfs_fs_traverse(&self.lfs, traverseCallback, &context));
