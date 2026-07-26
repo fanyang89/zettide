@@ -377,6 +377,14 @@ proposal-plus-certificate payload length and bind membership epoch and topology 
 scan validation does not make either membership or bootstrap authoritative; cross-member quorum
 evidence remains required.
 
+Membership commit evidence re-decodes retained raw commit and prepare slots. The commit proposal must
+be a valid successor of the current topology, and its certificate must satisfy both old and new voter
+quorums, or the explicit administrative-recovery rule. Every attestation resolves to the exact raw
+membership prepare on the named voter, with the exact proposal bytes and shared prepare history.
+Prepare records directly extend the selected authority, commits directly extend prepare, and the
+membership operation preserves writer term, generation, data root, and layout digest. Certificate
+validity alone still does not prove that the commit itself reached authority quorum.
+
 ### Dynamic Topology Envelope
 
 Dynamic membership uses a separate 3200-byte version 2 topology envelope with magic `DDVTOP2\0`.
