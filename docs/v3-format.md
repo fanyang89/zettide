@@ -477,6 +477,16 @@ only a fully validated genesis proposal; a nonempty journal rejects another gene
 validation and encoding complete before any write. Ordinary append rejects checkpoint records;
 callers use the explicit checkpoint API.
 
+Replicated callers use the exact two-step append boundary instead of ordinary append. A tail token
+commits to the retained local sequence, raw record digest, shared history digest, and physical
+frontier. Exact prepare requires that complete token, injects the same member-local chain fields,
+validates policy, and returns an owned record, canonical bytes, raw digest, and target slot without
+performing I/O or changing retained state. Prepared append reacquires the journal mutex, rebuilds the
+canonical prepared value against the retained tail, and rejects a stale token or any changed field,
+byte, digest, or slot before I/O. Only an exact match proceeds to the same durable write and retained
+state update used by ordinary append. This lets a coordinator prove a common shared parent before
+any member write while preserving member-local raw chains.
+
 The append target is exactly the retained physical frontier. Interior zero or invalid slots are
 never reused, and a full journal never wraps. Read-only, closed, frozen, full, sequence-overflow,
 and unresolved-tail states reject before writing. Append does not resolve or abandon tail damage.

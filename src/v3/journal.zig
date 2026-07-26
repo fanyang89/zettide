@@ -27,6 +27,21 @@ pub const AppendResult = struct {
     physical_slot: u64,
 };
 
+pub const TailToken = struct {
+    local_sequence: u64,
+    raw_record_digest: codec.Digest,
+    history_digest: codec.Digest,
+    physical_frontier: u64,
+};
+
+pub const PreparedAppend = struct {
+    expected_tail: TailToken,
+    record: control_record.Record,
+    encoded: [control_record.encoded_size]u8,
+    record_digest: codec.Digest,
+    physical_slot: u64,
+};
+
 pub const HistoryEntry = struct {
     record: control_record.Record,
     raw_record: [control_record.encoded_size]u8,
@@ -92,6 +107,33 @@ pub const Journal = struct {
         return self.scan_state;
     }
 
+    pub fn tailToken(self: *Journal) !TailToken {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+        try self.checkOpenLocked();
+        return self.tailTokenLocked();
+    }
+
+    pub fn prepareExact(
+        self: *Journal,
+        expected_tail: TailToken,
+        proposal: control_record.Record,
+    ) !PreparedAppend {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+        if (proposal.kind == control_record.checkpoint_kind) return error.UseCheckpointApi;
+        return self.prepareLocked(proposal, expected_tail);
+    }
+
+    pub fn appendPrepared(self: *Journal, prepared: *const PreparedAppend) !AppendResult {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+        if (prepared.record.kind == control_record.checkpoint_kind) return error.UseCheckpointApi;
+        const canonical = try self.prepareLocked(prepared.record, prepared.expected_tail);
+        if (!std.meta.eql(canonical, prepared.*)) return error.PreparedAppendMismatch;
+        return self.commitPreparedLocked(canonical);
+    }
+
     pub fn close(self: *Journal) void {
         self.mutex.lockUncancelable(self.member.io);
         defer self.mutex.unlock(self.member.io);
@@ -133,12 +175,27 @@ pub const Journal = struct {
     }
 
     fn appendLocked(self: *Journal, proposal: control_record.Record) !AppendResult {
-        if (self.closed) return error.JournalClosed;
-        if (self.member.isClosed()) return error.MemberClosed;
+        const expected_tail = if (self.scan_state.tail != null) try self.tailTokenLocked() else null;
+        const prepared = try self.prepareLocked(proposal, expected_tail);
+        return self.commitPreparedLocked(prepared);
+    }
+
+    fn prepareLocked(
+        self: *Journal,
+        proposal: control_record.Record,
+        expected_tail: ?TailToken,
+    ) !PreparedAppend {
+        try self.checkOpenLocked();
         if (self.member.mode() != .writable) return error.ReadOnlyMember;
         if (self.member.isFrozen()) return error.WriteFrozen;
         if (self.scan_state.unresolved_tail_damage) return error.UnresolvedTailDamage;
         if (self.scan_state.journal_full) return error.JournalFull;
+
+        if (expected_tail) |expected| {
+            if (!std.meta.eql(expected, try self.tailTokenLocked())) return error.StaleTailToken;
+        } else if (self.scan_state.tail != null) {
+            return error.StaleTailToken;
+        }
 
         var record = proposal;
         const header = self.member.header();
@@ -165,18 +222,51 @@ pub const Journal = struct {
         }
         const encoded = try control_record.encode(record);
         const physical_slot = self.scan_state.physical_frontier;
-        const offset = std.math.mul(u64, physical_slot, control_record.encoded_size) catch
-            return error.ControlOffsetOverflow;
-        try self.member.writeDurable(.control, offset, &encoded);
+        return .{
+            .expected_tail = expected_tail orelse .{
+                .local_sequence = 0,
+                .raw_record_digest = @splat(0),
+                .history_digest = @splat(0),
+                .physical_frontier = 0,
+            },
+            .record = record,
+            .encoded = encoded,
+            .record_digest = control_record.recordDigest(&encoded),
+            .physical_slot = physical_slot,
+        };
+    }
 
-        const record_digest = control_record.recordDigest(&encoded);
-        self.scan_state.tail = record;
-        self.scan_state.tail_raw_record_digest = record_digest;
-        self.scan_state.tail_physical_slot = physical_slot;
-        self.scan_state.physical_frontier = std.math.add(u64, physical_slot, 1) catch unreachable;
+    fn commitPreparedLocked(self: *Journal, prepared: PreparedAppend) !AppendResult {
+        const offset = std.math.mul(u64, prepared.physical_slot, control_record.encoded_size) catch
+            return error.ControlOffsetOverflow;
+        try self.member.writeDurable(.control, offset, &prepared.encoded);
+
+        self.scan_state.tail = prepared.record;
+        self.scan_state.tail_raw_record_digest = prepared.record_digest;
+        self.scan_state.tail_physical_slot = prepared.physical_slot;
+        self.scan_state.physical_frontier = std.math.add(u64, prepared.physical_slot, 1) catch unreachable;
         self.scan_state.journal_full = self.scan_state.physical_frontier == self.scan_state.slot_count;
         if (self.scan_state.checkpoint_status == .valid) self.scan_state.checkpoint_status = .stale;
-        return .{ .record = record, .record_digest = record_digest, .physical_slot = physical_slot };
+        return .{
+            .record = prepared.record,
+            .record_digest = prepared.record_digest,
+            .physical_slot = prepared.physical_slot,
+        };
+    }
+
+    fn checkOpenLocked(self: *const Journal) !void {
+        if (self.closed) return error.JournalClosed;
+        if (self.member.isClosed()) return error.MemberClosed;
+    }
+
+    fn tailTokenLocked(self: *const Journal) !TailToken {
+        const tail = self.scan_state.tail orelse return error.MissingGenesis;
+        return .{
+            .local_sequence = tail.local_sequence,
+            .raw_record_digest = self.scan_state.tail_raw_record_digest,
+            .history_digest = tail.history_digest,
+            .physical_frontier = self.scan_state.physical_frontier,
+        };
     }
 };
 
@@ -1036,6 +1126,65 @@ test "journal append injects identity sequence and digests across reopen" {
     try std.testing.expectEqual(@as(u64, 2), state.tail.?.local_sequence);
     try std.testing.expectEqual(@as(u64, 2), state.physical_frontier);
     try std.testing.expectEqualSlices(u8, &next.record_digest, &state.tail_raw_record_digest);
+}
+
+test "exact prepare is side effect free and prepared append rechecks every field" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try createInitializedMember(tmp.dir, "member", 4);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+    var journal = try Journal.open(&member);
+    defer journal.deinit();
+    const initial = try journal.state();
+    const token = try journal.tailToken();
+    try std.testing.expectEqual(initial.tail.?.local_sequence, token.local_sequence);
+    try std.testing.expectEqual(initial.physical_frontier, token.physical_frontier);
+    try std.testing.expectEqualSlices(u8, &initial.tail.?.history_digest, &token.history_digest);
+    try std.testing.expectEqualSlices(u8, &initial.tail_raw_record_digest, &token.raw_record_digest);
+
+    var fault: member_api.FaultController = .{ .fail_write_at = 0 };
+    member.setFaultController(&fault);
+    const prepared = try journal.prepareExact(token, try writerFenceProposal(initial.tail.?));
+    try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+    try std.testing.expectEqualDeep(initial, try journal.state());
+
+    var tampered = prepared;
+    tampered.encoded[0] ^= 1;
+    try std.testing.expectError(error.PreparedAppendMismatch, journal.appendPrepared(&tampered));
+    try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+    try std.testing.expectEqualDeep(initial, try journal.state());
+
+    var stale_token = token;
+    stale_token.physical_frontier += 1;
+    try std.testing.expectError(
+        error.StaleTailToken,
+        journal.prepareExact(stale_token, try writerFenceProposal(initial.tail.?)),
+    );
+    try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+    fault.disable();
+
+    const appended = try journal.appendPrepared(&prepared);
+    try std.testing.expectEqual(prepared.record, appended.record);
+    try std.testing.expectEqual(prepared.record_digest, appended.record_digest);
+    try std.testing.expectEqual(prepared.physical_slot, appended.physical_slot);
+
+    const second_token = try journal.tailToken();
+    const second_prepared = try journal.prepareExact(
+        second_token,
+        try writerFenceProposal(appended.record),
+    );
+    _ = try journal.append(try writerFenceProposal(appended.record));
+    const state_before_stale = try journal.state();
+    try std.testing.expectError(error.StaleTailToken, journal.appendPrepared(&second_prepared));
+    try std.testing.expectEqualDeep(state_before_stale, try journal.state());
+    try std.testing.expectError(
+        error.UseCheckpointApi,
+        journal.prepareExact(try journal.tailToken(), try checkpointProposal(state_before_stale.tail.?)),
+    );
+    var forged_checkpoint = second_prepared;
+    forged_checkpoint.record.kind = control_record.checkpoint_kind;
+    try std.testing.expectError(error.UseCheckpointApi, journal.appendPrepared(&forged_checkpoint));
 }
 
 test "concurrent journal appends serialize sequence and physical slots" {
