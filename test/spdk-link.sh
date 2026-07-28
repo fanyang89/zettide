@@ -16,8 +16,10 @@ trap 'rm -rf "$build_dir"' EXIT
 packages=(
 	spdk_event
 	spdk_event_bdev
+	spdk_event_nvmf
 	spdk_bdev_modules
 	spdk_env_dpdk
+	spdk_sock_modules
 	spdk_syslibs
 )
 pkg-config --exists "${packages[@]}"
