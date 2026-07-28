@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package zettide.control.v1;
+
+service PoolService {
+  rpc CreatePool(CreatePoolRequest) returns (CreatePoolResponse);
+  rpc GetPool(GetPoolRequest) returns (GetPoolResponse);
+  rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+}
+
+message Pool {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  int64 created_at_unix_ms = 4;
+  uint64 created_revision = 5;
+}
+
+message CreatePoolRequest {
+  string request_id = 1;
+  string name = 2;
+  string description = 3;
+}
+
+message CreatePoolResponse {
+  Pool pool = 1;
+}
+
+message GetPoolRequest {
+  oneof selector {
+    string id = 1;
+    string name = 2;
+  }
+}
+
+message GetPoolResponse {
+  Pool pool = 1;
+}
+
+message ListPoolsRequest {
+  uint32 page_size = 1;
+  bytes page_token = 2;
+}
+
+message ListPoolsResponse {
+  repeated Pool pools = 1;
+  bytes next_page_token = 2;
+}
+
+message CommandEnvelope {
+  uint32 format_version = 1;
+  oneof command {
+    CreatePoolCommand create_pool = 2;
+  }
+}
+
+message CreatePoolCommand {
+  string request_id = 1;
+  string proposed_pool_id = 2;
+  string name = 3;
+  string description = 4;
+  int64 proposed_created_at_unix_ms = 5;
+}
+
+enum ApplyCode {
+  APPLY_CODE_UNSPECIFIED = 0;
+  APPLY_CODE_CREATED = 1;
+  APPLY_CODE_IDEMPOTENT = 2;
+  APPLY_CODE_NAME_EXISTS = 3;
+  APPLY_CODE_REQUEST_CONFLICT = 4;
+}
+
+message ApplyResponse {
+  ApplyCode code = 1;
+  Pool pool = 2;
+}
+
+message RequestRecord {
+  string request_id = 1;
+  bytes request_fingerprint = 2;
+  bytes encoded_response = 3;
+}
+
+message StateSnapshot {
+  uint32 format_version = 1;
+  repeated Pool pools = 2;
+  repeated RequestRecord requests = 3;
+}

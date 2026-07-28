@@ -1,0 +1,59 @@
+const std = @import("std");
+const raft_build = @import("raft_zig");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const raft_dependency = b.dependency("raft_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const grpc_dependency = raft_build.grpcLiteDependency(raft_dependency, target, optimize);
+    const grpc_module = grpc_dependency.module("grpc_lite");
+    const protobuf_module = grpc_module.import_table.get("protobuf").?;
+    const uuid_dependency = b.dependency("uuid", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const generate_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
+        .destination_directory = b.path(".zig-cache/generated"),
+        .source_files = &.{b.path("proto/zettide/control/v1/control.proto")},
+        .include_directories = &.{b.path("proto")},
+    });
+    const generate_proto_step = b.step("gen-proto", "Generate Zig protobuf sources");
+    generate_proto_step.dependOn(&generate_proto.step);
+
+    const control_proto = b.createModule(.{
+        .root_source_file = b.path(".zig-cache/generated/zettide/control/v1.pb.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
+    });
+
+    const control = b.addModule("zettide_control", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "control_proto", .module = control_proto },
+            .{ .name = "grpc_lite", .module = grpc_module },
+            .{ .name = "raft_zig", .module = raft_dependency.module("raft_zig") },
+            .{ .name = "uuid", .module = uuid_dependency.module("uuid") },
+        },
+    });
+
+    const library = b.addLibrary(.{
+        .name = "zettide-control",
+        .root_module = control,
+    });
+    library.step.dependOn(&generate_proto.step);
+    b.installArtifact(library);
+
+    const tests = b.addTest(.{ .root_module = control });
+    tests.step.dependOn(&generate_proto.step);
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_tests.step);
+}
