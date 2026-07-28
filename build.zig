@@ -3,6 +3,7 @@ const std = @import("std");
 const FuseTestMode = enum { off, auto, required };
 const ExternalTestMode = enum { off, auto, required };
 const PrivilegedTestMode = enum { off, auto, required };
+const BlockTestMode = enum { off, auto, required };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -10,6 +11,7 @@ pub fn build(b: *std.Build) void {
     const fuse_test_mode = b.option(FuseTestMode, "fuse-tests", "FUSE tests: off, auto, or required") orelse .auto;
     const external_test_mode = b.option(ExternalTestMode, "external-tests", "External tests: off, auto, or required") orelse .auto;
     const privileged_test_mode = b.option(PrivilegedTestMode, "privileged-tests", "Privileged tests: off, auto, or required") orelse .auto;
+    const block_test_mode = b.option(BlockTestMode, "block-tests", "Linux block device tests: off, auto, or required") orelse .off;
 
     const portable_core = createCoreModule(b, target, optimize, false);
     const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux);
@@ -57,6 +59,16 @@ pub fn build(b: *std.Build) void {
     cli_test_cmd.addArtifactArg(exe);
     const cli_step = b.step("test-cli", "Run CLI process integration tests");
     cli_step.dependOn(&cli_test_cmd.step);
+
+    const linux_block_probe = if (target.result.os.tag == .linux)
+        createLinuxBlockProbe(b, target, optimize, portable_core)
+    else
+        null;
+    const linux_block_test_cmd = b.addSystemCommand(&.{ "bash", "test/linux-block.sh" });
+    linux_block_test_cmd.addArg(@tagName(block_test_mode));
+    if (linux_block_probe) |artifact| linux_block_test_cmd.addArtifactArg(artifact);
+    const linux_block_step = b.step("test-linux-block", "Run Linux loop block device tests");
+    linux_block_step.dependOn(&linux_block_test_cmd.step);
 
     const probe = if (target.result.os.tag == .linux) createFsProbe(b, target, optimize) else null;
     const durability_probe = if (target.result.os.tag == .linux) createDurabilityProbe(b, target, optimize) else null;
@@ -207,6 +219,23 @@ fn createExecutable(
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .imports = &.{.{ .name = "zettide", .module = core }},
+        }),
+    });
+}
+
+fn createLinuxBlockProbe(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    core: *std.Build.Module,
+) *std.Build.Step.Compile {
+    return b.addExecutable(.{
+        .name = "zettide-linux-block-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/linux_block.zig"),
+            .target = target,
+            .optimize = optimize,
             .imports = &.{.{ .name = "zettide", .module = core }},
         }),
     });

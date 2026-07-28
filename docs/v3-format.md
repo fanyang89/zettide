@@ -133,15 +133,18 @@ comparison excludes only header sequence, checkpoint offset, checkpoint local re
 checkpoint digest, and the final CRC. With equal static fields, the higher sequence wins. Equal
 sequences with different checkpoint semantics are ambiguous; identical copies select A.
 
-## Member File Boundary
+## Member Storage Boundary
 
-The v3 member API opens or exclusively creates a file relative to a caller-owned directory using a
-single-component basename. It does not expose the underlying file handle. Read-only opens
-take a shared non-blocking advisory lock; writable opens take an exclusive non-blocking lock.
+The v3 member API owns durable random-access storage with positional read, write, sync, capacity,
+and close operations. File convenience APIs open or exclusively create a file relative to a
+caller-owned directory using a single-component basename. They do not expose the underlying file
+handle. Read-only file opens take a shared non-blocking advisory lock; writable file opens take an
+exclusive non-blocking lock.
 Header A at offset 0 and header B at offset 4096 are read and decoded independently after locking.
 A single valid copy permits a degraded open. When neither copy is valid, the first transport read
 error takes precedence over `NoValidMemberHeader`. Open policy is checked after A/B selection, and
-the physical file length must exactly equal the selected header's `member_bytes` value.
+regular-file length must exactly equal the selected header's `member_bytes` value. Block storage may
+be larger; member I/O remains bounded by the selected header and never accesses trailing capacity.
 
 Region I/O uses offsets relative to the control, metadata, or data region and cannot cross a
 region boundary. Empty I/O is valid at a region end. Reads are exact; an unexpected end is
@@ -154,16 +157,18 @@ between them; success clears the dirty state. Any injected or real write or sync
 future writes and syncs while reads remain available. A dirty,
 unfrozen close syncs the file. Close waits for the member mutex without cancellation, always
 releases the lock and file resource, reports the first durability error, and is idempotent. This
-boundary also supports initialized member creation. Create validates the complete header and genesis
-payload before filesystem mutation. The initial header must have sequence 1, a zero checkpoint trio,
+boundary also supports initialized member creation. Storage creation validates the complete header,
+genesis payload, and minimum backing capacity before mutation. The initial header must have sequence
+1, a zero checkpoint trio,
 writable feature and subformat policy, and `member_bytes` no larger than `maxInt(i64)`. Genesis
 topology identity, member placement and roles, topology digest, layout, and chunk size must match the
 header. Creation uses exclusive create and an exclusive non-blocking lock, so an existing path is
 reported as `PathAlreadyExists` without truncation.
 
-After extending the file, create publishes in this exact durability order: whole-file sync, write the
-member-local genesis to control slot 0, whole-file sync, write header B at offset 4096, whole-file
-sync, write header A at offset 0, whole-file sync, then on Linux sync the parent directory. The Linux
+After provisioning storage, create publishes in this exact durability order: whole-storage sync,
+write the member-local genesis to control slot 0, whole-storage sync, write header B at offset 4096,
+whole-storage sync, write header A at offset 0, whole-storage sync, then for Linux file creation sync
+the parent directory. The Linux
 step opens and closes a sync-capable `.` duplicate relative to the borrowed `Dir`; it never closes or
 takes ownership of the caller's handle. Thus no normally openable header exists before genesis is
 durable, and B is recoverable before A is published. A successful create returns a writable, clean,
@@ -172,6 +177,13 @@ diagnosis or recovery; it never unlinks. A Linux parent-directory sync failure c
 complete member that can
 be reopened. Other targets skip parent-directory sync, so successful return does not guarantee
 directory-entry durability there. The control journal scanner uses exact region reads.
+
+Linux block-device acquisition verifies the opened fd is a block device, obtains capacity and sector
+size with block ioctls, and identifies it by major/minor device number. Its preflight rejects
+partitions, read-only devices, current-mount-namespace mounts, swaps, and sysfs holders. Writable open
+then uses `O_EXCL` and repeats identity and geometry checks on the acquired fd. Preflight alone does
+not grant ownership; write authority lasts only while that exclusive fd remains open. The current CLI
+does not expose physical-device provisioning.
 
 The fixed-three-member creation boundary accepts three borrowed directory handles and basenames in
 topology slot order. Before creating any file, it validates every member input and cross-validates

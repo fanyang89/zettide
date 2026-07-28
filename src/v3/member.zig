@@ -237,7 +237,8 @@ pub const Member = struct {
         const encoded_header = try member_format.encode(initial_header);
         var storage = storage_value;
         if (storage.capacity() < initial_header.member_bytes) return error.TruncatedMember;
-        if (storage.capacity() > initial_header.member_bytes) return error.UnexpectedMemberLength;
+        if (storage.kind == .regular_file and storage.capacity() > initial_header.member_bytes)
+            return error.UnexpectedMemberLength;
 
         try createSync(&storage, io, options.fault, .extent_sync);
         try createWrite(&storage, io, initial_header.control.offset, first_record, options.fault, .genesis_write);
@@ -286,7 +287,8 @@ pub const Member = struct {
         try member_format.checkOpenPolicy(selection.header, open_mode);
         const actual_length = storage.capacity();
         if (actual_length < selection.header.member_bytes) return error.TruncatedMember;
-        if (actual_length > selection.header.member_bytes) return error.UnexpectedMemberLength;
+        if (storage.kind == .regular_file and actual_length > selection.header.member_bytes)
+            return error.UnexpectedMemberLength;
 
         return .{
             .io = io,
@@ -853,6 +855,25 @@ test "storage entry points format and reopen a member" {
     defer reopened.deinit();
     try std.testing.expectEqual(header.member_id, reopened.header().member_id);
     try std.testing.expectEqual(OpenMode.read_only, reopened.mode());
+}
+
+test "block storage permits unused physical tail capacity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try testCreateHeader(0);
+    const physical_capacity = header.member_bytes + 4096;
+
+    const file = try tmp.dir.createFile(std.testing.io, "block-storage", .{ .read = true });
+    try file.setLength(std.testing.io, physical_capacity);
+    const storage = Storage.initOwned(file, physical_capacity, .linux_block_device, false);
+    var created = try Member.createStorage(std.testing.io, storage, header, testCreatePayload(), .{});
+    try created.close();
+
+    const reopened_file = try tmp.dir.openFile(std.testing.io, "block-storage", .{ .mode = .read_only });
+    const reopened_storage = Storage.initOwned(reopened_file, physical_capacity, .linux_block_device, false);
+    var reopened = try Member.openStorage(std.testing.io, reopened_storage, .read_only);
+    defer reopened.deinit();
+    try std.testing.expectEqual(header.member_bytes, reopened.header().member_bytes);
 }
 
 test "create publishes genesis then B then A with exact durability stages" {

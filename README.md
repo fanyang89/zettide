@@ -31,6 +31,7 @@ zig build test-image
 zig build test-cli
 zig build test-fault
 zig build test-cross
+zig build test-linux-block -Dblock-tests=required
 zig build test-fuse -Dfuse-tests=required
 zig build test-posix-baseline -Dfuse-tests=required
 zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
@@ -46,6 +47,10 @@ zig build ci
 perform real Linux syscalls and require writable `/dev/fuse`, `fusermount3`,
 and `mountpoint`. Use `-Dfuse-tests=auto` to skip them when those capabilities
 are unavailable.
+
+The Linux block-device gate uses a temporary loop device and requires
+`losetup`, `blockdev`, `mkfs.ext4`, mount tools, and passwordless `sudo`. It
+never targets an existing physical device.
 
 The external gates compile pinned source snapshots from libfuse and xfstests
 stored under `vendor/`. `test-libfuse` runs the syscall cases that match the

@@ -13,6 +13,7 @@ pub const Storage = struct {
     file: File,
     capacity_bytes: u64,
     kind: Kind,
+    unlock_on_close: bool,
 
     pub fn createFile(
         io: Io,
@@ -35,6 +36,7 @@ pub const Storage = struct {
             .file = file,
             .capacity_bytes = capacity_bytes,
             .kind = .regular_file,
+            .unlock_on_close = true,
         };
     }
 
@@ -57,14 +59,16 @@ pub const Storage = struct {
             .file = file,
             .capacity_bytes = try file.length(io),
             .kind = .regular_file,
+            .unlock_on_close = true,
         };
     }
 
-    pub fn initOwned(file: File, capacity_bytes: u64, kind: Kind) Storage {
+    pub fn initOwned(file: File, capacity_bytes: u64, kind: Kind, unlock_on_close: bool) Storage {
         return .{
             .file = file,
             .capacity_bytes = capacity_bytes,
             .kind = kind,
+            .unlock_on_close = unlock_on_close,
         };
     }
 
@@ -85,7 +89,7 @@ pub const Storage = struct {
     }
 
     pub fn close(self: *Storage, io: Io) void {
-        self.file.unlock(io);
+        if (self.unlock_on_close) self.file.unlock(io);
         self.file.close(io);
     }
 };
