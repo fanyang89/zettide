@@ -185,6 +185,20 @@ then uses `O_EXCL` and repeats identity and geometry checks on the acquired fd. 
 not grant ownership; write authority lasts only while that exclusive fd remains open. The current CLI
 does not expose physical-device provisioning.
 
+Dynamic pool provisioning accepts one owned storage per initial member. It rejects erasure coding and
+profiles wider than the supplied storage set, derives a common logical capacity from the smallest
+member, assigns at most three control voters, and validates every generated header before mutation.
+All storage handles receive a non-mutating sync preflight before the first genesis write. Storage
+alignment must be a power of two no larger than 4096 bytes; metadata read and program sizes use the
+largest required alignment. Regular files must end on the configured chunk boundary, while block
+devices may retain an inaccessible physical tail after the final full chunk.
+
+Cross-device publication is not atomic. A write or sync failure after publication begins returns an
+explicit partial outcome containing the set ID, genesis, completed-member count, failed-member index,
+and original error. The failed member may contain any prefix of its publication sequence, and completed
+voters may already form a writable quorum. Callers must retain this identity and inspect or recover the
+partial pool; they must not interpret the outcome as proof that no pool exists.
+
 The fixed-three-member creation boundary accepts three borrowed directory handles and basenames in
 topology slot order. Before creating any file, it validates every member input and cross-validates
 the complete header set against the genesis topology and layout. Reusing the same borrowed directory

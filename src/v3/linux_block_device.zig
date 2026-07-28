@@ -89,7 +89,13 @@ pub fn openStorage(
     if (writable and !opened.preflightEligible()) return error.DeviceNotEligible;
 
     return .{
-        .storage = storage_api.Storage.initOwned(file, opened.capacity_bytes, .linux_block_device, false),
+        .storage = storage_api.Storage.initOwned(
+            file,
+            opened.capacity_bytes,
+            .linux_block_device,
+            opened.logical_sector_size,
+            false,
+        ),
         .info = opened,
     };
 }

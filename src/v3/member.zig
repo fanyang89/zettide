@@ -865,12 +865,12 @@ test "block storage permits unused physical tail capacity" {
 
     const file = try tmp.dir.createFile(std.testing.io, "block-storage", .{ .read = true });
     try file.setLength(std.testing.io, physical_capacity);
-    const storage = Storage.initOwned(file, physical_capacity, .linux_block_device, false);
+    const storage = Storage.initOwned(file, physical_capacity, .linux_block_device, 4096, false);
     var created = try Member.createStorage(std.testing.io, storage, header, testCreatePayload(), .{});
     try created.close();
 
     const reopened_file = try tmp.dir.openFile(std.testing.io, "block-storage", .{ .mode = .read_only });
-    const reopened_storage = Storage.initOwned(reopened_file, physical_capacity, .linux_block_device, false);
+    const reopened_storage = Storage.initOwned(reopened_file, physical_capacity, .linux_block_device, 4096, false);
     var reopened = try Member.openStorage(std.testing.io, reopened_storage, .read_only);
     defer reopened.deinit();
     try std.testing.expectEqual(header.member_bytes, reopened.header().member_bytes);

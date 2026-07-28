@@ -10,6 +10,7 @@ pub const member_bootstrap = @import("member_bootstrap.zig");
 pub const member_set = @import("member_set.zig");
 pub const membership = @import("membership.zig");
 pub const pool_policy = @import("pool_policy.zig");
+pub const pool_provision = @import("pool_provision.zig");
 pub const pool_replicated_journal = @import("pool_replicated_journal.zig");
 pub const pool_layout = @import("pool_layout.zig");
 pub const pool_member_set = @import("pool_member_set.zig");
@@ -35,6 +36,7 @@ test {
     _ = member_set;
     _ = membership;
     _ = pool_policy;
+    _ = pool_provision;
     _ = pool_replicated_journal;
     _ = pool_layout;
     _ = pool_member_set;

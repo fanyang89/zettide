@@ -52,6 +52,20 @@ pub const PoolMemberSet = struct {
         intent: OpenIntent,
     ) !PoolMemberSet {
         var set = try scanLocations(io, allocator, locations, if (intent == .writable) .writable else .read_only);
+        return finishOpen(&set, intent);
+    }
+
+    pub fn openStorages(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        storages: []member_api.Storage,
+        intent: OpenIntent,
+    ) !PoolMemberSet {
+        var set = try scanStorages(io, allocator, storages, if (intent == .writable) .writable else .read_only);
+        return finishOpen(&set, intent);
+    }
+
+    fn finishOpen(set: *PoolMemberSet, intent: OpenIntent) !PoolMemberSet {
         errdefer set.deinit();
 
         var history_pointers: [max_member_count]*const journal.HistoryScan = undefined;
@@ -64,11 +78,12 @@ pub const PoolMemberSet = struct {
         }
         if (history_count == 0) return error.NoReadableMember;
         const selected_authority = try pool_authority.select(history_pointers[0..history_count]);
+        try set.validateAuthorityGeometry(selected_authority);
         set.authority_state = selected_authority;
         set.classifyMembers(intent);
         if (intent == .writable and set.control_write_state == null)
             return error.WriteQuorumUnavailable;
-        return set;
+        return set.*;
     }
 
     pub fn openAdministrativeRecovery(
@@ -318,7 +333,33 @@ pub const PoolMemberSet = struct {
         if (intent == .writable and ready.active_count >= selected_authority.topology.quorum)
             self.control_write_state = ready;
     }
+
+    fn validateAuthorityGeometry(self: *const PoolMemberSet, selected: pool_authority.Authority) !void {
+        var canonical: ?member_format.Header = null;
+        for (0..self.supplied_count) |index| {
+            const member = if (self.members[index]) |*value| value else continue;
+            const history = &(self.histories[index].?);
+            if (history.findHistoryDigest(selected.history_digest) == null) continue;
+            const header = member.header();
+            if (canonical) |expected| {
+                if (!samePoolGeometry(expected, header)) return error.InconsistentMemberGeometry;
+            } else {
+                canonical = header;
+            }
+        }
+    }
 };
+
+fn samePoolGeometry(a: member_format.Header, b: member_format.Header) bool {
+    return a.logical_capacity == b.logical_capacity and
+        a.control.offset == b.control.offset and a.control.length == b.control.length and
+        a.metadata.offset == b.metadata.offset and a.metadata.length == b.metadata.length and
+        a.data.offset == b.data.offset and
+        a.metadata_block_size == b.metadata_block_size and
+        a.metadata_read_size == b.metadata_read_size and
+        a.metadata_program_size == b.metadata_program_size and
+        a.chunk_size == b.chunk_size;
+}
 
 fn scanLocations(
     io: std.Io,
@@ -335,28 +376,64 @@ fn scanLocations(
             set.statuses[index] = .{ .open_failed = err };
             continue;
         };
-        if (!member_format.isDynamicPool(member.header())) {
-            member.deinit();
-            set.statuses[index] = .legacy;
-            continue;
-        }
-        var history = journal.scanHistory(allocator, &member) catch |err| {
-            member.deinit();
-            if (err == error.OutOfMemory) return err;
-            set.statuses[index] = .{ .scan_failed = err };
-            continue;
-        };
-        if (history.entries().len == 0) {
-            history.deinit();
-            member.deinit();
-            set.statuses[index] = .{ .scan_failed = error.MissingGenesis };
-            continue;
-        }
-        set.members[index] = member;
-        set.histories[index] = history;
-        set.statuses[index] = .stale;
+        try scanMember(allocator, &set, index, &member);
     }
     return set;
+}
+
+fn scanStorages(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    storages: []member_api.Storage,
+    mode: member_format.OpenMode,
+) !PoolMemberSet {
+    if (storages.len == 0 or storages.len > max_member_count) {
+        for (storages) |*storage| storage.close(io);
+        return error.InvalidMemberCount;
+    }
+    var set: PoolMemberSet = .{ .supplied_count = storages.len };
+    var consumed_count: usize = 0;
+    errdefer {
+        set.deinit();
+        for (storages[consumed_count..]) |*storage| storage.close(io);
+    }
+    for (storages, 0..) |storage, index| {
+        consumed_count += 1;
+        var member = member_api.openStorage(io, storage, mode) catch |err| {
+            set.statuses[index] = .{ .open_failed = err };
+            continue;
+        };
+        try scanMember(allocator, &set, index, &member);
+    }
+    return set;
+}
+
+fn scanMember(
+    allocator: std.mem.Allocator,
+    set: *PoolMemberSet,
+    index: usize,
+    member: *member_api.Member,
+) !void {
+    if (!member_format.isDynamicPool(member.header())) {
+        member.deinit();
+        set.statuses[index] = .legacy;
+        return;
+    }
+    var history = journal.scanHistory(allocator, member) catch |err| {
+        member.deinit();
+        if (err == error.OutOfMemory) return err;
+        set.statuses[index] = .{ .scan_failed = err };
+        return;
+    };
+    if (history.entries().len == 0) {
+        history.deinit();
+        member.deinit();
+        set.statuses[index] = .{ .scan_failed = error.MissingGenesis };
+        return;
+    }
+    set.members[index] = member.*;
+    set.histories[index] = history;
+    set.statuses[index] = .stale;
 }
 
 fn validateLocations(locations: []const Location) !void {
@@ -376,6 +453,15 @@ pub fn open(
     intent: OpenIntent,
 ) !PoolMemberSet {
     return PoolMemberSet.open(io, allocator, locations, intent);
+}
+
+pub fn openStorages(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    storages: []member_api.Storage,
+    intent: OpenIntent,
+) !PoolMemberSet {
+    return PoolMemberSet.openStorages(io, allocator, storages, intent);
 }
 
 pub fn openAdministrativeRecovery(
