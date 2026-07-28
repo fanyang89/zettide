@@ -81,6 +81,10 @@ pub fn build(b: *std.Build) void {
     const spdk_endpoint_step = b.step("test-spdk-endpoint", "Run the Linux SPDK bdev endpoint test");
     spdk_endpoint_step.dependOn(&spdk_endpoint_cmd.step);
 
+    const spdk_dispatcher_cmd = b.addSystemCommand(&.{ "bash", "test/spdk-dispatcher.sh" });
+    const spdk_dispatcher_step = b.step("test-spdk-dispatcher", "Run the Linux SPDK dispatcher test");
+    spdk_dispatcher_step.dependOn(&spdk_dispatcher_cmd.step);
+
     const probe = if (target.result.os.tag == .linux) createFsProbe(b, target, optimize) else null;
     const durability_probe = if (target.result.os.tag == .linux) createDurabilityProbe(b, target, optimize) else null;
     const fuse_test_cmd = b.addSystemCommand(&.{ "bash", "test/fuse.sh" });
