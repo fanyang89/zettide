@@ -5,6 +5,7 @@ const journal_api = @import("journal.zig");
 const member_bootstrap = @import("member_bootstrap.zig");
 const membership = @import("membership.zig");
 const pool_authority = @import("pool_authority.zig");
+const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
 const pool_certificate = @import("pool_certificate.zig");
 const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
@@ -126,6 +127,7 @@ pub const ReplicatedJournal = struct {
             const participant = &(self.participants[index].?);
             const item = prepared[index] orelse continue;
             prepare_results[index] = participant.journal.appendPrepared(&item) catch {
+                participant.active = false;
                 self.set.noteControlFailure(participant.set_index);
                 continue;
             };
@@ -171,6 +173,7 @@ pub const ReplicatedJournal = struct {
             const participant = &(self.participants[index].?);
             const item = commit_prepared[index] orelse continue;
             commit_results[index] = participant.journal.appendPrepared(&item) catch {
+                participant.active = false;
                 self.set.noteControlFailure(participant.set_index);
                 continue;
             };
@@ -187,7 +190,7 @@ pub const ReplicatedJournal = struct {
             .record = committed,
             .committed_members = committed_members,
             .committed_count = commit_count,
-            .degraded = commit_count < self.activeParticipantCount(),
+            .degraded = commit_count < target_count,
         };
     }
 
@@ -351,6 +354,82 @@ pub const ReplicatedJournal = struct {
             .committed_members = committed_members,
             .committed_count = countTrue(commit_successes[0..self.participant_count]),
             .degraded = active_count < voterCount(proposal.topology),
+        };
+    }
+
+    pub fn commitAuthorityCheckpoint(
+        self: *ReplicatedJournal,
+        proposal: control_record.Record,
+    ) !CommitResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.CoordinatorClosed;
+        if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.recovery_only) return error.RecoveryOnlyCoordinator;
+        if (proposal.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        const context: pool_authority_checkpoint.AuthorityContext = .{
+            .history_digest = authority.history_digest,
+            .data_root_digest = authority.data_root_digest,
+            .topology = authority.topology,
+            .layout = authority.layout,
+            .membership_epoch = authority.membership_epoch,
+            .writer_term = authority.writer_term,
+            .generation = authority.generation,
+            .administrative_recovery = authority.administrative_recovery,
+        };
+
+        var prepared: [max_control_participant_count]?journal_api.PreparedAppend = @splat(null);
+        var target_count: u16 = 0;
+        var shared_history: ?codec.Digest = null;
+        for (0..self.participant_count) |index| {
+            const participant = &(self.participants[index].?);
+            if (!participant.active) continue;
+            const state = try participant.journal.state();
+            if (state.physical_frontier == state.slot_count) continue;
+            const item = try participant.journal.prepareCheckpointExact(
+                try participant.journal.tailToken(),
+                proposal,
+            );
+            _ = try pool_authority_checkpoint.validateRecord(item.record, context);
+            if (shared_history) |expected| {
+                if (!std.mem.eql(u8, &expected, &item.record.history_digest))
+                    return error.CheckpointHistoryDiverged;
+            } else {
+                shared_history = item.record.history_digest;
+            }
+            prepared[index] = item;
+            target_count += 1;
+        }
+        if (target_count < self.quorum) return error.InsufficientJournalCapacity;
+
+        self.set.beginControlMutation();
+        var committed_members: [pool_member_set.max_member_count]bool = @splat(false);
+        var committed_record: ?control_record.Record = null;
+        var commit_count: u16 = 0;
+        for (0..self.participant_count) |index| {
+            const participant = &(self.participants[index].?);
+            const item = prepared[index] orelse continue;
+            const result = participant.journal.appendPreparedCheckpoint(&item) catch {
+                participant.active = false;
+                self.set.noteControlFailure(participant.set_index);
+                continue;
+            };
+            committed_members[participant.set_index] = true;
+            commit_count += 1;
+            if (committed_record == null) committed_record = result.record;
+        }
+        if (commit_count < self.quorum) {
+            self.frozen.store(true, .release);
+            return error.CheckpointOutcomeUnknown;
+        }
+        const committed = committed_record.?;
+        self.set.noteCommittedCheckpoint(committed, committed_members, commit_count);
+        return .{
+            .record = committed,
+            .committed_members = committed_members,
+            .committed_count = commit_count,
+            .degraded = commit_count < target_count,
         };
     }
 
@@ -748,12 +827,44 @@ test "one-member coordinator commits generation and membership then reopens" {
     try std.testing.expectEqual(@as(u16, 1), result.committed_count);
     try std.testing.expectEqual(@as(u64, 1), result.record.generation);
     try std.testing.expectEqual(@as(u64, 1), set.authority().?.generation);
+    const checkpoint_authority = set.authority().?;
+    const snapshot: pool_authority_checkpoint.Snapshot = .{
+        .previous_authority_history_digest = checkpoint_authority.history_digest,
+        .data_root_digest = checkpoint_authority.data_root_digest,
+        .writer_term = checkpoint_authority.writer_term,
+        .generation = checkpoint_authority.generation,
+        .topology = checkpoint_authority.topology,
+        .layout = checkpoint_authority.layout,
+        .administrative_recovery = checkpoint_authority.administrative_recovery,
+    };
+    var checkpoint_proposal: control_record.Record = .{
+        .kind = control_record.checkpoint_kind,
+        .local_sequence = 99,
+        .membership_epoch = checkpoint_authority.membership_epoch,
+        .writer_term = checkpoint_authority.writer_term,
+        .generation = checkpoint_authority.generation,
+        .set_id = checkpoint_authority.topology.set_id,
+        .member_id = id(8),
+        .mount_session_id = id(3),
+        .transaction_id = id(11),
+        .previous_record_digest = @splat(0x11),
+        .previous_history_digest = checkpoint_authority.history_digest,
+        .data_root_digest = checkpoint_authority.data_root_digest,
+        .topology_digest = try pool_topology.digest(checkpoint_authority.topology),
+        .layout_digest = try pool_layout.digest(checkpoint_authority.layout),
+        .payload = try pool_authority_checkpoint.makePayload(snapshot),
+    };
+    checkpoint_proposal.history_digest = try control_record.historyDigest(checkpoint_proposal);
+    const checkpoint_result = try coordinator.commitAuthorityCheckpoint(checkpoint_proposal);
+    try std.testing.expectEqual(@as(u16, 1), checkpoint_result.committed_count);
+    try std.testing.expectEqual(pool_authority.Kind.checkpoint, set.authority().?.kind);
     coordinator.close();
     try set.close();
 
     var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
     defer reopened.deinit();
     try std.testing.expectEqual(@as(u64, 1), reopened.authority().?.generation);
+    try std.testing.expectEqual(pool_authority.Kind.checkpoint, reopened.authority().?.kind);
     var membership_coordinator = try open(std.testing.io, &reopened);
     defer membership_coordinator.deinit();
     const current = reopened.authority().?;

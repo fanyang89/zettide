@@ -13,8 +13,9 @@ The multi-volume catalog codecs under development are specified separately in
 provisioning and do not change the single-volume format defined here.
 
 The planned control rollover authority snapshot payload is specified in
-[`v3-control-rollover-format.md`](v3-control-rollover-format.md). Its codec is not yet authority and
-does not change the append-only journal defined here.
+[`v3-control-rollover-format.md`](v3-control-rollover-format.md). Quorum-replicated checkpoints can
+advance authority while full history remains retained, but do not change the append-only journal
+defined here.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
 serialized Zig or native ABI structure. Each header copy is exactly 4096 bytes.
@@ -501,9 +502,10 @@ topology, and layout remain fixed; generation advances exactly once and writer t
 Dynamic authority selection starts only from a version 2 genesis observed by that topology's voter
 quorum. It then walks proven history ancestry: generation commits require current voter quorum,
 normal membership commits require both old and new voter quorums, administrative recovery requires
-new quorum, and bootstrap requires current voter quorum plus the target first-record copy. Two
-different valid children of one authority are a conflict. Epoch, generation, local sequence,
-physical frontier, and checkpoint hints are never tie-breakers.
+new quorum, bootstrap requires current voter quorum plus the target first-record copy, and an authority
+checkpoint requires current voter quorum plus a snapshot matching its direct parent. Two different
+valid children of one authority are a conflict. Epoch, generation, local sequence, physical frontier,
+and member-local checkpoint hints are never tie-breakers.
 
 `PoolMemberSet.open` accepts up to 96 supplied dynamic members, scans every readable history, and
 selects authority by the graph above before classifying members. Removed and stale members never
@@ -804,13 +806,18 @@ the append call did not acknowledge it. Such a full-valid unacknowledged record 
 tail and can be extended normally. This is local durability only and establishes no quorum or
 authority.
 
-The checkpoint API runs under the journal mutex. It first performs the same durable record append
-and advances retained journal state, then publishes the checkpoint hint through the member's A/B
-header protocol. A record write or sync failure leaves the header untouched. A subsequent header
-write or sync failure returns an error and freezes the member, but the durable checkpoint remains
-the retained journal tail and is never rolled back. Reopen selects whichever old or fully published
-header copy is valid and always performs a full scan. Header sequence overflow is rejected before
-header I/O, after the checkpoint record has become durable.
+The member-local checkpoint API runs under the journal mutex. It first performs the same durable
+record append and advances retained journal state, then publishes the checkpoint hint through the
+member's A/B header protocol. A record write or sync failure leaves the header untouched. A subsequent
+header write or sync failure returns an error and freezes the member, but the durable checkpoint
+remains the retained journal tail and is never rolled back. Reopen selects whichever old or fully
+published header copy is valid and always performs a full scan. Header sequence overflow is rejected
+before header I/O, after the checkpoint record has become durable.
+
+The exact authority-checkpoint API only durably appends a prepared record; it does not publish a
+member-local header hint. The Pool coordinator establishes authority by obtaining the current voter
+quorum for one shared checkpoint history event. Header publication becomes a reclaim barrier only in
+the future anchored-journal protocol.
 
 ## Commit Certificate
 

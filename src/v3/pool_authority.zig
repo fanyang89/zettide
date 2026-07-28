@@ -5,12 +5,13 @@ const journal = @import("journal.zig");
 const member_bootstrap = @import("member_bootstrap.zig");
 const membership = @import("membership.zig");
 const pool_certificate = @import("pool_certificate.zig");
+const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
 const pool_evidence = @import("pool_evidence.zig");
 const pool_genesis = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_topology = @import("pool_topology.zig");
 
-pub const Kind = enum { genesis, generation_commit, membership_commit, member_bootstrap };
+pub const Kind = enum { genesis, generation_commit, membership_commit, member_bootstrap, checkpoint };
 
 pub const Authority = struct {
     kind: Kind,
@@ -85,6 +86,9 @@ pub fn selectAdministrativeRecovery(history: *const journal.HistoryScan) !Author
             control_record.generation_commit_kind => authority = try replayLocalGeneration(history, authority, record),
             control_record.membership_commit_kind => authority = try replayLocalMembership(history, authority, record),
             control_record.member_bootstrap_kind => authority = try replayLocalBootstrap(authority, record),
+            control_record.checkpoint_kind => if (pool_authority_checkpoint.isSnapshotRecord(record)) {
+                authority = try replayLocalCheckpoint(authority, record);
+            },
             else => {},
         }
     }
@@ -103,7 +107,7 @@ fn selectRecoveryRoot(histories: []const *const journal.HistoryScan) !Authority 
         const witnesses = try countVoterWitnesses(
             histories,
             candidate.history_digest,
-            control_record.membership_commit_kind,
+            authorityRecordKind(candidate.kind),
             candidate.topology,
         );
         if (witnesses < candidate.topology.quorum) continue;
@@ -222,6 +226,22 @@ fn replayLocalBootstrap(current: Authority, record: control_record.Record) !Auth
     };
 }
 
+fn replayLocalCheckpoint(current: Authority, record: control_record.Record) !Authority {
+    _ = try pool_authority_checkpoint.validateRecord(record, checkpointContext(current));
+    return .{
+        .kind = .checkpoint,
+        .history_digest = record.history_digest,
+        .data_root_digest = current.data_root_digest,
+        .topology = current.topology,
+        .layout = current.layout,
+        .membership_epoch = current.membership_epoch,
+        .writer_term = current.writer_term,
+        .generation = current.generation,
+        .witness_count = 1,
+        .administrative_recovery = current.administrative_recovery,
+    };
+}
+
 fn validateLocalPrepareCommit(prepare: control_record.Record, commit: control_record.Record) !void {
     if (!std.mem.eql(u8, &prepare.set_id, &commit.set_id) or
         prepare.membership_epoch != commit.membership_epoch or
@@ -279,6 +299,10 @@ fn validateCandidate(
         control_record.generation_commit_kind => try validateGenerationCandidate(histories, current, history, entry),
         control_record.membership_commit_kind => try validateMembershipCandidate(histories, current, history, entry),
         control_record.member_bootstrap_kind => try validateBootstrapCandidate(histories, current, entry),
+        control_record.checkpoint_kind => if (pool_authority_checkpoint.isSnapshotRecord(entry.record))
+            try validateCheckpointCandidate(histories, current, history, entry)
+        else
+            null,
         else => null,
     };
 }
@@ -391,6 +415,59 @@ fn validateBootstrapCandidate(
     };
 }
 
+fn validateCheckpointCandidate(
+    histories: []const *const journal.HistoryScan,
+    current: Authority,
+    history: *const journal.HistoryScan,
+    entry: journal.HistoryEntry,
+) !?Authority {
+    if (!std.mem.eql(u8, &entry.record.previous_history_digest, &current.history_digest)) return null;
+    const witnesses = try countVoterWitnesses(
+        histories,
+        entry.record.history_digest,
+        control_record.checkpoint_kind,
+        current.topology,
+    );
+    if (witnesses < current.topology.quorum) return null;
+    const record = try verifiedWitness(history, &entry);
+    _ = try pool_authority_checkpoint.validateRecord(record, checkpointContext(current));
+    return .{
+        .kind = .checkpoint,
+        .history_digest = record.history_digest,
+        .data_root_digest = current.data_root_digest,
+        .topology = current.topology,
+        .layout = current.layout,
+        .membership_epoch = current.membership_epoch,
+        .writer_term = current.writer_term,
+        .generation = current.generation,
+        .witness_count = witnesses,
+        .administrative_recovery = current.administrative_recovery,
+    };
+}
+
+fn checkpointContext(authority: Authority) pool_authority_checkpoint.AuthorityContext {
+    return .{
+        .history_digest = authority.history_digest,
+        .data_root_digest = authority.data_root_digest,
+        .topology = authority.topology,
+        .layout = authority.layout,
+        .membership_epoch = authority.membership_epoch,
+        .writer_term = authority.writer_term,
+        .generation = authority.generation,
+        .administrative_recovery = authority.administrative_recovery,
+    };
+}
+
+fn authorityRecordKind(kind: Kind) u16 {
+    return switch (kind) {
+        .genesis => control_record.genesis_kind,
+        .generation_commit => control_record.generation_commit_kind,
+        .membership_commit => control_record.membership_commit_kind,
+        .member_bootstrap => control_record.member_bootstrap_kind,
+        .checkpoint => control_record.checkpoint_kind,
+    };
+}
+
 fn prepareExtends(
     histories: []const *const journal.HistoryScan,
     prepare_history_digest: codec.Digest,
@@ -473,9 +550,13 @@ fn makeEntry(record: control_record.Record, raw: [control_record.encoded_size]u8
 }
 
 fn makeHistory(entries: []journal.HistoryEntry) journal.HistoryScan {
+    return makeHistoryFor(id(2), entries);
+}
+
+fn makeHistoryFor(member_id: [16]u8, entries: []journal.HistoryEntry) journal.HistoryScan {
     return .{
         .scan_result = .{ .slot_count = entries.len },
-        .member_id = id(2),
+        .member_id = member_id,
         .storage = entries,
         .entry_count = entries.len,
         .allocator = std.testing.allocator,
@@ -564,4 +645,149 @@ test "administrative recovery rejects unresolved journal damage" {
     history.scan_result.tail = genesis;
     history.scan_result.unresolved_tail_damage = true;
     try std.testing.expectError(error.JournalNeedsRecovery, selectAdministrativeRecovery(&history));
+}
+
+test "quorum authority checkpoint advances authority and local hints do not" {
+    const topology = try testTopology();
+    const layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024);
+    const genesis = try pool_genesis.makeRecord(id(2), .{ .topology = topology, .layout = layout });
+    const genesis_raw = try control_record.encodeDynamicPool(genesis);
+    const snapshot: pool_authority_checkpoint.Snapshot = .{
+        .previous_authority_history_digest = genesis.history_digest,
+        .data_root_digest = genesis.data_root_digest,
+        .writer_term = genesis.writer_term,
+        .generation = genesis.generation,
+        .topology = topology,
+        .layout = layout,
+    };
+    var checkpoint: control_record.Record = .{
+        .kind = control_record.checkpoint_kind,
+        .local_sequence = 2,
+        .membership_epoch = genesis.membership_epoch,
+        .writer_term = genesis.writer_term,
+        .generation = genesis.generation,
+        .set_id = topology.set_id,
+        .member_id = id(2),
+        .mount_session_id = id(3),
+        .transaction_id = id(4),
+        .previous_record_digest = control_record.recordDigest(&genesis_raw),
+        .previous_history_digest = genesis.history_digest,
+        .data_root_digest = genesis.data_root_digest,
+        .topology_digest = try pool_topology.digest(topology),
+        .layout_digest = try pool_layout.digest(layout),
+        .payload = try pool_authority_checkpoint.makePayload(snapshot),
+    };
+    checkpoint.history_digest = try control_record.historyDigest(checkpoint);
+    const checkpoint_raw = try control_record.encodeDynamicPool(checkpoint);
+    var entries = [_]journal.HistoryEntry{
+        makeEntry(genesis, genesis_raw, 0),
+        makeEntry(checkpoint, checkpoint_raw, 1),
+    };
+    var history = makeHistory(&entries);
+    const histories = [_]*const journal.HistoryScan{&history};
+    const selected = try select(&histories);
+    try std.testing.expectEqual(Kind.checkpoint, selected.kind);
+    try std.testing.expectEqualSlices(u8, &checkpoint.history_digest, &selected.history_digest);
+
+    var hint = checkpoint;
+    hint.payload = try control_record.Payload.init("local scan hint");
+    hint.history_digest = try control_record.historyDigest(hint);
+    const hint_raw = try control_record.encodeDynamicPool(hint);
+    entries[1] = makeEntry(hint, hint_raw, 1);
+    history = makeHistory(&entries);
+    const hint_histories = [_]*const journal.HistoryScan{&history};
+    try std.testing.expectEqual(Kind.genesis, (try select(&hint_histories)).kind);
+}
+
+test "authority checkpoint requires current voter quorum before validation" {
+    const members = [_]pool_topology.Member{
+        .{ .member_id = id(2), .slot = 1, .control_role = pool_topology.voter_role, .role_flags = 3 },
+        .{ .member_id = id(3), .slot = 4, .control_role = pool_topology.voter_role, .role_flags = 3 },
+        .{ .member_id = id(4), .slot = 9, .control_role = pool_topology.voter_role, .role_flags = 3 },
+    };
+    const topology = try pool_topology.Topology.init(id(1), 1, @splat(0), &members);
+    const layout = try pool_layout.Layout.init(.replicated, 1, 1, 1024 * 1024);
+    var genesis_records: [3]control_record.Record = undefined;
+    var genesis_raw: [3][control_record.encoded_size]u8 = undefined;
+    for (members, 0..) |member, index| {
+        genesis_records[index] = try pool_genesis.makeRecord(member.member_id, .{
+            .topology = topology,
+            .layout = layout,
+        });
+        genesis_raw[index] = try control_record.encodeDynamicPool(genesis_records[index]);
+    }
+    const snapshot: pool_authority_checkpoint.Snapshot = .{
+        .previous_authority_history_digest = genesis_records[0].history_digest,
+        .data_root_digest = genesis_records[0].data_root_digest,
+        .writer_term = genesis_records[0].writer_term,
+        .generation = genesis_records[0].generation,
+        .topology = topology,
+        .layout = layout,
+    };
+    var checkpoint_records: [2]control_record.Record = undefined;
+    var checkpoint_raw: [2][control_record.encoded_size]u8 = undefined;
+    for (members[0..2], 0..) |member, index| {
+        checkpoint_records[index] = .{
+            .kind = control_record.checkpoint_kind,
+            .local_sequence = 2,
+            .membership_epoch = topology.epoch,
+            .writer_term = 0,
+            .generation = 0,
+            .set_id = topology.set_id,
+            .member_id = member.member_id,
+            .mount_session_id = id(5),
+            .transaction_id = id(6),
+            .previous_record_digest = control_record.recordDigest(&genesis_raw[index]),
+            .previous_history_digest = genesis_records[index].history_digest,
+            .data_root_digest = @splat(0),
+            .topology_digest = try pool_topology.digest(topology),
+            .layout_digest = try pool_layout.digest(layout),
+            .payload = try pool_authority_checkpoint.makePayload(snapshot),
+        };
+        checkpoint_records[index].history_digest = try control_record.historyDigest(checkpoint_records[index]);
+        checkpoint_raw[index] = try control_record.encodeDynamicPool(checkpoint_records[index]);
+    }
+    var entries0 = [_]journal.HistoryEntry{
+        makeEntry(genesis_records[0], genesis_raw[0], 0),
+        makeEntry(checkpoint_records[0], checkpoint_raw[0], 1),
+    };
+    var entries1 = [_]journal.HistoryEntry{makeEntry(genesis_records[1], genesis_raw[1], 0)};
+    var entries2 = [_]journal.HistoryEntry{makeEntry(genesis_records[2], genesis_raw[2], 0)};
+    var history0 = makeHistoryFor(id(2), &entries0);
+    var history1 = makeHistoryFor(id(3), &entries1);
+    var history2 = makeHistoryFor(id(4), &entries2);
+    var histories = [_]*const journal.HistoryScan{ &history0, &history1, &history2 };
+    try std.testing.expectEqual(Kind.genesis, (try select(&histories)).kind);
+
+    entries1 = .{
+        makeEntry(genesis_records[1], genesis_raw[1], 0),
+    };
+    var entries1_with_checkpoint = [_]journal.HistoryEntry{
+        entries1[0],
+        makeEntry(checkpoint_records[1], checkpoint_raw[1], 1),
+    };
+    history1 = makeHistoryFor(id(3), &entries1_with_checkpoint);
+    histories = .{ &history0, &history1, &history2 };
+    try std.testing.expectEqual(Kind.checkpoint, (try select(&histories)).kind);
+
+    var collision = checkpoint_records[0];
+    var collision_payload: [pool_authority_checkpoint.encoded_size]u8 = @splat(0);
+    @memcpy(collision_payload[0..8], "DDVPCHK1");
+    collision.payload = try control_record.Payload.init(&collision_payload);
+    collision.history_digest = try control_record.historyDigest(collision);
+    const collision_raw = try control_record.encodeDynamicPool(collision);
+    entries0[1] = makeEntry(collision, collision_raw, 1);
+    history0 = makeHistoryFor(id(2), &entries0);
+    history1 = makeHistoryFor(id(3), &entries1);
+    histories = .{ &history0, &history1, &history2 };
+    try std.testing.expectEqual(Kind.genesis, (try select(&histories)).kind);
+
+    var collision1 = checkpoint_records[1];
+    collision1.payload = try control_record.Payload.init(&collision_payload);
+    collision1.history_digest = try control_record.historyDigest(collision1);
+    const collision1_raw = try control_record.encodeDynamicPool(collision1);
+    entries1_with_checkpoint[1] = makeEntry(collision1, collision1_raw, 1);
+    history1 = makeHistoryFor(id(3), &entries1_with_checkpoint);
+    histories = .{ &history0, &history1, &history2 };
+    try std.testing.expectError(error.ChecksumMismatch, select(&histories));
 }

@@ -3,9 +3,10 @@
 ## Status
 
 This document freezes the authority checkpoint snapshot payload used by the planned dynamic Pool
-control journal rollover. The codec is implemented in `src/v3/pool_authority_checkpoint.zig`, but
-checkpoints do not yet establish Pool authority and no journal slots are reused. The existing
-member-local checkpoint hint semantics remain unchanged.
+control journal rollover. The codec is implemented in `src/v3/pool_authority_checkpoint.zig`.
+Checkpoint records replicated to the current voter quorum advance authority while complete prior
+history remains available; they are not yet accepted as compacted roots and no journal slots are
+reused. The existing member-local checkpoint hint semantics remain unchanged.
 
 All integers are little-endian. The fixed payload ends with CRC32C over all preceding bytes. Reserved
 bytes must be zero. The enclosing 4096-byte control record also binds the payload through its shared
@@ -42,7 +43,8 @@ An authority snapshot is carried by control record kind 9. Contextual validation
 
 1. The payload and record previous-history digests equal the selected prior authority digest.
 2. Payload topology, layout, data root, writer term, generation, and recovery state equal the selected
-   prior authority, so a checkpoint changes no authority state.
+   prior authority, so a checkpoint changes no snapshotted authority state; its kind, history digest,
+   and witness count identify the new authority event.
 3. The record set ID and membership epoch equal the embedded topology identity and epoch.
 4. The record topology, layout, data root, writer term, and generation bind the payload snapshot.
 5. The publishing member is a voter in the embedded topology and the transaction ID is nonzero.
@@ -52,6 +54,8 @@ Record CRC validation occurs when the enclosing 4096-byte record is decoded befo
 validation. A payload plus its complete decoded control record is the self-contained authority
 snapshot; the payload is not authority without that outer record and quorum evidence.
 
-The snapshot codec alone does not make a checkpoint authoritative. Rollover requires a future quorum
-publication protocol, compacted-root authority selection, dual-header reclaim barrier, anchored scan,
-and crash-safe slot clearing before any old record can be overwritten.
+The snapshot codec alone does not make a checkpoint authoritative. A checkpoint directly extending
+selected authority becomes its next authority only after current voter quorum has durably appended the
+same shared-history event. An unknown append outcome freezes the coordinator and requires full reopen.
+Rollover still requires compacted-root authority selection, a dual-header reclaim barrier, anchored
+scan, and crash-safe slot clearing before any old record can be overwritten.

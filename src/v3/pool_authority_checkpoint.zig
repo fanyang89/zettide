@@ -89,6 +89,11 @@ pub fn makePayload(snapshot: Snapshot) !control_record.Payload {
     return control_record.Payload.init(&(try encode(snapshot)));
 }
 
+pub fn isSnapshotRecord(record: control_record.Record) bool {
+    return record.kind == control_record.checkpoint_kind and record.payload.len == encoded_size and
+        std.mem.eql(u8, record.payload.slice()[0..magic.len], &magic);
+}
+
 pub fn validateRecord(record: control_record.Record, expected: AuthorityContext) !Snapshot {
     if (record.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
     try control_record.validateDynamicPoolPolicy(record);

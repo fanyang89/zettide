@@ -140,6 +140,26 @@ pub const Journal = struct {
         return self.commitPreparedLocked(canonical);
     }
 
+    pub fn prepareCheckpointExact(
+        self: *Journal,
+        expected_tail: TailToken,
+        proposal: control_record.Record,
+    ) !PreparedAppend {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+        if (proposal.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
+        return self.prepareLocked(proposal, expected_tail);
+    }
+
+    pub fn appendPreparedCheckpoint(self: *Journal, prepared: *const PreparedAppend) !AppendResult {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+        if (prepared.record.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
+        const canonical = try self.prepareLocked(prepared.record, prepared.expected_tail);
+        if (!std.meta.eql(canonical, prepared.*)) return error.PreparedAppendMismatch;
+        return self.commitPreparedLocked(canonical);
+    }
+
     pub fn close(self: *Journal) void {
         self.mutex.lockUncancelable(self.member.io);
         defer self.mutex.unlock(self.member.io);

@@ -206,9 +206,7 @@ pub const PoolMemberSet = struct {
             .active_members = active_members,
             .active_count = active_count,
         };
-        for (active_members[0..self.supplied_count], 0..) |active, index| {
-            if (active) self.statuses[index] = .active_voter;
-        }
+        self.updateVoterStatuses(previous.topology, active_members);
     }
 
     pub fn noteCommittedMembership(
@@ -281,10 +279,35 @@ pub const PoolMemberSet = struct {
             .active_members = active_members,
             .active_count = active_count,
         };
-        for (active_members[0..self.supplied_count], 0..) |active, member_index| {
-            if (active) self.statuses[member_index] = .active_voter;
-        }
+        self.updateVoterStatuses(previous.topology, active_members);
         return index;
+    }
+
+    pub fn noteCommittedCheckpoint(
+        self: *PoolMemberSet,
+        record: control_record.Record,
+        active_members: [max_member_count]bool,
+        active_count: u16,
+    ) void {
+        const previous = self.authority_state.?;
+        self.authority_state = .{
+            .kind = .checkpoint,
+            .history_digest = record.history_digest,
+            .data_root_digest = previous.data_root_digest,
+            .topology = previous.topology,
+            .layout = previous.layout,
+            .membership_epoch = previous.membership_epoch,
+            .writer_term = previous.writer_term,
+            .generation = previous.generation,
+            .witness_count = active_count,
+            .administrative_recovery = previous.administrative_recovery,
+        };
+        self.control_write_state = .{
+            .tail_history_digest = record.history_digest,
+            .active_members = active_members,
+            .active_count = active_count,
+        };
+        self.updateVoterStatuses(previous.topology, active_members);
     }
 
     pub fn close(self: *PoolMemberSet) !void {
@@ -350,6 +373,22 @@ pub const PoolMemberSet = struct {
         ) catch .unavailable;
         if (intent == .writable and ready.active_count >= selected_authority.topology.quorum)
             self.control_write_state = ready;
+    }
+
+    fn updateVoterStatuses(
+        self: *PoolMemberSet,
+        topology: pool_topology.Topology,
+        active_members: [max_member_count]bool,
+    ) void {
+        for (active_members[0..self.supplied_count], 0..) |active, index| {
+            if (active) {
+                self.statuses[index] = .active_voter;
+                continue;
+            }
+            const member = if (self.members[index]) |*value| value else continue;
+            const descriptor = pool_topology.findMember(&topology, member.header().member_id) orelse continue;
+            if (descriptor.control_role == pool_topology.voter_role) self.statuses[index] = .stale;
+        }
     }
 
     fn validateAuthorityGeometry(self: *const PoolMemberSet, selected: pool_authority.Authority) !void {
