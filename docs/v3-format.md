@@ -179,11 +179,18 @@ be reopened. Other targets skip parent-directory sync, so successful return does
 directory-entry durability there. The control journal scanner uses exact region reads.
 
 Linux block-device acquisition verifies the opened fd is a block device, obtains capacity and sector
-size with block ioctls, and identifies it by major/minor device number. Its preflight rejects
-partitions, read-only devices, current-mount-namespace mounts, swaps, and sysfs holders. Writable open
-then uses `O_EXCL` and repeats identity and geometry checks on the acquired fd. Preflight alone does
-not grant ownership; write authority lasts only while that exclusive fd remains open. The current CLI
-does not expose physical-device provisioning.
+size with block ioctls, and identifies the current device instance by major/minor number and Linux
+`diskseq`. Its preflight rejects partitions, read-only devices, current-mount-namespace mounts, swaps,
+and sysfs holders. Writable open then uses `O_EXCL` and repeats instance identity and geometry checks
+on the acquired fd. This coordinates with other exclusive block-device users but cannot prevent an
+uncooperative process from issuing raw writes.
+
+The Linux raw-pool CLI requires every device path explicitly. `pool plan-create` scans the complete
+capacity of every device and rejects any nonzero data. A confirmation token binds the ordered device
+instances, capacities, logical sector sizes, profile, and label. `pool create` reconstructs that plan,
+requires the exact token, acquires all devices with `O_EXCL`, repeats identity and full-capacity scans
+through the acquired fds, and only then starts publication. Tokens cease to match when a device path
+is rebound to a different `diskseq` instance.
 
 Dynamic pool provisioning accepts one owned storage per initial member. It rejects erasure coding and
 profiles wider than the supplied storage set, derives a common logical capacity from the smallest

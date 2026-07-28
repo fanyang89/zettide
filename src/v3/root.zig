@@ -4,6 +4,7 @@ pub const genesis_payload = @import("genesis_payload.zig");
 pub const journal = @import("journal.zig");
 pub const layout = @import("layout.zig");
 pub const linux_block_device = if (@import("builtin").os.tag == .linux) @import("linux_block_device.zig") else struct {};
+pub const linux_pool_plan = if (@import("builtin").os.tag == .linux) @import("linux_pool_plan.zig") else struct {};
 pub const member = @import("member.zig");
 pub const member_format = @import("member_format.zig");
 pub const member_bootstrap = @import("member_bootstrap.zig");
@@ -30,6 +31,7 @@ test {
     _ = journal;
     _ = layout;
     _ = linux_block_device;
+    _ = linux_pool_plan;
     _ = member;
     _ = member_format;
     _ = member_bootstrap;

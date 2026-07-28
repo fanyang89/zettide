@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args.len < 2 or std.mem.eql(u8, args[1], "help") or std.mem.eql(u8, args[1], "--help")) {
         try usage(stdout);
+        try stdout.flush();
         return;
     }
 
@@ -29,11 +30,124 @@ pub fn main(init: std.process.Init) !void {
         try unmountCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "device")) {
         try deviceCommand(allocator, init.io, args[2..], stdout);
+    } else if (std.mem.eql(u8, command, "pool")) {
+        try poolCommand(allocator, init.io, args[2..], stdout);
     } else {
         try stdout.print("Unknown command: {s}\n\n", .{command});
         try usage(stdout);
         return error.InvalidCommand;
     }
+    try stdout.flush();
+}
+
+fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+    if (@import("builtin").os.tag != .linux) return error.RawPoolNotImplemented;
+    if (args.len == 0) return error.InvalidArguments;
+    const operation = args[0];
+    const planning = std.mem.eql(u8, operation, "plan-create");
+    const creating = std.mem.eql(u8, operation, "create");
+    if (!planning and !creating) return error.InvalidArguments;
+
+    var paths: [zettide.v3.pool_topology.max_member_count][]const u8 = undefined;
+    var path_count: usize = 0;
+    var protection: zettide.v3.pool_policy.Protection = .replicated;
+    var label: []const u8 = "Zettide";
+    var confirmation: ?[]const u8 = null;
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        const option = args[index];
+        if (std.mem.eql(u8, option, "--device")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            if (path_count == paths.len) return error.TooManyDevices;
+            paths[path_count] = args[index];
+            path_count += 1;
+        } else if (std.mem.eql(u8, option, "--profile")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            protection = if (std.mem.eql(u8, args[index], "replicated"))
+                .replicated
+            else if (std.mem.eql(u8, args[index], "unprotected"))
+                .unprotected
+            else
+                return error.InvalidProfile;
+        } else if (std.mem.eql(u8, option, "--label")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            label = args[index];
+        } else if (std.mem.eql(u8, option, "--confirm")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            if (confirmation != null) return error.DuplicateOption;
+            confirmation = args[index];
+        } else {
+            return error.UnknownOption;
+        }
+    }
+    if (planning and confirmation != null) return error.UnknownOption;
+    if (creating and confirmation == null) return error.MissingConfirmation;
+
+    var plan = try zettide.v3.linux_pool_plan.inspect(io, allocator, paths[0..path_count], .{
+        .protection = protection,
+        .label = label,
+    });
+    defer plan.deinit();
+    try printPoolPlan(&plan, stdout);
+    if (!plan.ready()) {
+        if (creating) return error.PlanNotReady;
+        return;
+    }
+    var token_buffer: [64]u8 = undefined;
+    const token = zettide.v3.linux_pool_plan.formatToken(plan.token, &token_buffer);
+    if (planning) {
+        try stdout.print("Confirm token: {s}\n", .{token});
+        return;
+    }
+    if (!std.mem.eql(u8, confirmation.?, token)) return error.ConfirmationMismatch;
+
+    const storages = try zettide.v3.linux_pool_plan.acquire(&plan, io, allocator);
+    defer allocator.free(storages);
+    const outcome = try zettide.v3.pool_provision.create(io, allocator, storages, .{
+        .protection = protection,
+        .label = label,
+    });
+    switch (outcome) {
+        .complete => |value| {
+            var provisioned = value;
+            defer provisioned.deinit();
+            try stdout.print("Created pool: {x}\n", .{provisioned.genesis.topology.set_id});
+        },
+        .partial => |partial| {
+            try stdout.print("Partial pool: {x}\n", .{partial.set_id});
+            try stdout.print("Completed members: {d}\n", .{partial.completed_member_count});
+            try stdout.print("Failed member: {d} ({s})\n", .{ partial.failed_member_index, @errorName(partial.cause) });
+            try stdout.flush();
+            return error.PartialPoolCreation;
+        },
+    }
+}
+
+fn printPoolPlan(plan: *const zettide.v3.linux_pool_plan.Plan, stdout: *Io.Writer) !void {
+    for (plan.paths, plan.devices, plan.contains_data) |path, device, has_data| {
+        try stdout.print("Device: {s} ({d}:{d}, sequence {d}, {Bi:.2})\n", .{
+            path,
+            device.id.major,
+            device.id.minor,
+            device.disk_sequence,
+            device.capacity_bytes,
+        });
+        try stdout.print("Status: {s}\n", .{
+            if (!device.preflightEligible())
+                "rejected"
+            else if (has_data)
+                "contains data"
+            else if (!zettide.v3.linux_pool_plan.deviceReady(device))
+                "unsupported geometry"
+            else
+                "ready",
+        });
+    }
+    try stdout.print("Plan: {s}\n", .{if (plan.ready()) "ready" else "rejected"});
 }
 
 fn deviceCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -148,6 +262,8 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide mount <container> <mountpoint> [--allow-other]
         \\  zettide unmount <mountpoint>
         \\  zettide device inspect <device>
+        \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>]
+        \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] --confirm <token>
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
         \\

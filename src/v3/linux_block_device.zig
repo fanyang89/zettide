@@ -8,6 +8,7 @@ const linux = std.os.linux;
 const block_ioctl_type = 0x12;
 const blk_sector_size = linux.IOCTL.IO(block_ioctl_type, 104);
 const blk_capacity = linux.IOCTL.IOR(block_ioctl_type, 114, usize);
+const blk_disk_sequence = linux.IOCTL.IOR(block_ioctl_type, 128, u64);
 
 pub const DeviceId = struct {
     major: u32,
@@ -32,6 +33,7 @@ pub const Eligibility = packed struct {
 
 pub const DeviceInfo = struct {
     id: DeviceId,
+    disk_sequence: u64,
     capacity_bytes: u64,
     logical_sector_size: u32,
     sysfs_path: [Io.Dir.max_path_bytes]u8,
@@ -42,8 +44,8 @@ pub const DeviceInfo = struct {
         return self.sysfs_path[0..self.sysfs_path_len];
     }
 
-    /// Reports only observable preflight conflicts. A writable caller owns the
-    /// device only after openStorage returns and while its O_EXCL fd remains open.
+    /// Reports observable conflicts only. O_EXCL coordinates with other exclusive
+    /// block-device users, but cannot prevent an uncooperative raw writer.
     pub fn preflightEligible(self: *const DeviceInfo) bool {
         return self.eligibility.preflightEligible();
     }
@@ -83,6 +85,7 @@ pub fn openStorage(
 
     const opened = try inspectFile(io, allocator, file);
     if (!DeviceId.eql(inspected.id, opened.id) or
+        inspected.disk_sequence != opened.disk_sequence or
         inspected.capacity_bytes != opened.capacity_bytes or
         inspected.logical_sector_size != opened.logical_sector_size)
         return error.DeviceChanged;
@@ -100,11 +103,31 @@ pub fn openStorage(
     };
 }
 
+pub fn hasData(storage: *storage_api.Storage, io: Io, allocator: std.mem.Allocator) !bool {
+    const buffer = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(buffer);
+    var offset: u64 = 0;
+    while (offset < storage.capacity()) {
+        const amount: usize = @intCast(@min(@as(u64, buffer.len), storage.capacity() - offset));
+        if (try storage.readAt(io, buffer[0..amount], offset) != amount) return error.TruncatedDevice;
+        if (!std.mem.allEqual(u8, buffer[0..amount], 0)) return true;
+        offset += amount;
+    }
+    return false;
+}
+
+pub fn pathHasData(io: Io, allocator: std.mem.Allocator, path: []const u8) !bool {
+    var opened = try openStorage(io, allocator, path, false);
+    defer opened.storage.close(io);
+    return hasData(&opened.storage, io, allocator);
+}
+
 fn inspectFile(io: Io, allocator: std.mem.Allocator, file: File) !DeviceInfo {
     const stat = try file.stat(io);
     if (stat.kind != .block_device) return error.NotBlockDevice;
     const statx = try statxFile(file);
     const id: DeviceId = .{ .major = statx.rdev_major, .minor = statx.rdev_minor };
+    const disk_sequence = try ioctlValue(file, blk_disk_sequence, u64);
     const capacity_bytes = try ioctlValue(file, blk_capacity, u64);
     const logical_sector_size = try ioctlValue(file, blk_sector_size, u32);
     if (capacity_bytes == 0 or logical_sector_size == 0 or capacity_bytes % logical_sector_size != 0)
@@ -112,6 +135,7 @@ fn inspectFile(io: Io, allocator: std.mem.Allocator, file: File) !DeviceInfo {
 
     var result: DeviceInfo = .{
         .id = id,
+        .disk_sequence = disk_sequence,
         .capacity_bytes = capacity_bytes,
         .logical_sector_size = logical_sector_size,
         .sysfs_path = undefined,
@@ -121,6 +145,7 @@ fn inspectFile(io: Io, allocator: std.mem.Allocator, file: File) !DeviceInfo {
     result.sysfs_path_len = try resolveSysfsDevice(io, id, &result.sysfs_path) orelse
         return error.DeviceNotInSysfs;
     const sysfs_path = result.sysfsPath();
+    if (result.disk_sequence == 0) return error.InvalidDiskSequence;
     result.eligibility.partition = try childPathExists(io, sysfs_path, "partition");
     result.eligibility.read_only = try readBooleanChild(io, sysfs_path, "ro");
     result.eligibility.held = try descendantHasHolders(io, sysfs_path);
