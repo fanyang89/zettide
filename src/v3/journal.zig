@@ -334,6 +334,12 @@ pub fn scanHistory(allocator: std.mem.Allocator, member: *member_api.Member) !Hi
         .allocator = allocator,
     };
     history.scan_result = try scanInto(member, &history);
+    if (history.entry_count != history.storage.len) {
+        const compacted = try allocator.alloc(HistoryEntry, history.entry_count);
+        @memcpy(compacted, history.entries());
+        allocator.free(history.storage);
+        history.storage = compacted;
+    }
     return history;
 }
 
@@ -943,6 +949,7 @@ test "history scan retains every accepted record and supports digest lookup" {
     defer history.deinit();
     const entries = history.entries();
     try std.testing.expectEqual(@as(usize, 3), entries.len);
+    try std.testing.expectEqual(entries.len, history.storage.len);
     try std.testing.expectEqual(@as(u64, 0), entries[0].physical_slot);
     try std.testing.expectEqual(@as(u64, 2), entries[1].physical_slot);
     try std.testing.expectEqual(@as(u64, 4), entries[2].physical_slot);

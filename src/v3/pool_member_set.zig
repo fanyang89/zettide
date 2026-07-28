@@ -98,6 +98,9 @@ pub const PoolMemberSet = struct {
         if (!std.mem.eql(u8, &member.header().member_id, &trusted_member_id))
             return error.TrustedMemberMismatch;
         const history = if (set.histories[0]) |*value| value else return error.TrustedMemberUnavailable;
+        if (history.scan_result.unresolved_tail_damage) return error.JournalNeedsRecovery;
+        if (history.scan_result.slot_count - history.scan_result.physical_frontier < 2)
+            return error.InsufficientJournalCapacity;
         var selected_authority = try pool_authority.selectAdministrativeRecovery(history);
         selected_authority.administrative_recovery = true;
         set.authority_state = selected_authority;
@@ -495,6 +498,15 @@ fn id(value: u8) [16]u8 {
 }
 
 fn createTestPool(dir: std.Io.Dir, name: []const u8, protection: pool_policy.Protection) !void {
+    return createTestPoolWithControlBytes(dir, name, protection, 64 * 1024);
+}
+
+fn createTestPoolWithControlBytes(
+    dir: std.Io.Dir,
+    name: []const u8,
+    protection: pool_policy.Protection,
+    control_bytes: u64,
+) !void {
     const members = [_]pool_topology.Member{.{
         .member_id = id(2),
         .slot = 7,
@@ -515,7 +527,7 @@ fn createTestPool(dir: std.Io.Dir, name: []const u8, protection: pool_policy.Pro
         .created_ns = 1,
         .member_bytes = 3 * 1024 * 1024,
         .logical_capacity = 1024 * 1024,
-        .control = .{ .offset = 64 * 1024, .length = 64 * 1024 },
+        .control = .{ .offset = 64 * 1024, .length = control_bytes },
         .metadata = .{ .offset = 1024 * 1024, .length = 256 * 1024 },
         .data = .{ .offset = 2 * 1024 * 1024, .length = 1024 * 1024 },
         .metadata_block_size = 4096,
@@ -567,5 +579,41 @@ test "duplicate locations and legacy members are not admitted" {
     try std.testing.expectError(
         error.DuplicateMemberLocation,
         open(std.testing.io, std.testing.allocator, &duplicate, .read_only),
+    );
+}
+
+test "administrative recovery requires capacity for prepare and commit" {
+    inline for (.{ 4096, 2 * 4096 }) |control_bytes| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try createTestPoolWithControlBytes(tmp.dir, "member", .unprotected, control_bytes);
+        const location: Location = .{ .parent = tmp.dir, .basename = "member" };
+        try std.testing.expectError(
+            error.InsufficientJournalCapacity,
+            openAdministrativeRecovery(std.testing.io, std.testing.allocator, location, id(2)),
+        );
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createTestPoolWithControlBytes(tmp.dir, "member", .unprotected, 3 * 4096);
+    const location: Location = .{ .parent = tmp.dir, .basename = "member" };
+    var set = try openAdministrativeRecovery(std.testing.io, std.testing.allocator, location, id(2));
+    defer set.deinit();
+    try std.testing.expect(set.controlWriteReady() != null);
+}
+
+test "administrative recovery rejects a damaged physical tail" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createTestPool(tmp.dir, "member", .unprotected);
+    const file = try tmp.dir.openFile(std.testing.io, "member", .{ .mode = .read_write });
+    defer file.close(std.testing.io);
+    try file.writePositionalAll(std.testing.io, &.{0xaa}, 64 * 1024 + 4096);
+
+    const location: Location = .{ .parent = tmp.dir, .basename = "member" };
+    try std.testing.expectError(
+        error.JournalNeedsRecovery,
+        openAdministrativeRecovery(std.testing.io, std.testing.allocator, location, id(2)),
     );
 }

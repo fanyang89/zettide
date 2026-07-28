@@ -244,6 +244,9 @@ members.
 Dynamic pool provisioning accepts one owned storage per initial member. It rejects erasure coding and
 profiles wider than the supplied storage set, derives a common logical capacity from the smallest
 member, assigns at most three control voters, and validates every generated header before mutation.
+High-level dynamic Pool provisioning requires at least three control records for genesis plus one
+prepare/commit transaction. The default 960 KiB control region contains 240 records and still ends at
+the 1 MiB metadata boundary. Lower-level member format APIs retain the one-record structural minimum.
 All storage handles receive a non-mutating sync preflight before the first genesis write. Storage
 alignment must be a power of two no larger than 4096 bytes; metadata read and program sizes use the
 largest required alignment. Regular files must end on the configured chunk boundary, while block
@@ -527,10 +530,11 @@ voter quorum.
 
 Losing an old quorum requires a separate administrative-recovery open with exactly one explicitly
 trusted survivor. Local replay verifies every retained raw record and exact local prepare/commit
-chain, rejects an unresolved or uncommitted tail, and exposes a recovery-only coordinator. That
-coordinator rejects generation, bootstrap, and normal membership operations; it can only commit an
-`administrative_recovery` topology using the new quorum. After that commit, ordinary open may use the
-new topology quorum as a recovery root even though the original genesis quorum is unavailable.
+chain, rejects an unresolved or uncommitted tail, and requires two free records for the recovery
+prepare/commit before exposing a recovery-only coordinator. That coordinator rejects generation,
+bootstrap, and normal membership operations; it can only commit an `administrative_recovery` topology
+using the new quorum. After that commit, ordinary open may use the new topology quorum as a recovery
+root even though the original genesis quorum is unavailable.
 
 ### Dynamic Topology Envelope
 

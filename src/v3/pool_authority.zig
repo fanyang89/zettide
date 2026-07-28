@@ -62,6 +62,7 @@ pub fn select(histories: []const *const journal.HistoryScan) !Authority {
 }
 
 pub fn selectAdministrativeRecovery(history: *const journal.HistoryScan) !Authority {
+    if (history.scan_result.unresolved_tail_damage) return error.JournalNeedsRecovery;
     if (history.entries().len == 0) return error.MissingGenesis;
     const genesis = try verifiedWitness(history, &history.entries()[0]);
     if (genesis.kind != control_record.genesis_kind) return error.MissingGenesis;
@@ -551,4 +552,16 @@ test "authority does not advance a commit without commit quorum" {
     const histories = [_]*const journal.HistoryScan{&history};
     const authority = try select(&histories);
     try std.testing.expectEqual(Kind.genesis, authority.kind);
+}
+
+test "administrative recovery rejects unresolved journal damage" {
+    const topology = try testTopology();
+    const layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024);
+    const genesis = try pool_genesis.makeRecord(id(2), .{ .topology = topology, .layout = layout });
+    const genesis_raw = try control_record.encodeDynamicPool(genesis);
+    var entries = [_]journal.HistoryEntry{makeEntry(genesis, genesis_raw, 0)};
+    var history = makeHistory(&entries);
+    history.scan_result.tail = genesis;
+    history.scan_result.unresolved_tail_damage = true;
+    try std.testing.expectError(error.JournalNeedsRecovery, selectAdministrativeRecovery(&history));
 }

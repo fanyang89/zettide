@@ -8,7 +8,8 @@ const pool_policy = @import("pool_policy.zig");
 const pool_topology = @import("pool_topology.zig");
 const storage_api = @import("storage.zig");
 
-const default_control_bytes: u64 = 64 * 1024;
+const default_control_bytes: u64 = 960 * 1024;
+const minimum_control_bytes: u64 = 3 * 4096;
 const default_metadata_bytes: u64 = 1024 * 1024;
 const default_chunk_size: u32 = 1024 * 1024;
 const region_alignment: u64 = 1024 * 1024;
@@ -73,7 +74,7 @@ pub fn create(
     if (storages.len < try options.protection.fullWidth())
         return error.InsufficientMembers;
     if (!std.math.isPowerOfTwo(options.chunk_size) or options.chunk_size % 4096 != 0 or
-        options.control_bytes < 4096 or options.control_bytes % 4096 != 0 or
+        options.control_bytes < minimum_control_bytes or options.control_bytes % 4096 != 0 or
         options.metadata_bytes < 256 * 1024 or options.metadata_bytes % 4096 != 0)
         return error.InvalidGeometry;
     const label = try member_format.Label.init(options.label);
@@ -215,6 +216,8 @@ test "provisioning validates all file storages then creates a reopenable pool" {
     };
     try std.testing.expectEqual(@as(usize, 3), provisioned.members.len);
     try std.testing.expectEqual(pool_layout.Kind.replicated, provisioned.genesis.layout.kind);
+    try std.testing.expectEqual(@as(u64, 240 * 4096), provisioned.members[0].header().control.length);
+    try std.testing.expectEqual(@as(u64, 1024 * 1024), provisioned.members[0].header().metadata.offset);
     try provisioned.close();
 
     var reopened_storages: [names.len]storage_api.Storage = undefined;
@@ -229,6 +232,39 @@ test "provisioning validates all file storages then creates a reopenable pool" {
     defer reopened.deinit();
     try std.testing.expect(reopened.controlWriteReady() != null);
     try std.testing.expectEqual(pool_policy.DataAccess.read_write, reopened.dataAccess());
+}
+
+test "provisioning reserves genesis plus one control transaction" {
+    inline for (.{ 4096, 2 * 4096 }) |control_bytes| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storages = [_]storage_api.Storage{
+            try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 8 * 1024 * 1024),
+        };
+        try std.testing.expectError(
+            error.InvalidGeometry,
+            create(std.testing.io, std.testing.allocator, &storages, .{
+                .protection = .unprotected,
+                .control_bytes = control_bytes,
+            }),
+        );
+    }
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storages = [_]storage_api.Storage{
+        try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 8 * 1024 * 1024),
+    };
+    const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
+        .protection = .unprotected,
+        .control_bytes = minimum_control_bytes,
+    });
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    try std.testing.expectEqual(minimum_control_bytes, provisioned.members[0].header().control.length);
 }
 
 test "provisioning rejects every target before the first write" {
