@@ -53,7 +53,7 @@ its generated pkg-config metadata. For a sibling SPDK checkout built with shared
 libraries, run:
 
 ```sh
-PKG_CONFIG_PATH=../spdk/build/lib/pkgconfig \
+PKG_CONFIG_PATH=../third_party/spdk/build/lib/pkgconfig \
 zig build test-spdk-link
 ```
 
