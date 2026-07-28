@@ -38,4 +38,5 @@ test {
     _ = grpc;
     _ = raft;
     _ = state_machine;
+    _ = @import("integration_test.zig");
 }
