@@ -65,9 +65,12 @@ message CreatePoolCommand {
 enum ApplyCode {
   APPLY_CODE_UNSPECIFIED = 0;
   APPLY_CODE_CREATED = 1;
-  APPLY_CODE_IDEMPOTENT = 2;
+  reserved 2;
   APPLY_CODE_NAME_EXISTS = 3;
   APPLY_CODE_REQUEST_CONFLICT = 4;
+  APPLY_CODE_ID_EXISTS = 5;
+  APPLY_CODE_REQUEST_LIMIT = 6;
+  APPLY_CODE_POOL_LIMIT = 7;
 }
 
 message ApplyResponse {
@@ -79,6 +82,8 @@ message RequestRecord {
   string request_id = 1;
   bytes request_fingerprint = 2;
   bytes encoded_response = 3;
+  bytes encoded_command = 4;
+  uint64 applied_revision = 5;
 }
 
 message StateSnapshot {
