@@ -12,6 +12,10 @@ The multi-volume catalog codecs under development are specified separately in
 [`v3-multivolume-format.md`](v3-multivolume-format.md). They are not yet selected by Pool
 provisioning and do not change the single-volume format defined here.
 
+The planned control rollover authority snapshot payload is specified in
+[`v3-control-rollover-format.md`](v3-control-rollover-format.md). Its codec is not yet authority and
+does not change the append-only journal defined here.
+
 All integers use little-endian encoding. The header is encoded field by field and is never a
 serialized Zig or native ABI structure. Each header copy is exactly 4096 bytes.
 
