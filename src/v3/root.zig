@@ -18,6 +18,7 @@ pub const pool_authority = @import("pool_authority.zig");
 pub const pool_genesis_payload = @import("pool_genesis_payload.zig");
 pub const pool_topology = @import("pool_topology.zig");
 pub const replicated_journal = @import("replicated_journal.zig");
+pub const storage = @import("storage.zig");
 pub const topology = @import("topology.zig");
 
 test {
@@ -41,5 +42,6 @@ test {
     _ = pool_genesis_payload;
     _ = pool_topology;
     _ = replicated_journal;
+    _ = storage;
     _ = topology;
 }

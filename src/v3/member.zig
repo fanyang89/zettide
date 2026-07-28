@@ -8,6 +8,7 @@ const member_format = @import("member_format.zig");
 const pool_genesis_payload = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_topology = @import("pool_topology.zig");
+const storage_api = @import("storage.zig");
 const topology_format = @import("topology.zig");
 
 const Io = std.Io;
@@ -15,6 +16,7 @@ const File = Io.File;
 
 pub const OpenMode = member_format.OpenMode;
 pub const SourceSlot = member_format.SourceSlot;
+pub const Storage = storage_api.Storage;
 
 pub const CreateFaultPoint = enum {
     extent_sync,
@@ -121,7 +123,7 @@ fn matches(target: ?u64, current: u64) bool {
 
 pub const Member = struct {
     io: Io,
-    file: File,
+    storage: Storage,
     selected_header: member_format.Header,
     selected_source: SourceSlot,
     degraded: bool,
@@ -142,9 +144,11 @@ pub const Member = struct {
         options: CreateOptions,
     ) !Member {
         try validateCreateAt(basename, initial_header, genesis_payload);
-        const genesis_record = try genesis_payload_format.makeRecord(initial_header.member_id, genesis_payload);
-        const encoded_genesis = try control_record.encode(genesis_record);
-        return createWithFirstRecord(io, parent, basename, initial_header, &encoded_genesis, options);
+        const storage = try Storage.createFile(io, parent, basename, initial_header.member_bytes);
+        var result = try Member.createStorage(io, storage, initial_header, genesis_payload, options);
+        errdefer result.deinit();
+        if (builtin.os.tag == .linux) try createParentSync(parent, io, options.fault);
+        return result;
     }
 
     pub fn createPoolAt(
@@ -156,9 +160,11 @@ pub const Member = struct {
         options: CreateOptions,
     ) !Member {
         try validateCreatePoolAt(basename, initial_header, genesis_payload);
-        const genesis_record = try pool_genesis_payload.makeRecord(initial_header.member_id, genesis_payload);
-        const encoded_genesis = try control_record.encodeDynamicPool(genesis_record);
-        return createWithFirstRecord(io, parent, basename, initial_header, &encoded_genesis, options);
+        const storage = try Storage.createFile(io, parent, basename, initial_header.member_bytes);
+        var result = try Member.createPoolStorage(io, storage, initial_header, genesis_payload, options);
+        errdefer result.deinit();
+        if (builtin.os.tag == .linux) try createParentSync(parent, io, options.fault);
+        return result;
     }
 
     pub fn createJoiningAt(
@@ -170,44 +176,80 @@ pub const Member = struct {
         options: CreateOptions,
     ) !Member {
         try validateCreateJoiningAt(basename, initial_header, bootstrap_record);
+        const storage = try Storage.createFile(io, parent, basename, initial_header.member_bytes);
+        var result = try Member.createJoiningStorage(io, storage, initial_header, bootstrap_record, options);
+        errdefer result.deinit();
+        if (builtin.os.tag == .linux) try createParentSync(parent, io, options.fault);
+        return result;
+    }
+
+    pub fn createStorage(
+        io: Io,
+        storage: Storage,
+        initial_header: member_format.Header,
+        genesis_payload: genesis_payload_format.GenesisPayload,
+        options: CreateOptions,
+    ) !Member {
+        var owned_storage = storage;
+        errdefer owned_storage.close(io);
+        try validateCreateStorage(initial_header, genesis_payload);
+        const genesis_record = try genesis_payload_format.makeRecord(initial_header.member_id, genesis_payload);
+        const encoded_genesis = try control_record.encode(genesis_record);
+        return createWithFirstRecord(io, owned_storage, initial_header, &encoded_genesis, options);
+    }
+
+    pub fn createPoolStorage(
+        io: Io,
+        storage: Storage,
+        initial_header: member_format.Header,
+        genesis_payload: pool_genesis_payload.GenesisPayload,
+        options: CreateOptions,
+    ) !Member {
+        var owned_storage = storage;
+        errdefer owned_storage.close(io);
+        try validateCreatePoolStorage(initial_header, genesis_payload);
+        const genesis_record = try pool_genesis_payload.makeRecord(initial_header.member_id, genesis_payload);
+        const encoded_genesis = try control_record.encodeDynamicPool(genesis_record);
+        return createWithFirstRecord(io, owned_storage, initial_header, &encoded_genesis, options);
+    }
+
+    pub fn createJoiningStorage(
+        io: Io,
+        storage: Storage,
+        initial_header: member_format.Header,
+        bootstrap_record: control_record.Record,
+        options: CreateOptions,
+    ) !Member {
+        var owned_storage = storage;
+        errdefer owned_storage.close(io);
+        try validateCreateJoiningStorage(initial_header, bootstrap_record);
         const encoded_bootstrap = try control_record.encodeDynamicPool(bootstrap_record);
-        return createWithFirstRecord(io, parent, basename, initial_header, &encoded_bootstrap, options);
+        return createWithFirstRecord(io, owned_storage, initial_header, &encoded_bootstrap, options);
     }
 
     fn createWithFirstRecord(
         io: Io,
-        parent: Io.Dir,
-        basename: []const u8,
+        storage_value: Storage,
         initial_header: member_format.Header,
         first_record: *const [control_record.encoded_size]u8,
         options: CreateOptions,
     ) !Member {
         const encoded_header = try member_format.encode(initial_header);
+        var storage = storage_value;
+        if (storage.capacity() < initial_header.member_bytes) return error.TruncatedMember;
+        if (storage.capacity() > initial_header.member_bytes) return error.UnexpectedMemberLength;
 
-        const file = try parent.createFile(io, basename, .{
-            .read = true,
-            .exclusive = true,
-            .lock = .exclusive,
-            .lock_nonblocking = true,
-        });
-        errdefer {
-            file.unlock(io);
-            file.close(io);
-        }
-
-        try file.setLength(io, initial_header.member_bytes);
-        try createSync(file, io, options.fault, .extent_sync);
-        try createWrite(file, io, initial_header.control.offset, first_record, options.fault, .genesis_write);
-        try createSync(file, io, options.fault, .genesis_sync);
-        try createWrite(file, io, member_format.encoded_size, &encoded_header, options.fault, .header_b_write);
-        try createSync(file, io, options.fault, .header_b_sync);
-        try createWrite(file, io, 0, &encoded_header, options.fault, .header_a_write);
-        try createSync(file, io, options.fault, .header_a_sync);
-        if (builtin.os.tag == .linux) try createParentSync(parent, io, options.fault);
+        try createSync(&storage, io, options.fault, .extent_sync);
+        try createWrite(&storage, io, initial_header.control.offset, first_record, options.fault, .genesis_write);
+        try createSync(&storage, io, options.fault, .genesis_sync);
+        try createWrite(&storage, io, member_format.encoded_size, &encoded_header, options.fault, .header_b_write);
+        try createSync(&storage, io, options.fault, .header_b_sync);
+        try createWrite(&storage, io, 0, &encoded_header, options.fault, .header_a_write);
+        try createSync(&storage, io, options.fault, .header_a_sync);
 
         return .{
             .io = io,
-            .file = file,
+            .storage = storage,
             .selected_header = initial_header,
             .selected_source = .a,
             .degraded = false,
@@ -217,22 +259,20 @@ pub const Member = struct {
 
     pub fn openAt(io: Io, parent: Io.Dir, basename: []const u8, open_mode: OpenMode) !Member {
         if (!validBasename(basename)) return error.InvalidBasename;
-        const file = try parent.openFile(io, basename, .{
-            .mode = if (open_mode == .writable) .read_write else .read_only,
-            .lock = if (open_mode == .writable) .exclusive else .shared,
-            .lock_nonblocking = true,
-        });
-        errdefer {
-            file.unlock(io);
-            file.close(io);
-        }
+        const storage = try Storage.openFile(io, parent, basename, open_mode == .writable);
+        return Member.openStorage(io, storage, open_mode);
+    }
+
+    pub fn openStorage(io: Io, storage_value: Storage, open_mode: OpenMode) !Member {
+        var storage = storage_value;
+        errdefer storage.close(io);
 
         var first_transport_error: ?anyerror = null;
-        const a = readCandidate(file, io, 0) catch |err| candidate: {
+        const a = readCandidate(&storage, io, 0) catch |err| candidate: {
             first_transport_error = err;
             break :candidate member_format.Candidate{ .invalid = err };
         };
-        const b = readCandidate(file, io, member_format.encoded_size) catch |err| candidate: {
+        const b = readCandidate(&storage, io, member_format.encoded_size) catch |err| candidate: {
             if (first_transport_error == null) first_transport_error = err;
             break :candidate member_format.Candidate{ .invalid = err };
         };
@@ -244,13 +284,13 @@ pub const Member = struct {
         };
 
         try member_format.checkOpenPolicy(selection.header, open_mode);
-        const actual_length = try file.length(io);
+        const actual_length = storage.capacity();
         if (actual_length < selection.header.member_bytes) return error.TruncatedMember;
         if (actual_length > selection.header.member_bytes) return error.UnexpectedMemberLength;
 
         return .{
             .io = io,
-            .file = file,
+            .storage = storage,
             .selected_header = selection.header,
             .selected_source = selection.source,
             .degraded = selection.redundancy_degraded,
@@ -301,7 +341,7 @@ pub const Member = struct {
 
         if (self.isClosed()) return error.MemberClosed;
         const file_offset = try self.position(kind, offset, buffer.len);
-        const amount = try self.file.readPositionalAll(self.io, buffer, file_offset);
+        const amount = try self.storage.readAt(self.io, buffer, file_offset);
         if (amount != buffer.len) return error.TruncatedMember;
     }
 
@@ -364,7 +404,7 @@ pub const Member = struct {
             return error.InjectedFault;
         }
         const write_bytes = if (action == .partial) bytes[0 .. bytes.len / 2] else bytes;
-        self.file.writePositionalAll(self.io, write_bytes, file_offset) catch |err| {
+        self.storage.writeAllAt(self.io, write_bytes, file_offset) catch |err| {
             self.freeze();
             return err;
         };
@@ -386,7 +426,7 @@ pub const Member = struct {
             return error.InjectedFault;
         }
         const write_bytes = if (action == .partial) bytes[0 .. bytes.len / 2] else bytes;
-        self.file.writePositionalAll(self.io, write_bytes, offset) catch |err| {
+        self.storage.writeAllAt(self.io, write_bytes, offset) catch |err| {
             self.freeze();
             return err;
         };
@@ -418,8 +458,7 @@ pub const Member = struct {
             }
         }
         self.closed.store(true, .release);
-        self.file.unlock(self.io);
-        self.file.close(self.io);
+        self.storage.close(self.io);
         if (first_error) |err| return err;
     }
 
@@ -437,7 +476,7 @@ pub const Member = struct {
             self.freeze();
             return error.InjectedFault;
         }
-        self.file.sync(self.io) catch |err| {
+        self.storage.sync(self.io) catch |err| {
             self.freeze();
             return err;
         };
@@ -469,6 +508,10 @@ pub fn openAt(io: Io, parent: Io.Dir, basename: []const u8, mode: OpenMode) !Mem
     return Member.openAt(io, parent, basename, mode);
 }
 
+pub fn openStorage(io: Io, storage: Storage, mode: OpenMode) !Member {
+    return Member.openStorage(io, storage, mode);
+}
+
 pub fn createAt(
     io: Io,
     parent: Io.Dir,
@@ -478,6 +521,16 @@ pub fn createAt(
     options: CreateOptions,
 ) !Member {
     return Member.createAt(io, parent, basename, header, genesis_payload, options);
+}
+
+pub fn createStorage(
+    io: Io,
+    storage: Storage,
+    header: member_format.Header,
+    genesis_payload: genesis_payload_format.GenesisPayload,
+    options: CreateOptions,
+) !Member {
+    return Member.createStorage(io, storage, header, genesis_payload, options);
 }
 
 pub fn createPoolAt(
@@ -491,6 +544,16 @@ pub fn createPoolAt(
     return Member.createPoolAt(io, parent, basename, header, genesis_payload, options);
 }
 
+pub fn createPoolStorage(
+    io: Io,
+    storage: Storage,
+    header: member_format.Header,
+    genesis_payload: pool_genesis_payload.GenesisPayload,
+    options: CreateOptions,
+) !Member {
+    return Member.createPoolStorage(io, storage, header, genesis_payload, options);
+}
+
 pub fn createJoiningAt(
     io: Io,
     parent: Io.Dir,
@@ -502,12 +565,30 @@ pub fn createJoiningAt(
     return Member.createJoiningAt(io, parent, basename, header, bootstrap_record, options);
 }
 
+pub fn createJoiningStorage(
+    io: Io,
+    storage: Storage,
+    header: member_format.Header,
+    bootstrap_record: control_record.Record,
+    options: CreateOptions,
+) !Member {
+    return Member.createJoiningStorage(io, storage, header, bootstrap_record, options);
+}
+
 pub fn validateCreateAt(
     basename: []const u8,
     header: member_format.Header,
     genesis_payload: genesis_payload_format.GenesisPayload,
 ) !void {
-    try validateInitialCreate(basename, header);
+    if (!validBasename(basename)) return error.InvalidBasename;
+    try validateCreateStorage(header, genesis_payload);
+}
+
+pub fn validateCreateStorage(
+    header: member_format.Header,
+    genesis_payload: genesis_payload_format.GenesisPayload,
+) !void {
+    try validateInitialCreate(header);
     if (member_format.isDynamicPool(header)) return error.LegacyMemberRequired;
 
     const genesis_digest = try topology_format.digest(genesis_payload.topology);
@@ -522,7 +603,15 @@ pub fn validateCreatePoolAt(
     header: member_format.Header,
     genesis_payload: pool_genesis_payload.GenesisPayload,
 ) !void {
-    try validateInitialCreate(basename, header);
+    if (!validBasename(basename)) return error.InvalidBasename;
+    try validateCreatePoolStorage(header, genesis_payload);
+}
+
+pub fn validateCreatePoolStorage(
+    header: member_format.Header,
+    genesis_payload: pool_genesis_payload.GenesisPayload,
+) !void {
+    try validateInitialCreate(header);
     try pool_genesis_payload.validateMemberHeader(genesis_payload, header);
     const record = try pool_genesis_payload.makeRecord(header.member_id, genesis_payload);
     _ = try pool_genesis_payload.validateRecord(record);
@@ -533,12 +622,19 @@ pub fn validateCreateJoiningAt(
     header: member_format.Header,
     bootstrap_record: control_record.Record,
 ) !void {
-    try validateInitialCreate(basename, header);
+    if (!validBasename(basename)) return error.InvalidBasename;
+    try validateCreateJoiningStorage(header, bootstrap_record);
+}
+
+pub fn validateCreateJoiningStorage(
+    header: member_format.Header,
+    bootstrap_record: control_record.Record,
+) !void {
+    try validateInitialCreate(header);
     _ = try member_bootstrap.validateTargetFirstRecord(header, bootstrap_record);
 }
 
-fn validateInitialCreate(basename: []const u8, header: member_format.Header) !void {
-    if (!validBasename(basename)) return error.InvalidBasename;
+fn validateInitialCreate(header: member_format.Header) !void {
     _ = try member_format.encode(header);
     if (header.header_sequence != 1) return error.InvalidInitialHeaderSequence;
     if (header.checkpoint_offset != 0 or header.checkpoint_record_sequence != 0 or
@@ -548,7 +644,7 @@ fn validateInitialCreate(basename: []const u8, header: member_format.Header) !vo
 }
 
 fn createWrite(
-    file: File,
+    storage: *Storage,
     io: Io,
     offset: u64,
     bytes: []const u8,
@@ -558,14 +654,14 @@ fn createWrite(
     const action = if (fault) |controller| controller.action(point) else null;
     if (action == .before) return error.InjectedCreateFault;
     const write_bytes = if (action == .partial) bytes[0 .. bytes.len / 2] else bytes;
-    try file.writePositionalAll(io, write_bytes, offset);
+    try storage.writeAllAt(io, write_bytes, offset);
     if (action == .partial or action == .after) return error.InjectedCreateFault;
 }
 
-fn createSync(file: File, io: Io, fault: ?*CreateFaultController, point: CreateFaultPoint) !void {
+fn createSync(storage: *Storage, io: Io, fault: ?*CreateFaultController, point: CreateFaultPoint) !void {
     const action = if (fault) |controller| controller.action(point) else null;
     if (action == .before) return error.InjectedCreateFault;
-    try file.sync(io);
+    try storage.sync(io);
     if (action == .partial or action == .after) return error.InjectedCreateFault;
 }
 
@@ -586,9 +682,9 @@ fn validBasename(name: []const u8) bool {
         std.mem.indexOfAny(u8, name, "/\\\x00") == null;
 }
 
-fn readCandidate(file: File, io: Io, offset: u64) !member_format.Candidate {
+fn readCandidate(storage: *Storage, io: Io, offset: u64) !member_format.Candidate {
     var bytes: [member_format.encoded_size]u8 = undefined;
-    const amount = try file.readPositionalAll(io, &bytes, offset);
+    const amount = try storage.readAt(io, &bytes, offset);
     if (amount != bytes.len) return .{ .invalid = error.TruncatedMember };
     return member_format.decodeCandidate(&bytes);
 }
@@ -740,6 +836,23 @@ const linux_create_fault_points = common_create_fault_points ++ [_]CreateFaultPo
 
 fn expectedCreateFaultPoints() []const CreateFaultPoint {
     return if (builtin.os.tag == .linux) &linux_create_fault_points else &common_create_fault_points;
+}
+
+test "storage entry points format and reopen a member" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = try testCreateHeader(0);
+
+    const storage = try Storage.createFile(std.testing.io, tmp.dir, "storage-member", header.member_bytes);
+    var created = try Member.createStorage(std.testing.io, storage, header, testCreatePayload(), .{});
+    try std.testing.expectEqual(header.member_id, created.header().member_id);
+    try created.close();
+
+    const reopened_storage = try Storage.openFile(std.testing.io, tmp.dir, "storage-member", false);
+    var reopened = try Member.openStorage(std.testing.io, reopened_storage, .read_only);
+    defer reopened.deinit();
+    try std.testing.expectEqual(header.member_id, reopened.header().member_id);
+    try std.testing.expectEqual(OpenMode.read_only, reopened.mode());
 }
 
 test "create publishes genesis then B then A with exact durability stages" {
