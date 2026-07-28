@@ -66,7 +66,10 @@ pub fn build(b: *std.Build) void {
         null;
     const linux_block_test_cmd = b.addSystemCommand(&.{ "bash", "test/linux-block.sh" });
     linux_block_test_cmd.addArg(@tagName(block_test_mode));
-    if (linux_block_probe) |artifact| linux_block_test_cmd.addArtifactArg(artifact);
+    if (linux_block_probe) |artifact| {
+        linux_block_test_cmd.addArtifactArg(artifact);
+        linux_block_test_cmd.addArtifactArg(exe);
+    }
     const linux_block_step = b.step("test-linux-block", "Run Linux loop block device tests");
     linux_block_step.dependOn(&linux_block_test_cmd.step);
 

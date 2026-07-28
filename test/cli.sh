@@ -30,6 +30,13 @@ if "$exe" create "$tmp/missing.ddv" >/dev/null 2>&1; then
     exit 1
 fi
 
+if [[ "$(uname -s)" == "Linux" ]]; then
+    if "$exe" device inspect /dev/null >/dev/null 2>&1; then
+        echo "character device unexpectedly passed inspection" >&2
+        exit 1
+    fi
+fi
+
 cp "$image" "$tmp/corrupt.ddv"
 printf X | dd of="$tmp/corrupt.ddv" bs=1 seek=0 conv=notrunc status=none
 printf Y | dd of="$tmp/corrupt.ddv" bs=1 seek=4096 conv=notrunc status=none

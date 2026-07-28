@@ -80,6 +80,7 @@ pins, manifests, and log controls are documented in
 zettide create workspace.ddv --size 16GiB --label Workspace
 zettide info workspace.ddv
 zettide check workspace.ddv
+zettide device inspect /dev/disk/by-id/example
 mkdir workspace
 zettide mount workspace.ddv workspace
 # From another terminal:

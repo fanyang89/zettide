@@ -27,10 +27,33 @@ pub fn main(init: std.process.Init) !void {
         try mountCommand(init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "unmount")) {
         try unmountCommand(allocator, init.io, args[2..], stdout);
+    } else if (std.mem.eql(u8, command, "device")) {
+        try deviceCommand(allocator, init.io, args[2..], stdout);
     } else {
         try stdout.print("Unknown command: {s}\n\n", .{command});
         try usage(stdout);
         return error.InvalidCommand;
+    }
+}
+
+fn deviceCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+    if (args.len != 2 or !std.mem.eql(u8, args[0], "inspect")) return error.InvalidArguments;
+    if (@import("builtin").os.tag != .linux) return error.DeviceInspectionNotImplemented;
+    const path = args[1];
+    const info = try zettide.v3.linux_block_device.inspect(io, allocator, path);
+    try stdout.print("Path: {s}\n", .{path});
+    try stdout.print("Device: {d}:{d}\n", .{ info.id.major, info.id.minor });
+    try stdout.print("Capacity: {Bi:.2}\n", .{info.capacity_bytes});
+    try stdout.print("Logical sector: {d}\n", .{info.logical_sector_size});
+    try stdout.print("Preflight: {s}\n", .{if (info.preflightEligible()) "eligible" else "rejected"});
+    if (!info.preflightEligible()) {
+        try stdout.writeAll("Reasons:");
+        if (info.eligibility.partition) try stdout.writeAll(" partition");
+        if (info.eligibility.read_only) try stdout.writeAll(" read-only");
+        if (info.eligibility.mounted) try stdout.writeAll(" mounted");
+        if (info.eligibility.swap) try stdout.writeAll(" swap");
+        if (info.eligibility.held) try stdout.writeAll(" held");
+        try stdout.writeByte('\n');
     }
 }
 
@@ -124,6 +147,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide check <container>
         \\  zettide mount <container> <mountpoint> [--allow-other]
         \\  zettide unmount <mountpoint>
+        \\  zettide device inspect <device>
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
         \\

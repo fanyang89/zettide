@@ -17,8 +17,9 @@ skip_or_fail() {
     exit 0
 }
 
-[[ $# -ge 2 ]] || skip_or_fail "Linux target is required"
+[[ $# -ge 3 ]] || skip_or_fail "Linux target is required"
 probe=$2
+cli=$3
 [[ "$(uname -s)" == "Linux" ]] || skip_or_fail "Linux is required"
 command -v losetup >/dev/null || skip_or_fail "losetup is unavailable"
 command -v truncate >/dev/null || skip_or_fail "truncate is unavailable"
@@ -44,9 +45,11 @@ trap cleanup EXIT
 
 truncate --size 32MiB "$work/backing"
 loop=$(sudo -n losetup --find --show "$work/backing") || skip_or_fail "no loop device is available"
+sudo -n "$cli" device inspect "$loop" | grep -q '^Preflight: eligible$'
 sudo -n "$probe" write "$loop"
 
 sudo -n blockdev --setro "$loop"
+sudo -n "$cli" device inspect "$loop" | grep -q '^Preflight: rejected$'
 sudo -n "$probe" expect-read-only "$loop"
 sudo -n blockdev --setrw "$loop"
 
@@ -54,6 +57,7 @@ sudo -n mkfs.ext4 -q -F "$loop"
 mkdir "$work/mount"
 sudo -n mount "$loop" "$work/mount"
 mounted=true
+sudo -n "$cli" device inspect "$loop" | grep -q '^Reasons: mounted$'
 sudo -n "$probe" expect-mounted "$loop"
 sudo -n umount "$work/mount"
 mounted=false
