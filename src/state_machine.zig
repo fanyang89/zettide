@@ -3,6 +3,7 @@ const std = @import("std");
 const pb = @import("control_proto");
 const raft = @import("raft_zig");
 const uuid = @import("uuid");
+const wire = @import("protobuf_wire.zig");
 
 pub const command_format_version: u32 = 1;
 pub const snapshot_format_version: u32 = 2;
@@ -77,6 +78,7 @@ const Request = struct {
 const State = struct {
     pools_by_id: std.StringHashMapUnmanaged(Pool) = .empty,
     pool_ids_by_name: std.StringHashMapUnmanaged([]const u8) = .empty,
+    pool_ids_by_revision: std.ArrayList([]const u8) = .empty,
     requests: std.StringHashMapUnmanaged(Request) = .empty,
     max_pool_created_revision: u64 = 0,
 
@@ -85,6 +87,7 @@ const State = struct {
         while (request_iterator.next()) |request| request.deinit(allocator);
         self.requests.deinit(allocator);
 
+        self.pool_ids_by_revision.deinit(allocator);
         var pool_iterator = self.pools_by_id.valueIterator();
         while (pool_iterator.next()) |pool| pool.deinit(allocator);
         self.pools_by_id.deinit(allocator);
@@ -134,11 +137,51 @@ pub const PoolStateMachine = struct {
             for (pools.items) |*pool| pool.deinit(allocator);
             pools.deinit(allocator);
         }
-        try pools.ensureTotalCapacity(allocator, self.state.pools_by_id.count());
-        var iterator = self.state.pools_by_id.valueIterator();
-        while (iterator.next()) |pool| pools.appendAssumeCapacity(try dupePool(allocator, pool.proto()));
-        std.mem.sort(pb.Pool, pools.items, {}, poolRevisionLessThan);
+        try pools.ensureTotalCapacity(allocator, self.state.pool_ids_by_revision.items.len);
+        for (self.state.pool_ids_by_revision.items) |id| {
+            pools.appendAssumeCapacity(try dupePool(allocator, self.state.pools_by_id.get(id).?.proto()));
+        }
         return pools.toOwnedSlice(allocator);
+    }
+
+    pub const PoolPage = struct {
+        pools: []pb.Pool,
+        has_more: bool,
+
+        pub fn deinit(self: *PoolPage, allocator: std.mem.Allocator) void {
+            deinitPoolList(allocator, self.pools);
+            self.* = undefined;
+        }
+    };
+
+    pub fn listPoolsPage(
+        self: *const PoolStateMachine,
+        allocator: std.mem.Allocator,
+        after_id: ?[]const u8,
+        limit: usize,
+    ) !PoolPage {
+        var start: usize = 0;
+        if (after_id) |target| {
+            while (start < self.state.pool_ids_by_revision.items.len and
+                !std.mem.eql(u8, self.state.pool_ids_by_revision.items[start], target)) : (start += 1)
+            {}
+            if (start == self.state.pool_ids_by_revision.items.len) return error.InvalidPageToken;
+            start += 1;
+        }
+        const end = @min(start +| limit, self.state.pool_ids_by_revision.items.len);
+        var pools: std.ArrayList(pb.Pool) = .empty;
+        errdefer {
+            for (pools.items) |*pool| pool.deinit(allocator);
+            pools.deinit(allocator);
+        }
+        try pools.ensureTotalCapacity(allocator, end - start);
+        for (self.state.pool_ids_by_revision.items[start..end]) |id| {
+            pools.appendAssumeCapacity(try dupePool(allocator, self.state.pools_by_id.get(id).?.proto()));
+        }
+        return .{
+            .pools = try pools.toOwnedSlice(allocator),
+            .has_more = end < self.state.pool_ids_by_revision.items.len,
+        };
     }
 
     fn apply(ctx: *anyopaque, entry: raft.Entry) raft.Error!raft.ApplyResult {
@@ -212,9 +255,11 @@ pub const PoolStateMachine = struct {
 
         try self.state.pools_by_id.ensureUnusedCapacity(self.allocator, 1);
         try self.state.pool_ids_by_name.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.pool_ids_by_revision.ensureUnusedCapacity(self.allocator, 1);
         try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
         self.state.pools_by_id.putAssumeCapacity(pool.id, pool);
         self.state.pool_ids_by_name.putAssumeCapacity(pool.name, pool.id);
+        self.state.pool_ids_by_revision.appendAssumeCapacity(pool.id);
         self.state.max_pool_created_revision = @max(self.state.max_pool_created_revision, pool.created_revision);
         self.state.requests.putAssumeCapacity(request_id, .{
             .request_id = request_id,
@@ -328,6 +373,7 @@ pub const PoolStateMachine = struct {
             try revisions.put(self.allocator, source.created_revision, {});
             try restorePool(self.allocator, &restored, source);
         }
+        std.mem.sort([]const u8, restored.pool_ids_by_revision.items, &restored, poolRevisionIdLessThan);
 
         var created_pool_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer created_pool_ids.deinit(self.allocator);
@@ -443,8 +489,10 @@ fn restorePool(allocator: std.mem.Allocator, state: *State, source: pb.Pool) raf
     errdefer pool.deinit(allocator);
     try state.pools_by_id.ensureUnusedCapacity(allocator, 1);
     try state.pool_ids_by_name.ensureUnusedCapacity(allocator, 1);
+    try state.pool_ids_by_revision.ensureUnusedCapacity(allocator, 1);
     state.pools_by_id.putAssumeCapacity(pool.id, pool);
     state.pool_ids_by_name.putAssumeCapacity(pool.name, pool.id);
+    state.pool_ids_by_revision.appendAssumeCapacity(pool.id);
     state.max_pool_created_revision = @max(state.max_pool_created_revision, pool.created_revision);
 }
 
@@ -576,48 +624,8 @@ fn dupePool(allocator: std.mem.Allocator, source: pb.Pool) !pb.Pool {
     return owned.proto();
 }
 
-const WireError = error{InvalidWire};
-
-const WireField = struct {
-    number: u32,
-    wire_type: u3,
-};
-
-const WireCursor = struct {
-    bytes: []const u8,
-    position: usize = 0,
-
-    fn next(self: *WireCursor) WireError!?WireField {
-        if (self.position == self.bytes.len) return null;
-        const key = try self.readVarint();
-        const number = key >> 3;
-        const wire_type = key & 0x07;
-        if (number == 0 or number > 0x1fff_ffff or (wire_type != 0 and wire_type != 2)) return error.InvalidWire;
-        return .{ .number = @intCast(number), .wire_type = @intCast(wire_type) };
-    }
-
-    fn readVarint(self: *WireCursor) WireError!u64 {
-        var result: u64 = 0;
-        for (0..10) |index| {
-            if (self.position == self.bytes.len) return error.InvalidWire;
-            const byte = self.bytes[self.position];
-            self.position += 1;
-            if (index == 9 and byte > 1) return error.InvalidWire;
-            result |= @as(u64, byte & 0x7f) << @intCast(index * 7);
-            if (byte & 0x80 == 0) return result;
-        }
-        return error.InvalidWire;
-    }
-
-    fn readBytes(self: *WireCursor, max_bytes: usize) WireError![]const u8 {
-        const encoded_length = try self.readVarint();
-        const length = std.math.cast(usize, encoded_length) orelse return error.InvalidWire;
-        if (length > max_bytes or length > self.bytes.len - self.position) return error.InvalidWire;
-        const result = self.bytes[self.position..][0..length];
-        self.position += length;
-        return result;
-    }
-};
+const WireError = wire.Error;
+const WireCursor = wire.Cursor;
 
 fn preflightCommand(bytes: []const u8) WireError!void {
     if (bytes.len > max_pool_wire_bytes) return error.InvalidWire;
@@ -779,7 +787,9 @@ fn preflightApplyResponse(bytes: []const u8) WireError!void {
     if (!seen_code) return error.InvalidWire;
 }
 
-fn poolRevisionLessThan(_: void, lhs: pb.Pool, rhs: pb.Pool) bool {
+fn poolRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8) bool {
+    const lhs = state.pools_by_id.get(lhs_id).?;
+    const rhs = state.pools_by_id.get(rhs_id).?;
     if (lhs.created_revision != rhs.created_revision) return lhs.created_revision < rhs.created_revision;
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }

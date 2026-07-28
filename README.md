@@ -15,6 +15,13 @@ validated before atomically replacing live state. The initial format limits a
 cluster to 25,000 Pools and 50,000 retained request records so committed input
 cannot grow memory and snapshots without bound.
 
+`PoolService` requires Raft quorum checking, disabled proposal forwarding, and
+finite proposal and ReadIndex timeouts. Its allocator must be thread-safe.
+`PoolRpc` adapts the asynchronous operations to grpc-lite retained calls.
+Shutdown order is: stop RPC admission, stop and wait for the gRPC server, call
+`PoolRpc.shutdown`, join the Raft driver, then deinitialize `PoolRpc` and the
+server.
+
 ## Development
 
 ```sh
