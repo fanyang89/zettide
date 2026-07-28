@@ -6,9 +6,14 @@ const block_device = @import("block_device.zig");
 const metadata = @import("metadata.zig");
 const object_format = @import("object_format.zig");
 const object_store = @import("object_store.zig");
+const pool_block_device = @import("v3/pool_block_device.zig");
+const pool_member_set = @import("v3/pool_member_set.zig");
+const pool_provision = @import("v3/pool_provision.zig");
 pub const c = block_device.c;
 
 pub const Volume = struct {
+    const Backing = enum { file, pool };
+
     io: Io,
     file: File,
     header: container.Header,
@@ -25,6 +30,9 @@ pub const Volume = struct {
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
     reservation_blocks: u64 = 0,
     object_transaction_mutex: Io.Mutex,
+    backing: Backing = .file,
+    pool_set: ?pool_member_set.PoolMemberSet = null,
+    pool_device: pool_block_device.PoolBlockDevice = undefined,
 
     pub fn create(io: Io, path: []const u8, logical_size: u64, label: []const u8) !void {
         var header = try container.Header.init(io, logical_size, label);
@@ -45,31 +53,7 @@ pub const Volume = struct {
 
         var device = block_device.FileBlockDevice.init(io, file, header);
         var config = device.configure(header);
-        var lfs: c.lfs_t = std.mem.zeroes(c.lfs_t);
-        try checkLfs(c.lfs_format(&lfs, &config));
-
-        try checkLfs(c.lfs_mount(&lfs, &config));
-        var mounted = true;
-        defer {
-            if (mounted) _ = c.lfs_unmount(&lfs);
-        }
-        const object_store_handle: object_store.Store = .{ .io = io, .lfs = &lfs };
-        try object_store_handle.initialize();
-        const owner = hostOwner();
-        const root_metadata = metadata.Metadata.init(io, .directory, 0o40755, owner.uid, owner.gid);
-        const root_bytes = root_metadata.encode();
-        try checkLfs(c.lfs_setattr(&lfs, object_store.namespace_root, metadata.attribute_type, &root_bytes, root_bytes.len));
-        var root_identity: object_format.ObjectId = undefined;
-        try io.randomSecure(&root_identity);
-        try checkLfs(c.lfs_setattr(
-            &lfs,
-            object_store.namespace_root,
-            metadata.directory_identity_attribute_type,
-            &root_identity,
-            root_identity.len,
-        ));
-        try checkLfs(c.lfs_unmount(&lfs));
-        mounted = false;
+        try initializeFilesystem(io, &config);
 
         header.state = .ready;
         header.sequence += 1;
@@ -78,6 +62,138 @@ pub const Volume = struct {
         header.sequence += 1;
         try container.write(file, io, container.header_a_offset, header);
         try file.sync(io);
+    }
+
+    pub fn initializePool(
+        io: Io,
+        provisioned: *pool_provision.ProvisionedPool,
+        label: []const u8,
+    ) !void {
+        var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
+        if (provisioned.members.len > member_pointers.len) return error.UnsupportedPoolWidth;
+        for (provisioned.members, 0..) |*member, index| member_pointers[index] = member;
+        return initializePoolMembers(
+            io,
+            member_pointers[0..provisioned.members.len],
+            provisioned.genesis.layout,
+            label,
+        );
+    }
+
+    pub fn initializePoolSet(io: Io, set: *pool_member_set.PoolMemberSet, label: []const u8) !void {
+        const authority = set.authority() orelse return error.MissingAuthority;
+        if (set.controlWriteReady() == null or set.dataAccess() != .read_write)
+            return error.PoolWriteUnavailable;
+        var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
+        const member_count = try collectPoolMembers(set, &member_pointers);
+        var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
+            io,
+            member_pointers[0..member_count],
+            authority.layout,
+        );
+        if (!try reader.canInitializeVolume(std.heap.c_allocator)) return error.PoolVolumeNotEmpty;
+        return initializePoolMembers(io, member_pointers[0..member_count], authority.layout, label);
+    }
+
+    fn initializePoolMembers(
+        io: Io,
+        members: []const *@import("v3/member.zig").Member,
+        layout: @import("v3/pool_layout.zig").Layout,
+        label: []const u8,
+    ) !void {
+        const capacity = members[0].header().logical_capacity;
+        const maximum_size = @as(u64, std.math.maxInt(u32)) * container.default_block_size;
+        const logical_size = @min(capacity, maximum_size) / container.default_block_size * container.default_block_size;
+        var header = try container.Header.init(io, logical_size, label);
+        for (members) |member| {
+            header.read_size = @max(header.read_size, member.header().metadata_read_size);
+            header.prog_size = @max(header.prog_size, member.header().metadata_program_size);
+        }
+        try header.validate();
+        var device = try pool_block_device.PoolBlockDevice.init(
+            io,
+            members,
+            layout,
+            header,
+        );
+        try device.writeHeaderDurable(container.header_a_offset, header);
+        try device.writeHeaderDurable(container.header_b_offset, header);
+        var config = device.configure(header);
+        try initializeFilesystem(io, &config);
+        header.state = .ready;
+        header.sequence += 1;
+        try device.writeHeaderDurable(container.header_b_offset, header);
+        header.sequence += 1;
+        try device.writeHeaderDurable(container.header_a_offset, header);
+    }
+
+    pub fn openPool(
+        io: Io,
+        allocator: std.mem.Allocator,
+        set_source: *pool_member_set.PoolMemberSet,
+        writable: bool,
+    ) !Volume {
+        var set = set_source.take();
+        errdefer set.deinit();
+        const authority = set.authority() orelse return error.MissingAuthority;
+        if (set.dataAccess() == .unavailable or (writable and set.dataAccess() != .read_write))
+            return error.PoolDataUnavailable;
+        const header = try inspectPoolHeader(io, &set);
+        var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
+        const member_count = try collectPoolMembers(&set, &member_pointers);
+        var verifier = try pool_block_device.PoolBlockDevice.init(
+            io,
+            member_pointers[0..member_count],
+            authority.layout,
+            header,
+        );
+        if (writable) try verifier.prepareWritableReplicas(allocator);
+
+        var result: Volume = undefined;
+        result.io = io;
+        result.file = undefined;
+        result.header = header;
+        result.device = undefined;
+        result.config = undefined;
+        result.lfs = std.mem.zeroes(c.lfs_t);
+        result.mounted = false;
+        result.closed = false;
+        result.fallback_uid = 0;
+        result.fallback_gid = 0;
+        result.writable = writable;
+        result.open_files = null;
+        result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.reservation_blocks = 0;
+        result.object_transaction_mutex = .init;
+        result.backing = .pool;
+        result.pool_set = set;
+        result.pool_device = undefined;
+        return result;
+    }
+
+    pub fn inspectPoolHeader(io: Io, set: *pool_member_set.PoolMemberSet) !container.Header {
+        const authority = set.authority() orelse return error.MissingAuthority;
+        var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
+        const member_count = try collectPoolMembers(set, &member_pointers);
+        var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
+            io,
+            member_pointers[0..member_count],
+            authority.layout,
+        );
+        return reader.readHeader();
+    }
+
+    pub fn canInitializePool(io: Io, set: *pool_member_set.PoolMemberSet) !bool {
+        const authority = set.authority() orelse return error.MissingAuthority;
+        var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
+        const member_count = try collectPoolMembers(set, &member_pointers);
+        var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
+            io,
+            member_pointers[0..member_count],
+            authority.layout,
+        );
+        return reader.canInitializeVolume(std.heap.c_allocator);
     }
 
     pub fn open(io: Io, path: []const u8, writable: bool) !Volume {
@@ -106,6 +222,9 @@ pub const Volume = struct {
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
+        result.backing = .file;
+        result.pool_set = null;
+        result.pool_device = undefined;
         return result;
     }
 
@@ -118,7 +237,21 @@ pub const Volume = struct {
         if (self.closed) return error.VolumeClosed;
         if (self.mounted) return error.AlreadyMounted;
         // Moving Volume after this call is invalid because littlefs retains these pointers.
-        self.config.context = &self.device;
+        if (self.backing == .pool) {
+            const authority = self.pool_set.?.authority() orelse return error.MissingAuthority;
+            var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
+            const member_count = try collectPoolMembers(&self.pool_set.?, &member_pointers);
+            self.pool_device = try pool_block_device.PoolBlockDevice.init(
+                self.io,
+                member_pointers[0..member_count],
+                authority.layout,
+                self.header,
+            );
+            self.config = self.pool_device.configure(self.header);
+            self.config.context = &self.pool_device;
+        } else {
+            self.config.context = &self.device;
+        }
         try checkLfs(c.lfs_mount(&self.lfs, &self.config));
         self.mounted = true;
         errdefer {
@@ -149,7 +282,14 @@ pub const Volume = struct {
         }
         self.object_pins.deinit();
         self.link_counts.deinit();
-        self.file.close(self.io);
+        if (self.backing == .pool) {
+            if (self.pool_set) |*set| set.close() catch |err| if (first_error == null) {
+                first_error = err;
+            };
+            self.pool_set = null;
+        } else {
+            self.file.close(self.io);
+        }
         self.closed = true;
 
         if (first_error) |err| return err;
@@ -176,7 +316,18 @@ pub const Volume = struct {
     }
 
     pub fn isWriteFrozen(self: *const Volume) bool {
-        return self.device.isWriteFrozen();
+        return if (self.backing == .pool)
+            self.mounted and self.pool_device.isWriteFrozen()
+        else
+            self.device.isWriteFrozen();
+    }
+
+    fn syncBacking(self: *Volume) !void {
+        if (self.backing == .pool) {
+            if (!self.mounted) return error.VolumeNotMounted;
+            return self.pool_device.sync();
+        }
+        return self.device.sync();
     }
 
     pub fn stat(self: *Volume, path: [*:0]const u8) !NodeInfo {
@@ -263,6 +414,7 @@ pub const Volume = struct {
     }
 
     pub fn setMetadata(self: *Volume, path: [*:0]const u8, value: metadata.Metadata) !void {
+        try self.ensureWritesAllowed();
         var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
@@ -606,19 +758,21 @@ pub const Volume = struct {
 
     pub fn syncFile(self: *Volume, handle: *FileHandle) !void {
         if (self.closed) return error.VolumeClosed;
+        if (!self.writable) return;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
-        self.device.sync() catch return error.InputOutput;
+        self.syncBacking() catch return error.InputOutput;
         handle.original_metadata = handle.metadata;
     }
 
     pub fn sync(self: *Volume) !void {
         if (self.closed) return error.VolumeClosed;
+        if (!self.writable) return;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
-        self.device.sync() catch return error.InputOutput;
+        self.syncBacking() catch return error.InputOutput;
     }
 
     pub fn persistMetadata(self: *Volume, handle: *FileHandle) !void {
@@ -713,6 +867,7 @@ pub const Volume = struct {
     }
 
     fn ensureWritesAllowed(self: *const Volume) !void {
+        if (!self.writable) return error.ReadOnlyVolume;
         if (self.isWriteFrozen()) return error.VolumeFrozen;
     }
 
@@ -960,6 +1115,65 @@ pub const Volume = struct {
         try self.setMetadata(&buffer, parent_metadata);
     }
 };
+
+fn initializeFilesystem(io: Io, config: *c.struct_lfs_config) !void {
+    var lfs: c.lfs_t = std.mem.zeroes(c.lfs_t);
+    try checkLfs(c.lfs_format(&lfs, config));
+    try checkLfs(c.lfs_mount(&lfs, config));
+    var mounted = true;
+    defer if (mounted) {
+        _ = c.lfs_unmount(&lfs);
+    };
+    const store: object_store.Store = .{ .io = io, .lfs = &lfs };
+    try store.initialize();
+    const owner = hostOwner();
+    const root_metadata = metadata.Metadata.init(io, .directory, 0o40755, owner.uid, owner.gid);
+    const root_bytes = root_metadata.encode();
+    try checkLfs(c.lfs_setattr(
+        &lfs,
+        object_store.namespace_root,
+        metadata.attribute_type,
+        &root_bytes,
+        root_bytes.len,
+    ));
+    var root_identity: object_format.ObjectId = undefined;
+    try io.randomSecure(&root_identity);
+    try checkLfs(c.lfs_setattr(
+        &lfs,
+        object_store.namespace_root,
+        metadata.directory_identity_attribute_type,
+        &root_identity,
+        root_identity.len,
+    ));
+    try checkLfs(c.lfs_unmount(&lfs));
+    mounted = false;
+}
+
+fn collectPoolMembers(
+    set: *pool_member_set.PoolMemberSet,
+    output: *[3]*@import("v3/member.zig").Member,
+) !usize {
+    const authority = set.authority() orelse return error.MissingAuthority;
+    const required_count: usize = switch (authority.layout.kind) {
+        .unprotected => 1,
+        .replicated => 3,
+        .erasure_coded => return error.ErasureCodingNotImplemented,
+    };
+    if (set.suppliedCount() != required_count) return error.UnsupportedPoolWidth;
+    var count: usize = 0;
+    for (0..set.suppliedCount()) |index| {
+        switch (try set.statusAt(index)) {
+            .authority, .active_voter => {},
+            else => continue,
+        }
+        const member = try set.memberAt(index) orelse continue;
+        if (count == output.len) return error.UnsupportedPoolWidth;
+        output.*[count] = member;
+        count += 1;
+    }
+    if (count != required_count) return error.UnsupportedPoolWidth;
+    return count;
+}
 
 const accounting_metadata_blocks: u64 = 32;
 

@@ -27,13 +27,25 @@ command -v blockdev >/dev/null || skip_or_fail "blockdev is unavailable"
 command -v mkfs.ext4 >/dev/null || skip_or_fail "mkfs.ext4 is unavailable"
 command -v mount >/dev/null || skip_or_fail "mount is unavailable"
 command -v umount >/dev/null || skip_or_fail "umount is unavailable"
+command -v fusermount3 >/dev/null || skip_or_fail "fusermount3 is unavailable"
+command -v mountpoint >/dev/null || skip_or_fail "mountpoint is unavailable"
+command -v timeout >/dev/null || skip_or_fail "timeout is unavailable"
+[[ -r /dev/fuse && -w /dev/fuse ]] || skip_or_fail "/dev/fuse is unavailable"
 sudo -n true 2>/dev/null || skip_or_fail "passwordless sudo is unavailable"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/zettide-block.XXXXXX")
 loop=""
 replica_loops=()
 mounted=false
+pool_mount_pid=""
 cleanup() {
+    if sudo -n mountpoint -q "$work/pool-mount" 2>/dev/null; then
+        sudo -n timeout --kill-after=2s 5s fusermount3 -uz "$work/pool-mount" || true
+    fi
+    if [[ -n "$pool_mount_pid" ]]; then
+        sudo -n kill -TERM "$pool_mount_pid" 2>/dev/null || true
+        wait "$pool_mount_pid" 2>/dev/null || true
+    fi
     if [[ "$mounted" == "true" ]]; then
         sudo -n umount "$work/mount" || true
     fi
@@ -41,6 +53,7 @@ cleanup() {
         sudo -n losetup --detach "$loop" || true
     fi
     for replica_loop in "${replica_loops[@]}"; do
+        sudo -n blockdev --setrw "$replica_loop" 2>/dev/null || true
         sudo -n losetup --detach "$replica_loop" || true
     done
     rm -rf "$work"
@@ -103,6 +116,13 @@ for index in 0 1 2; do
     truncate --size 32MiB "$work/replica-$index"
     replica_loops+=("$(sudo -n losetup --find --show "$work/replica-$index")")
 done
+if sudo -n "$cli" pool plan-create \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}" \
+    --profile unprotected >/dev/null 2>&1; then
+    echo "unsupported unprotected pool width was accepted" >&2
+    exit 1
+fi
 replica_args=(
     --device "${replica_loops[0]}"
     --device "${replica_loops[1]}"
@@ -122,7 +142,7 @@ inspect=$(sudo -n "$cli" pool inspect \
 grep -q '^Profile: replicated$' <<<"$inspect"
 grep -q '^Members: 3/3$' <<<"$inspect"
 grep -q '^Data policy: read_write$' <<<"$inspect"
-grep -q '^Mountable: no$' <<<"$inspect"
+grep -q '^Mountable: yes$' <<<"$inspect"
 degraded=$(sudo -n "$cli" pool inspect \
     --device "${replica_loops[0]}" \
     --device "${replica_loops[1]}")
@@ -132,3 +152,115 @@ if sudo -n "$cli" pool inspect --device "${replica_loops[0]}" >/dev/null 2>&1; t
     echo "replicated pool opened without control quorum" >&2
     exit 1
 fi
+
+mkdir "$work/pool-mount"
+printf 'physical pool data' >"$work/expected"
+start_pool_mount() {
+    mount_options=("$@")
+    : >"$work/pool-mount.log"
+    sudo -n timeout --kill-after=2s 30s "$cli" pool mount "$work/pool-mount" \
+        --device "${replica_loops[0]}" \
+        --device "${replica_loops[1]}" \
+        --device "${replica_loops[2]}" "${mount_options[@]}" >"$work/pool-mount.log" 2>&1 &
+    pool_mount_pid=$!
+    for _ in $(seq 1 100); do
+        sudo -n mountpoint -q "$work/pool-mount" && return 0
+        kill -0 "$pool_mount_pid" 2>/dev/null || {
+            cat "$work/pool-mount.log" >&2
+            return 1
+        }
+        sleep 0.05
+    done
+    cat "$work/pool-mount.log" >&2
+    echo "pool mount readiness timeout" >&2
+    return 1
+}
+stop_pool_mount() {
+    sudo -n timeout --kill-after=2s 5s "$cli" unmount "$work/pool-mount" >/dev/null
+    for _ in $(seq 1 100); do
+        if ! sudo -n mountpoint -q "$work/pool-mount"; then
+            wait "$pool_mount_pid"
+            pool_mount_pid=""
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "pool unmount timeout" >&2
+    return 1
+}
+start_pool_mount
+sudo -n "$probe" expect-busy "${replica_loops[0]}"
+sudo -n cp "$work/expected" "$work/pool-mount/hello.txt"
+sudo -n sync -f "$work/pool-mount/hello.txt"
+stop_pool_mount
+start_pool_mount
+sudo -n cmp "$work/expected" "$work/pool-mount/hello.txt"
+stop_pool_mount
+for replica_loop in "${replica_loops[@]}"; do
+    sudo -n blockdev --setro "$replica_loop"
+done
+start_pool_mount --read-only
+sudo -n cmp "$work/expected" "$work/pool-mount/hello.txt"
+if sudo -n touch "$work/pool-mount/read-only-write" 2>/dev/null; then
+    echo "read-only pool mount accepted a write" >&2
+    exit 1
+fi
+stop_pool_mount
+for replica_loop in "${replica_loops[@]}"; do
+    sudo -n blockdev --setrw "$replica_loop"
+done
+initialized_pool=$(sudo -n "$cli" pool inspect \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}" \
+    --device "${replica_loops[2]}")
+pool_id=$(grep '^Pool: ' <<<"$initialized_pool")
+pool_id=${pool_id#Pool: }
+if sudo -n "$cli" pool initialize \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}" \
+    --device "${replica_loops[2]}" \
+    --confirm "initialize-empty-volume:$pool_id" >/dev/null 2>&1; then
+    echo "initialized pool was reinitialized" >&2
+    exit 1
+fi
+for replica_loop in "${replica_loops[@]}"; do
+    sudo -n dd if=/dev/zero of="$replica_loop" bs=1M seek=1 count=31 conv=notrunc status=none
+done
+empty_pool=$(sudo -n "$cli" pool inspect \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}" \
+    --device "${replica_loops[2]}")
+grep -q '^Mountable: no$' <<<"$empty_pool"
+initialize_token=$(grep '^Initialize token: ' <<<"$empty_pool")
+initialize_token=${initialize_token#Initialize token: }
+if sudo -n "$cli" pool initialize \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}" \
+    --device "${replica_loops[2]}" \
+    --confirm invalid >/dev/null 2>&1; then
+    echo "invalid initialize token was accepted" >&2
+    exit 1
+fi
+if sudo -n "$cli" pool initialize \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}" \
+    --device "${replica_loops[2]}" \
+    --device "$loop" \
+    --confirm "$initialize_token" >/dev/null 2>&1; then
+    echo "pool initialize accepted an extra device" >&2
+    exit 1
+fi
+sudo -n "$cli" pool initialize \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}" \
+    --device "${replica_loops[2]}" \
+    --label recovered \
+    --confirm "$initialize_token" | grep -q '^Initialized pool: '
+sudo -n "$cli" pool inspect \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}" \
+    --device "${replica_loops[2]}" | grep -q '^Mountable: yes$'
+start_pool_mount
+sudo -n cp "$work/expected" "$work/pool-mount/recovered.txt"
+sudo -n cmp "$work/expected" "$work/pool-mount/recovered.txt"
+stop_pool_mount

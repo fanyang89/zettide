@@ -49,6 +49,16 @@ pub const DeviceInfo = struct {
     pub fn preflightEligible(self: *const DeviceInfo) bool {
         return self.eligibility.preflightEligible();
     }
+
+    pub fn preflightReadable(self: *const DeviceInfo) bool {
+        const eligibility = self.eligibility;
+        return !eligibility.partition and !eligibility.mounted and !eligibility.swap and !eligibility.held;
+    }
+};
+
+pub const OpenedStorage = struct {
+    storage: storage_api.Storage,
+    info: DeviceInfo,
 };
 
 pub fn inspect(io: Io, allocator: std.mem.Allocator, path: []const u8) !DeviceInfo {
@@ -62,14 +72,25 @@ pub fn openStorage(
     allocator: std.mem.Allocator,
     path: []const u8,
     writable: bool,
-) !struct { storage: storage_api.Storage, info: DeviceInfo } {
+) !OpenedStorage {
+    return openStorageOptions(io, allocator, path, writable, writable);
+}
+
+pub fn openStorageOptions(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    writable: bool,
+    exclusive: bool,
+) !OpenedStorage {
     const inspected = try inspect(io, allocator, path);
-    if (writable and !inspected.preflightEligible()) return error.DeviceNotEligible;
+    if ((writable and !inspected.preflightEligible()) or
+        (!writable and exclusive and !inspected.preflightReadable())) return error.DeviceNotEligible;
 
     const path_z = try std.posix.toPosixPath(path);
     const rc = linux.open(path_z[0..].ptr, .{
         .ACCMODE = if (writable) .RDWR else .RDONLY,
-        .EXCL = writable,
+        .EXCL = exclusive,
         .CLOEXEC = true,
     }, 0);
     const fd: linux.fd_t = switch (linux.errno(rc)) {
@@ -89,7 +110,8 @@ pub fn openStorage(
         inspected.capacity_bytes != opened.capacity_bytes or
         inspected.logical_sector_size != opened.logical_sector_size)
         return error.DeviceChanged;
-    if (writable and !opened.preflightEligible()) return error.DeviceNotEligible;
+    if ((writable and !opened.preflightEligible()) or
+        (!writable and exclusive and !opened.preflightReadable())) return error.DeviceNotEligible;
 
     return .{
         .storage = storage_api.Storage.initOwned(

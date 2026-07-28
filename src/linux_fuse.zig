@@ -306,7 +306,7 @@ const FuseDirectoryHandle = struct {
     parent_id: c.fuse_ino_t,
 };
 
-pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bool) !void {
+pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bool, read_only: bool) !void {
     const allocator = std.heap.c_allocator;
     const program = try allocator.dupeZ(u8, "zettide");
     defer allocator.free(program);
@@ -318,7 +318,14 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bo
     defer allocator.free(option);
     const permissions = try allocator.dupeZ(
         u8,
-        if (allow_other) "default_permissions,allow_other" else "default_permissions",
+        if (allow_other and read_only)
+            "default_permissions,allow_other,ro"
+        else if (allow_other)
+            "default_permissions,allow_other"
+        else if (read_only)
+            "default_permissions,ro"
+        else
+            "default_permissions",
     );
     defer allocator.free(permissions);
     const mountpoint_z = try allocator.dupeZ(u8, mountpoint);
@@ -1006,6 +1013,7 @@ fn patchDirectoryMetadata(
 }
 
 fn updateDirectoryAccessTime(state: *MountState, handle: *FuseDirectoryHandle) !void {
+    if (!state.volume.writable) return;
     var info = try currentDirectoryInfo(state, handle.inode);
     info.metadata.atime_ns = now(state.volume.io);
     if (state.pathFor(handle.inode)) |path| try state.volume.setMetadata(path, info.metadata);

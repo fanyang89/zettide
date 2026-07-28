@@ -1,9 +1,8 @@
 # Zettide
 
-Zettide is an experimental cross-platform, single-file development volume
-built on [littlefs](https://github.com/littlefs-project/littlefs). Containers
-have a fixed logical capacity, can be sparse on the host filesystem, and reserve
-format space for future authenticated encryption.
+Zettide is an experimental cross-platform development volume built on
+[littlefs](https://github.com/littlefs-project/littlefs). Volumes can use a
+single sparse container file or an explicitly selected Linux raw-disk Pool.
 
 The project currently implements the portable container core and a foreground
 Linux FUSE3 mount adapter. The core cross-compiles for Windows; the native
@@ -61,9 +60,10 @@ zig build test-spdk-link
 This check validates headers and shared-library loading only. It does not start
 the SPDK application framework, allocate hugepages, or bind storage devices.
 
-The Linux block-device gate uses a temporary loop device and requires
-`losetup`, `blockdev`, `mkfs.ext4`, mount tools, and passwordless `sudo`. It
-never targets an existing physical device.
+The Linux block-device gate uses temporary loop devices and requires `losetup`,
+`blockdev`, `mkfs.ext4`, `fusermount3`, `mountpoint`, a writable `/dev/fuse`,
+`timeout`, mount tools, and passwordless `sudo`. It never targets an existing
+physical device.
 
 The external gates compile pinned source snapshots from libfuse and xfstests
 stored under `vendor/`. `test-libfuse` runs the syscall cases that match the
@@ -99,6 +99,33 @@ zettide mount workspace.ddv workspace
 # From another terminal:
 zettide unmount workspace
 ```
+
+Linux raw-disk Pools currently support exactly one unprotected device or three
+replicated devices. Creation destroys all data on the explicitly listed whole
+devices and requires the confirmation token produced by the full-device scan:
+
+```sh
+zettide pool plan-create \
+  --device /dev/disk/by-id/disk-a \
+  --device /dev/disk/by-id/disk-b \
+  --device /dev/disk/by-id/disk-c \
+  --profile replicated --label Workspace
+zettide pool create \
+  --device /dev/disk/by-id/disk-a \
+  --device /dev/disk/by-id/disk-b \
+  --device /dev/disk/by-id/disk-c \
+  --profile replicated --label Workspace \
+  --confirm <token>
+mkdir workspace
+zettide pool mount workspace \
+  --device /dev/disk/by-id/disk-a \
+  --device /dev/disk/by-id/disk-b \
+  --device /dev/disk/by-id/disk-c
+```
+
+Use `zettide pool inspect --device ...` to inspect authority and mountability.
+An interrupted empty-volume initialization exposes a Pool-bound recovery token;
+pass it to `zettide pool initialize --device ... --confirm <token>`.
 
 ## Format limits
 

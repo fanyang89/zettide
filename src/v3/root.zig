@@ -18,6 +18,7 @@ pub const pool_member_set = @import("pool_member_set.zig");
 pub const pool_evidence = @import("pool_evidence.zig");
 pub const pool_certificate = @import("pool_certificate.zig");
 pub const pool_authority = @import("pool_authority.zig");
+pub const pool_block_device = @import("pool_block_device.zig");
 pub const pool_genesis_payload = @import("pool_genesis_payload.zig");
 pub const pool_topology = @import("pool_topology.zig");
 pub const replicated_journal = @import("replicated_journal.zig");
@@ -45,6 +46,7 @@ test {
     _ = pool_evidence;
     _ = pool_certificate;
     _ = pool_authority;
+    _ = pool_block_device;
     _ = pool_genesis_payload;
     _ = pool_topology;
     _ = replicated_journal;

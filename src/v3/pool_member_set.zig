@@ -134,6 +134,21 @@ pub const PoolMemberSet = struct {
         return self.statuses[index];
     }
 
+    pub fn suppliedCount(self: *const PoolMemberSet) usize {
+        return self.supplied_count;
+    }
+
+    pub fn memberAt(self: *PoolMemberSet, index: usize) !?*member_api.Member {
+        if (index >= self.supplied_count) return error.InvalidMemberIndex;
+        return if (self.members[index]) |*member| member else null;
+    }
+
+    pub fn take(self: *PoolMemberSet) PoolMemberSet {
+        const result = self.*;
+        self.* = .{};
+        return result;
+    }
+
     pub fn memberById(self: *PoolMemberSet, member_id: [16]u8) !*member_api.Member {
         for (self.members[0..self.supplied_count]) |*maybe_member| {
             const member = if (maybe_member.*) |*value| value else continue;

@@ -4,9 +4,9 @@
 
 This document freezes the v3 member header, topology record, replicated layout, genesis payload,
 control record, commit certificate codecs, member-local creation, fixed-three-member set creation,
-existing-set control authority, control journal scan, and append. It defines no volume mounting,
-journal repair, signatures, manifest, erasure coding, or CLI behavior.
-A volume containing only these records is not mountable.
+existing-set control authority, control journal scan, append, and the initial Pool volume data plane.
+It defines no journal repair, signatures, manifest, erasure coding, member replacement, or rebalance.
+A Pool is mountable only after its volume data plane is initialized.
 
 All integers use little-endian encoding. The header is encoded field by field and is never a
 serialized Zig or native ABI structure. Each header copy is exactly 4096 bytes.
@@ -180,22 +180,62 @@ directory-entry durability there. The control journal scanner uses exact region 
 
 Linux block-device acquisition verifies the opened fd is a block device, obtains capacity and sector
 size with block ioctls, and identifies the current device instance by major/minor number and Linux
-`diskseq`. Its preflight rejects partitions, read-only devices, current-mount-namespace mounts, swaps,
-and sysfs holders. Writable open then uses `O_EXCL` and repeats instance identity and geometry checks
-on the acquired fd. This coordinates with other exclusive block-device users but cannot prevent an
+`diskseq`. Its writable preflight rejects partitions, read-only devices,
+current-mount-namespace mounts, swaps, and sysfs holders. Writable acquisition uses `O_RDWR|O_EXCL`;
+an explicitly read-only mount uses `O_RDONLY|O_EXCL` and accepts a kernel read-only whole device while
+retaining the other safety checks. Both modes repeat instance identity and geometry checks on the
+acquired fd. This coordinates with other exclusive block-device users but cannot prevent an
 uncooperative process from issuing raw writes.
 
-The Linux raw-pool CLI requires every device path explicitly. `pool plan-create` scans the complete
-capacity of every device and rejects any nonzero data. A confirmation token binds the ordered device
-instances, capacities, logical sector sizes, profile, and label. `pool create` reconstructs that plan,
-requires the exact token, acquires all devices with `O_EXCL`, repeats identity and full-capacity scans
-through the acquired fds, and only then starts publication. Tokens cease to match when a device path
-is rebound to a different `diskseq` instance.
+The Linux raw-pool CLI requires every device path explicitly. The initial mountable implementation
+accepts exactly one device for `unprotected` and exactly three devices for `replicated`.
+`pool plan-create` scans the complete capacity of every device and rejects any nonzero data. A
+confirmation token binds the ordered device instances, capacities, logical sector sizes, profile,
+and label. `pool create` reconstructs that plan, requires the exact token, acquires all devices with
+`O_EXCL`, repeats identity and full-capacity scans through the acquired fds, and only then starts
+publication. Tokens cease to match when a device path is rebound to a different `diskseq` instance.
 
 `pool inspect` reopens an explicitly supplied member set read-only, selects control authority, and
-reports the topology, layout, generation, member classifications, and policy-level data access. That
-policy value reflects available authoritative members only; inspection reports the pool as not
-mountable until a metadata and object data plane is defined and recovered.
+reports the topology, layout, generation, member classifications, policy-level data access, and
+whether the exact supplied profile width has a valid Pool volume header quorum. The policy value
+reflects available authoritative members only and is distinct from the stricter exact-width
+requirement of the initial mount command.
+
+### Pool Volume Data Plane
+
+The initial Pool volume stores the mirrored `LFSDRV2` container headers in each member's metadata
+region at relative offsets 0 and 4096. The littlefs and object-store block address space starts at
+relative offset zero in each member's data region. The common logical size is the smallest member's
+logical capacity, rounded down to a 4096-byte block, and is capped by the 32-bit littlefs block count.
+
+An unprotected Pool reads and writes its one member. A replicated Pool read succeeds only when two
+members return identical bytes. Program and sync operations are issued to all three members, and the
+operation succeeds only when all three succeed. Any program or sync failure freezes that mounted
+writer. Before a writable reopen, all three selected container headers and the complete logical data
+region must have the same static volume identity and byte-identical data. These runtime rules are
+intentionally stricter than the version 2 layout envelope's durable-write threshold of two and read
+threshold of one; the encoded policy fields remain unchanged for format compatibility and do not
+weaken this implementation's acknowledgement or read-validation requirements.
+
+Pool creation initializes the volume before reporting success. `pool inspect` emits an
+`initialize-empty-volume:<set-id>` token in either of two cases: the complete member set has no ready
+header but retains a valid creating header for one volume identity, or every header slot and every
+complete member data region is zero. Any valid ready header or ambiguous nonzero header damage blocks
+destructive initialization. `pool initialize` requires the exact token, writable control and data
+policy, the complete profile width with no extra supplied devices, and exclusive acquisition of every
+supplied device.
+
+Ready-header quorum compares static volume identity rather than member-local sequence. A single ready
+header is also sufficient when every other member retains a matching creating header. Writable reopen
+first requires complete logical data equality, then durably publishes ready B/A headers to those
+creating members without formatting or changing data. Member-local sequence differences left by an
+interrupted A/B publication are accepted.
+
+`pool mount` also requires the complete profile width. Writable mount exclusively acquires writable
+devices and verifies static ready-header identity plus complete replica data equality.
+`pool mount --read-only` exclusively acquires readable devices, passes `ro` to FUSE, permits read-only
+block devices, and performs majority reads without modifying access times or syncing the backing
+members.
 
 Dynamic pool provisioning accepts one owned storage per initial member. It rejects erasure coding and
 profiles wider than the supplied storage set, derives a common logical capacity from the smallest

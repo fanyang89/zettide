@@ -46,6 +46,10 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     const operation = args[0];
     if (std.mem.eql(u8, operation, "inspect"))
         return poolInspectCommand(allocator, io, args[1..], stdout);
+    if (std.mem.eql(u8, operation, "mount"))
+        return poolMountCommand(allocator, io, args[1..], stdout);
+    if (std.mem.eql(u8, operation, "initialize"))
+        return poolInitializeCommand(allocator, io, args[1..], stdout);
     const planning = std.mem.eql(u8, operation, "plan-create");
     const creating = std.mem.eql(u8, operation, "create");
     if (!planning and !creating) return error.InvalidArguments;
@@ -117,6 +121,14 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         .complete => |value| {
             var provisioned = value;
             defer provisioned.deinit();
+            zettide.volume.Volume.initializePool(io, &provisioned, label) catch |cause| {
+                try stdout.print("Pool created but volume initialization failed: {x} ({s})\n", .{
+                    provisioned.genesis.topology.set_id,
+                    @errorName(cause),
+                });
+                try stdout.flush();
+                return cause;
+            };
             try stdout.print("Created pool: {x}\n", .{provisioned.genesis.topology.set_id});
         },
         .partial => |partial| {
@@ -148,13 +160,139 @@ fn poolInspectCommand(
     }
     if (path_count == 0) return error.InvalidMemberCount;
 
-    const storages = try allocator.alloc(zettide.v3.storage.Storage, path_count);
+    var set = try openRawPoolSet(allocator, io, paths[0..path_count], false, false, .read_only);
+    defer set.deinit();
+    const authority = set.authority() orelse return error.MissingAuthority;
+    try stdout.print("Pool: {x}\n", .{authority.topology.set_id});
+    try stdout.print("Authority: {s}\n", .{@tagName(authority.kind)});
+    try stdout.print("Generation: {d}\n", .{authority.generation});
+    try stdout.print("Topology epoch: {d}\n", .{authority.topology.epoch});
+    try stdout.print("Layout epoch: {d}\n", .{authority.layout.layout_epoch});
+    try stdout.print("Profile: {s}\n", .{@tagName(authority.layout.kind)});
+    try stdout.print("Members: {d}/{d}\n", .{ path_count, authority.topology.member_count });
+    try stdout.print("Data policy: {s}\n", .{@tagName(set.dataAccess())});
+    const mountable = zettide.volume.Volume.inspectPoolHeader(io, &set) catch null;
+    try stdout.print("Mountable: {s}\n", .{if (mountable != null) "yes" else "no"});
+    const can_initialize = zettide.volume.Volume.canInitializePool(io, &set) catch false;
+    if (can_initialize)
+        try stdout.print("Initialize token: initialize-empty-volume:{x}\n", .{
+            authority.topology.set_id,
+        });
+    for (paths[0..path_count], 0..) |path, member_index| {
+        try stdout.print("Member: {s} ({s})\n", .{ path, memberStatusName(try set.statusAt(member_index)) });
+    }
+}
+
+fn poolInitializeCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    args: []const []const u8,
+    stdout: *Io.Writer,
+) !void {
+    var paths: [zettide.v3.pool_topology.max_member_count][]const u8 = undefined;
+    var path_count: usize = 0;
+    var label: []const u8 = "Zettide";
+    var confirmation: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--device")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            if (path_count == paths.len) return error.TooManyDevices;
+            paths[path_count] = args[index];
+            path_count += 1;
+        } else if (std.mem.eql(u8, args[index], "--label")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            label = args[index];
+        } else if (std.mem.eql(u8, args[index], "--confirm")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            if (confirmation != null) return error.DuplicateOption;
+            confirmation = args[index];
+        } else {
+            return error.UnknownOption;
+        }
+    }
+    if (path_count == 0) return error.InvalidMemberCount;
+    const supplied_confirmation = confirmation orelse return error.MissingConfirmation;
+    var set = try openRawPoolSet(allocator, io, paths[0..path_count], true, true, .writable);
+    defer set.deinit();
+    const authority = set.authority() orelse return error.MissingAuthority;
+    var expected_buffer: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "initialize-empty-volume:{x}", .{
+        authority.topology.set_id,
+    });
+    if (!std.mem.eql(u8, supplied_confirmation, expected)) return error.ConfirmationMismatch;
+    try zettide.volume.Volume.initializePoolSet(io, &set, label);
+    try stdout.print("Initialized pool: {x}\n", .{authority.topology.set_id});
+}
+
+fn poolMountCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    args: []const []const u8,
+    stdout: *Io.Writer,
+) !void {
+    if (args.len == 0) return error.MissingMountpoint;
+    const mountpoint = args[0];
+    var paths: [zettide.v3.pool_topology.max_member_count][]const u8 = undefined;
+    var path_count: usize = 0;
+    var writable = true;
+    var allow_other = false;
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--device")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            if (path_count == paths.len) return error.TooManyDevices;
+            paths[path_count] = args[index];
+            path_count += 1;
+        } else if (std.mem.eql(u8, args[index], "--read-only")) {
+            writable = false;
+        } else if (std.mem.eql(u8, args[index], "--allow-other")) {
+            allow_other = true;
+        } else {
+            return error.UnknownOption;
+        }
+    }
+    if (path_count == 0) return error.InvalidMemberCount;
+
+    const intent: zettide.v3.pool_member_set.OpenIntent = if (writable) .writable else .read_only;
+    var set = try openRawPoolSet(allocator, io, paths[0..path_count], writable, true, intent);
+    defer set.deinit();
+    var volume = try zettide.volume.Volume.openPool(io, allocator, &set, writable);
+    defer volume.deinit();
+    volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
+    try volume.mount();
+    try stdout.print("Mounted pool at {s}; press Ctrl-C to stop\n", .{mountpoint});
+    try stdout.flush();
+    try zettide.linux_fuse.mount(&volume, mountpoint, allow_other, !writable);
+    try volume.close();
+}
+
+fn openRawPoolSet(
+    allocator: std.mem.Allocator,
+    io: Io,
+    paths: []const []const u8,
+    writable: bool,
+    exclusive: bool,
+    intent: zettide.v3.pool_member_set.OpenIntent,
+) !zettide.v3.pool_member_set.PoolMemberSet {
+    if (paths.len == 0) return error.InvalidMemberCount;
+    const storages = try allocator.alloc(zettide.v3.storage.Storage, paths.len);
     defer allocator.free(storages);
     var opened_count: usize = 0;
     errdefer for (storages[0..opened_count]) |*storage| storage.close(io);
     var device_ids: [zettide.v3.pool_topology.max_member_count]zettide.v3.linux_block_device.DeviceId = undefined;
-    for (paths[0..path_count], 0..) |path, member_index| {
-        const opened = try zettide.v3.linux_block_device.openStorage(io, allocator, path, false);
+    for (paths, 0..) |path, member_index| {
+        const opened = try zettide.v3.linux_block_device.openStorageOptions(
+            io,
+            allocator,
+            path,
+            writable,
+            exclusive,
+        );
         for (device_ids[0..member_index]) |previous| {
             if (zettide.v3.linux_block_device.DeviceId.eql(previous, opened.info.id)) {
                 var duplicate = opened.storage;
@@ -168,21 +306,7 @@ fn poolInspectCommand(
     }
     // PoolMemberSet consumes every supplied storage on both success and failure.
     opened_count = 0;
-    var set = try zettide.v3.pool_member_set.openStorages(io, allocator, storages, .read_only);
-    defer set.deinit();
-    const authority = set.authority() orelse return error.MissingAuthority;
-    try stdout.print("Pool: {x}\n", .{authority.topology.set_id});
-    try stdout.print("Authority: {s}\n", .{@tagName(authority.kind)});
-    try stdout.print("Generation: {d}\n", .{authority.generation});
-    try stdout.print("Topology epoch: {d}\n", .{authority.topology.epoch});
-    try stdout.print("Layout epoch: {d}\n", .{authority.layout.layout_epoch});
-    try stdout.print("Profile: {s}\n", .{@tagName(authority.layout.kind)});
-    try stdout.print("Members: {d}/{d}\n", .{ path_count, authority.topology.member_count });
-    try stdout.print("Data policy: {s}\n", .{@tagName(set.dataAccess())});
-    try stdout.writeAll("Mountable: no\n");
-    for (paths[0..path_count], 0..) |path, member_index| {
-        try stdout.print("Member: {s} ({s})\n", .{ path, memberStatusName(try set.statusAt(member_index)) });
-    }
+    return zettide.v3.pool_member_set.openStorages(io, allocator, storages, intent);
 }
 
 fn memberStatusName(status: zettide.v3.pool_member_set.MemberStatus) []const u8 {
@@ -253,7 +377,7 @@ fn mountCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     try volume.mount();
     try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
     try stdout.flush();
-    try zettide.linux_fuse.mount(&volume, args[1], allow_other);
+    try zettide.linux_fuse.mount(&volume, args[1], allow_other, false);
     try volume.close();
 }
 
@@ -334,6 +458,8 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide unmount <mountpoint>
         \\  zettide device inspect <device>
         \\  zettide pool inspect --device <device>...
+        \\  zettide pool initialize --device <device>... [--label <label>] --confirm <token>
+        \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other]
         \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>]
         \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] --confirm <token>
         \\

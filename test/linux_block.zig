@@ -30,5 +30,14 @@ pub fn main(init: std.process.Init) !void {
         if (set.authority() == null) return error.MissingAuthority;
         return;
     }
+    if (std.mem.eql(u8, operation, "expect-busy")) {
+        const opened = api.openStorage(init.io, init.arena.allocator(), device, true) catch |err| {
+            if (err == error.DeviceBusy) return;
+            return err;
+        };
+        var storage = opened.storage;
+        storage.close(init.io);
+        return error.ExpectedBusyDevice;
+    }
     return error.InvalidOperation;
 }

@@ -40,7 +40,7 @@ pub fn inspect(
     if (paths.len == 0 or paths.len > @import("pool_topology.zig").max_member_count)
         return error.InvalidMemberCount;
     if (options.protection == .erasure_coded) return error.ErasureCodingNotImplemented;
-    if (paths.len < try options.protection.fullWidth()) return error.InsufficientMembers;
+    if (paths.len != try options.protection.fullWidth()) return error.UnsupportedPoolWidth;
     _ = try @import("member_format.zig").Label.init(options.label);
 
     const devices = try allocator.alloc(linux_block.DeviceInfo, paths.len);
