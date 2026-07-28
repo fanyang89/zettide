@@ -192,6 +192,11 @@ requires the exact token, acquires all devices with `O_EXCL`, repeats identity a
 through the acquired fds, and only then starts publication. Tokens cease to match when a device path
 is rebound to a different `diskseq` instance.
 
+`pool inspect` reopens an explicitly supplied member set read-only, selects control authority, and
+reports the topology, layout, generation, member classifications, and policy-level data access. That
+policy value reflects available authoritative members only; inspection reports the pool as not
+mountable until a metadata and object data plane is defined and recovered.
+
 Dynamic pool provisioning accepts one owned storage per initial member. It rejects erasure coding and
 profiles wider than the supplied storage set, derives a common logical capacity from the smallest
 member, assigns at most three control voters, and validates every generated header before mutation.

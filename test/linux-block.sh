@@ -31,6 +31,7 @@ sudo -n true 2>/dev/null || skip_or_fail "passwordless sudo is unavailable"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/zettide-block.XXXXXX")
 loop=""
+replica_loops=()
 mounted=false
 cleanup() {
     if [[ "$mounted" == "true" ]]; then
@@ -39,6 +40,9 @@ cleanup() {
     if [[ -n "$loop" ]]; then
         sudo -n losetup --detach "$loop" || true
     fi
+    for replica_loop in "${replica_loops[@]}"; do
+        sudo -n losetup --detach "$replica_loop" || true
+    done
     rm -rf "$work"
 }
 trap cleanup EXIT
@@ -94,3 +98,37 @@ sudo -n "$cli" device inspect "$loop" | grep -q '^Reasons: mounted$'
 sudo -n "$probe" expect-mounted "$loop"
 sudo -n umount "$work/mount"
 mounted=false
+
+for index in 0 1 2; do
+    truncate --size 32MiB "$work/replica-$index"
+    replica_loops+=("$(sudo -n losetup --find --show "$work/replica-$index")")
+done
+replica_args=(
+    --device "${replica_loops[0]}"
+    --device "${replica_loops[1]}"
+    --device "${replica_loops[2]}"
+    --profile replicated
+    --label replica-cli
+)
+replica_plan=$(sudo -n "$cli" pool plan-create "${replica_args[@]}")
+replica_token=$(grep '^Confirm token: ' <<<"$replica_plan")
+replica_token=${replica_token#Confirm token: }
+sudo -n "$cli" pool create "${replica_args[@]}" --confirm "$replica_token" \
+    | grep -q '^Created pool: '
+inspect=$(sudo -n "$cli" pool inspect \
+    --device "${replica_loops[2]}" \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}")
+grep -q '^Profile: replicated$' <<<"$inspect"
+grep -q '^Members: 3/3$' <<<"$inspect"
+grep -q '^Data policy: read_write$' <<<"$inspect"
+grep -q '^Mountable: no$' <<<"$inspect"
+degraded=$(sudo -n "$cli" pool inspect \
+    --device "${replica_loops[0]}" \
+    --device "${replica_loops[1]}")
+grep -q '^Members: 2/3$' <<<"$degraded"
+grep -q '^Data policy: read_only$' <<<"$degraded"
+if sudo -n "$cli" pool inspect --device "${replica_loops[0]}" >/dev/null 2>&1; then
+    echo "replicated pool opened without control quorum" >&2
+    exit 1
+fi
