@@ -1,16 +1,16 @@
 const std = @import("std");
 const block_device = @import("../block_device.zig");
 const container = @import("../container.zig");
-const member_api = @import("member.zig");
 const pool_layout = @import("pool_layout.zig");
+const ReplicaEndpoint = @import("replica_endpoint.zig").ReplicaEndpoint;
 
 const c = block_device.c;
 const max_replica_count = 3;
 
 pub const PoolBlockDevice = struct {
     io: std.Io,
-    members: [max_replica_count]*member_api.Member,
-    member_count: usize,
+    replicas: [max_replica_count]ReplicaEndpoint,
+    replica_count: usize,
     kind: pool_layout.Kind,
     volume_header: container.Header,
     block_size: u32,
@@ -20,7 +20,7 @@ pub const PoolBlockDevice = struct {
 
     pub fn init(
         io: std.Io,
-        members: []const *member_api.Member,
+        replicas: []const ReplicaEndpoint,
         layout: pool_layout.Layout,
         header: container.Header,
     ) !PoolBlockDevice {
@@ -29,53 +29,53 @@ pub const PoolBlockDevice = struct {
             .replicated => max_replica_count,
             .erasure_coded => return error.ErasureCodingNotImplemented,
         };
-        if (members.len != required_count) return error.UnsupportedPoolWidth;
-        if (header.logical_size > members[0].header().logical_capacity)
+        if (replicas.len != required_count) return error.UnsupportedPoolWidth;
+        if (header.logical_size > replicas[0].geometry.logical_capacity)
             return error.TruncatedPoolData;
         var result: PoolBlockDevice = .{
             .io = io,
-            .members = undefined,
-            .member_count = members.len,
+            .replicas = undefined,
+            .replica_count = replicas.len,
             .kind = layout.kind,
             .volume_header = header,
             .block_size = header.block_size,
             .block_count = header.block_count,
         };
-        for (members, 0..) |member, index| {
-            if (header.logical_size > member.header().logical_capacity)
+        for (replicas, 0..) |replica, index| {
+            if (header.logical_size > replica.geometry.logical_capacity)
                 return error.InconsistentPoolCapacity;
-            result.members[index] = member;
+            result.replicas[index] = replica;
         }
         return result;
     }
 
     pub fn initHeaderReader(
         io: std.Io,
-        members: []const *member_api.Member,
+        replicas: []const ReplicaEndpoint,
         layout: pool_layout.Layout,
     ) !PoolBlockDevice {
         var header: container.Header = undefined;
         header.logical_size = container.default_block_size;
         header.block_size = container.default_block_size;
         header.block_count = 1;
-        return init(io, members, layout, header);
+        return init(io, replicas, layout, header);
     }
 
     pub fn read(self: *PoolBlockDevice, block: u32, offset: u32, buffer: []u8) !void {
         const data_offset = try self.position(block, offset, buffer.len);
         if (self.kind == .unprotected)
-            return self.members[0].read(.data, data_offset, buffer);
+            return self.replicas[0].readData(data_offset, buffer);
         if (buffer.len > container.default_block_size) return error.OutOfBounds;
 
         var copies: [max_replica_count][container.default_block_size]u8 = undefined;
         var readable: [max_replica_count]bool = @splat(false);
-        for (self.members[0..self.member_count], 0..) |member, index| {
-            member.read(.data, data_offset, copies[index][0..buffer.len]) catch continue;
+        for (self.replicas[0..self.replica_count], 0..) |replica, index| {
+            replica.readData(data_offset, copies[index][0..buffer.len]) catch continue;
             readable[index] = true;
         }
-        for (0..self.member_count) |left| {
+        for (0..self.replica_count) |left| {
             if (!readable[left]) continue;
-            for (left + 1..self.member_count) |right| {
+            for (left + 1..self.replica_count) |right| {
                 if (readable[right] and std.mem.eql(
                     u8,
                     copies[left][0..buffer.len],
@@ -93,8 +93,8 @@ pub const PoolBlockDevice = struct {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         const data_offset = try self.position(block, offset, data.len);
         var first_error: ?anyerror = null;
-        for (self.members[0..self.member_count]) |member| {
-            member.write(.data, data_offset, data) catch |err| if (first_error == null) {
+        for (self.replicas[0..self.replica_count]) |replica| {
+            replica.writeData(data_offset, data) catch |err| if (first_error == null) {
                 first_error = err;
             };
         }
@@ -107,8 +107,8 @@ pub const PoolBlockDevice = struct {
     pub fn sync(self: *PoolBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         var first_error: ?anyerror = null;
-        for (self.members[0..self.member_count]) |member| {
-            member.sync() catch |err| if (first_error == null) {
+        for (self.replicas[0..self.replica_count]) |replica| {
+            replica.sync() catch |err| if (first_error == null) {
                 first_error = err;
             };
         }
@@ -124,8 +124,8 @@ pub const PoolBlockDevice = struct {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         const encoded = header.encode();
         var first_error: ?anyerror = null;
-        for (self.members[0..self.member_count]) |member| {
-            member.writeDurable(.metadata, offset, &encoded) catch |err| if (first_error == null) {
+        for (self.replicas[0..self.replica_count]) |replica| {
+            replica.writeMetadataDurable(offset, &encoded) catch |err| if (first_error == null) {
                 first_error = err;
             };
         }
@@ -137,13 +137,13 @@ pub const PoolBlockDevice = struct {
 
     pub fn readHeader(self: *PoolBlockDevice) !container.Header {
         var headers: [max_replica_count]?container.Header = @splat(null);
-        for (self.members[0..self.member_count], 0..) |member, index|
-            headers[index] = readMemberHeader(member) catch null;
+        for (self.replicas[0..self.replica_count], 0..) |replica, index|
+            headers[index] = readReplicaHeader(replica) catch null;
         if (self.kind == .unprotected) return headers[0] orelse error.NoValidPoolVolumeHeader;
-        for (0..self.member_count) |left| {
+        for (0..self.replica_count) |left| {
             const left_header = headers[left] orelse continue;
             const left_identity = volumeIdentity(left_header);
-            for (left + 1..self.member_count) |right| {
+            for (left + 1..self.replica_count) |right| {
                 const right_header = headers[right] orelse continue;
                 if (std.mem.eql(u8, &left_identity, &volumeIdentity(right_header)))
                     return if (right_header.sequence > left_header.sequence) right_header else left_header;
@@ -152,9 +152,9 @@ pub const PoolBlockDevice = struct {
         for (headers, 0..) |maybe_header, ready_index| {
             const header = maybe_header orelse continue;
             const identity = volumeIdentity(header);
-            for (self.members[0..self.member_count], 0..) |member, member_index| {
-                if (member_index == ready_index) continue;
-                if (try memberHeaderState(member, identity) != .creating) break;
+            for (self.replicas[0..self.replica_count], 0..) |replica, replica_index| {
+                if (replica_index == ready_index) continue;
+                if (try replicaHeaderState(replica, identity) != .creating) break;
             } else return header;
         }
         return error.VolumeHeaderQuorumUnavailable;
@@ -166,10 +166,10 @@ pub const PoolBlockDevice = struct {
         var creating_found = false;
         var invalid_found = false;
         var ready_members: usize = 0;
-        for (self.members[0..self.member_count]) |member| {
-            var member_ready = false;
+        for (self.replicas[0..self.replica_count]) |replica| {
+            var replica_ready = false;
             for ([_]u64{ container.header_a_offset, container.header_b_offset }) |offset| {
-                try member.read(.metadata, offset, &bytes);
+                try replica.readMetadata(offset, &bytes);
                 if (std.mem.allEqual(u8, &bytes, 0)) continue;
                 const header = container.Header.decode(&bytes) catch {
                     invalid_found = true;
@@ -183,10 +183,10 @@ pub const PoolBlockDevice = struct {
                 }
                 switch (header.state) {
                     .creating => creating_found = true,
-                    .ready => member_ready = true,
+                    .ready => replica_ready = true,
                 }
             }
-            ready_members += @intFromBool(member_ready);
+            ready_members += @intFromBool(replica_ready);
         }
         if (ready_members != 0) return false;
         if (creating_found) return true;
@@ -194,14 +194,14 @@ pub const PoolBlockDevice = struct {
 
         const buffer = try allocator.alloc(u8, 1024 * 1024);
         defer allocator.free(buffer);
-        for (self.members[0..self.member_count]) |member| {
+        for (self.replicas[0..self.replica_count]) |replica| {
             var offset: u64 = 0;
-            while (offset < member.header().data.length) {
+            while (offset < replica.geometry.data_length) {
                 const amount: usize = @intCast(@min(
                     @as(u64, buffer.len),
-                    member.header().data.length - offset,
+                    replica.geometry.data_length - offset,
                 ));
-                try member.read(.data, offset, buffer[0..amount]);
+                try replica.readData(offset, buffer[0..amount]);
                 if (!std.mem.allEqual(u8, buffer[0..amount], 0)) return false;
                 offset += amount;
             }
@@ -214,17 +214,17 @@ pub const PoolBlockDevice = struct {
         const expected_header = self.volume_header;
         const expected_header_identity = volumeIdentity(expected_header);
         var header_states: [max_replica_count]MemberHeaderState = undefined;
-        for (self.members[0..self.member_count], 0..) |member, index|
-            header_states[index] = try memberHeaderState(member, expected_header_identity);
-        const buffers = try allocator.alloc([1024 * 1024]u8, self.member_count);
+        for (self.replicas[0..self.replica_count], 0..) |replica, index|
+            header_states[index] = try replicaHeaderState(replica, expected_header_identity);
+        const buffers = try allocator.alloc([1024 * 1024]u8, self.replica_count);
         defer allocator.free(buffers);
         const logical_size = @as(u64, self.block_size) * self.block_count;
         var offset: u64 = 0;
         while (offset < logical_size) {
             const amount: usize = @intCast(@min(@as(u64, 1024 * 1024), logical_size - offset));
-            for (self.members[0..self.member_count], 0..) |member, index|
-                try member.read(.data, offset, buffers[index][0..amount]);
-            for (buffers[1..self.member_count]) |buffer| {
+            for (self.replicas[0..self.replica_count], 0..) |replica, index|
+                try replica.readData(offset, buffers[index][0..amount]);
+            for (buffers[1..self.replica_count]) |buffer| {
                 if (!std.mem.eql(u8, buffers[0][0..amount], buffer[0..amount]))
                     return error.ReplicaDivergence;
             }
@@ -233,11 +233,11 @@ pub const PoolBlockDevice = struct {
         var repaired_header = expected_header;
         repaired_header.state = .ready;
         repaired_header.sequence = 2;
-        for (self.members[0..self.member_count], header_states[0..self.member_count]) |member, state| {
+        for (self.replicas[0..self.replica_count], header_states[0..self.replica_count]) |replica, state| {
             if (state == .ready) continue;
-            try member.writeDurable(.metadata, container.header_b_offset, &repaired_header.encode());
+            try replica.writeMetadataDurable(container.header_b_offset, &repaired_header.encode());
             repaired_header.sequence = 3;
-            try member.writeDurable(.metadata, container.header_a_offset, &repaired_header.encode());
+            try replica.writeMetadataDurable(container.header_a_offset, &repaired_header.encode());
             repaired_header.sequence = 2;
         }
     }
@@ -319,11 +319,11 @@ pub const PoolBlockDevice = struct {
     }
 };
 
-fn readMemberHeader(member: *member_api.Member) !container.Header {
+fn readReplicaHeader(replica: ReplicaEndpoint) !container.Header {
     var a_bytes: [container.header_size]u8 = undefined;
     var b_bytes: [container.header_size]u8 = undefined;
-    try member.read(.metadata, container.header_a_offset, &a_bytes);
-    try member.read(.metadata, container.header_b_offset, &b_bytes);
+    try replica.readMetadata(container.header_a_offset, &a_bytes);
+    try replica.readMetadata(container.header_b_offset, &b_bytes);
     const a = container.Header.decode(&a_bytes) catch null;
     const b = container.Header.decode(&b_bytes) catch null;
     const selected = if (a) |a_header|
@@ -333,18 +333,18 @@ fn readMemberHeader(member: *member_api.Member) !container.Header {
     else
         return error.NoValidPoolVolumeHeader;
     if (selected.state != .ready) return error.IncompletePoolVolume;
-    if (selected.logical_size > member.header().logical_capacity) return error.TruncatedPoolData;
+    if (selected.logical_size > replica.geometry.logical_capacity) return error.TruncatedPoolData;
     return selected;
 }
 
 const MemberHeaderState = enum { creating, ready };
 
-fn memberHeaderState(member: *member_api.Member, expected_identity: [container.header_size]u8) !MemberHeaderState {
+fn replicaHeaderState(replica: ReplicaEndpoint, expected_identity: [container.header_size]u8) !MemberHeaderState {
     var bytes: [container.header_size]u8 = undefined;
     var creating_found = false;
     var ready_found = false;
     for ([_]u64{ container.header_a_offset, container.header_b_offset }) |offset| {
-        try member.read(.metadata, offset, &bytes);
+        try replica.readMetadata(offset, &bytes);
         if (std.mem.allEqual(u8, &bytes, 0)) continue;
         const header = container.Header.decode(&bytes) catch continue;
         if (!std.mem.eql(u8, &expected_identity, &volumeIdentity(header)))
@@ -372,6 +372,7 @@ fn lookaheadSize(block_count: u32) u32 {
 }
 
 test "replicated reads require two matching members" {
+    const member_api = @import("member.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storages: [3]member_api.Storage = undefined;
@@ -393,8 +394,10 @@ test "replicated reads require two matching members" {
     defer provisioned.deinit();
     var members: [3]*member_api.Member = undefined;
     for (&members, 0..) |*member, index| member.* = &provisioned.members[index];
+    var replicas: [3]ReplicaEndpoint = undefined;
+    for (&replicas, members) |*replica, member| replica.* = member.asReplicaEndpoint();
     const header = try container.Header.init(std.testing.io, 1024 * 1024, "Pool");
-    var device = try PoolBlockDevice.init(std.testing.io, &members, provisioned.genesis.layout, header);
+    var device = try PoolBlockDevice.init(std.testing.io, &replicas, provisioned.genesis.layout, header);
     try std.testing.expect(try device.canInitializeVolume(std.testing.allocator));
     try provisioned.members[0].writeDurable(.data, 0, "existing");
     try std.testing.expect(!try device.canInitializeVolume(std.testing.allocator));
@@ -445,7 +448,7 @@ test "replicated reads require two matching members" {
     try device.read(0, 128, &offset_actual);
     try std.testing.expectEqualStrings("offset", &offset_actual);
     try std.testing.expectError(error.ReplicaDivergence, device.prepareWritableReplicas(std.testing.allocator));
-    var sync_device = try PoolBlockDevice.init(std.testing.io, &members, provisioned.genesis.layout, ready_header);
+    var sync_device = try PoolBlockDevice.init(std.testing.io, &replicas, provisioned.genesis.layout, ready_header);
     try std.testing.expectError(error.WriteFrozen, sync_device.sync());
     try std.testing.expect(sync_device.isWriteFrozen());
 }

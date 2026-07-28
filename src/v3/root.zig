@@ -21,6 +21,7 @@ pub const pool_authority = @import("pool_authority.zig");
 pub const pool_block_device = @import("pool_block_device.zig");
 pub const pool_genesis_payload = @import("pool_genesis_payload.zig");
 pub const pool_topology = @import("pool_topology.zig");
+pub const replica_endpoint = @import("replica_endpoint.zig");
 pub const replicated_journal = @import("replicated_journal.zig");
 pub const storage = @import("storage.zig");
 pub const topology = @import("topology.zig");
@@ -49,6 +50,7 @@ test {
     _ = pool_block_device;
     _ = pool_genesis_payload;
     _ = pool_topology;
+    _ = replica_endpoint;
     _ = replicated_journal;
     _ = storage;
     _ = topology;

@@ -8,6 +8,7 @@ const object_format = @import("object_format.zig");
 const object_store = @import("object_store.zig");
 const pool_block_device = @import("v3/pool_block_device.zig");
 const pool_member_set = @import("v3/pool_member_set.zig");
+const ReplicaEndpoint = @import("v3/replica_endpoint.zig").ReplicaEndpoint;
 const pool_provision = @import("v3/pool_provision.zig");
 pub const c = block_device.c;
 
@@ -86,9 +87,10 @@ pub const Volume = struct {
             return error.PoolWriteUnavailable;
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(set, &member_pointers);
+        var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
             io,
-            member_pointers[0..member_count],
+            makeReplicaEndpoints(member_pointers[0..member_count], &replica_endpoints),
             authority.layout,
         );
         if (!try reader.canInitializeVolume(std.heap.c_allocator)) return error.PoolVolumeNotEmpty;
@@ -110,9 +112,10 @@ pub const Volume = struct {
             header.prog_size = @max(header.prog_size, member.header().metadata_program_size);
         }
         try header.validate();
+        var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var device = try pool_block_device.PoolBlockDevice.init(
             io,
-            members,
+            makeReplicaEndpoints(members, &replica_endpoints),
             layout,
             header,
         );
@@ -141,9 +144,10 @@ pub const Volume = struct {
         const header = try inspectPoolHeader(io, &set);
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(&set, &member_pointers);
+        var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var verifier = try pool_block_device.PoolBlockDevice.init(
             io,
-            member_pointers[0..member_count],
+            makeReplicaEndpoints(member_pointers[0..member_count], &replica_endpoints),
             authority.layout,
             header,
         );
@@ -176,9 +180,10 @@ pub const Volume = struct {
         const authority = set.authority() orelse return error.MissingAuthority;
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(set, &member_pointers);
+        var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
             io,
-            member_pointers[0..member_count],
+            makeReplicaEndpoints(member_pointers[0..member_count], &replica_endpoints),
             authority.layout,
         );
         return reader.readHeader();
@@ -188,9 +193,10 @@ pub const Volume = struct {
         const authority = set.authority() orelse return error.MissingAuthority;
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(set, &member_pointers);
+        var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
             io,
-            member_pointers[0..member_count],
+            makeReplicaEndpoints(member_pointers[0..member_count], &replica_endpoints),
             authority.layout,
         );
         return reader.canInitializeVolume(std.heap.c_allocator);
@@ -241,9 +247,10 @@ pub const Volume = struct {
             const authority = self.pool_set.?.authority() orelse return error.MissingAuthority;
             var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
             const member_count = try collectPoolMembers(&self.pool_set.?, &member_pointers);
+            var replica_endpoints: [3]ReplicaEndpoint = undefined;
             self.pool_device = try pool_block_device.PoolBlockDevice.init(
                 self.io,
-                member_pointers[0..member_count],
+                makeReplicaEndpoints(member_pointers[0..member_count], &replica_endpoints),
                 authority.layout,
                 self.header,
             );
@@ -1173,6 +1180,14 @@ fn collectPoolMembers(
     }
     if (count != required_count) return error.UnsupportedPoolWidth;
     return count;
+}
+
+fn makeReplicaEndpoints(
+    members: []const *@import("v3/member.zig").Member,
+    output: *[3]ReplicaEndpoint,
+) []const ReplicaEndpoint {
+    for (members, 0..) |member, index| output[index] = member.asReplicaEndpoint();
+    return output[0..members.len];
 }
 
 const accounting_metadata_blocks: u64 = 32;
