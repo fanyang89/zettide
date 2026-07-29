@@ -95,18 +95,9 @@ pub fn isSnapshotRecord(record: control_record.Record) bool {
 }
 
 pub fn validateRecord(record: control_record.Record, expected: AuthorityContext) !Snapshot {
-    if (record.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
-    try control_record.validateDynamicPoolPolicy(record);
-    if (!std.mem.eql(u8, &record.history_digest, &(try control_record.historyDigest(record))))
-        return error.HistoryDigestMismatch;
-    if (codec.isZero(&record.transaction_id)) return error.InvalidCheckpointTransaction;
+    const snapshot = try validateCompactedRootRecord(record);
     try validateContext(expected);
-    if (record.payload.len != encoded_size) return error.InvalidCheckpointPayloadLength;
-    var bytes: [encoded_size]u8 = undefined;
-    @memcpy(&bytes, record.payload.slice());
-    const snapshot = try decode(&bytes);
-    if (!std.mem.eql(u8, &snapshot.previous_authority_history_digest, &expected.history_digest) or
-        !std.mem.eql(u8, &record.previous_history_digest, &expected.history_digest))
+    if (!std.mem.eql(u8, &snapshot.previous_authority_history_digest, &expected.history_digest))
         return error.PreviousAuthorityDigestMismatch;
     if (!std.meta.eql(snapshot.topology, expected.topology) or
         !std.meta.eql(snapshot.layout, expected.layout) or
@@ -114,6 +105,21 @@ pub fn validateRecord(record: control_record.Record, expected: AuthorityContext)
         snapshot.writer_term != expected.writer_term or snapshot.generation != expected.generation or
         snapshot.administrative_recovery != expected.administrative_recovery)
         return error.CheckpointAuthorityMismatch;
+    return snapshot;
+}
+
+pub fn validateCompactedRootRecord(record: control_record.Record) !Snapshot {
+    if (record.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
+    try control_record.validateDynamicPoolPolicy(record);
+    if (!std.mem.eql(u8, &record.history_digest, &(try control_record.historyDigest(record))))
+        return error.HistoryDigestMismatch;
+    if (codec.isZero(&record.transaction_id)) return error.InvalidCheckpointTransaction;
+    if (record.payload.len != encoded_size) return error.InvalidCheckpointPayloadLength;
+    var bytes: [encoded_size]u8 = undefined;
+    @memcpy(&bytes, record.payload.slice());
+    const snapshot = try decode(&bytes);
+    if (!std.mem.eql(u8, &snapshot.previous_authority_history_digest, &record.previous_history_digest))
+        return error.PreviousAuthorityDigestMismatch;
     if (!std.mem.eql(u8, &record.set_id, &snapshot.topology.set_id)) return error.CheckpointSetMismatch;
     if (record.membership_epoch != snapshot.topology.epoch) return error.MembershipEpochMismatch;
     if (!std.mem.eql(u8, &record.data_root_digest, &snapshot.data_root_digest) or

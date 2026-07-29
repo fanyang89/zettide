@@ -8,10 +8,17 @@ const membership = @import("membership.zig");
 const pool_genesis_payload = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_certificate = @import("pool_certificate.zig");
+const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
 const pool_topology = @import("pool_topology.zig");
 const topology_format = @import("topology.zig");
 
 pub const CheckpointStatus = enum { none, valid, stale, invalid };
+
+pub const AnchorState = struct {
+    record: control_record.Record,
+    raw_record_digest: codec.Digest,
+    physical_slot: u64,
+};
 
 pub const ScanResult = struct {
     tail: ?control_record.Record = null,
@@ -25,6 +32,9 @@ pub const ScanResult = struct {
     unresolved_tail_damage: bool = false,
     journal_full: bool = false,
     checkpoint_status: CheckpointStatus = .none,
+    active_anchor: ?AnchorState = null,
+    anchored: bool = false,
+    next_physical_slot: u64 = 0,
 };
 
 pub const AppendResult = struct {
@@ -102,6 +112,8 @@ pub const Journal = struct {
         }
         if (member.mode() == .writable and scan_state.unresolved_tail_damage)
             return error.JournalNeedsRecovery;
+        if (member.mode() == .writable and scan_state.anchored)
+            return error.RolloverWriteNotImplemented;
         return .{ .member = member, .scan_state = scan_state };
     }
 
@@ -364,6 +376,13 @@ pub fn scanHistory(allocator: std.mem.Allocator, member: *member_api.Member) !Hi
 }
 
 fn scanInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResult {
+    return scanLinearInto(member, history) catch |linear_error| {
+        if (history) |evidence| evidence.entry_count = 0;
+        return scanAnchoredInto(member, history) catch return linear_error;
+    };
+}
+
+fn scanLinearInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResult {
     const header = member.header();
     const slot_count = header.control.length / control_record.encoded_size;
     var result: ScanResult = .{ .slot_count = slot_count };
@@ -451,6 +470,15 @@ fn scanInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResult {
         {
             matched_hint = true;
             result.checkpoint_status = .valid;
+            if (pool_authority_checkpoint.isSnapshotRecord(record)) {
+                if (pool_authority_checkpoint.validateCompactedRootRecord(record)) |_| {
+                    result.active_anchor = .{
+                        .record = record,
+                        .raw_record_digest = raw_record_digest,
+                        .physical_slot = slot,
+                    };
+                } else |_| {}
+            }
         } else if (matched_hint) {
             result.checkpoint_status = .stale;
         }
@@ -458,7 +486,130 @@ fn scanInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResult {
 
     result.unresolved_tail_damage = pending_invalid_slots != 0;
     result.journal_full = result.physical_frontier == result.slot_count;
+    result.next_physical_slot = result.physical_frontier;
     return result;
+}
+
+fn scanAnchoredInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResult {
+    const header = member.header();
+    if (!member_format.isDynamicPool(header) or header.checkpoint_offset == 0)
+        return error.MissingAuthorityAnchor;
+    const slot_count = header.control.length / control_record.encoded_size;
+    const anchor_relative = header.checkpoint_offset - header.control.offset;
+    const anchor_slot = anchor_relative / control_record.encoded_size;
+    if (anchor_slot == 0 or anchor_slot >= slot_count) return error.InvalidAuthorityAnchor;
+
+    var birth_raw: [control_record.encoded_size]u8 = undefined;
+    try member.read(.control, 0, &birth_raw);
+    const birth = try control_record.decode(&birth_raw);
+    if (!std.mem.eql(u8, &birth.set_id, &header.set_id)) return error.ForeignSet;
+    if (!std.mem.eql(u8, &birth.member_id, &header.member_id)) return error.ForeignMember;
+    try validateFirstRecord(header, birth);
+
+    var anchor_raw: [control_record.encoded_size]u8 = undefined;
+    try member.read(.control, anchor_relative, &anchor_raw);
+    const anchor = try control_record.decode(&anchor_raw);
+    if (!std.mem.eql(u8, &anchor.set_id, &header.set_id)) return error.ForeignSet;
+    if (!std.mem.eql(u8, &anchor.member_id, &header.member_id)) return error.ForeignMember;
+    const anchor_digest = control_record.recordDigest(&anchor_raw);
+    if (anchor.local_sequence != header.checkpoint_record_sequence or
+        !std.mem.eql(u8, &anchor_digest, &header.checkpoint_record_digest))
+        return error.AuthorityAnchorHeaderMismatch;
+    if (!pool_authority_checkpoint.isSnapshotRecord(anchor)) return error.InvalidAuthorityAnchor;
+    _ = try pool_authority_checkpoint.validateCompactedRootRecord(anchor);
+    if (anchor.local_sequence <= birth.local_sequence) return error.InvalidAuthorityAnchor;
+    const next_birth_sequence = std.math.add(u64, birth.local_sequence, 1) catch
+        return error.InvalidAuthorityAnchor;
+    if (anchor.local_sequence == next_birth_sequence and
+        (!std.mem.eql(u8, &anchor.previous_record_digest, &control_record.recordDigest(&birth_raw)) or
+            !std.mem.eql(u8, &anchor.previous_history_digest, &birth.history_digest)))
+        return error.InvalidAuthorityAnchor;
+
+    var result: ScanResult = .{
+        .tail = anchor,
+        .tail_raw_record_digest = anchor_digest,
+        .tail_physical_slot = anchor_slot,
+        .physical_frontier = slot_count,
+        .slot_count = slot_count,
+        .checkpoint_status = .valid,
+        .active_anchor = .{
+            .record = anchor,
+            .raw_record_digest = anchor_digest,
+            .physical_slot = anchor_slot,
+        },
+        .anchored = true,
+        .next_physical_slot = nextRingSlot(anchor_slot, slot_count),
+    };
+    if (history) |evidence| {
+        appendHistoryEntry(evidence, birth, birth_raw, 0);
+        appendHistoryEntry(evidence, anchor, anchor_raw, anchor_slot);
+    }
+
+    var slot = nextRingSlot(anchor_slot, slot_count);
+    var pending_invalid_slots: u64 = 0;
+    while (slot != anchor_slot) : (slot = nextRingSlot(slot, slot_count)) {
+        if (slot == 0) continue;
+        const offset = std.math.mul(u64, slot, control_record.encoded_size) catch
+            return error.ControlOffsetOverflow;
+        var raw: [control_record.encoded_size]u8 = undefined;
+        try member.read(.control, offset, &raw);
+        if (codec.isZero(&raw)) {
+            result.zero_hole_count = try std.math.add(u64, result.zero_hole_count, 1);
+            continue;
+        }
+        const record = control_record.decode(&raw) catch {
+            result.invalid_slot_count = try std.math.add(u64, result.invalid_slot_count, 1);
+            pending_invalid_slots = try std.math.add(u64, pending_invalid_slots, 1);
+            continue;
+        };
+        if (record.local_sequence <= anchor.local_sequence) continue;
+        if (!std.mem.eql(u8, &record.set_id, &header.set_id)) return error.ForeignSet;
+        if (!std.mem.eql(u8, &record.member_id, &header.member_id)) return error.ForeignMember;
+        try validateRecordForHeader(header, record);
+        const tail = result.tail.?;
+        const expected_sequence = std.math.add(u64, tail.local_sequence, 1) catch
+            return error.RecordSequenceGap;
+        if (record.local_sequence != expected_sequence) return error.RecordSequenceGap;
+        if (!std.mem.eql(u8, &record.previous_record_digest, &result.tail_raw_record_digest))
+            return error.PreviousRecordDigestMismatch;
+        if (!std.mem.eql(u8, &record.previous_history_digest, &tail.history_digest))
+            return error.PreviousHistoryDigestMismatch;
+        result.interior_invalid_slot_count = try std.math.add(
+            u64,
+            result.interior_invalid_slot_count,
+            pending_invalid_slots,
+        );
+        pending_invalid_slots = 0;
+        const raw_digest = control_record.recordDigest(&raw);
+        result.tail = record;
+        result.tail_raw_record_digest = raw_digest;
+        result.tail_physical_slot = slot;
+        result.next_physical_slot = nextRingSlot(slot, slot_count);
+        if (history) |evidence| appendHistoryEntry(evidence, record, raw, slot);
+    }
+    result.unresolved_tail_damage = pending_invalid_slots != 0;
+    return result;
+}
+
+fn nextRingSlot(slot: u64, slot_count: u64) u64 {
+    const next = slot + 1;
+    return if (next == slot_count) 1 else next;
+}
+
+fn appendHistoryEntry(
+    history: *HistoryScan,
+    record: control_record.Record,
+    raw: [control_record.encoded_size]u8,
+    physical_slot: u64,
+) void {
+    std.debug.assert(history.entry_count < history.storage.len);
+    history.storage[history.entry_count] = .{
+        .record = record,
+        .raw_record = raw,
+        .raw_record_digest = control_record.recordDigest(&raw),
+        .physical_slot = physical_slot,
+    };
+    history.entry_count += 1;
 }
 
 pub fn validateGenerationCommitEvidence(
@@ -911,6 +1062,126 @@ test "dynamic scanner accepts shared bootstrap as a joining member first record"
     const result = try scan(&member);
     try std.testing.expectEqual(control_record.member_bootstrap_kind, result.tail.?.kind);
     try std.testing.expect(!codec.isZero(&result.tail.?.previous_history_digest));
+}
+
+test "anchored scanner retains birth and follows the live chain across physical wrap" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const first = try dynamicGenesisFirstRecord();
+    var header = first.header;
+    try createMemberWithHeader(tmp.dir, "anchored", header);
+    try writeSlot(tmp.dir, "anchored", header, 0, &first.bytes);
+    const genesis = try control_record.decode(&first.bytes);
+    const payload = try pool_genesis_payload.validateRecord(genesis);
+    const snapshot: pool_authority_checkpoint.Snapshot = .{
+        .previous_authority_history_digest = @splat(0x55),
+        .data_root_digest = @splat(0x66),
+        .writer_term = 3,
+        .generation = 7,
+        .topology = payload.topology,
+        .layout = payload.layout,
+    };
+    var anchor: control_record.Record = .{
+        .kind = control_record.checkpoint_kind,
+        .local_sequence = 5,
+        .membership_epoch = payload.topology.epoch,
+        .writer_term = snapshot.writer_term,
+        .generation = snapshot.generation,
+        .set_id = payload.topology.set_id,
+        .member_id = header.member_id,
+        .mount_session_id = @splat(0x33),
+        .transaction_id = @splat(0x44),
+        .previous_record_digest = control_record.recordDigest(&first.bytes),
+        .previous_history_digest = snapshot.previous_authority_history_digest,
+        .data_root_digest = snapshot.data_root_digest,
+        .topology_digest = try pool_topology.digest(payload.topology),
+        .layout_digest = try pool_layout.digest(payload.layout),
+        .payload = try pool_authority_checkpoint.makePayload(snapshot),
+    };
+    anchor.history_digest = try control_record.historyDigest(anchor);
+    const anchor_raw = try control_record.encodeDynamicPool(anchor);
+    try writeSlot(tmp.dir, "anchored", header, 3, &anchor_raw);
+    const successor = try nextRecord(anchor, &anchor_raw);
+    const successor_raw = try control_record.encodeDynamicPool(successor);
+    try writeSlot(tmp.dir, "anchored", header, 1, &successor_raw);
+    header.header_sequence = 2;
+    header.checkpoint_offset = header.control.offset + 3 * control_record.encoded_size;
+    header.checkpoint_record_sequence = anchor.local_sequence;
+    header.checkpoint_record_digest = control_record.recordDigest(&anchor_raw);
+    try writeHeaders(tmp.dir, "anchored", header);
+
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "anchored", .read_only);
+    var history = try scanHistory(std.testing.allocator, &member);
+    defer history.deinit();
+    try std.testing.expect(history.scan_result.anchored);
+    try std.testing.expectEqual(@as(?u64, 3), history.scan_result.active_anchor.?.physical_slot);
+    try std.testing.expectEqual(@as(?u64, 1), history.scan_result.tail_physical_slot);
+    try std.testing.expectEqual(@as(u64, 2), history.scan_result.next_physical_slot);
+    try std.testing.expectEqual(@as(usize, 3), history.entries().len);
+    try std.testing.expectEqual(control_record.genesis_kind, history.entries()[0].record.kind);
+    try std.testing.expectEqual(control_record.checkpoint_kind, history.entries()[1].record.kind);
+    try std.testing.expectEqual(successor.local_sequence, history.entries()[2].record.local_sequence);
+    try member.close();
+
+    member = try member_api.openAt(std.testing.io, tmp.dir, "anchored", .writable);
+    try std.testing.expectError(error.RolloverWriteNotImplemented, Journal.open(&member));
+    try member.close();
+
+    const torn: [control_record.encoded_size]u8 = @splat(0xaa);
+    try writeSlot(tmp.dir, "anchored", header, 2, &torn);
+    member = try member_api.openAt(std.testing.io, tmp.dir, "anchored", .read_only);
+    defer member.deinit();
+    var damaged = try scanHistory(std.testing.allocator, &member);
+    try std.testing.expect(damaged.scan_result.unresolved_tail_damage);
+    damaged.deinit();
+}
+
+test "anchored scanner rejects a direct checkpoint that does not extend birth" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const first = try dynamicGenesisFirstRecord();
+    var header = first.header;
+    try createMemberWithHeader(tmp.dir, "bad-anchor", header);
+    try writeSlot(tmp.dir, "bad-anchor", header, 0, &first.bytes);
+    const genesis = try control_record.decode(&first.bytes);
+    const payload = try pool_genesis_payload.validateRecord(genesis);
+    const snapshot: pool_authority_checkpoint.Snapshot = .{
+        .previous_authority_history_digest = @splat(0x55),
+        .data_root_digest = @splat(0x66),
+        .writer_term = 3,
+        .generation = 7,
+        .topology = payload.topology,
+        .layout = payload.layout,
+    };
+    var anchor: control_record.Record = .{
+        .kind = control_record.checkpoint_kind,
+        .local_sequence = genesis.local_sequence + 1,
+        .membership_epoch = payload.topology.epoch,
+        .writer_term = snapshot.writer_term,
+        .generation = snapshot.generation,
+        .set_id = payload.topology.set_id,
+        .member_id = header.member_id,
+        .mount_session_id = @splat(0x33),
+        .transaction_id = @splat(0x44),
+        .previous_record_digest = control_record.recordDigest(&first.bytes),
+        .previous_history_digest = snapshot.previous_authority_history_digest,
+        .data_root_digest = snapshot.data_root_digest,
+        .topology_digest = try pool_topology.digest(payload.topology),
+        .layout_digest = try pool_layout.digest(payload.layout),
+        .payload = try pool_authority_checkpoint.makePayload(snapshot),
+    };
+    anchor.history_digest = try control_record.historyDigest(anchor);
+    const raw = try control_record.encodeDynamicPool(anchor);
+    try writeSlot(tmp.dir, "bad-anchor", header, 3, &raw);
+    header.header_sequence = 2;
+    header.checkpoint_offset = header.control.offset + 3 * control_record.encoded_size;
+    header.checkpoint_record_sequence = anchor.local_sequence;
+    header.checkpoint_record_digest = control_record.recordDigest(&raw);
+    try writeHeaders(tmp.dir, "bad-anchor", header);
+
+    var member = try member_api.openAt(std.testing.io, tmp.dir, "bad-anchor", .read_only);
+    defer member.deinit();
+    try std.testing.expectError(error.PreviousHistoryDigestMismatch, scan(&member));
 }
 
 test "fixed scanner rejects dynamic bootstrap as a first record" {

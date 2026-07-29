@@ -376,7 +376,7 @@ pub const PoolMemberSet = struct {
             const tail = history.scan_result.tail orelse continue;
             if (intent != .writable or descriptor.control_role != pool_topology.voter_role or
                 member.mode() != .writable or member.isFrozen() or history.scan_result.unresolved_tail_damage or
-                history.scan_result.journal_full or
+                history.scan_result.journal_full or history.scan_result.anchored or
                 !std.mem.eql(u8, &tail.history_digest, &selected_authority.history_digest)) continue;
             ready.active_members[index] = true;
             ready.active_count += 1;

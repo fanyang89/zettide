@@ -38,12 +38,41 @@ pub const Authority = struct {
     }
 };
 
+const CompactedRoot = struct {
+    authority: Authority,
+    parent_history_digest: codec.Digest,
+};
+
 pub fn select(histories: []const *const journal.HistoryScan) !Authority {
     try validateUniqueHistories(histories);
-    var authority = selectGenesis(histories) catch |err| switch (err) {
-        error.NoGenesisQuorum => return selectRecoveryRoot(histories),
+    const compacted: ?CompactedRoot = selectCompactedRoot(histories) catch |err| switch (err) {
+        error.NoCompactedRootQuorum => null,
         else => return err,
     };
+    const genesis: ?Authority = selectGenesis(histories) catch |err| switch (err) {
+        error.NoGenesisQuorum => null,
+        else => return err,
+    };
+
+    if (compacted) |root| {
+        const selected = try advanceAuthority(histories, root.authority);
+        if (genesis) |genesis_root| {
+            const legacy = try advanceAuthority(histories, genesis_root);
+            try reconcileCompactedRoot(root, selected, legacy);
+        }
+        const recovery: ?Authority = selectRecoveryRoot(histories) catch |err| switch (err) {
+            error.NoGenesisQuorum => null,
+            else => return err,
+        };
+        if (recovery) |candidate| try reconcileCompactedRoot(root, selected, candidate);
+        return selected;
+    }
+    if (genesis) |root| return advanceAuthority(histories, root);
+    return selectRecoveryRoot(histories);
+}
+
+fn advanceAuthority(histories: []const *const journal.HistoryScan, root: Authority) !Authority {
+    var authority = root;
     while (true) {
         var next: ?Authority = null;
         for (histories) |history| {
@@ -62,8 +91,22 @@ pub fn select(histories: []const *const journal.HistoryScan) !Authority {
     }
 }
 
+fn reconcileCompactedRoot(root: CompactedRoot, selected: Authority, candidate: Authority) !void {
+    if (std.mem.eql(u8, &candidate.history_digest, &selected.history_digest) or
+        std.mem.eql(u8, &candidate.history_digest, &root.authority.history_digest) or
+        std.mem.eql(u8, &candidate.history_digest, &root.parent_history_digest)) return;
+    if (candidate.kind == .genesis and
+        std.mem.eql(u8, &candidate.topology.set_id, &root.authority.topology.set_id)) return;
+    return error.ConflictingAuthority;
+}
+
 pub fn selectAdministrativeRecovery(history: *const journal.HistoryScan) !Authority {
+    return selectLocalRecoveryAuthority(history, true);
+}
+
+fn selectLocalRecoveryAuthority(history: *const journal.HistoryScan, require_committed_tail: bool) !Authority {
     if (history.scan_result.unresolved_tail_damage) return error.JournalNeedsRecovery;
+    if (history.scan_result.anchored) return selectAnchoredAdministrativeRecovery(history, require_committed_tail);
     if (history.entries().len == 0) return error.MissingGenesis;
     const genesis = try verifiedWitness(history, &history.entries()[0]);
     if (genesis.kind != control_record.genesis_kind) return error.MissingGenesis;
@@ -80,21 +123,92 @@ pub fn selectAdministrativeRecovery(history: *const journal.HistoryScan) !Author
         .generation = genesis.generation,
         .witness_count = 1,
     };
-    for (history.entries()[1..]) |*entry| {
-        const record = try verifiedWitness(history, entry);
+    replay: for (history.entries()[1..]) |*entry| {
+        const record = verifiedWitness(history, entry) catch |err| {
+            if (require_committed_tail) return err;
+            break :replay;
+        };
         switch (record.kind) {
-            control_record.generation_commit_kind => authority = try replayLocalGeneration(history, authority, record),
-            control_record.membership_commit_kind => authority = try replayLocalMembership(history, authority, record),
-            control_record.member_bootstrap_kind => authority = try replayLocalBootstrap(authority, record),
+            control_record.generation_commit_kind => authority = replayLocalGeneration(history, authority, record) catch |err| {
+                if (require_committed_tail) return err;
+                break :replay;
+            },
+            control_record.membership_commit_kind => authority = replayLocalMembership(history, authority, record) catch |err| {
+                if (require_committed_tail) return err;
+                break :replay;
+            },
+            control_record.member_bootstrap_kind => authority = replayLocalBootstrap(authority, record) catch |err| {
+                if (require_committed_tail) return err;
+                break :replay;
+            },
             control_record.checkpoint_kind => if (pool_authority_checkpoint.isSnapshotRecord(record)) {
-                authority = try replayLocalCheckpoint(authority, record);
+                authority = replayLocalCheckpoint(authority, record) catch |err| {
+                    if (require_committed_tail) return err;
+                    break :replay;
+                };
             },
             else => {},
         }
     }
-    const tail = history.scan_result.tail orelse return error.MissingGenesis;
-    if (!std.mem.eql(u8, &tail.history_digest, &authority.history_digest))
-        return error.RecoveryTailIsNotCommitted;
+    if (require_committed_tail) {
+        const tail = history.scan_result.tail orelse return error.MissingGenesis;
+        if (!std.mem.eql(u8, &tail.history_digest, &authority.history_digest))
+            return error.RecoveryTailIsNotCommitted;
+    }
+    if (!isVoter(authority.topology, history.member_id)) return error.TrustedMemberIsNotCurrentVoter;
+    return authority;
+}
+
+fn selectAnchoredAdministrativeRecovery(
+    history: *const journal.HistoryScan,
+    require_committed_tail: bool,
+) !Authority {
+    const anchor_state = history.scan_result.active_anchor orelse return error.MissingAuthorityAnchor;
+    const anchor_entry = history.findRawRecordDigest(anchor_state.raw_record_digest) orelse
+        return error.MissingAuthorityAnchor;
+    if (anchor_entry.physical_slot != anchor_state.physical_slot) return error.MissingAuthorityAnchor;
+    const record = try verifiedWitness(history, anchor_entry);
+    const snapshot = try pool_authority_checkpoint.validateCompactedRootRecord(record);
+    if (!isVoter(snapshot.topology, history.member_id)) return error.TrustedMemberIsNotVoter;
+    var authority = authorityFromSnapshot(record, snapshot, 1);
+    var after_anchor = false;
+    replay: for (history.entries()) |*entry| {
+        if (entry == anchor_entry) {
+            after_anchor = true;
+            continue;
+        }
+        if (!after_anchor) continue;
+        const next = verifiedWitness(history, entry) catch |err| {
+            if (require_committed_tail) return err;
+            break :replay;
+        };
+        switch (next.kind) {
+            control_record.generation_commit_kind => authority = replayLocalGeneration(history, authority, next) catch |err| {
+                if (require_committed_tail) return err;
+                break :replay;
+            },
+            control_record.membership_commit_kind => authority = replayLocalMembership(history, authority, next) catch |err| {
+                if (require_committed_tail) return err;
+                break :replay;
+            },
+            control_record.member_bootstrap_kind => authority = replayLocalBootstrap(authority, next) catch |err| {
+                if (require_committed_tail) return err;
+                break :replay;
+            },
+            control_record.checkpoint_kind => if (pool_authority_checkpoint.isSnapshotRecord(next)) {
+                authority = replayLocalCheckpoint(authority, next) catch |err| {
+                    if (require_committed_tail) return err;
+                    break :replay;
+                };
+            },
+            else => {},
+        }
+    }
+    if (require_committed_tail) {
+        const tail = history.scan_result.tail orelse return error.MissingAuthorityAnchor;
+        if (!std.mem.eql(u8, &tail.history_digest, &authority.history_digest))
+            return error.RecoveryTailIsNotCommitted;
+    }
     if (!isVoter(authority.topology, history.member_id)) return error.TrustedMemberIsNotCurrentVoter;
     return authority;
 }
@@ -102,8 +216,9 @@ pub fn selectAdministrativeRecovery(history: *const journal.HistoryScan) !Author
 fn selectRecoveryRoot(histories: []const *const journal.HistoryScan) !Authority {
     var selected: ?Authority = null;
     for (histories) |history| {
-        const candidate = selectAdministrativeRecovery(history) catch continue;
+        var candidate = selectLocalRecoveryAuthority(history, false) catch continue;
         if (!candidate.administrative_recovery) continue;
+        candidate = try advanceAuthority(histories, candidate);
         const witnesses = try countVoterWitnesses(
             histories,
             candidate.history_digest,
@@ -287,6 +402,69 @@ fn selectGenesis(histories: []const *const journal.HistoryScan) !Authority {
         }
     }
     return selected orelse error.NoGenesisQuorum;
+}
+
+fn selectCompactedRoot(histories: []const *const journal.HistoryScan) !CompactedRoot {
+    var selected: ?CompactedRoot = null;
+    for (histories) |history| {
+        const anchor_state = history.scan_result.active_anchor orelse continue;
+        const anchor_entry = history.findRawRecordDigest(anchor_state.raw_record_digest) orelse continue;
+        if (anchor_entry.physical_slot != anchor_state.physical_slot) continue;
+        const record = try verifiedWitness(history, anchor_entry);
+        const snapshot = try pool_authority_checkpoint.validateCompactedRootRecord(record);
+        const witnesses = try countAnchorWitnesses(histories, record.history_digest, snapshot.topology);
+        if (witnesses < snapshot.topology.quorum) continue;
+        const candidate: CompactedRoot = .{
+            .authority = authorityFromSnapshot(record, snapshot, witnesses),
+            .parent_history_digest = snapshot.previous_authority_history_digest,
+        };
+        if (selected) |current| {
+            if (!std.mem.eql(u8, &current.authority.history_digest, &candidate.authority.history_digest))
+                return error.ConflictingCompactedAuthority;
+        } else {
+            selected = candidate;
+        }
+    }
+    return selected orelse error.NoCompactedRootQuorum;
+}
+
+fn countAnchorWitnesses(
+    histories: []const *const journal.HistoryScan,
+    history_digest: codec.Digest,
+    topology: pool_topology.Topology,
+) !u16 {
+    var count: u16 = 0;
+    for (histories) |history| {
+        const member = pool_topology.findMember(&topology, history.member_id) orelse continue;
+        if (member.control_role != pool_topology.voter_role) continue;
+        const anchor_state = history.scan_result.active_anchor orelse continue;
+        if (!std.mem.eql(u8, &anchor_state.record.history_digest, &history_digest)) continue;
+        const entry = history.findRawRecordDigest(anchor_state.raw_record_digest) orelse continue;
+        if (entry.physical_slot != anchor_state.physical_slot) continue;
+        const record = try verifiedWitness(history, entry);
+        _ = try pool_authority_checkpoint.validateCompactedRootRecord(record);
+        count = std.math.add(u16, count, 1) catch unreachable;
+    }
+    return count;
+}
+
+fn authorityFromSnapshot(
+    record: control_record.Record,
+    snapshot: pool_authority_checkpoint.Snapshot,
+    witnesses: u16,
+) Authority {
+    return .{
+        .kind = .checkpoint,
+        .history_digest = record.history_digest,
+        .data_root_digest = snapshot.data_root_digest,
+        .topology = snapshot.topology,
+        .layout = snapshot.layout,
+        .membership_epoch = snapshot.topology.epoch,
+        .writer_term = snapshot.writer_term,
+        .generation = snapshot.generation,
+        .witness_count = witnesses,
+        .administrative_recovery = snapshot.administrative_recovery,
+    };
 }
 
 fn validateCandidate(
@@ -689,6 +867,15 @@ test "quorum authority checkpoint advances authority and local hints do not" {
     try std.testing.expectEqual(Kind.checkpoint, selected.kind);
     try std.testing.expectEqualSlices(u8, &checkpoint.history_digest, &selected.history_digest);
 
+    history.scan_result.active_anchor = .{
+        .record = checkpoint,
+        .raw_record_digest = control_record.recordDigest(&checkpoint_raw),
+        .physical_slot = 1,
+    };
+    const compacted_selected = try select(&histories);
+    try std.testing.expectEqualSlices(u8, &checkpoint.history_digest, &compacted_selected.history_digest);
+    history.scan_result.active_anchor = null;
+
     var hint = checkpoint;
     hint.payload = try control_record.Payload.init("local scan hint");
     hint.history_digest = try control_record.historyDigest(hint);
@@ -790,4 +977,80 @@ test "authority checkpoint requires current voter quorum before validation" {
     history1 = makeHistoryFor(id(3), &entries1_with_checkpoint);
     histories = .{ &history0, &history1, &history2 };
     try std.testing.expectError(error.ChecksumMismatch, select(&histories));
+}
+
+test "compacted checkpoint quorum is a self-contained authority root" {
+    const topology = try testTopology();
+    const layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024);
+    const snapshot: pool_authority_checkpoint.Snapshot = .{
+        .previous_authority_history_digest = @splat(0x44),
+        .data_root_digest = @splat(0x55),
+        .writer_term = 3,
+        .generation = 7,
+        .topology = topology,
+        .layout = layout,
+        .administrative_recovery = true,
+    };
+    var checkpoint: control_record.Record = .{
+        .kind = control_record.checkpoint_kind,
+        .local_sequence = 9,
+        .membership_epoch = topology.epoch,
+        .writer_term = snapshot.writer_term,
+        .generation = snapshot.generation,
+        .set_id = topology.set_id,
+        .member_id = id(2),
+        .mount_session_id = id(3),
+        .transaction_id = id(4),
+        .previous_record_digest = @splat(0x33),
+        .previous_history_digest = snapshot.previous_authority_history_digest,
+        .data_root_digest = snapshot.data_root_digest,
+        .topology_digest = try pool_topology.digest(topology),
+        .layout_digest = try pool_layout.digest(layout),
+        .payload = try pool_authority_checkpoint.makePayload(snapshot),
+    };
+    checkpoint.history_digest = try control_record.historyDigest(checkpoint);
+    const raw = try control_record.encodeDynamicPool(checkpoint);
+    var entries = [_]journal.HistoryEntry{makeEntry(checkpoint, raw, 3)};
+    var history = makeHistory(&entries);
+    history.scan_result.active_anchor = .{
+        .record = checkpoint,
+        .raw_record_digest = control_record.recordDigest(&raw),
+        .physical_slot = 3,
+    };
+    history.scan_result.anchored = true;
+    const histories = [_]*const journal.HistoryScan{&history};
+    const selected = try select(&histories);
+    try std.testing.expectEqual(Kind.checkpoint, selected.kind);
+    try std.testing.expectEqual(snapshot.generation, selected.generation);
+    try std.testing.expectEqual(snapshot.writer_term, selected.writer_term);
+    try std.testing.expect(selected.administrative_recovery);
+    try std.testing.expectEqualSlices(u8, &snapshot.data_root_digest, &selected.data_root_digest);
+}
+
+test "compacted root rejects an unrelated committed authority" {
+    const topology = try testTopology();
+    const layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024);
+    const root_authority: Authority = .{
+        .kind = .checkpoint,
+        .history_digest = @splat(0x22),
+        .data_root_digest = @splat(0x33),
+        .topology = topology,
+        .layout = layout,
+        .membership_epoch = topology.epoch,
+        .writer_term = 3,
+        .generation = 7,
+        .witness_count = 1,
+    };
+    const root: CompactedRoot = .{
+        .authority = root_authority,
+        .parent_history_digest = @splat(0x11),
+    };
+    var divergent = root_authority;
+    divergent.kind = .membership_commit;
+    divergent.history_digest = @splat(0x44);
+    divergent.administrative_recovery = true;
+    try std.testing.expectError(error.ConflictingAuthority, reconcileCompactedRoot(root, root_authority, divergent));
+
+    divergent.history_digest = root.parent_history_digest;
+    try reconcileCompactedRoot(root, root_authority, divergent);
 }
