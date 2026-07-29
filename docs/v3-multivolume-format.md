@@ -158,9 +158,9 @@ entry is unavailable space removed from an older authoritative mapping. Its reti
 exactly the first catalog generation whose root omits that mapping; it is nonzero and no newer than
 its containing page's creation generation. A publication transition must derive newly retired ranges
 from the previous authoritative mappings and assign the new root generation. It must preserve the
-generation of ranges already retired instead of trusting caller-supplied values. Reclamation moves an
-interval to the free-space index only when the oldest recoverable root generation is at least the
-interval's retirement generation.
+generation of ranges already retired instead of trusting caller-supplied values. A transition from
+authoritative generation N to N+1 may reclaim an interval only when its retirement generation is no
+greater than N.
 
 Entries are ordered by member slot and then physical start. Ranges on one member do not overlap. Free
 ranges are maximally merged. Adjacent retired ranges are maximally merged only when their retirement
@@ -183,8 +183,8 @@ bytes.
 State 1 is free and requires a zero retirement generation. State 2 is retired and requires a nonzero
 retirement generation no newer than the page creation generation. As with physical retirement, newly
 retired pages receive the first root generation that no longer references them and preserve that value
-across later COW allocator pages. They become free only when the oldest recoverable root generation is
-at least their retirement generation.
+across later COW allocator pages. A transition from authoritative generation N to N+1 may make them
+free only when their retirement generation is no greater than N.
 
 Page ordinals 0 and 1 are the mirrored catalog roots and never appear in this index. Entries have a
 nonzero count, are ordered by page start, and do not overlap. Adjacent entries are maximally merged
@@ -318,10 +318,10 @@ requires all of the following:
 6. Current pages plus free and retired metadata intervals account for every metadata page after the
    two mirrored roots.
 
-Graph validation also receives every older recoverable page reference. A current page may share an
-offset with an older root only when the digest is identical. Free metadata cannot overlap any of
-those references. Omitting recoverable roots from this input is unsafe; the publisher must derive the
-set from retained authority/root evidence.
+Standalone graph validation accepts no external recoverability witness. During a transition, the
+validator internally treats every page in the previous authority-bound graph as protected. A current
+page may share an offset with that graph only when the digest is identical, and free metadata cannot
+overlap those pages. This input cannot be supplied or omitted by the caller.
 
 Member geometry binds both member ID and slot. Reusing a numeric slot for a different device never
 inherits allocator state from the old device.
@@ -343,10 +343,22 @@ A catalog generation transition is valid only when:
    mappings, publish a generation that removes the member's free allocator ranges while it remains in
    topology, then commit membership removal without changing the root.
 
-The current transition validator intentionally rejects every physical or metadata
-`retired -> free/mapped` transition. Reclaim remains disabled until the publisher can supply an
-authority-backed witness proving that no recoverable root predates the interval's retirement
-generation. A caller-supplied generation number is not sufficient evidence.
+The transition validator permits physical or metadata `retired -> free`, and can validate
+`retired -> mapped/used`, only when the preserved retirement generation is no greater than the
+previous authority-bound root generation. The previous binding is validated against selected control
+authority, its digest must be the new root's `previous_root_digest`, and generation must advance by
+exactly one. This is the reclaim barrier; the public commit API accepts neither a caller-supplied
+generation nor a caller-supplied page list. The integrated publisher still rejects new physical data
+mappings until it receives a trusted data-durability witness.
+
+Known normal control commit establishes the new authority and makes earlier generations unreachable
+to normal data access. An unknown outcome freezes the coordinator, performs no root repair, and
+permits no later transition.
+Reopen must first select one control authority before reclaim can be attempted again. A stale A/B root
+copy that does not match selected control authority is not by itself recoverable authority.
+Administrative recovery may select an older local authority from one trusted member, but nonzero
+catalog authority remains permanently recovery-only and data-unavailable in that mode; it cannot
+publish a catalog transition or expose reclaimed data.
 
 ## Durable Staging
 

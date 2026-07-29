@@ -542,7 +542,6 @@ pub const PoolMemberSet = struct {
                 member,
                 selected,
                 geometry,
-                &.{},
                 &scratch,
             ) catch |err| {
                 self.invalidateCatalogVoter(set_index, err);

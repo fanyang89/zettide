@@ -89,7 +89,15 @@ pub fn validateGraph(
     binding: AuthorityBinding,
     graph: Graph,
     members: []const MemberGeometry,
-    recoverable_pages: []const pool_catalog.PageReference,
+) !ValidatedCatalog {
+    return validateGraphWithProtectedPages(binding, graph, members, &.{});
+}
+
+fn validateGraphWithProtectedPages(
+    binding: AuthorityBinding,
+    graph: Graph,
+    members: []const MemberGeometry,
+    protected_pages: []const pool_catalog.PageReference,
 ) !ValidatedCatalog {
     try validateInputs(binding, graph, members);
     const root = try pool_catalog.decodeRoot(graph.root_bytes);
@@ -185,7 +193,7 @@ pub fn validateGraph(
     try pool_catalog_page.validateMetadataIntervalsForMembers(
         result.metadataSlice(),
         result.currentPageSlice(),
-        recoverable_pages,
+        protected_pages,
         metadata_lengths[0..members.len],
     );
     try validateMetadataCoverage(&result);
@@ -289,20 +297,6 @@ fn validateMetadataCoverage(catalog: *const ValidatedCatalog) !void {
     if (accounted != catalog.metadata_page_count - 2) return error.IncompleteMetadataAllocator;
 }
 
-fn validateRecoverableMetadata(
-    catalog: *const ValidatedCatalog,
-    recoverable_pages: []const pool_catalog.PageReference,
-) !void {
-    var metadata_lengths: [pool_topology.max_member_count]u64 = undefined;
-    for (catalog.memberSlice(), 0..) |member, index| metadata_lengths[index] = member.metadata_length;
-    try pool_catalog_page.validateMetadataIntervalsForMembers(
-        catalog.metadataSlice(),
-        catalog.currentPageSlice(),
-        recoverable_pages,
-        metadata_lengths[0..catalog.member_count],
-    );
-}
-
 pub fn validateTransition(
     previous_binding: AuthorityBinding,
     previous_graph: Graph,
@@ -310,15 +304,9 @@ pub fn validateTransition(
     current_binding: AuthorityBinding,
     current_graph: Graph,
     current_members: []const MemberGeometry,
-    older_recoverable_pages: []const pool_catalog.PageReference,
 ) !ValidatedCatalog {
-    const previous = try validateGraph(
-        previous_binding,
-        previous_graph,
-        previous_members,
-        older_recoverable_pages,
-    );
-    const current = try validateGraph(
+    const previous = try validateGraph(previous_binding, previous_graph, previous_members);
+    const current = try validateGraphWithProtectedPages(
         current_binding,
         current_graph,
         current_members,
@@ -328,7 +316,6 @@ pub fn validateTransition(
         return error.TopologyChangedDuringCatalogGeneration;
     if (!std.mem.eql(u8, &(try pool_layout.digest(previous_binding.layout)), &(try pool_layout.digest(current_binding.layout))))
         return error.LayoutChangedDuringCatalogGeneration;
-    try validateRecoverableMetadata(&current, older_recoverable_pages);
     try validateSnapshots(&previous, &current);
     return current;
 }
@@ -412,6 +399,7 @@ fn validatePhysicalSlotTransition(
             after,
             previous_has_state,
             current.root.generation,
+            if (previous) |catalog| catalog.root.generation else null,
         );
         cursor = next;
     }
@@ -422,6 +410,7 @@ fn validatePhysicalStateChange(
     after: PhysicalState,
     previous_has_state: bool,
     current_generation: u64,
+    reclaim_barrier_generation: ?u64,
 ) !void {
     switch (before) {
         .absent => switch (after) {
@@ -446,7 +435,9 @@ fn validatePhysicalStateChange(
         .retired => |retired_generation| switch (after) {
             .retired => |generation| if (generation != retired_generation)
                 return error.ChangedRetirementGeneration,
-            .free, .mapped => return error.PhysicalExtentReclaimRequiresAuthorityBarrier,
+            .free, .mapped => if (reclaim_barrier_generation == null or
+                retired_generation > reclaim_barrier_generation.?)
+                return error.PhysicalExtentReclaimRequiresAuthorityBarrier,
             .absent => return error.InvalidPhysicalAllocationTransition,
         },
     }
@@ -562,7 +553,8 @@ fn validateMetadataTransition(
             .retired => |retired_generation| switch (after) {
                 .retired => |generation| if (generation != retired_generation)
                     return error.ChangedRetirementGeneration,
-                .free, .used => return error.MetadataPageReclaimRequiresAuthorityBarrier,
+                .free, .used => if (retired_generation > previous.root.generation)
+                    return error.MetadataPageReclaimRequiresAuthorityBarrier,
                 .absent => return error.InvalidMetadataAllocationTransition,
             },
         }
@@ -695,7 +687,7 @@ test "catalog graph resolves authority-bound pages" {
         .data_root_digest = try pool_catalog.rootDigest(root),
         .topology = topology,
         .layout = layout,
-    }, .{ .root_bytes = &root_bytes, .pages = &images }, &geometry, &.{});
+    }, .{ .root_bytes = &root_bytes, .pages = &images }, &geometry);
     try std.testing.expectEqual(@as(u16, 1), catalog.free_count);
     try std.testing.expectEqual(@as(u16, 1), catalog.metadata_count);
     try std.testing.expectEqual(@as(u16, 2), catalog.current_page_count);
@@ -715,7 +707,7 @@ test "catalog graph resolves authority-bound pages" {
         .data_root_digest = try pool_catalog.rootDigest(root),
         .topology = joining_topology,
         .layout = layout,
-    }, .{ .root_bytes = &root_bytes, .pages = &images }, &geometry, &.{});
+    }, .{ .root_bytes = &root_bytes, .pages = &images }, &geometry);
 
     var future_physical_bytes = try pool_catalog_page.encodePhysicalIntervals(.physical_allocator, 2, catalog.freeSlice());
     var future_images = images;
@@ -728,7 +720,7 @@ test "catalog graph resolves authority-bound pages" {
         .data_root_digest = try pool_catalog.rootDigest(future_root),
         .topology = topology,
         .layout = layout,
-    }, .{ .root_bytes = &future_root_bytes, .pages = &future_images }, &geometry, &.{}));
+    }, .{ .root_bytes = &future_root_bytes, .pages = &future_images }, &geometry));
 }
 
 test "nonempty catalog graph binds volume header and extent owner" {
@@ -817,7 +809,7 @@ test "nonempty catalog graph binds volume header and extent owner" {
         .data_root_digest = try pool_catalog.rootDigest(root),
         .topology = topology,
         .layout = layout,
-    }, .{ .root_bytes = &root_bytes, .pages = &images }, &geometry, &.{});
+    }, .{ .root_bytes = &root_bytes, .pages = &images }, &geometry);
     try std.testing.expectEqual(@as(u32, 1), catalog.root.volume_count);
     try std.testing.expectEqual(@as(u16, 1), catalog.extent_counts[0]);
 }
@@ -895,9 +887,44 @@ test "public transition validates COW metadata quarantine" {
         current_binding,
         .{ .root_bytes = &current_root_bytes, .pages = &current_images },
         &geometry,
-        &.{},
     );
     try std.testing.expectEqual(@as(u64, 2), catalog.root.generation);
+
+    const reclaimed_metadata_bytes = try pool_catalog_page.encodeMetadataAllocator(3, &.{
+        .{ .page_start = 3, .page_count = 1 },
+        .{ .page_start = 4, .page_count = 1, .state = .retired, .retired_generation = 3 },
+        .{ .page_start = 6, .page_count = 4 },
+    });
+    const reclaimed_metadata_reference = try pool_catalog_page.pageReference(5 * pool_catalog.page_size, &reclaimed_metadata_bytes);
+    const reclaimed_root: pool_catalog.Root = .{
+        .set_id = topology.set_id,
+        .generation = 3,
+        .sequence = 3,
+        .previous_root_digest = try pool_catalog.rootDigest(current_root),
+        .allocator_root = physical_reference,
+        .metadata_allocator_root = reclaimed_metadata_reference,
+        .extent_size = layout.chunk_size,
+    };
+    const reclaimed_root_bytes = try pool_catalog.encodeRoot(reclaimed_root);
+    const reclaimed_images = [_]PageImage{
+        .{ .offset = physical_reference.offset, .bytes = &physical_bytes },
+        .{ .offset = reclaimed_metadata_reference.offset, .bytes = &reclaimed_metadata_bytes },
+    };
+    const reclaimed = try validateTransition(
+        current_binding,
+        .{ .root_bytes = &current_root_bytes, .pages = &current_images },
+        &geometry,
+        .{
+            .generation = 3,
+            .data_root_digest = try pool_catalog.rootDigest(reclaimed_root),
+            .topology = topology,
+            .layout = layout,
+        },
+        .{ .root_bytes = &reclaimed_root_bytes, .pages = &reclaimed_images },
+        &geometry,
+    );
+    try std.testing.expectEqual(pool_catalog_page.MetadataIntervalState.free, reclaimed.metadata[0].state);
+    try std.testing.expectEqual(@as(u64, 3), reclaimed.metadata[1].retired_generation);
 }
 
 fn testTransitionRoot(generation: u64, previous_digest: codec.Digest) pool_catalog.Root {
@@ -993,9 +1020,23 @@ test "catalog transition quarantines removed physical and metadata pages" {
     reclaimed.root = reclaimed_root;
     reclaimed.free[0] = .{ .member_slot = 1, .physical_start = 0, .extent_count = 4 };
     reclaimed.retired_count = 0;
+    reclaimed.current_pages[2] = .{ .offset = 6 * pool_catalog.page_size, .digest = @splat(7) };
+    reclaimed.metadata_count = 3;
+    reclaimed.metadata[0] = .{ .page_start = 4, .page_count = 1 };
+    reclaimed.metadata[1] = .{
+        .page_start = 5,
+        .page_count = 1,
+        .state = .retired,
+        .retired_generation = 3,
+    };
+    reclaimed.metadata[2] = .{ .page_start = 7, .page_count = 1 };
+    try validateSnapshots(&current, &reclaimed);
+
+    var premature = current;
+    premature.retired[0].retired_generation = 3;
     try std.testing.expectError(
         error.PhysicalExtentReclaimRequiresAuthorityBarrier,
-        validateSnapshots(&current, &reclaimed),
+        validateSnapshots(&premature, &reclaimed),
     );
 }
 

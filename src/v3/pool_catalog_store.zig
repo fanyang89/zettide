@@ -79,7 +79,6 @@ pub fn loadAuthorityCatalog(
     member: *member_api.Member,
     authority: pool_authority.Authority,
     geometry: []const pool_catalog_graph.MemberGeometry,
-    recoverable_pages: []const pool_catalog.PageReference,
     scratch: *LoadScratch,
 ) !LoadedCatalog {
     scratch.image_count = 0;
@@ -115,7 +114,7 @@ pub fn loadAuthorityCatalog(
             .data_root_digest = authority.data_root_digest,
             .topology = authority.topology,
             .layout = authority.layout,
-        }, graph, geometry, recoverable_pages),
+        }, graph, geometry),
     };
 }
 
@@ -136,7 +135,7 @@ pub fn installAuthorityCatalog(
         .data_root_digest = authority.data_root_digest,
         .topology = authority.topology,
         .layout = authority.layout,
-    }, source.graph(), geometry, &.{});
+    }, source.graph(), geometry);
 
     const copies = readRootCopies(target);
     const write_a = try installRootNeedsWrite(copies.a, &source.root_bytes);
@@ -157,7 +156,7 @@ pub fn installAuthorityCatalog(
     if (write_a) try target.writeRootDurable(rootOffset(.a), &source.root_bytes);
     if (write_b) try target.writeRootDurable(rootOffset(.b), &source.root_bytes);
 
-    const loaded = try loadAuthorityCatalog(target.member, authority, geometry, &.{}, verify_scratch);
+    const loaded = try loadAuthorityCatalog(target.member, authority, geometry, verify_scratch);
     if (loaded.selection.mirror_degraded) return error.CatalogInstallIncomplete;
 }
 
@@ -485,7 +484,7 @@ test "catalog store stages pages before root and preserves authority mirror" {
         .root_bytes = &previous_root_bytes,
         .pages = &previous_images,
     };
-    const previous = try pool_catalog_graph.validateGraph(previous_binding, previous_graph, &geometry, &.{});
+    const previous = try pool_catalog_graph.validateGraph(previous_binding, previous_graph, &geometry);
     const genesis_authority = testAuthority(topology, layout, 0, @splat(0));
     var partial_root: [pool_catalog.root_encoded_size]u8 = @splat(0);
     @memcpy(partial_root[0 .. partial_root.len / 2], previous_root_bytes[0 .. previous_root_bytes.len / 2]);
@@ -501,7 +500,7 @@ test "catalog store stages pages before root and preserves authority mirror" {
     try std.testing.expect(candidateMatches(redundant.a, previous_authority));
     try std.testing.expect(candidateMatches(redundant.b, previous_authority));
     var load_scratch: LoadScratch = .{};
-    const loaded_previous = try loadAuthorityCatalog(&member, previous_authority, &geometry, &.{}, &load_scratch);
+    const loaded_previous = try loadAuthorityCatalog(&member, previous_authority, &geometry, &load_scratch);
     try std.testing.expectEqual(@as(u64, 1), loaded_previous.validated.root.generation);
     try std.testing.expectEqual(@as(usize, 2), load_scratch.image_count);
     try std.testing.expect(!loaded_previous.selection.mirror_degraded);
@@ -539,7 +538,6 @@ test "catalog store stages pages before root and preserves authority mirror" {
         next_binding,
         next_graph,
         &geometry,
-        &.{},
     );
     try std.testing.expectEqual(
         RootSlot.a,
@@ -549,7 +547,7 @@ test "catalog store stages pages before root and preserves authority mirror" {
     const next_authority = testAuthority(topology, layout, 2, next_binding.data_root_digest);
     try std.testing.expect(candidateMatches(staged.a, next_authority));
     try std.testing.expect(candidateMatches(staged.b, previous_authority));
-    const loaded_next = try loadAuthorityCatalog(&member, next_authority, &geometry, &.{}, &load_scratch);
+    const loaded_next = try loadAuthorityCatalog(&member, next_authority, &geometry, &load_scratch);
     try std.testing.expectEqual(@as(u64, 2), loaded_next.validated.root.generation);
     try std.testing.expect(loaded_next.selection.mirror_degraded);
 
@@ -571,7 +569,7 @@ test "catalog store stages pages before root and preserves authority mirror" {
     var retry_claim = try reopened_target.claimCatalog();
     defer retry_claim.release() catch unreachable;
     try installAuthorityCatalog(&retry_claim, next_authority, &geometry, &load_scratch, &verify_scratch);
-    const installed = try loadAuthorityCatalog(&reopened_target, next_authority, &geometry, &.{}, &verify_scratch);
+    const installed = try loadAuthorityCatalog(&reopened_target, next_authority, &geometry, &verify_scratch);
     try std.testing.expect(!installed.selection.mirror_degraded);
 
     var repair_fault: member_api.FaultController = .{ .fail_write_at = 0 };

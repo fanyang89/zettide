@@ -28,7 +28,6 @@ pub const CatalogGenerationRequest = struct {
     prepare_proposal: control_record.Record,
     previous_graph: ?pool_catalog_graph.Graph,
     current_graph: pool_catalog_graph.Graph,
-    older_recoverable_pages: []const pool_catalog.PageReference = &.{},
 };
 
 pub const CatalogCommitResult = struct {
@@ -275,7 +274,6 @@ pub const ReplicatedJournal = struct {
                 current_binding,
                 request.current_graph,
                 geometry,
-                request.older_recoverable_pages,
             );
         } else current: {
             const previous_graph = request.previous_graph orelse return error.MissingPreviousCatalog;
@@ -289,7 +287,6 @@ pub const ReplicatedJournal = struct {
                 previous_binding,
                 previous_graph,
                 geometry,
-                request.older_recoverable_pages,
             );
             break :current try pool_catalog_graph.validateTransition(
                 previous_binding,
@@ -298,7 +295,6 @@ pub const ReplicatedJournal = struct {
                 current_binding,
                 request.current_graph,
                 geometry,
-                request.older_recoverable_pages,
             );
         };
         try pool_catalog_graph.validateNoNewDataMappings(if (previous) |*value| value else null, &current);
@@ -423,7 +419,6 @@ pub const ReplicatedJournal = struct {
             source.member,
             authority,
             geometry,
-            &.{},
             &source_scratch,
         ) catch |err| {
             self.set.noteCatalogFailure(source.set_index, err);
@@ -1218,7 +1213,6 @@ pub const ReplicatedJournal = struct {
                 member,
                 authority,
                 geometry,
-                &.{},
                 &scratch,
             ) catch return error.CatalogCatchupRequired;
             if (loaded.selection.mirror_degraded) return error.CatalogCatchupRequired;
@@ -1227,7 +1221,7 @@ pub const ReplicatedJournal = struct {
                 .data_root_digest = authority.data_root_digest,
                 .topology = next,
                 .layout = authority.layout,
-            }, scratch.graph(), geometry, &.{}) catch return error.CatalogCatchupRequired;
+            }, scratch.graph(), geometry) catch return error.CatalogCatchupRequired;
         }
         return count;
     }
