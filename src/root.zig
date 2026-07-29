@@ -5,6 +5,8 @@ pub const grpc = @import("grpc_lite");
 pub const raft = @import("raft_zig");
 pub const uuid = @import("uuid");
 pub const config = @import("config.zig");
+pub const runtime = @import("runtime.zig");
+pub const Runtime = runtime.Runtime;
 pub const protobuf_wire = @import("protobuf_wire.zig");
 pub const state_machine = @import("state_machine.zig");
 pub const PoolStateMachine = state_machine.PoolStateMachine;
@@ -43,6 +45,7 @@ test {
     _ = grpc;
     _ = raft;
     _ = config;
+    _ = runtime;
     _ = protobuf_wire;
     _ = state_machine;
     _ = service;

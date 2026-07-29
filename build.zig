@@ -56,6 +56,24 @@ pub fn build(b: *std.Build) void {
     library.step.dependOn(&generate_proto.step);
     b.installArtifact(library);
 
+    const executable_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zettide_control", .module = control }},
+    });
+    const executable = b.addExecutable(.{
+        .name = "zettide-control",
+        .root_module = executable_module,
+    });
+    executable.step.dependOn(&generate_proto.step);
+    b.installArtifact(executable);
+
+    const run_executable = b.addRunArtifact(executable);
+    if (b.args) |args| run_executable.addArgs(args);
+    const run_step = b.step("run", "Run the metadata control plane");
+    run_step.dependOn(&run_executable.step);
+
     const tests = b.addTest(.{ .root_module = control });
     tests.step.dependOn(&generate_proto.step);
     const run_tests = b.addRunArtifact(tests);
