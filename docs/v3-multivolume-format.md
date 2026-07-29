@@ -296,6 +296,55 @@ enforce all of the following before this format becomes writable:
 5. Unknown commit outcomes freeze mutation and require authority reopen.
 6. A physical extent has at most one owner in the authoritative allocator.
 
+## Graph Validation
+
+`src/v3/pool_catalog_graph.zig` validates a collected graph without performing I/O. Its authority
+binding must come from the selected control authority, not from the candidate root itself. Validation
+requires all of the following:
+
+1. The root generation equals the control generation, the root set ID equals the authoritative
+   topology set ID, and the canonical root digest equals the authoritative `data_root_digest`.
+2. Every referenced page is present at its metadata-relative offset and its complete-page digest
+   matches. Different current references never alias one offset.
+3. Every catalog leaf has its expected kind and owner, and its creation generation is no newer than
+   the root generation.
+4. Volume and name indexes are one-to-one, extent maps satisfy the authoritative layout/topology and
+   member geometry, and mapped/free/retired physical ranges never overlap.
+5. Each `LFSDRV2` header decodes successfully and matches its descriptor's volume ID, state, creation
+   time, logical size, extent size, and name.
+6. Current pages plus free and retired metadata intervals account for every metadata page after the
+   two mirrored roots.
+
+Graph validation also receives every older recoverable page reference. A current page may share an
+offset with an older root only when the digest is identical. Free metadata cannot overlap any of
+those references. Omitting recoverable roots from this input is unsafe; the publisher must derive the
+set from retained authority/root evidence.
+
+Member geometry binds both member ID and slot. Reusing a numeric slot for a different device never
+inherits allocator state from the old device.
+
+## Transition Validation
+
+A catalog generation transition is valid only when:
+
+1. The generation advances by exactly one, root sequence increases, and `previous_root_digest`
+   equals the previous canonical root digest.
+2. The generation prepare preserves the selected topology and layout. Membership changes are
+   separate control transactions that preserve the catalog generation and root digest.
+3. A physical mapping either keeps the same `(volume ID, logical extent)` owner or enters retired
+   state with the new generation. Free space may become mapped. A retired range preserves its
+   original retirement generation.
+4. An immutable metadata page either keeps the same offset and digest or enters retired state with
+   the new generation. New pages come from previously free metadata space.
+5. Free physical capacity may be withdrawn to absent state. This supports member removal: drain all
+   mappings, publish a generation that removes the member's free allocator ranges while it remains in
+   topology, then commit membership removal without changing the root.
+
+The current transition validator intentionally rejects every physical or metadata
+`retired -> free/mapped` transition. Reclaim remains disabled until the publisher can supply an
+authority-backed witness proving that no recoverable root predates the interval's retirement
+generation. A caller-supplied generation number is not sufficient evidence.
+
 ## Mirrored Root Selection
 
 The control authority selects roots; root sequence alone is never Pool authority. A root copy is a

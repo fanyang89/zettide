@@ -8,6 +8,9 @@ pub const checksum_offset: usize = encoded_size - @sizeOf(u32);
 pub const name_entry_size: usize = 160;
 pub const physical_interval_entry_size: usize = 32;
 pub const metadata_interval_entry_size: usize = 32;
+pub const max_extent_run_count: usize = (checksum_offset - header_size) / pool_catalog.extent_run_encoded_size;
+pub const max_physical_interval_count: usize = (checksum_offset - header_size) / physical_interval_entry_size;
+pub const max_metadata_interval_count: usize = (checksum_offset - header_size) / metadata_interval_entry_size;
 
 const magic = [8]u8{ 'D', 'D', 'V', 'P', 'G', '0', '0', '1' };
 const format_version: u16 = 1;
@@ -278,13 +281,26 @@ pub fn validateMetadataIntervalsForMembers(
             return error.InvalidMemberMetadataGeometry;
     }
     for ([_][]const pool_catalog.PageReference{ current_pages, recoverable_pages }) |references| {
-        for (references) |reference| {
+        for (references, 0..) |reference, index| {
             try reference.validate();
             if (reference.isNull()) continue;
+            for (references[0..index]) |previous| {
+                if (previous.offset == reference.offset and
+                    !std.mem.eql(u8, &previous.digest, &reference.digest))
+                    return error.DivergentRecoverablePage;
+            }
             for (member_metadata_lengths) |metadata_length| {
                 if (reference.offset + pool_catalog.page_size > metadata_length)
                     return error.MetadataPageOutsideMember;
             }
+        }
+    }
+    for (current_pages) |current| {
+        if (current.isNull()) continue;
+        for (recoverable_pages) |recoverable| {
+            if (recoverable.offset == current.offset and
+                !std.mem.eql(u8, &recoverable.digest, &current.digest))
+                return error.DivergentRecoverablePage;
         }
     }
     for (intervals, 0..) |interval, index| {
@@ -798,6 +814,14 @@ test "allocator geometry rejects byte overflow and out of bounds ranges" {
         .retired_generation = 1,
     }};
     try validateMetadataIntervalsForMembers(&metadata_retired, &.{}, &current_pages, &metadata_lengths);
+    const divergent_page = [_]pool_catalog.PageReference{.{
+        .offset = current_pages[0].offset,
+        .digest = @splat(2),
+    }};
+    try std.testing.expectError(
+        error.DivergentRecoverablePage,
+        validateMetadataIntervalsForMembers(&metadata_retired, &current_pages, &divergent_page, &metadata_lengths),
+    );
     try std.testing.expectError(
         error.MetadataIntervalOutsideMember,
         validateMetadataIntervalsForMembers(
