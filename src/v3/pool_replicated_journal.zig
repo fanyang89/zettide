@@ -1245,7 +1245,9 @@ const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
 const pool_genesis = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
+const pool_provision = @import("pool_provision.zig");
 const pool_topology = @import("pool_topology.zig");
+const storage_api = @import("storage.zig");
 
 fn id(value: u8) [16]u8 {
     return @splat(value);
@@ -1279,6 +1281,104 @@ fn checkpointProposalForAuthority(authority: pool_authority.Authority, transacti
     };
 }
 
+const three_voter_names = [_][]const u8{ "member0", "member1", "member2" };
+
+fn threeVoterTestLocations(dir: std.Io.Dir) [three_voter_names.len]pool_member_set.Location {
+    const supplied_order = [_]usize{ 2, 0, 1 };
+    var locations: [three_voter_names.len]pool_member_set.Location = undefined;
+    for (supplied_order, 0..) |name_index, index|
+        locations[index] = .{ .parent = dir, .basename = three_voter_names[name_index] };
+    return locations;
+}
+
+fn createThreeVoterTestSet(dir: std.Io.Dir) !pool_member_set.PoolMemberSet {
+    var storages: [three_voter_names.len]storage_api.Storage = undefined;
+    for (three_voter_names, 0..) |name, index| {
+        storages[index] = storage_api.Storage.createFile(std.testing.io, dir, name, 8 * 1024 * 1024) catch |err| {
+            storage_api.closeAll(storages[0..index], std.testing.io) catch {};
+            return err;
+        };
+    }
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{});
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    try provisioned.close();
+    const locations = threeVoterTestLocations(dir);
+    return pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+}
+
+const GenesisCatalog = struct {
+    physical_bytes: [pool_catalog.page_size]u8,
+    metadata_bytes: [pool_catalog.page_size]u8,
+    physical_reference: pool_catalog.PageReference,
+    metadata_reference: pool_catalog.PageReference,
+    root: pool_catalog.Root,
+    root_bytes: [pool_catalog.root_encoded_size]u8,
+
+    fn init(set: *pool_member_set.PoolMemberSet) !GenesisCatalog {
+        const authority = set.authority() orelse return error.MissingAuthority;
+        var physical: [three_voter_names.len]pool_catalog_page.PhysicalInterval = undefined;
+        for (authority.topology.memberSlice(), 0..) |descriptor, index| {
+            const member = try set.memberById(descriptor.member_id);
+            physical[index] = .{
+                .member_slot = descriptor.slot,
+                .physical_start = 0,
+                .extent_count = member.header().data.length / authority.layout.chunk_size,
+            };
+        }
+        const physical_bytes = try pool_catalog_page.encodePhysicalIntervals(.physical_allocator, 1, &physical);
+        const metadata_page_count = ((try set.memberAt(0)).?).header().metadata.length / pool_catalog.page_size;
+        const metadata_bytes = try pool_catalog_page.encodeMetadataAllocator(1, &.{.{
+            .page_start = 4,
+            .page_count = @intCast(metadata_page_count - 4),
+        }});
+        const physical_reference = try pool_catalog_page.pageReference(2 * pool_catalog.page_size, &physical_bytes);
+        const metadata_reference = try pool_catalog_page.pageReference(3 * pool_catalog.page_size, &metadata_bytes);
+        const root: pool_catalog.Root = .{
+            .set_id = authority.topology.set_id,
+            .generation = 1,
+            .sequence = 1,
+            .previous_root_digest = @splat(0),
+            .allocator_root = physical_reference,
+            .metadata_allocator_root = metadata_reference,
+            .extent_size = authority.layout.chunk_size,
+        };
+        return .{
+            .physical_bytes = physical_bytes,
+            .metadata_bytes = metadata_bytes,
+            .physical_reference = physical_reference,
+            .metadata_reference = metadata_reference,
+            .root = root,
+            .root_bytes = try pool_catalog.encodeRoot(root),
+        };
+    }
+
+    fn proposal(self: *const GenesisCatalog, authority: pool_authority.Authority) !control_record.Record {
+        var result: control_record.Record = .{
+            .kind = control_record.generation_prepare_kind,
+            .local_sequence = 99,
+            .membership_epoch = authority.membership_epoch,
+            .writer_term = @max(authority.writer_term, 1),
+            .generation = 1,
+            .set_id = authority.topology.set_id,
+            .member_id = id(8),
+            .mount_session_id = id(3),
+            .transaction_id = id(4),
+            .previous_record_digest = @splat(0x11),
+            .previous_history_digest = @splat(0x22),
+            .data_root_digest = try pool_catalog.rootDigest(self.root),
+            .topology_digest = try pool_topology.digest(authority.topology),
+            .layout_digest = try pool_layout.digest(authority.layout),
+            .payload = try control_record.Payload.init("generation"),
+        };
+        result.history_digest = try control_record.historyDigest(result);
+        return result;
+    }
+};
+
 test "active non-voter promotion requires catalog catch-up" {
     const active_non_voter: pool_topology.Member = .{
         .member_id = id(2),
@@ -1304,6 +1404,121 @@ test "member removal requires catalog drain" {
     const next = try pool_topology.Topology.init(id(1), 2, try pool_topology.digest(current), members[0..1]);
     try std.testing.expect(removesMember(current, next));
     try std.testing.expect(!removesMember(current, current));
+}
+
+test "three-voter catalog publication fault matrix" {
+    const Case = enum {
+        success,
+        staging_first_page,
+        staging_second_page,
+        staging_root,
+        single_prepare_failure,
+        prepare_quorum_failure,
+        unknown_commit_before,
+        unknown_commit_after,
+        repair_failure,
+    };
+    inline for (std.enums.values(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var set = try createThreeVoterTestSet(tmp.dir);
+        defer set.deinit();
+        var coordinator = try open(std.testing.io, &set);
+        defer coordinator.deinit();
+        var faults: [three_voter_names.len]member_api.FaultController = @splat(.{});
+        switch (case) {
+            .success => {},
+            .staging_first_page => faults[2].fail_write_at = 0,
+            .staging_second_page => faults[2].fail_write_at = 1,
+            .staging_root => faults[2].fail_write_at = 2,
+            .single_prepare_failure => faults[0].fail_write_at = 3,
+            .prepare_quorum_failure => {
+                faults[1].fail_write_at = 3;
+                faults[2].fail_write_at = 3;
+            },
+            .unknown_commit_before => {
+                faults[1].fail_write_at = 4;
+                faults[2].fail_write_at = 4;
+            },
+            .unknown_commit_after => {
+                faults[1].fail_sync_after_at = 3;
+                faults[2].fail_sync_after_at = 3;
+            },
+            .repair_failure => faults[2].fail_write_at = 5,
+        }
+        for (&faults, 0..) |*fault, index|
+            ((try set.memberAt(index)) orelse return error.MemberUnavailable).setFaultController(fault);
+
+        const catalog = try GenesisCatalog.init(&set);
+        const images = [_]pool_catalog_graph.PageImage{
+            .{ .offset = catalog.physical_reference.offset, .bytes = &catalog.physical_bytes },
+            .{ .offset = catalog.metadata_reference.offset, .bytes = &catalog.metadata_bytes },
+        };
+        const request: CatalogGenerationRequest = .{
+            .prepare_proposal = try catalog.proposal(set.authority().?),
+            .previous_graph = null,
+            .current_graph = .{ .root_bytes = &catalog.root_bytes, .pages = &images },
+        };
+
+        switch (case) {
+            .staging_first_page, .staging_second_page, .staging_root => {
+                try std.testing.expectError(error.CatalogStagingFailed, coordinator.commitCatalogGeneration(request));
+                try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
+                try std.testing.expectEqual(@as(u64, 0), faults[0].write_count);
+                try std.testing.expectEqual(@as(u64, 3), faults[1].write_count);
+                const failed_writes: u64 = switch (case) {
+                    .staging_first_page => 1,
+                    .staging_second_page => 2,
+                    .staging_root => 3,
+                    else => unreachable,
+                };
+                try std.testing.expectEqual(failed_writes, faults[2].write_count);
+            },
+            .prepare_quorum_failure => {
+                try std.testing.expectError(error.PrepareQuorumFailed, coordinator.commitCatalogGeneration(request));
+                try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
+                for (faults) |fault| try std.testing.expectEqual(@as(u64, 4), fault.write_count);
+            },
+            .unknown_commit_before, .unknown_commit_after => {
+                try std.testing.expectError(error.CommitOutcomeUnknown, coordinator.commitCatalogGeneration(request));
+                try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
+                for (faults) |fault| try std.testing.expectEqual(@as(u64, 5), fault.write_count);
+            },
+            .success, .single_prepare_failure, .repair_failure => {
+                const result = try coordinator.commitCatalogGeneration(request);
+                try std.testing.expectEqual(@as(u64, 1), set.authority().?.generation);
+                const expected_commit_count: u16 = if (case == .single_prepare_failure) 2 else 3;
+                try std.testing.expectEqual(expected_commit_count, result.generation.committed_count);
+                try std.testing.expectEqual(@as(u16, 2), countTrue(&result.generation.prepare_witness_members));
+                const omitted_witness_index: usize = if (case == .single_prepare_failure) 0 else 2;
+                for (0..three_voter_names.len) |index|
+                    try std.testing.expectEqual(index != omitted_witness_index, result.generation.prepare_witness_members[index]);
+                for (0..three_voter_names.len) |index| try std.testing.expect(result.staged_members[index]);
+                if (case == .success) {
+                    for (0..three_voter_names.len) |index| try std.testing.expect(result.repaired_members[index]);
+                } else {
+                    const failed_index: usize = if (case == .single_prepare_failure) 0 else 2;
+                    for (0..three_voter_names.len) |index| {
+                        try std.testing.expectEqual(index == failed_index, result.repair_failed_members[index]);
+                        try std.testing.expectEqual(index != failed_index, result.repaired_members[index]);
+                    }
+                }
+            },
+        }
+        if (case != .success) {
+            try std.testing.expect(coordinator.isFrozen());
+            try std.testing.expect(set.controlWriteReady() == null);
+        }
+        if (case == .unknown_commit_before or case == .unknown_commit_after) {
+            coordinator.close();
+            try std.testing.expectError(error.WriteFrozen, set.close());
+            const locations = threeVoterTestLocations(tmp.dir);
+            var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .read_only);
+            defer reopened.deinit();
+            const expected_generation: u64 = if (case == .unknown_commit_after) 1 else 0;
+            try std.testing.expectEqual(expected_generation, reopened.authority().?.generation);
+        }
+    }
 }
 
 test "one-member coordinator commits generation and membership then reopens" {
