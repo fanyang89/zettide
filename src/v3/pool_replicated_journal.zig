@@ -25,11 +25,19 @@ pub const BootstrapResult = struct {
     voter_ack_count: u16,
 };
 
+pub const RolloverResult = struct {
+    active_members: [pool_member_set.max_member_count]bool,
+    active_count: u16,
+    degraded: bool,
+};
+
 const Participant = struct {
     set_index: usize,
     journal: journal_api.Journal,
     active: bool,
 };
+
+const InferredAnchorTransition = enum { none, first_anchor, replacement };
 
 pub const ReplicatedJournal = struct {
     io: std.Io,
@@ -38,6 +46,8 @@ pub const ReplicatedJournal = struct {
     participant_count: usize = 0,
     quorum: u16,
     recovery_only: bool,
+    reclaim_required: bool,
+    pending_anchor_history_digest: ?codec.Digest = null,
     mutex: std.Io.Mutex = .init,
     frozen: std.atomic.Value(bool) = .init(false),
     closed: bool = false,
@@ -52,6 +62,7 @@ pub const ReplicatedJournal = struct {
             .set = set,
             .quorum = authority.topology.quorum,
             .recovery_only = set.isRecoveryOnly(),
+            .reclaim_required = ready.reclaim_required,
         };
         errdefer coordinator.closeParticipants();
         for (ready.active_members[0..set.supplied_count], 0..) |active, set_index| {
@@ -77,6 +88,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.reclaim_required) return error.ReclaimBarrierRequired;
         if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         if (prepare_proposal.kind != control_record.generation_prepare_kind)
             return error.NotGenerationPrepare;
@@ -95,8 +107,7 @@ pub const ReplicatedJournal = struct {
         for (0..self.participant_count) |index| {
             const participant = &(self.participants[index].?);
             if (!participant.active) continue;
-            const state = try participant.journal.state();
-            if (state.physical_frontier + 2 > state.slot_count) continue;
+            if (!try participant.journal.hasAppendCapacity(3)) continue;
             targets[index] = true;
             target_count += 1;
         }
@@ -202,6 +213,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.reclaim_required) return error.ReclaimBarrierRequired;
         if (prepare_proposal.kind != control_record.membership_prepare_kind)
             return error.NotMembershipPrepare;
         const authority = self.set.authority() orelse return error.MissingAuthority;
@@ -209,6 +221,7 @@ pub const ReplicatedJournal = struct {
         if (self.recovery_only and proposal.mode != .administrative_recovery)
             return error.AdministrativeRecoveryRequired;
         try membership.validateTransition(authority.topology, proposal);
+        if (proposal.mode == .normal) try self.validateAnchorRetention(proposal.topology);
         try self.validatePromotions(authority.topology, proposal.topology, authority.history_digest);
         if (prepare_proposal.generation != authority.generation or
             !std.mem.eql(u8, &prepare_proposal.data_root_digest, &authority.data_root_digest))
@@ -227,8 +240,7 @@ pub const ReplicatedJournal = struct {
             const participant = &(self.participants[index].?);
             const member_id = participant.journal.member.header().member_id;
             if (!isVoter(authority.topology, member_id) and !isVoter(proposal.topology, member_id)) continue;
-            const state = try participant.journal.state();
-            if (state.physical_frontier + 2 > state.slot_count) continue;
+            if (!try participant.journal.hasAppendCapacity(3)) continue;
             targets[index] = true;
         }
         if (!hasMembershipQuorums(targets, self.participants[0..self.participant_count], authority.topology, proposal))
@@ -363,8 +375,56 @@ pub const ReplicatedJournal = struct {
     ) !CommitResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        try self.requireFullVoterSet(2, false);
+        const committed = try self.commitAuthorityCheckpointLocked(proposal, 2);
+        if (committed.committed_count != voterCount(self.set.authority().?.topology)) {
+            self.set.beginControlMutation();
+            self.frozen.store(true, .release);
+            return error.CheckpointOutcomeUnknown;
+        }
+        return committed;
+    }
+
+    pub fn rolloverAuthorityCheckpoint(
+        self: *ReplicatedJournal,
+        proposal: control_record.Record,
+    ) !CommitResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.requireFullVoterSet(1, true);
+        const committed = try self.commitAuthorityCheckpointLocked(proposal, 1);
+        const voter_count = voterCount(self.set.authority().?.topology);
+        if (committed.committed_count != voter_count) {
+            self.set.beginControlMutation();
+            self.frozen.store(true, .release);
+            return error.RolloverCheckpointIncomplete;
+        }
+        self.reclaim_required = true;
+        self.pending_anchor_history_digest = committed.record.history_digest;
+        _ = self.resumeRolloverLocked() catch |err| {
+            self.set.beginControlMutation();
+            self.frozen.store(true, .release);
+            return err;
+        };
+        return committed;
+    }
+
+    pub fn resumeRollover(self: *ReplicatedJournal) !RolloverResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        return self.resumeRolloverLocked();
+    }
+
+    fn commitAuthorityCheckpointLocked(
+        self: *ReplicatedJournal,
+        proposal: control_record.Record,
+        required_slots: u64,
+    ) !CommitResult {
+        if (self.closed) return error.CoordinatorClosed;
+        if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.reclaim_required) return error.ReclaimBarrierRequired;
         if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         if (proposal.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
         const authority = self.set.authority() orelse return error.MissingAuthority;
@@ -385,8 +445,7 @@ pub const ReplicatedJournal = struct {
         for (0..self.participant_count) |index| {
             const participant = &(self.participants[index].?);
             if (!participant.active) continue;
-            const state = try participant.journal.state();
-            if (state.physical_frontier == state.slot_count) continue;
+            if (!try participant.journal.hasAppendCapacity(required_slots)) continue;
             const item = try participant.journal.prepareCheckpointExact(
                 try participant.journal.tailToken(),
                 proposal,
@@ -433,6 +492,230 @@ pub const ReplicatedJournal = struct {
         };
     }
 
+    fn resumeRolloverLocked(self: *ReplicatedJournal) !RolloverResult {
+        if (!self.reclaim_required) return error.RolloverNotRequired;
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        const voter_count = voterCount(authority.topology);
+        const inferred = if (self.pending_anchor_history_digest == null)
+            try self.inferAnchorTransition(authority, voter_count)
+        else
+            .none;
+        const superseding = self.pending_anchor_history_digest != null or inferred == .replacement;
+        const target_anchor_digest = self.pending_anchor_history_digest orelse
+            if (inferred != .none) authority.history_digest else null;
+        const required_participants: u16 = if (self.recovery_only)
+            1
+        else if (superseding)
+            voter_count
+        else
+            authority.topology.quorum;
+        if (self.activeParticipantCount() < required_participants) return error.WriteQuorumUnavailable;
+
+        self.set.beginControlMutation();
+        var published: [max_control_participant_count]bool = @splat(false);
+        var needs_reclaim: [max_control_participant_count]bool = @splat(false);
+        var publication_anchors: [max_control_participant_count]?journal_api.AnchorState = @splat(null);
+        var publish_count: u16 = 0;
+        for (0..self.participant_count) |index| {
+            const participant = &(self.participants[index].?);
+            if (!participant.active) continue;
+            const state = participant.journal.state() catch {
+                participant.active = false;
+                self.set.noteControlFailure(participant.set_index);
+                continue;
+            };
+            const tail = state.tail orelse {
+                participant.active = false;
+                self.set.noteControlFailure(participant.set_index);
+                continue;
+            };
+            const maybe_anchor: ?journal_api.AnchorState = if (target_anchor_digest) |pending|
+                if (tail.kind == control_record.checkpoint_kind and
+                    std.mem.eql(u8, &tail.history_digest, &pending))
+                    journal_api.AnchorState{
+                        .record = tail,
+                        .raw_record_digest = state.tail_raw_record_digest,
+                        .physical_slot = state.tail_physical_slot.?,
+                    }
+                else
+                    null
+            else if (state.active_anchor) |anchor|
+                anchor
+            else if (self.recovery_only and tail.kind == control_record.checkpoint_kind and
+                std.mem.eql(u8, &tail.history_digest, &authority.history_digest))
+                journal_api.AnchorState{
+                    .record = tail,
+                    .raw_record_digest = state.tail_raw_record_digest,
+                    .physical_slot = state.tail_physical_slot.?,
+                }
+            else
+                null;
+            const anchor = maybe_anchor orelse {
+                published[index] = true;
+                publish_count += 1;
+                continue;
+            };
+            const header = participant.journal.member.header();
+            const relative_offset = std.math.mul(u64, anchor.physical_slot, control_record.encoded_size) catch {
+                participant.active = false;
+                self.set.noteControlFailure(participant.set_index);
+                continue;
+            };
+            const absolute_offset = std.math.add(u64, header.control.offset, relative_offset) catch {
+                participant.active = false;
+                self.set.noteControlFailure(participant.set_index);
+                continue;
+            };
+            participant.journal.member.publishCheckpointRedundant(
+                absolute_offset,
+                anchor.record.local_sequence,
+                anchor.raw_record_digest,
+            ) catch {
+                participant.active = false;
+                self.set.noteControlFailure(participant.set_index);
+                continue;
+            };
+            published[index] = true;
+            needs_reclaim[index] = true;
+            publication_anchors[index] = anchor;
+            publish_count += 1;
+        }
+        if (publish_count < required_participants or
+            (!self.recovery_only and !try self.hasAnchorQuorum(&publication_anchors, &published)))
+        {
+            self.frozen.store(true, .release);
+            return error.AnchorPublicationFailed;
+        }
+
+        var active_members: [pool_member_set.max_member_count]bool = @splat(false);
+        var reclaimed: [max_control_participant_count]bool = @splat(false);
+        var reclaimed_count: u16 = 0;
+        for (0..self.participant_count) |index| {
+            if (!published[index]) continue;
+            const participant = &(self.participants[index].?);
+            if (needs_reclaim[index]) participant.journal.reclaimPublishedAnchor() catch {
+                participant.active = false;
+                self.set.noteControlFailure(participant.set_index);
+                continue;
+            };
+            reclaimed[index] = true;
+            active_members[participant.set_index] = true;
+            reclaimed_count += 1;
+        }
+        const required_quorum: u16 = if (self.recovery_only) 1 else authority.topology.quorum;
+        if (reclaimed_count < required_quorum or
+            (!self.recovery_only and !try self.hasAnchorQuorum(&publication_anchors, &reclaimed)))
+        {
+            self.frozen.store(true, .release);
+            return error.ReclaimQuorumFailed;
+        }
+        self.set.noteControlReclaimed(active_members, reclaimed_count);
+        self.reclaim_required = false;
+        self.pending_anchor_history_digest = null;
+        return .{
+            .active_members = active_members,
+            .active_count = reclaimed_count,
+            .degraded = reclaimed_count != required_participants,
+        };
+    }
+
+    fn requireFullVoterSet(
+        self: *ReplicatedJournal,
+        required_slots: u64,
+        validate_rollover_topology: bool,
+    ) !void {
+        if (self.closed) return error.CoordinatorClosed;
+        if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        const voter_count = voterCount(authority.topology);
+        if (validate_rollover_topology and voter_count != 1 and voter_count != 3)
+            return error.UnsupportedRolloverTopology;
+        if (self.activeParticipantCount() != voter_count)
+            return error.FullVoterSetRequired;
+        for (0..self.participant_count) |index| {
+            const participant = &(self.participants[index].?);
+            if (participant.active and !try participant.journal.hasAppendCapacity(required_slots))
+                return error.InsufficientJournalCapacity;
+        }
+    }
+
+    fn hasAnchorQuorum(
+        self: *ReplicatedJournal,
+        anchors: *const [max_control_participant_count]?journal_api.AnchorState,
+        successes: *const [max_control_participant_count]bool,
+    ) !bool {
+        for (anchors) |maybe_candidate| {
+            const candidate = maybe_candidate orelse continue;
+            const snapshot = try pool_authority_checkpoint.validateCompactedRootRecord(candidate.record);
+            var witnesses: u16 = 0;
+            for (anchors, 0..) |maybe_anchor, index| {
+                if (!successes[index]) continue;
+                const anchor = maybe_anchor orelse continue;
+                if (!std.mem.eql(u8, &anchor.record.history_digest, &candidate.record.history_digest)) continue;
+                const member_id = self.participants[index].?.journal.member.header().member_id;
+                if (isVoter(snapshot.topology, member_id)) witnesses += 1;
+            }
+            if (witnesses >= snapshot.topology.quorum) return true;
+        }
+        return false;
+    }
+
+    fn inferAnchorTransition(
+        self: *ReplicatedJournal,
+        authority: pool_authority.Authority,
+        voter_count: u16,
+    ) !InferredAnchorTransition {
+        if (voter_count != 1 and voter_count != 3) return .none;
+        if (authority.kind != .checkpoint) return .none;
+        var has_existing_anchor = false;
+        for (0..self.participant_count) |index| {
+            const participant = &(self.participants[index].?);
+            if (!participant.active) continue;
+            const state = try participant.journal.state();
+            has_existing_anchor = has_existing_anchor or state.active_anchor != null;
+            const tail = state.tail orelse return .none;
+            if (!state.journal_full or tail.kind != control_record.checkpoint_kind or
+                !std.mem.eql(u8, &tail.history_digest, &authority.history_digest)) return .none;
+        }
+        if (!has_existing_anchor) return .first_anchor;
+        return if (self.activeParticipantCount() == voter_count) .replacement else .none;
+    }
+
+    fn validateAnchorRetention(self: *ReplicatedJournal, next: pool_topology.Topology) !void {
+        var anchors: [max_control_participant_count]?journal_api.AnchorState = @splat(null);
+        var active: [max_control_participant_count]bool = @splat(false);
+        for (0..self.participant_count) |index| {
+            const participant = &(self.participants[index].?);
+            if (!participant.active) continue;
+            anchors[index] = (try participant.journal.state()).active_anchor;
+            active[index] = true;
+        }
+        var saw_anchor = false;
+        var retained_root_quorum = false;
+        for (anchors) |maybe_candidate| {
+            const candidate = maybe_candidate orelse continue;
+            saw_anchor = true;
+            const snapshot = try pool_authority_checkpoint.validateCompactedRootRecord(candidate.record);
+            var current_witnesses: u16 = 0;
+            var retained_witnesses: u16 = 0;
+            for (anchors, 0..) |maybe_anchor, index| {
+                if (!active[index]) continue;
+                const anchor = maybe_anchor orelse continue;
+                if (!std.mem.eql(u8, &anchor.record.history_digest, &candidate.record.history_digest)) continue;
+                const member_id = self.participants[index].?.journal.member.header().member_id;
+                if (!isVoter(snapshot.topology, member_id)) continue;
+                current_witnesses += 1;
+                if (isVoter(next, member_id)) retained_witnesses += 1;
+            }
+            if (current_witnesses >= snapshot.topology.quorum) {
+                if (retained_witnesses < snapshot.topology.quorum)
+                    return error.RolloverRequiredBeforeMembership;
+                retained_root_quorum = true;
+            }
+        }
+        if (saw_anchor and !retained_root_quorum) return error.AnchorQuorumUnavailable;
+    }
+
     pub fn bootstrapMember(
         self: *ReplicatedJournal,
         allocator: std.mem.Allocator,
@@ -445,6 +728,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.reclaim_required) return error.ReclaimBarrierRequired;
         if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         if (self.set.supplied_count == pool_member_set.max_member_count)
             return error.TooManyPoolMembers;
@@ -469,8 +753,7 @@ pub const ReplicatedJournal = struct {
         for (0..self.participant_count) |index| {
             const participant = &(self.participants[index].?);
             if (!participant.active) continue;
-            const state = try participant.journal.state();
-            if (state.physical_frontier == state.slot_count) continue;
+            if (!try participant.journal.hasAppendCapacity(2)) continue;
             prepared[index] = try participant.journal.prepareExact(
                 try participant.journal.tailToken(),
                 bootstrap_record,
@@ -760,6 +1043,34 @@ fn id(value: u8) [16]u8 {
     return @splat(value);
 }
 
+fn checkpointProposalForAuthority(authority: pool_authority.Authority, transaction_id: [16]u8) !control_record.Record {
+    return .{
+        .kind = control_record.checkpoint_kind,
+        .local_sequence = 0,
+        .membership_epoch = authority.membership_epoch,
+        .writer_term = authority.writer_term,
+        .generation = authority.generation,
+        .set_id = authority.topology.set_id,
+        .member_id = id(8),
+        .mount_session_id = id(3),
+        .transaction_id = transaction_id,
+        .previous_record_digest = @splat(0),
+        .previous_history_digest = authority.history_digest,
+        .data_root_digest = authority.data_root_digest,
+        .topology_digest = try pool_topology.digest(authority.topology),
+        .layout_digest = try pool_layout.digest(authority.layout),
+        .payload = try pool_authority_checkpoint.makePayload(.{
+            .previous_authority_history_digest = authority.history_digest,
+            .data_root_digest = authority.data_root_digest,
+            .writer_term = authority.writer_term,
+            .generation = authority.generation,
+            .topology = authority.topology,
+            .layout = authority.layout,
+            .administrative_recovery = authority.administrative_recovery,
+        }),
+    };
+}
+
 test "one-member coordinator commits generation and membership then reopens" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -783,7 +1094,7 @@ test "one-member coordinator commits generation and membership then reopens" {
         .created_ns = 1,
         .member_bytes = 3 * 1024 * 1024,
         .logical_capacity = 1024 * 1024,
-        .control = .{ .offset = 64 * 1024, .length = 64 * 1024 },
+        .control = .{ .offset = 64 * 1024, .length = 8 * control_record.encoded_size },
         .metadata = .{ .offset = 1024 * 1024, .length = 256 * 1024 },
         .data = .{ .offset = 2 * 1024 * 1024, .length = 1024 * 1024 },
         .metadata_block_size = 4096,
@@ -858,6 +1169,10 @@ test "one-member coordinator commits generation and membership then reopens" {
     const checkpoint_result = try coordinator.commitAuthorityCheckpoint(checkpoint_proposal);
     try std.testing.expectEqual(@as(u16, 1), checkpoint_result.committed_count);
     try std.testing.expectEqual(pool_authority.Kind.checkpoint, set.authority().?.kind);
+    try std.testing.expect(!coordinator.reclaim_required);
+    _ = try coordinator.rolloverAuthorityCheckpoint(
+        try checkpointProposalForAuthority(set.authority().?, id(13)),
+    );
     coordinator.close();
     try set.close();
 
@@ -867,6 +1182,10 @@ test "one-member coordinator commits generation and membership then reopens" {
     try std.testing.expectEqual(pool_authority.Kind.checkpoint, reopened.authority().?.kind);
     var membership_coordinator = try open(std.testing.io, &reopened);
     defer membership_coordinator.deinit();
+    _ = try membership_coordinator.resumeRollover();
+    _ = try membership_coordinator.rolloverAuthorityCheckpoint(
+        try checkpointProposalForAuthority(reopened.authority().?, id(12)),
+    );
     const current = reopened.authority().?;
     const next_members = [_]pool_topology.Member{
         current.topology.members[0],
@@ -949,7 +1268,7 @@ test "one-member coordinator commits generation and membership then reopens" {
         .created_ns = 2,
         .member_bytes = 3 * 1024 * 1024,
         .logical_capacity = 1024 * 1024,
-        .control = .{ .offset = 64 * 1024, .length = 64 * 1024 },
+        .control = .{ .offset = 64 * 1024, .length = 8 * control_record.encoded_size },
         .metadata = .{ .offset = 1024 * 1024, .length = 256 * 1024 },
         .data = .{ .offset = 2 * 1024 * 1024, .length = 1024 * 1024 },
         .metadata_block_size = 4096,
@@ -1004,12 +1323,16 @@ test "one-member coordinator commits generation and membership then reopens" {
         std.testing.io,
         std.testing.allocator,
         &recovered_locations,
-        .read_only,
+        .writable,
     );
     defer recovered.deinit();
     try std.testing.expectEqual(pool_authority.Kind.membership_commit, recovered.authority().?.kind);
     try std.testing.expectEqual(@as(u16, 2), recovered.authority().?.topology.member_count);
     try std.testing.expectEqual(pool_topology.MemberState.active, recovered.authority().?.topology.members[1].state);
+    try std.testing.expect(recovered.controlWriteReady().?.reclaim_required);
+    var resumed = try open(std.testing.io, &recovered);
+    defer resumed.deinit();
+    try std.testing.expectEqual(@as(u16, 2), (try resumed.resumeRollover()).active_count);
 }
 
 test "administrative recovery converts a lost two-of-two quorum to one-of-one" {
@@ -1115,4 +1438,20 @@ test "administrative recovery converts a lost two-of-two quorum to one-of-one" {
     try std.testing.expectEqual(@as(u16, 1), recovered.authority().?.topology.member_count);
     try std.testing.expectEqual(@as(u16, 1), recovered.controlWriteReady().?.active_count);
     try std.testing.expectEqual(pool_policy.DataAccess.read_only, recovered.dataAccess());
+    var normal = try open(std.testing.io, &recovered);
+    _ = try normal.rolloverAuthorityCheckpoint(try checkpointProposalForAuthority(recovered.authority().?, id(12)));
+    normal.close();
+    try recovered.close();
+
+    var anchored_recovery = try pool_member_set.openAdministrativeRecovery(
+        std.testing.io,
+        std.testing.allocator,
+        survivor_location,
+        id(2),
+    );
+    defer anchored_recovery.deinit();
+    try std.testing.expect(anchored_recovery.controlWriteReady().?.reclaim_required);
+    var anchored_coordinator = try open(std.testing.io, &anchored_recovery);
+    defer anchored_coordinator.deinit();
+    try std.testing.expectEqual(@as(u16, 1), (try anchored_coordinator.resumeRollover()).active_count);
 }

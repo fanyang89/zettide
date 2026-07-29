@@ -105,7 +105,8 @@ pub fn selectAdministrativeRecovery(history: *const journal.HistoryScan) !Author
 }
 
 fn selectLocalRecoveryAuthority(history: *const journal.HistoryScan, require_committed_tail: bool) !Authority {
-    if (history.scan_result.unresolved_tail_damage) return error.JournalNeedsRecovery;
+    if (history.scan_result.unresolved_tail_damage and !history.scan_result.anchored)
+        return error.JournalNeedsRecovery;
     if (history.scan_result.anchored) return selectAnchoredAdministrativeRecovery(history, require_committed_tail);
     if (history.entries().len == 0) return error.MissingGenesis;
     const genesis = try verifiedWitness(history, &history.entries()[0]);

@@ -48,6 +48,7 @@ pub const TailToken = struct {
     raw_record_digest: codec.Digest,
     history_digest: codec.Digest,
     physical_frontier: u64,
+    next_physical_slot: u64,
 };
 
 pub const PreparedAppend = struct {
@@ -101,6 +102,7 @@ pub const Journal = struct {
     scan_state: ScanResult,
     mutex: std.Io.Mutex = .init,
     closed: bool = false,
+    ring_write_ready: bool,
 
     pub fn open(member: *member_api.Member) !Journal {
         try member.claimJournal();
@@ -110,11 +112,13 @@ pub const Journal = struct {
             if (scan_state.unresolved_tail_damage) return error.JournalNeedsRecovery;
             return error.MissingGenesis;
         }
-        if (member.mode() == .writable and scan_state.unresolved_tail_damage)
+        if (member.mode() == .writable and scan_state.unresolved_tail_damage and !scan_state.anchored)
             return error.JournalNeedsRecovery;
-        if (member.mode() == .writable and scan_state.anchored)
-            return error.RolloverWriteNotImplemented;
-        return .{ .member = member, .scan_state = scan_state };
+        return .{
+            .member = member,
+            .scan_state = scan_state,
+            .ring_write_ready = !scan_state.anchored,
+        };
     }
 
     pub fn state(self: *Journal) !ScanResult {
@@ -130,6 +134,60 @@ pub const Journal = struct {
         defer self.mutex.unlock(self.member.io);
         try self.checkOpenLocked();
         return self.tailTokenLocked();
+    }
+
+    pub fn hasAppendCapacity(self: *Journal, required: u64) !bool {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+        try self.checkOpenLocked();
+        return availableSlotCount(self.scan_state) >= required;
+    }
+
+    pub fn reclaimPublishedAnchor(self: *Journal) !void {
+        try self.mutex.lock(self.member.io);
+        defer self.mutex.unlock(self.member.io);
+        try self.checkOpenLocked();
+        if (self.member.mode() != .writable) return error.ReadOnlyMember;
+        if (self.member.isFrozen()) return error.WriteFrozen;
+        if (!self.member.checkpointReclaimReady()) return error.ReclaimBarrierRequired;
+
+        const header = self.member.header();
+        const tail = self.scan_state.tail orelse return error.MissingGenesis;
+        const tail_slot = self.scan_state.tail_physical_slot orelse return error.MissingGenesis;
+        const header_slot = (header.checkpoint_offset - header.control.offset) / control_record.encoded_size;
+        const anchor: AnchorState = if (tail_slot == header_slot and
+            tail.local_sequence == header.checkpoint_record_sequence and
+            std.mem.eql(u8, &self.scan_state.tail_raw_record_digest, &header.checkpoint_record_digest))
+            .{
+                .record = tail,
+                .raw_record_digest = self.scan_state.tail_raw_record_digest,
+                .physical_slot = tail_slot,
+            }
+        else
+            self.scan_state.active_anchor orelse return error.MissingAuthorityAnchor;
+        if (anchor.physical_slot != header_slot or
+            anchor.record.local_sequence != header.checkpoint_record_sequence or
+            !std.mem.eql(u8, &anchor.raw_record_digest, &header.checkpoint_record_digest))
+            return error.AuthorityAnchorHeaderMismatch;
+        _ = try pool_authority_checkpoint.validateCompactedRootRecord(anchor.record);
+
+        const zero: [control_record.encoded_size]u8 = @splat(0);
+        var slot = nextRingSlot(tail_slot, self.scan_state.slot_count);
+        while (slot != anchor.physical_slot) : (slot = nextRingSlot(slot, self.scan_state.slot_count)) {
+            const offset = try slotOffset(slot);
+            var raw: [control_record.encoded_size]u8 = undefined;
+            try self.member.read(.control, offset, &raw);
+            if (!codec.isZero(&raw)) try self.member.writeDurable(.control, offset, &zero);
+        }
+
+        self.scan_state.active_anchor = anchor;
+        self.scan_state.anchored = true;
+        self.scan_state.unresolved_tail_damage = false;
+        self.scan_state.physical_frontier = self.scan_state.slot_count;
+        self.scan_state.next_physical_slot = nextRingSlot(tail_slot, self.scan_state.slot_count);
+        self.scan_state.journal_full = self.scan_state.next_physical_slot == anchor.physical_slot;
+        self.scan_state.checkpoint_status = .valid;
+        self.ring_write_ready = true;
     }
 
     pub fn prepareExact(
@@ -201,6 +259,7 @@ pub const Journal = struct {
         if (self.closed) return error.JournalClosed;
         if (self.member.isClosed()) return error.MemberClosed;
         if (proposal.kind != control_record.checkpoint_kind) return error.NotCheckpointRecord;
+        if (self.scan_state.anchored) return error.AnchoredCheckpointRequiresRollover;
         const appended = try self.appendLocked(proposal);
         const header = self.member.header();
         const relative_offset = std.math.mul(u64, appended.physical_slot, control_record.encoded_size) catch
@@ -226,6 +285,7 @@ pub const Journal = struct {
         try self.checkOpenLocked();
         if (self.member.mode() != .writable) return error.ReadOnlyMember;
         if (self.member.isFrozen()) return error.WriteFrozen;
+        if (self.scan_state.anchored and !self.ring_write_ready) return error.ReclaimBarrierRequired;
         if (self.scan_state.unresolved_tail_damage) return error.UnresolvedTailDamage;
         if (self.scan_state.journal_full) return error.JournalFull;
 
@@ -262,13 +322,14 @@ pub const Journal = struct {
             try control_record.encodeDynamicPool(record)
         else
             try control_record.encode(record);
-        const physical_slot = self.scan_state.physical_frontier;
+        const physical_slot = self.scan_state.next_physical_slot;
         return .{
             .expected_tail = expected_tail orelse .{
                 .local_sequence = 0,
                 .raw_record_digest = @splat(0),
                 .history_digest = @splat(0),
                 .physical_frontier = 0,
+                .next_physical_slot = 0,
             },
             .record = record,
             .encoded = encoded,
@@ -278,15 +339,25 @@ pub const Journal = struct {
     }
 
     fn commitPreparedLocked(self: *Journal, prepared: PreparedAppend) !AppendResult {
-        const offset = std.math.mul(u64, prepared.physical_slot, control_record.encoded_size) catch
-            return error.ControlOffsetOverflow;
+        const offset = try slotOffset(prepared.physical_slot);
+        if (self.scan_state.anchored) {
+            var raw: [control_record.encoded_size]u8 = undefined;
+            try self.member.read(.control, offset, &raw);
+            if (!codec.isZero(&raw)) return error.SlotNotReclaimed;
+        }
         try self.member.writeDurable(.control, offset, &prepared.encoded);
 
         self.scan_state.tail = prepared.record;
         self.scan_state.tail_raw_record_digest = prepared.record_digest;
         self.scan_state.tail_physical_slot = prepared.physical_slot;
-        self.scan_state.physical_frontier = std.math.add(u64, prepared.physical_slot, 1) catch unreachable;
-        self.scan_state.journal_full = self.scan_state.physical_frontier == self.scan_state.slot_count;
+        if (self.scan_state.anchored) {
+            self.scan_state.next_physical_slot = nextRingSlot(prepared.physical_slot, self.scan_state.slot_count);
+            self.scan_state.journal_full = self.scan_state.next_physical_slot == self.scan_state.active_anchor.?.physical_slot;
+        } else {
+            self.scan_state.physical_frontier = std.math.add(u64, prepared.physical_slot, 1) catch unreachable;
+            self.scan_state.next_physical_slot = self.scan_state.physical_frontier;
+            self.scan_state.journal_full = self.scan_state.physical_frontier == self.scan_state.slot_count;
+        }
         if (self.scan_state.checkpoint_status == .valid) self.scan_state.checkpoint_status = .stale;
         return .{
             .record = prepared.record,
@@ -307,6 +378,7 @@ pub const Journal = struct {
             .raw_record_digest = self.scan_state.tail_raw_record_digest,
             .history_digest = tail.history_digest,
             .physical_frontier = self.scan_state.physical_frontier,
+            .next_physical_slot = self.scan_state.next_physical_slot,
         };
     }
 };
@@ -485,8 +557,17 @@ fn scanLinearInto(member: *member_api.Member, history: ?*HistoryScan) !ScanResul
     }
 
     result.unresolved_tail_damage = pending_invalid_slots != 0;
-    result.journal_full = result.physical_frontier == result.slot_count;
-    result.next_physical_slot = result.physical_frontier;
+    if (result.active_anchor) |anchor| {
+        result.anchored = true;
+        result.next_physical_slot = if (result.physical_frontier == result.slot_count)
+            1
+        else
+            result.physical_frontier;
+        result.journal_full = result.next_physical_slot == anchor.physical_slot;
+    } else {
+        result.journal_full = result.physical_frontier == result.slot_count;
+        result.next_physical_slot = result.physical_frontier;
+    }
     return result;
 }
 
@@ -588,12 +669,24 @@ fn scanAnchoredInto(member: *member_api.Member, history: ?*HistoryScan) !ScanRes
         if (history) |evidence| appendHistoryEntry(evidence, record, raw, slot);
     }
     result.unresolved_tail_damage = pending_invalid_slots != 0;
+    result.journal_full = result.next_physical_slot == anchor_slot;
     return result;
 }
 
 fn nextRingSlot(slot: u64, slot_count: u64) u64 {
     const next = slot + 1;
     return if (next == slot_count) 1 else next;
+}
+
+fn slotOffset(slot: u64) !u64 {
+    return std.math.mul(u64, slot, control_record.encoded_size) catch error.ControlOffsetOverflow;
+}
+
+pub fn availableSlotCount(state: ScanResult) u64 {
+    if (!state.anchored) return state.slot_count - state.next_physical_slot;
+    const anchor_slot = state.active_anchor.?.physical_slot;
+    if (state.next_physical_slot <= anchor_slot) return anchor_slot - state.next_physical_slot;
+    return (state.slot_count - state.next_physical_slot) + (anchor_slot - 1);
 }
 
 fn appendHistoryEntry(
@@ -1123,17 +1216,48 @@ test "anchored scanner retains birth and follows the live chain across physical 
     try std.testing.expectEqual(successor.local_sequence, history.entries()[2].record.local_sequence);
     try member.close();
 
-    member = try member_api.openAt(std.testing.io, tmp.dir, "anchored", .writable);
-    try std.testing.expectError(error.RolloverWriteNotImplemented, Journal.open(&member));
-    try member.close();
-
     const torn: [control_record.encoded_size]u8 = @splat(0xaa);
     try writeSlot(tmp.dir, "anchored", header, 2, &torn);
     member = try member_api.openAt(std.testing.io, tmp.dir, "anchored", .read_only);
-    defer member.deinit();
     var damaged = try scanHistory(std.testing.allocator, &member);
     try std.testing.expect(damaged.scan_result.unresolved_tail_damage);
     damaged.deinit();
+    try member.close();
+
+    member = try member_api.openAt(std.testing.io, tmp.dir, "anchored", .writable);
+    const proposal = try nextRecord(successor, &successor_raw);
+    {
+        var writable = try Journal.open(&member);
+        try std.testing.expectError(error.ReclaimBarrierRequired, writable.append(proposal));
+        try member.publishCheckpointRedundant(
+            header.checkpoint_offset,
+            header.checkpoint_record_sequence,
+            header.checkpoint_record_digest,
+        );
+        var fault: member_api.FaultController = .{ .fail_write_partial_at = 0 };
+        member.setFaultController(&fault);
+        try std.testing.expectError(error.InjectedFault, writable.reclaimPublishedAnchor());
+        try std.testing.expect(member.isFrozen());
+        try std.testing.expectError(error.WriteFrozen, writable.append(proposal));
+        writable.close();
+    }
+    try std.testing.expectError(error.WriteFrozen, member.close());
+
+    member = try member_api.openAt(std.testing.io, tmp.dir, "anchored", .writable);
+    defer member.deinit();
+    var writable = try Journal.open(&member);
+    defer writable.deinit();
+    try member.publishCheckpointRedundant(
+        member.header().checkpoint_offset,
+        member.header().checkpoint_record_sequence,
+        member.header().checkpoint_record_digest,
+    );
+    try writable.reclaimPublishedAnchor();
+    try std.testing.expect(try writable.hasAppendCapacity(1));
+    const appended = try writable.append(proposal);
+    try std.testing.expectEqual(@as(u64, 2), appended.physical_slot);
+    try std.testing.expect((try writable.state()).journal_full);
+    try std.testing.expectError(error.JournalFull, writable.append(proposal));
 }
 
 test "anchored scanner rejects a direct checkpoint that does not extend birth" {

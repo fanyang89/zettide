@@ -4,6 +4,7 @@ const journal = @import("journal.zig");
 const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
 const pool_authority = @import("pool_authority.zig");
+const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_policy = @import("pool_policy.zig");
 const pool_topology = @import("pool_topology.zig");
@@ -33,6 +34,7 @@ pub const ControlWriteReady = struct {
     tail_history_digest: [32]u8,
     active_members: [max_member_count]bool,
     active_count: u16,
+    reclaim_required: bool = false,
 };
 
 pub const PoolMemberSet = struct {
@@ -99,8 +101,14 @@ pub const PoolMemberSet = struct {
         if (!std.mem.eql(u8, &member.header().member_id, &trusted_member_id))
             return error.TrustedMemberMismatch;
         const history = if (set.histories[0]) |*value| value else return error.TrustedMemberUnavailable;
-        if (history.scan_result.unresolved_tail_damage) return error.JournalNeedsRecovery;
-        if (history.scan_result.slot_count - history.scan_result.physical_frontier < 2)
+        if (history.scan_result.unresolved_tail_damage and !history.scan_result.anchored)
+            return error.JournalNeedsRecovery;
+        const tail = history.scan_result.tail;
+        const resumable_full_checkpoint = history.scan_result.journal_full and tail != null and
+            pool_authority_checkpoint.isSnapshotRecord(tail.?) and
+            (pool_authority_checkpoint.validateCompactedRootRecord(tail.?) catch null) != null;
+        if (!history.scan_result.anchored and !resumable_full_checkpoint and
+            journal.availableSlotCount(history.scan_result) < 3)
             return error.InsufficientJournalCapacity;
         var selected_authority = try pool_authority.selectAdministrativeRecovery(history);
         selected_authority.administrative_recovery = true;
@@ -110,6 +118,7 @@ pub const PoolMemberSet = struct {
             .tail_history_digest = selected_authority.history_digest,
             .active_members = @splat(false),
             .active_count = 1,
+            .reclaim_required = history.scan_result.anchored or resumable_full_checkpoint,
         };
         set.control_write_state.?.active_members[0] = true;
         set.statuses[0] = .active_voter;
@@ -210,6 +219,7 @@ pub const PoolMemberSet = struct {
             .tail_history_digest = record.history_digest,
             .active_members = active_members,
             .active_count = active_count,
+            .reclaim_required = false,
         };
         self.updateVoterStatuses(previous.topology, active_members);
     }
@@ -239,6 +249,7 @@ pub const PoolMemberSet = struct {
             .tail_history_digest = record.history_digest,
             .active_members = active_members,
             .active_count = active_count,
+            .reclaim_required = false,
         };
         for (0..self.supplied_count) |index| {
             const member = if (self.members[index]) |*value| value else continue;
@@ -283,6 +294,7 @@ pub const PoolMemberSet = struct {
             .tail_history_digest = record.history_digest,
             .active_members = active_members,
             .active_count = active_count,
+            .reclaim_required = false,
         };
         self.updateVoterStatuses(previous.topology, active_members);
         return index;
@@ -311,8 +323,24 @@ pub const PoolMemberSet = struct {
             .tail_history_digest = record.history_digest,
             .active_members = active_members,
             .active_count = active_count,
+            .reclaim_required = false,
         };
         self.updateVoterStatuses(previous.topology, active_members);
+    }
+
+    pub fn noteControlReclaimed(
+        self: *PoolMemberSet,
+        active_members: [max_member_count]bool,
+        active_count: u16,
+    ) void {
+        const selected = self.authority_state.?;
+        self.control_write_state = .{
+            .tail_history_digest = selected.history_digest,
+            .active_members = active_members,
+            .active_count = active_count,
+            .reclaim_required = false,
+        };
+        self.updateVoterStatuses(selected.topology, active_members);
     }
 
     pub fn close(self: *PoolMemberSet) !void {
@@ -357,6 +385,7 @@ pub const PoolMemberSet = struct {
             .tail_history_digest = selected_authority.history_digest,
             .active_members = @splat(false),
             .active_count = 0,
+            .reclaim_required = false,
         };
         var available_data_members: usize = 0;
         for (0..self.supplied_count) |index| {
@@ -374,12 +403,17 @@ pub const PoolMemberSet = struct {
             self.statuses[index] = .authority;
             if (descriptor.state != .joining) available_data_members += 1;
             const tail = history.scan_result.tail orelse continue;
+            const needs_reclaim = history.scan_result.anchored or
+                (history.scan_result.journal_full and selected_authority.kind == .checkpoint and
+                    tail.kind == control_record.checkpoint_kind);
             if (intent != .writable or descriptor.control_role != pool_topology.voter_role or
-                member.mode() != .writable or member.isFrozen() or history.scan_result.unresolved_tail_damage or
-                history.scan_result.journal_full or history.scan_result.anchored or
+                member.mode() != .writable or member.isFrozen() or
+                (history.scan_result.unresolved_tail_damage and !history.scan_result.anchored) or
+                (history.scan_result.journal_full and !needs_reclaim) or
                 !std.mem.eql(u8, &tail.history_digest, &selected_authority.history_digest)) continue;
             ready.active_members[index] = true;
             ready.active_count += 1;
+            ready.reclaim_required = ready.reclaim_required or needs_reclaim;
             self.statuses[index] = .active_voter;
         }
         self.data_access_state = pool_policy.dataAccess(
@@ -642,8 +676,8 @@ test "duplicate locations and legacy members are not admitted" {
     );
 }
 
-test "administrative recovery requires capacity for prepare and commit" {
-    inline for (.{ 4096, 2 * 4096 }) |control_bytes| {
+test "administrative recovery reserves a checkpoint slot" {
+    inline for (.{ 4096, 2 * 4096, 3 * 4096 }) |control_bytes| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         try createTestPoolWithControlBytes(tmp.dir, "member", .unprotected, control_bytes);
@@ -656,7 +690,7 @@ test "administrative recovery requires capacity for prepare and commit" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try createTestPoolWithControlBytes(tmp.dir, "member", .unprotected, 3 * 4096);
+    try createTestPoolWithControlBytes(tmp.dir, "member", .unprotected, 4 * 4096);
     const location: Location = .{ .parent = tmp.dir, .basename = "member" };
     var set = try openAdministrativeRecovery(std.testing.io, std.testing.allocator, location, id(2));
     defer set.deinit();

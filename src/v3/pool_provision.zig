@@ -9,7 +9,7 @@ const pool_topology = @import("pool_topology.zig");
 const storage_api = @import("storage.zig");
 
 const default_control_bytes: u64 = 960 * 1024;
-const minimum_control_bytes: u64 = 3 * 4096;
+const minimum_control_bytes: u64 = 5 * 4096;
 const default_metadata_bytes: u64 = 1024 * 1024;
 const default_chunk_size: u32 = 1024 * 1024;
 const region_alignment: u64 = 1024 * 1024;
@@ -77,6 +77,8 @@ pub fn create(
         return error.ErasureCodingNotImplemented;
     if (storages.len < try options.protection.fullWidth())
         return error.InsufficientMembers;
+    if ((try pool_policy.controlPolicy(storages.len)).voter_count == 2)
+        return error.InvalidMemberCount;
     if (!std.math.isPowerOfTwo(options.chunk_size) or options.chunk_size % 4096 != 0 or
         options.control_bytes < minimum_control_bytes or options.control_bytes % 4096 != 0 or
         options.metadata_bytes < 256 * 1024 or options.metadata_bytes % 4096 != 0)
@@ -239,7 +241,7 @@ test "provisioning validates all file storages then creates a reopenable pool" {
 }
 
 test "provisioning reserves genesis plus one control transaction" {
-    inline for (.{ 4096, 2 * 4096 }) |control_bytes| {
+    inline for (.{ 4096, 2 * 4096, 3 * 4096, 4 * 4096 }) |control_bytes| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storages = [_]storage_api.Storage{

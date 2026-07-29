@@ -2,11 +2,10 @@
 
 ## Status
 
-This document freezes the authority checkpoint snapshot payload used by the planned dynamic Pool
-control journal rollover. The codec is implemented in `src/v3/pool_authority_checkpoint.zig`.
-Checkpoint records replicated to the current voter quorum advance authority while complete prior
-history remains available; they are not yet accepted as compacted roots and no journal slots are
-reused. The existing member-local checkpoint hint semantics remain unchanged.
+This document freezes the authority checkpoint snapshot payload and dynamic Pool control journal
+rollover protocol. Checkpoint records replicated to the current voter quorum advance authority.
+Redundant anchor publication, durable reclaim, compacted-root recovery, and circular append permit
+old control slots to be reused without retaining the complete prior history.
 
 All integers are little-endian. The fixed payload ends with CRC32C over all preceding bytes. Reserved
 bytes must be zero. The enclosing 4096-byte control record also binds the payload through its shared
@@ -69,3 +68,33 @@ attempt first revokes that state. An interrupted publication may leave one newer
 never establishes a reclaim barrier on that member. Reopen observes header contents for recovery but
 requires a fresh successful redundant publication before reclaim. No old control slot may be cleared
 before the current voter quorum has established this current-open barrier.
+
+## Reclaim And Circular Append
+
+Replacing an already compacted anchor publishes every current voter before clearing any member. A
+one-voter topology therefore requires 1/1 participation, and a three-voter topology requires 3/3
+participation. The full voter set preserves an old- or new-anchor quorum throughout migration. The
+first compacted anchor may be recovered from an authoritative checkpoint quorum because complete
+linear history has not yet been reclaimed. A partial publication freezes the coordinator and never
+starts reclaim.
+
+After all publications succeed, each member durably zeros the ring arc after its current tail up to,
+but excluding, the published anchor. Slot 0, the active anchor, and all live successors are retained.
+A member becomes ring-write-ready only after its own current-open redundant publication and complete
+clear. Reclaim failures exclude that member; fewer than the current quorum of successful members
+freezes the coordinator.
+
+Circular append uses the next physical ring slot, skips slot 0, and never overwrites the active anchor.
+The target must be zero before writing. Generation and membership transactions require three free
+slots: two records plus one reserved checkpoint slot. Bootstrap requires two free slots. An ordinary
+authority checkpoint requires two slots so it cannot consume the final rollover slot; an explicit
+rollover checkpoint requires one and must involve every supported voter. New Pools therefore require
+at least five control records.
+
+Reopen never inherits reclaim readiness. Anchored voters must repeat redundant publication and reclaim
+before ordinary writes resume. Linear current voters remain write participants only while the active
+voters still retain a quorum of one self-contained compacted root. A normal membership transition may
+not remove that root quorum; it must publish a checkpoint for the new voter set first. Administrative
+recovery may rebuild the barrier from its explicitly trusted survivor. A directly invoked member-local
+checkpoint cannot replace an active authority anchor; anchor replacement is only performed by the
+replicated rollover operation.
