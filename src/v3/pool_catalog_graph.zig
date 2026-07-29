@@ -332,6 +332,30 @@ pub fn validateTransition(
     return current;
 }
 
+pub fn validateNoNewDataMappings(
+    previous: ?*const ValidatedCatalog,
+    current: *const ValidatedCatalog,
+) !void {
+    for (current.descriptorSlice(), 0..) |descriptor, volume_index| {
+        for (current.extentSlice(volume_index)) |run| {
+            const previous_catalog = previous orelse return error.DataMappingRequiresDurabilityWitness;
+            const previous_index = findVolumeIndex(previous_catalog, descriptor.volume_id) orelse
+                return error.DataMappingRequiresDurabilityWitness;
+            var logical_cursor = run.logical_start;
+            const logical_end = try std.math.add(u64, run.logical_start, run.extent_count);
+            while (logical_cursor < logical_end) {
+                const previous_run = findMatchingRun(
+                    previous_catalog.extentSlice(previous_index),
+                    run,
+                    logical_cursor,
+                ) orelse return error.DataMappingRequiresDurabilityWitness;
+                const previous_end = try std.math.add(u64, previous_run.logical_start, previous_run.extent_count);
+                logical_cursor = @min(logical_end, previous_end);
+            }
+        }
+    }
+}
+
 fn validateSnapshots(
     previous: *const ValidatedCatalog,
     current: *const ValidatedCatalog,
@@ -591,6 +615,30 @@ fn considerBoundary(candidate: u64, after: ?u64, boundary: *?u64) void {
 
 fn rangeContains(start: u64, count: anytype, position: u64) bool {
     return position >= start and position < start + @as(u64, @intCast(count));
+}
+
+fn findVolumeIndex(catalog: *const ValidatedCatalog, volume_id: [16]u8) ?usize {
+    for (catalog.descriptorSlice(), 0..) |descriptor, index| {
+        if (std.mem.eql(u8, &descriptor.volume_id, &volume_id)) return index;
+    }
+    return null;
+}
+
+fn findMatchingRun(
+    runs: []const pool_catalog.ExtentRun,
+    current: pool_catalog.ExtentRun,
+    logical_extent: u64,
+) ?pool_catalog.ExtentRun {
+    for (runs) |candidate| {
+        if (!rangeContains(candidate.logical_start, candidate.extent_count, logical_extent)) continue;
+        const offset = logical_extent - current.logical_start;
+        const candidate_offset = logical_extent - candidate.logical_start;
+        if (current.physical_start + offset != candidate.physical_start + candidate_offset or
+            current.state != candidate.state or current.member_count != candidate.member_count or
+            !std.mem.eql(u16, current.memberSlice(), candidate.memberSlice())) continue;
+        return candidate;
+    }
+    return null;
 }
 
 fn findMemberGeometry(members: []const MemberGeometry, slot: u16) ?MemberGeometry {
@@ -909,6 +957,11 @@ test "catalog transition quarantines removed physical and metadata pages" {
     };
     current.metadata[1] = .{ .page_start = 6, .page_count = 2 };
     try validateSnapshots(&previous, &current);
+    try validateNoNewDataMappings(&previous, &current);
+    try std.testing.expectError(
+        error.DataMappingRequiresDurabilityWitness,
+        validateNoNewDataMappings(&current, &previous),
+    );
 
     var invalid = current;
     invalid.retired[0].retired_generation = 1;

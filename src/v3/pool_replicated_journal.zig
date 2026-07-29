@@ -6,6 +6,10 @@ const member_bootstrap = @import("member_bootstrap.zig");
 const membership = @import("membership.zig");
 const pool_authority = @import("pool_authority.zig");
 const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
+const pool_catalog = @import("pool_catalog.zig");
+const pool_catalog_graph = @import("pool_catalog_graph.zig");
+const pool_catalog_page = @import("pool_catalog_page.zig");
+const pool_catalog_store = @import("pool_catalog_store.zig");
 const pool_certificate = @import("pool_certificate.zig");
 const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
@@ -17,6 +21,21 @@ pub const CommitResult = struct {
     committed_members: [pool_member_set.max_member_count]bool,
     committed_count: u16,
     degraded: bool,
+    prepare_witness_members: [pool_member_set.max_member_count]bool = @splat(false),
+};
+
+pub const CatalogGenerationRequest = struct {
+    prepare_proposal: control_record.Record,
+    previous_graph: ?pool_catalog_graph.Graph,
+    current_graph: pool_catalog_graph.Graph,
+    older_recoverable_pages: []const pool_catalog.PageReference = &.{},
+};
+
+pub const CatalogCommitResult = struct {
+    generation: CommitResult,
+    staged_members: [pool_member_set.max_member_count]bool,
+    repaired_members: [pool_member_set.max_member_count]bool,
+    repair_failed_members: [pool_member_set.max_member_count]bool,
 };
 
 pub const BootstrapResult = struct {
@@ -80,12 +99,10 @@ pub const ReplicatedJournal = struct {
         return coordinator;
     }
 
-    pub fn commitGeneration(
+    fn commitGenerationLocked(
         self: *ReplicatedJournal,
         prepare_proposal: control_record.Record,
     ) !CommitResult {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
         if (self.reclaim_required) return error.ReclaimBarrierRequired;
@@ -101,6 +118,7 @@ pub const ReplicatedJournal = struct {
             return error.TopologyDigestMismatch;
         if (!std.mem.eql(u8, &prepare_proposal.layout_digest, &(try pool_layout.digest(authority.layout))))
             return error.LayoutDigestMismatch;
+        if (prepare_proposal.writer_term < authority.writer_term) return error.WriterTermRegression;
 
         var targets: [max_control_participant_count]bool = @splat(false);
         var target_count: u16 = 0;
@@ -151,6 +169,15 @@ pub const ReplicatedJournal = struct {
         }
 
         const certificate = makeCertificate(prepare_results, prepare_successes, self.quorum);
+        var prepare_witness_members: [pool_member_set.max_member_count]bool = @splat(false);
+        for (certificate.attestations[0..certificate.count]) |attestation| {
+            for (0..self.participant_count) |index| {
+                const participant = self.participants[index].?;
+                const member = (try self.set.memberAt(participant.set_index)) orelse continue;
+                if (std.mem.eql(u8, &member.header().member_id, &attestation.member_id))
+                    prepare_witness_members[participant.set_index] = true;
+            }
+        }
         var commit_proposal = firstResult(prepare_results, prepare_successes).record;
         commit_proposal.kind = control_record.generation_commit_kind;
         commit_proposal.payload = try control_record.Payload.init(&(try pool_certificate.encode(certificate)));
@@ -202,7 +229,167 @@ pub const ReplicatedJournal = struct {
             .committed_members = committed_members,
             .committed_count = commit_count,
             .degraded = commit_count < target_count,
+            .prepare_witness_members = prepare_witness_members,
         };
+    }
+
+    pub fn commitCatalogGeneration(
+        self: *ReplicatedJournal,
+        request: CatalogGenerationRequest,
+    ) !CatalogCommitResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        const authority = try self.validateGenerationProposal(request.prepare_proposal);
+
+        var voter_buffer: [pool_member_set.max_member_count]pool_member_set.CatalogVoter = undefined;
+        const voters = try self.set.collectCatalogVoters(&voter_buffer);
+        var catalog_claims: [pool_member_set.max_member_count]?member_api.CatalogClaim = @splat(null);
+        var claimed_voter_count: usize = 0;
+        for (voters, 0..) |voter, index| {
+            catalog_claims[index] = voter.member.claimCatalog() catch {
+                for (catalog_claims[0..claimed_voter_count]) |*maybe_claim| {
+                    if (maybe_claim.*) |*claim| claim.release() catch {};
+                }
+                self.frozen.store(true, .release);
+                self.set.revokeWriteReady();
+                return error.CatalogClaimUnavailable;
+            };
+            claimed_voter_count += 1;
+        }
+        defer for (catalog_claims[0..claimed_voter_count]) |*maybe_claim| {
+            if (maybe_claim.*) |*claim| claim.release() catch {};
+        };
+
+        var geometry_buffer: [pool_member_set.max_member_count]pool_catalog_graph.MemberGeometry = undefined;
+        const geometry = try self.set.collectCatalogGeometry(&geometry_buffer);
+        const current_binding: pool_catalog_graph.AuthorityBinding = .{
+            .generation = request.prepare_proposal.generation,
+            .data_root_digest = request.prepare_proposal.data_root_digest,
+            .topology = authority.topology,
+            .layout = authority.layout,
+        };
+        var previous: ?pool_catalog_graph.ValidatedCatalog = null;
+        const current = if (authority.generation == 0) current: {
+            if (request.previous_graph != null) return error.UnexpectedPreviousCatalog;
+            break :current try pool_catalog_graph.validateGraph(
+                current_binding,
+                request.current_graph,
+                geometry,
+                request.older_recoverable_pages,
+            );
+        } else current: {
+            const previous_graph = request.previous_graph orelse return error.MissingPreviousCatalog;
+            const previous_binding: pool_catalog_graph.AuthorityBinding = .{
+                .generation = authority.generation,
+                .data_root_digest = authority.data_root_digest,
+                .topology = authority.topology,
+                .layout = authority.layout,
+            };
+            previous = try pool_catalog_graph.validateGraph(
+                previous_binding,
+                previous_graph,
+                geometry,
+                request.older_recoverable_pages,
+            );
+            break :current try pool_catalog_graph.validateTransition(
+                previous_binding,
+                previous_graph,
+                geometry,
+                current_binding,
+                request.current_graph,
+                geometry,
+                request.older_recoverable_pages,
+            );
+        };
+        try pool_catalog_graph.validateNoNewDataMappings(if (previous) |*value| value else null, &current);
+
+        var staged_members: [pool_member_set.max_member_count]bool = @splat(false);
+        for (voters, 0..) |voter, voter_index| {
+            const claim = &(catalog_claims[voter_index].?);
+            if (authority.generation == 0) {
+                _ = pool_catalog_store.stageInitialization(
+                    claim,
+                    authority,
+                    &current,
+                    request.current_graph,
+                ) catch {
+                    self.failCatalogMember(voter.set_index);
+                    return error.CatalogStagingFailed;
+                };
+            } else {
+                _ = pool_catalog_store.stageTransition(
+                    claim,
+                    authority,
+                    &previous.?,
+                    &current,
+                    request.current_graph,
+                ) catch {
+                    self.failCatalogMember(voter.set_index);
+                    return error.CatalogStagingFailed;
+                };
+            }
+            staged_members[voter.set_index] = true;
+        }
+
+        const generation = try self.commitGenerationLocked(request.prepare_proposal);
+        for (generation.prepare_witness_members, 0..) |witness, index| {
+            if (witness and !staged_members[index]) {
+                self.frozen.store(true, .release);
+                self.set.revokeWriteReady();
+                return error.UnstagedPrepareWitness;
+            }
+        }
+
+        var repaired_members: [pool_member_set.max_member_count]bool = @splat(false);
+        var repair_failed_members: [pool_member_set.max_member_count]bool = @splat(false);
+        const committed_authority = self.set.authority().?;
+        for (voters, 0..) |voter, voter_index| {
+            _ = pool_catalog_store.repairRootMirror(
+                &(catalog_claims[voter_index].?),
+                committed_authority,
+                request.current_graph.root_bytes,
+            ) catch {
+                repair_failed_members[voter.set_index] = true;
+                self.failCatalogMember(voter.set_index);
+                continue;
+            };
+            repaired_members[voter.set_index] = true;
+        }
+        return .{
+            .generation = generation,
+            .staged_members = staged_members,
+            .repaired_members = repaired_members,
+            .repair_failed_members = repair_failed_members,
+        };
+    }
+
+    fn validateGenerationProposal(
+        self: *ReplicatedJournal,
+        prepare_proposal: control_record.Record,
+    ) !pool_authority.Authority {
+        if (self.closed) return error.CoordinatorClosed;
+        if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.reclaim_required) return error.ReclaimBarrierRequired;
+        if (self.recovery_only) return error.RecoveryOnlyCoordinator;
+        if (prepare_proposal.kind != control_record.generation_prepare_kind)
+            return error.NotGenerationPrepare;
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        if (prepare_proposal.membership_epoch != authority.membership_epoch)
+            return error.MembershipEpochMismatch;
+        if (authority.generation == std.math.maxInt(u64) or
+            prepare_proposal.generation != authority.generation + 1) return error.UnexpectedGeneration;
+        if (!std.mem.eql(u8, &prepare_proposal.topology_digest, &(try pool_topology.digest(authority.topology))))
+            return error.TopologyDigestMismatch;
+        if (!std.mem.eql(u8, &prepare_proposal.layout_digest, &(try pool_layout.digest(authority.layout))))
+            return error.LayoutDigestMismatch;
+        if (prepare_proposal.writer_term < authority.writer_term) return error.WriterTermRegression;
+        return authority;
+    }
+
+    fn failCatalogMember(self: *ReplicatedJournal, set_index: usize) void {
+        self.frozen.store(true, .release);
+        self.set.noteControlFailure(set_index);
+        self.set.revokeWriteReady();
     }
 
     pub fn commitMembership(
@@ -222,7 +409,7 @@ pub const ReplicatedJournal = struct {
             return error.AdministrativeRecoveryRequired;
         try membership.validateTransition(authority.topology, proposal);
         if (proposal.mode == .normal) try self.validateAnchorRetention(proposal.topology);
-        try self.validatePromotions(authority.topology, proposal.topology, authority.history_digest);
+        try self.validateCatalogMembershipGates(authority.topology, proposal.topology, authority.history_digest);
         if (prepare_proposal.generation != authority.generation or
             !std.mem.eql(u8, &prepare_proposal.data_root_digest, &authority.data_root_digest))
             return error.MembershipChangedAuthorityData;
@@ -871,15 +1058,22 @@ pub const ReplicatedJournal = struct {
         return error.NewVoterUnavailable;
     }
 
-    fn validatePromotions(
+    fn validateCatalogMembershipGates(
         self: *const ReplicatedJournal,
         current: pool_topology.Topology,
         next: pool_topology.Topology,
         authority_digest: codec.Digest,
     ) !void {
+        const selected = self.set.authority() orelse return error.MissingAuthority;
+        if (!codec.isZero(&selected.data_root_digest) and removesMember(current, next))
+            return error.CatalogDrainRequired;
         for (current.memberSlice()) |old_member| {
-            if (old_member.state != .joining) continue;
             const new_member = pool_topology.findMember(&next, old_member.member_id) orelse continue;
+            if (promotesActiveNonVoter(old_member, new_member.*)) {
+                if (!codec.isZero(&selected.data_root_digest)) return error.CatalogCatchupRequired;
+                continue;
+            }
+            if (old_member.state != .joining) continue;
             if (new_member.state != .active) continue;
             var matching_history: ?*const journal_api.HistoryScan = null;
             for (self.set.histories[0..self.set.supplied_count]) |*maybe_history| {
@@ -898,6 +1092,7 @@ pub const ReplicatedJournal = struct {
             const tail = history.scan_result.tail orelse return error.MemberNotCaughtUp;
             if (!std.mem.eql(u8, &tail.history_digest, &authority_digest) or
                 history.findHistoryDigest(authority_digest) == null) return error.MemberNotCaughtUp;
+            if (!codec.isZero(&selected.data_root_digest)) return error.CatalogCatchupRequired;
         }
     }
 };
@@ -1029,6 +1224,19 @@ fn voterCount(topology: pool_topology.Topology) u16 {
     return count;
 }
 
+fn promotesActiveNonVoter(old_member: pool_topology.Member, new_member: pool_topology.Member) bool {
+    return old_member.state != .joining and
+        old_member.control_role != pool_topology.voter_role and
+        new_member.control_role == pool_topology.voter_role;
+}
+
+fn removesMember(current: pool_topology.Topology, next: pool_topology.Topology) bool {
+    for (current.memberSlice()) |member| {
+        if (pool_topology.findMember(&next, member.member_id) == null) return true;
+    }
+    return false;
+}
+
 pub fn open(io: std.Io, set: *pool_member_set.PoolMemberSet) !ReplicatedJournal {
     return ReplicatedJournal.open(io, set);
 }
@@ -1069,6 +1277,33 @@ fn checkpointProposalForAuthority(authority: pool_authority.Authority, transacti
             .administrative_recovery = authority.administrative_recovery,
         }),
     };
+}
+
+test "active non-voter promotion requires catalog catch-up" {
+    const active_non_voter: pool_topology.Member = .{
+        .member_id = id(2),
+        .slot = 7,
+        .control_role = 0,
+        .role_flags = member_format.data_role,
+    };
+    var promoted = active_non_voter;
+    promoted.control_role = pool_topology.voter_role;
+    try std.testing.expect(promotesActiveNonVoter(active_non_voter, promoted));
+
+    var joining = active_non_voter;
+    joining.state = .joining;
+    try std.testing.expect(!promotesActiveNonVoter(joining, promoted));
+}
+
+test "member removal requires catalog drain" {
+    const members = [_]pool_topology.Member{
+        .{ .member_id = id(2), .slot = 7, .control_role = pool_topology.voter_role, .role_flags = member_format.known_role_flags },
+        .{ .member_id = id(3), .slot = 11, .state = .draining, .control_role = pool_topology.voter_role, .role_flags = member_format.known_role_flags },
+    };
+    const current = try pool_topology.Topology.init(id(1), 1, @splat(0), &members);
+    const next = try pool_topology.Topology.init(id(1), 2, try pool_topology.digest(current), members[0..1]);
+    try std.testing.expect(removesMember(current, next));
+    try std.testing.expect(!removesMember(current, current));
 }
 
 test "one-member coordinator commits generation and membership then reopens" {
@@ -1116,6 +1351,31 @@ test "one-member coordinator commits generation and membership then reopens" {
     var coordinator = try open(std.testing.io, &set);
     defer coordinator.deinit();
     const authority = set.authority().?;
+    const physical_bytes = try pool_catalog_page.encodePhysicalIntervals(.physical_allocator, 1, &.{.{
+        .member_slot = 7,
+        .physical_start = 0,
+        .extent_count = 1,
+    }});
+    const metadata_bytes = try pool_catalog_page.encodeMetadataAllocator(1, &.{.{
+        .page_start = 4,
+        .page_count = 60,
+    }});
+    const physical_reference = try pool_catalog_page.pageReference(2 * pool_catalog.page_size, &physical_bytes);
+    const metadata_reference = try pool_catalog_page.pageReference(3 * pool_catalog.page_size, &metadata_bytes);
+    const catalog_root: pool_catalog.Root = .{
+        .set_id = authority.topology.set_id,
+        .generation = 1,
+        .sequence = 1,
+        .previous_root_digest = @splat(0),
+        .allocator_root = physical_reference,
+        .metadata_allocator_root = metadata_reference,
+        .extent_size = authority.layout.chunk_size,
+    };
+    const catalog_root_bytes = try pool_catalog.encodeRoot(catalog_root);
+    const catalog_images = [_]pool_catalog_graph.PageImage{
+        .{ .offset = physical_reference.offset, .bytes = &physical_bytes },
+        .{ .offset = metadata_reference.offset, .bytes = &metadata_bytes },
+    };
     var proposal: control_record.Record = .{
         .kind = control_record.generation_prepare_kind,
         .local_sequence = 99,
@@ -1128,15 +1388,22 @@ test "one-member coordinator commits generation and membership then reopens" {
         .transaction_id = id(4),
         .previous_record_digest = @splat(0x11),
         .previous_history_digest = @splat(0x22),
-        .data_root_digest = @splat(0x55),
+        .data_root_digest = try pool_catalog.rootDigest(catalog_root),
         .topology_digest = try pool_topology.digest(authority.topology),
         .layout_digest = try pool_layout.digest(authority.layout),
         .payload = try control_record.Payload.init("generation"),
     };
     proposal.history_digest = try control_record.historyDigest(proposal);
-    const result = try coordinator.commitGeneration(proposal);
-    try std.testing.expectEqual(@as(u16, 1), result.committed_count);
-    try std.testing.expectEqual(@as(u64, 1), result.record.generation);
+    const result = try coordinator.commitCatalogGeneration(.{
+        .prepare_proposal = proposal,
+        .previous_graph = null,
+        .current_graph = .{ .root_bytes = &catalog_root_bytes, .pages = &catalog_images },
+    });
+    try std.testing.expectEqual(@as(u16, 1), result.generation.committed_count);
+    try std.testing.expectEqual(@as(u64, 1), result.generation.record.generation);
+    try std.testing.expect(result.staged_members[0]);
+    try std.testing.expect(result.repaired_members[0]);
+    try std.testing.expect(result.generation.prepare_witness_members[0]);
     try std.testing.expectEqual(@as(u64, 1), set.authority().?.generation);
     const checkpoint_authority = set.authority().?;
     const snapshot: pool_authority_checkpoint.Snapshot = .{
@@ -1309,30 +1576,12 @@ test "one-member coordinator commits generation and membership then reopens" {
     );
     try std.testing.expectEqual(@as(u16, 1), bootstrap_result.voter_ack_count);
 
-    const promotion_result = try membership_coordinator.commitMembership(promotion_prepare);
-    try std.testing.expectEqual(@as(u16, 2), promotion_result.committed_count);
-    try std.testing.expectEqual(@as(u16, 2), reopened.controlWriteReady().?.active_count);
+    try std.testing.expectError(
+        error.CatalogCatchupRequired,
+        membership_coordinator.commitMembership(promotion_prepare),
+    );
     membership_coordinator.close();
     try reopened.close();
-
-    const recovered_locations = [_]pool_member_set.Location{
-        .{ .parent = tmp.dir, .basename = "member" },
-        .{ .parent = tmp.dir, .basename = "joining" },
-    };
-    var recovered = try pool_member_set.open(
-        std.testing.io,
-        std.testing.allocator,
-        &recovered_locations,
-        .writable,
-    );
-    defer recovered.deinit();
-    try std.testing.expectEqual(pool_authority.Kind.membership_commit, recovered.authority().?.kind);
-    try std.testing.expectEqual(@as(u16, 2), recovered.authority().?.topology.member_count);
-    try std.testing.expectEqual(pool_topology.MemberState.active, recovered.authority().?.topology.members[1].state);
-    try std.testing.expect(recovered.controlWriteReady().?.reclaim_required);
-    var resumed = try open(std.testing.io, &recovered);
-    defer resumed.deinit();
-    try std.testing.expectEqual(@as(u16, 2), (try resumed.resumeRollover()).active_count);
 }
 
 test "administrative recovery converts a lost two-of-two quorum to one-of-one" {

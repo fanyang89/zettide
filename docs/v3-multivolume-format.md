@@ -3,9 +3,10 @@
 ## Status
 
 This document freezes the first catalog root, catalog leaf page, volume descriptor, and extent run
-codecs for multi-volume raw Pools. The codecs are implemented in `src/v3/pool_catalog.zig` and
-`src/v3/pool_catalog_page.zig` but are not yet selected by Pool provisioning. Existing raw Pools
-still use the single-volume metadata format.
+codecs for multi-volume raw Pools. The codecs, graph validator, and durable catalog-generation
+staging path are implemented in `src/v3/pool_catalog.zig`, `src/v3/pool_catalog_page.zig`,
+`src/v3/pool_catalog_graph.zig`, and `src/v3/pool_catalog_store.zig`. They are not yet selected by
+Pool provisioning. Existing raw Pools still use the single-volume metadata format.
 
 All integers are little-endian. Digests are BLAKE3-256. Fixed records end with a CRC32C over all
 preceding bytes. Reserved bytes must be zero.
@@ -344,6 +345,42 @@ The current transition validator intentionally rejects every physical or metadat
 `retired -> free/mapped` transition. Reclaim remains disabled until the publisher can supply an
 authority-backed witness proving that no recoverable root predates the interval's retirement
 generation. A caller-supplied generation number is not sufficient evidence.
+
+## Durable Staging
+
+`commitCatalogGeneration` is the only public dynamic-Pool generation commit path. It holds the
+coordinator mutex and an owner-token catalog claim on every current voter through graph validation,
+staging, control commit, and root repair. Ordinary Member metadata writes and close are rejected while
+the claim is held.
+
+Publication uses the complete current voter set, not only control quorum:
+
+1. Validate the previous authority-bound graph and the proposed next graph.
+2. On every voter, read A/B roots and select authority only by the control `data_root_digest`.
+3. Read-verify unchanged pages. Never rewrite an immutable page referenced by the old root.
+4. Batch-write new COW pages and issue one durable sync barrier.
+5. Write the non-authoritative root slot and issue a second durable sync barrier.
+6. Only after every voter has staged the root, append generation prepare records.
+7. Verify every certificate prepare witness belongs to the staged-member set.
+8. After known commit success, repair the other root slot on every voter.
+
+Thus normal topologies stage on 1/1 or 3/3 voters, and a transient two-voter topology stages on 2/2,
+even though the control certificate and commit require only the topology quorum. A staging failure
+occurs before prepare, revokes write readiness, and freezes the coordinator. An unknown control commit
+outcome skips repair and requires full authority reopen. A post-commit repair failure is returned as a
+failure bitmap alongside the successful commit result and also revokes further writes.
+
+Genesis has no old catalog root. Initial publication requires zero A/B slots, writes pages then A,
+commits generation 1, and repairs B after known success. Retrying the same candidate accepts an exact
+staged root or a recognized prefix left by a partial root write; a conflicting nonzero root is never
+overwritten.
+
+The integrated path currently supports metadata-only transitions. Any new, moved, or state-changed
+data mapping is rejected until data initialization/write durability can be represented by a trusted
+witness. Voter promotion under a nonzero catalog authority is likewise rejected until the joining or
+non-voter member has an authority-bound catalog catch-up proof. Member removal is rejected until an
+authority-bound catalog drain proof shows that no mapping or allocator interval references its slot.
+These are deliberate fail-closed functional limits.
 
 ## Mirrored Root Selection
 

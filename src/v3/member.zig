@@ -67,6 +67,36 @@ pub const RegionKind = enum {
     data,
 };
 
+pub const RegionWrite = struct {
+    offset: u64,
+    bytes: []const u8,
+};
+
+pub const CatalogClaim = struct {
+    member: *Member,
+    id: u64,
+    released: bool = false,
+
+    pub fn read(self: *const CatalogClaim, offset: u64, buffer: []u8) !void {
+        try self.member.validateCatalogClaim(self.id);
+        try self.member.read(.metadata, offset, buffer);
+    }
+
+    pub fn writeBatchDurable(self: *const CatalogClaim, writes: []const RegionWrite) !void {
+        return self.member.writeCatalogBatchDurable(self.id, writes);
+    }
+
+    pub fn writeRootDurable(self: *const CatalogClaim, offset: u64, bytes: []const u8) !void {
+        return self.member.writeCatalogRootDurable(self.id, offset, bytes);
+    }
+
+    pub fn release(self: *CatalogClaim) !void {
+        if (self.released) return;
+        try self.member.releaseCatalogClaim(self.id);
+        self.released = true;
+    }
+};
+
 pub const FaultController = struct {
     fail_write_at: ?u64 = null,
     fail_write_partial_at: ?u64 = null,
@@ -137,6 +167,8 @@ pub const Member = struct {
     frozen: std.atomic.Value(bool) = .init(false),
     closed: std.atomic.Value(bool) = .init(false),
     journal_claimed: std.atomic.Value(bool) = .init(false),
+    catalog_claim_id: std.atomic.Value(u64) = .init(0),
+    catalog_claim_sequence: std.atomic.Value(u64) = .init(1),
 
     pub fn createAt(
         io: Io,
@@ -358,6 +390,35 @@ pub const Member = struct {
         self.journal_claimed.store(false, .release);
     }
 
+    pub fn claimCatalog(self: *Member) !CatalogClaim {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.isClosed()) return error.MemberClosed;
+        if (self.open_mode != .writable) return error.ReadOnlyMember;
+        if (self.isFrozen()) return error.WriteFrozen;
+        var id = self.catalog_claim_sequence.load(.acquire);
+        while (true) {
+            if (id == 0 or id == std.math.maxInt(u64)) return error.CatalogClaimSequenceExhausted;
+            if (self.catalog_claim_sequence.cmpxchgWeak(id, id + 1, .acq_rel, .acquire)) |observed| {
+                id = observed;
+                continue;
+            }
+            break;
+        }
+        if (self.catalog_claim_id.cmpxchgStrong(0, id, .acq_rel, .acquire) != null)
+            return error.CatalogAlreadyClaimed;
+        return .{ .member = self, .id = id };
+    }
+
+    fn releaseCatalogClaim(self: *Member, claim_id: u64) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.catalog_claim_id.cmpxchgStrong(claim_id, 0, .acq_rel, .acquire) != null)
+            return error.InvalidCatalogClaim;
+    }
+
     pub fn read(self: *Member, kind: RegionKind, offset: u64, buffer: []u8) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -372,6 +433,7 @@ pub const Member = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
+        if (kind == .metadata and self.catalog_claim_id.load(.acquire) != 0) return error.CatalogClaimed;
         try self.writeLocked(kind, offset, bytes);
     }
 
@@ -379,8 +441,42 @@ pub const Member = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
+        if (kind == .metadata and self.catalog_claim_id.load(.acquire) != 0) return error.CatalogClaimed;
         try self.writeLocked(kind, offset, bytes);
         try self.syncLocked();
+    }
+
+    fn writeCatalogBatchDurable(self: *Member, claim_id: u64, writes: []const RegionWrite) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.validateCatalogWriteClaim(claim_id);
+        if (writes.len == 0) return;
+        for (writes) |item| _ = try self.position(.metadata, item.offset, item.bytes.len);
+        for (writes) |item| try self.writeLocked(.metadata, item.offset, item.bytes);
+        try self.syncLocked();
+    }
+
+    fn writeCatalogRootDurable(self: *Member, claim_id: u64, offset: u64, bytes: []const u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.validateCatalogWriteClaim(claim_id);
+        try self.writeLocked(.metadata, offset, bytes);
+        try self.syncLocked();
+    }
+
+    fn validateCatalogWriteClaim(self: *Member, claim_id: u64) !void {
+        if (self.isClosed()) return error.MemberClosed;
+        if (self.open_mode != .writable) return error.ReadOnlyMember;
+        if (self.isFrozen()) return error.WriteFrozen;
+        if (claim_id == 0 or self.catalog_claim_id.load(.acquire) != claim_id)
+            return error.InvalidCatalogClaim;
+    }
+
+    fn validateCatalogClaim(self: *Member, claim_id: u64) !void {
+        if (claim_id == 0 or self.catalog_claim_id.load(.acquire) != claim_id)
+            return error.InvalidCatalogClaim;
     }
 
     pub fn publishCheckpoint(
@@ -504,6 +600,7 @@ pub const Member = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.isClosed()) return;
+        if (self.catalog_claim_id.load(.acquire) != 0) return error.CatalogClaimed;
         self.checkpoint_reclaim_ready = false;
 
         var first_error: ?anyerror = null;
@@ -1353,6 +1450,54 @@ test "empty writes validate lifecycle without dirtying or consuming faults" {
     var reopened = try openAt(std.testing.io, tmp.dir, "member", .writable);
     try reopened.close();
     try std.testing.expectError(error.MemberClosed, member.write(.control, 0, &.{}));
+}
+
+test "durable write batches prevalidate ranges and use one sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = testHeader();
+    try createRawMember(tmp.dir, "member", header, header, header.member_bytes);
+    var member = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+    var fault: FaultController = .{};
+    member.setFaultController(&fault);
+
+    var claim = try member.claimCatalog();
+    try std.testing.expectError(error.RegionOutOfBounds, claim.writeBatchDurable(&.{
+        .{ .offset = 0, .bytes = &.{1} },
+        .{ .offset = header.metadata.length, .bytes = &.{2} },
+    }));
+    try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+    try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
+
+    try claim.writeBatchDurable(&.{
+        .{ .offset = 0, .bytes = &.{ 1, 2 } },
+        .{ .offset = 8, .bytes = &.{ 3, 4 } },
+    });
+    try std.testing.expectEqual(@as(u64, 2), fault.write_count);
+    try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+    var first: [2]u8 = undefined;
+    var second: [2]u8 = undefined;
+    try member.read(.metadata, 0, &first);
+    try member.read(.metadata, 8, &second);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2 }, &first);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 4 }, &second);
+
+    const stale_claim = claim;
+    try std.testing.expectError(error.CatalogClaimed, member.write(.metadata, 16, &.{1}));
+    try claim.writeBatchDurable(&.{.{ .offset = 16, .bytes = &.{5} }});
+    try claim.release();
+    var next_claim = try member.claimCatalog();
+    try std.testing.expectError(
+        error.InvalidCatalogClaim,
+        stale_claim.writeBatchDurable(&.{.{ .offset = 24, .bytes = &.{6} }}),
+    );
+    try next_claim.release();
+    member.catalog_claim_sequence.store(std.math.maxInt(u64), .release);
+    try std.testing.expectError(error.CatalogClaimSequenceExhausted, member.claimCatalog());
+    try std.testing.expectError(error.CatalogClaimSequenceExhausted, member.claimCatalog());
+    try std.testing.expectEqual(@as(u64, 3), fault.write_count);
+    try std.testing.expectEqual(@as(u64, 2), fault.sync_count);
 }
 
 test "region reads report truncation exactly" {

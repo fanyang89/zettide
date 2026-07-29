@@ -5,6 +5,7 @@ const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
 const pool_authority = @import("pool_authority.zig");
 const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
+const pool_catalog_graph = @import("pool_catalog_graph.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_policy = @import("pool_policy.zig");
 const pool_topology = @import("pool_topology.zig");
@@ -35,6 +36,11 @@ pub const ControlWriteReady = struct {
     active_members: [max_member_count]bool,
     active_count: u16,
     reclaim_required: bool = false,
+};
+
+pub const CatalogVoter = struct {
+    set_index: usize,
+    member: *member_api.Member,
 };
 
 pub const PoolMemberSet = struct {
@@ -174,9 +180,66 @@ pub const PoolMemberSet = struct {
         return error.MemberUnavailable;
     }
 
+    pub fn collectCatalogVoters(
+        self: *PoolMemberSet,
+        output: []CatalogVoter,
+    ) ![]CatalogVoter {
+        const selected = self.authority_state orelse return error.MissingAuthority;
+        const ready = self.control_write_state orelse return error.WriteQuorumUnavailable;
+        var count: usize = 0;
+        for (selected.topology.memberSlice()) |descriptor| {
+            if (descriptor.control_role != pool_topology.voter_role) continue;
+            if (count == output.len) return error.OutputTooSmall;
+            const set_index = self.findSuppliedMember(descriptor.member_id) orelse
+                return error.CatalogVoterUnavailable;
+            const member = if (self.members[set_index]) |*value| value else return error.CatalogVoterUnavailable;
+            if (self.statuses[set_index] != .active_voter or !ready.active_members[set_index] or
+                member.mode() != .writable or member.isFrozen() or member.isClosed())
+                return error.CatalogVoterUnavailable;
+            output[count] = .{ .set_index = set_index, .member = member };
+            count += 1;
+        }
+        if (count == 0) return error.CatalogVoterUnavailable;
+        return output[0..count];
+    }
+
+    pub fn collectCatalogGeometry(
+        self: *PoolMemberSet,
+        output: []pool_catalog_graph.MemberGeometry,
+    ) ![]pool_catalog_graph.MemberGeometry {
+        const selected = self.authority_state orelse return error.MissingAuthority;
+        if (output.len < selected.topology.member_count) return error.OutputTooSmall;
+        for (selected.topology.memberSlice(), 0..) |descriptor, index| {
+            const set_index = self.findSuppliedMember(descriptor.member_id) orelse
+                return error.MemberGeometryUnavailable;
+            const member = if (self.members[set_index]) |*value| value else return error.MemberGeometryUnavailable;
+            const header = member.header();
+            if (header.member_slot != descriptor.slot) return error.MemberGeometryIdentityMismatch;
+            output[index] = .{
+                .member_id = header.member_id,
+                .slot = header.member_slot,
+                .metadata_length = header.metadata.length,
+                .data_length = header.data.length,
+            };
+        }
+        return output[0..selected.topology.member_count];
+    }
+
+    pub fn revokeWriteReady(self: *PoolMemberSet) void {
+        self.control_write_state = null;
+    }
+
     pub fn claimCoordinator(self: *PoolMemberSet) !void {
         if (self.coordinator_state.cmpxchgStrong(0, 1, .acq_rel, .acquire)) |state|
             return if (state == 2 or state == 3) error.MemberSetClosed else error.CoordinatorAlreadyOpen;
+    }
+
+    fn findSuppliedMember(self: *const PoolMemberSet, member_id: [16]u8) ?usize {
+        for (self.members[0..self.supplied_count], 0..) |maybe_member, index| {
+            const member = if (maybe_member) |value| value else continue;
+            if (std.mem.eql(u8, &member.header().member_id, &member_id)) return index;
+        }
+        return null;
     }
 
     pub fn releaseCoordinator(self: *PoolMemberSet) void {
