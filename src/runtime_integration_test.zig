@@ -9,6 +9,12 @@ const runtime_mod = @import("runtime.zig");
 const config_allocator = std.testing.allocator;
 const runtime_allocator = std.heap.smp_allocator;
 
+const node_control_endpoint = "127.0.0.1:9000";
+const node_nvmf_endpoint = "127.0.0.1:4420";
+const node_failure_domain = "rack-a";
+const node_capability_bits: u64 = 5;
+const node_protocol_version: u32 = 1;
+
 const test_options: runtime_mod.Options = .{
     .tick_interval_ms = 5,
     .election_tick = 20,
@@ -32,6 +38,16 @@ const CreatedPool = struct {
     }
 };
 
+const RegisteredNode = struct {
+    id: []u8,
+    revision: u64,
+
+    fn deinit(self: *RegisteredNode) void {
+        config_allocator.free(self.id);
+        self.* = undefined;
+    }
+};
+
 test "runtime restores Pool snapshot and WAL suffix through RPC" {
     var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
@@ -48,17 +64,42 @@ test "runtime restores Pool snapshot and WAL suffix through RPC" {
 
     var primary: CreatedPool = undefined;
     var secondary: CreatedPool = undefined;
+    var snapshot_node: RegisteredNode = undefined;
+    var suffix_node: RegisteredNode = undefined;
     {
         const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
         defer destroyRuntime(runtime);
         _ = try waitForStableLeader(&.{runtime});
         primary = try createPool(runtime, "request-primary", "primary");
+        errdefer primary.deinit();
         secondary = try createPool(runtime, "request-secondary", "secondary");
+        errdefer secondary.deinit();
+        snapshot_node = try registerNode(
+            runtime,
+            &config,
+            "request-snapshot-node",
+            "0198f54d-5c2a-7000-8000-000000000101",
+        );
+        errdefer snapshot_node.deinit();
+        suffix_node = try registerNode(
+            runtime,
+            &config,
+            "request-suffix-node",
+            "0198f54d-5c2a-7000-8000-000000000102",
+        );
+        errdefer suffix_node.deinit();
+        try std.testing.expectEqual(@as(u64, 2), primary.revision);
+        try std.testing.expectEqual(@as(u64, 3), secondary.revision);
+        try std.testing.expectEqual(@as(u64, 4), snapshot_node.revision);
+        try std.testing.expectEqual(@as(u64, 5), suffix_node.revision);
         try expectList(runtime, 2);
+        try expectNodeList(runtime, &.{ snapshot_node, suffix_node });
         try runtime.shutdown();
     }
     defer primary.deinit();
     defer secondary.deinit();
+    defer snapshot_node.deinit();
+    defer suffix_node.deinit();
 
     {
         const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
@@ -67,10 +108,22 @@ test "runtime restores Pool snapshot and WAL suffix through RPC" {
         try expectPool(runtime, "primary", primary.id);
         try expectPool(runtime, "secondary", secondary.id);
         try expectList(runtime, 2);
+        try expectNode(runtime, &config, snapshot_node);
+        try expectNode(runtime, &config, suffix_node);
+        try expectNodeList(runtime, &.{ snapshot_node, suffix_node });
         var replayed = try createPool(runtime, "request-primary", "primary");
         defer replayed.deinit();
         try std.testing.expectEqualStrings(primary.id, replayed.id);
         try std.testing.expectEqual(primary.revision, replayed.revision);
+        var replayed_snapshot_node = try registerNode(
+            runtime,
+            &config,
+            "request-snapshot-node",
+            "0198f54d-5c2a-7000-8000-000000000101",
+        );
+        defer replayed_snapshot_node.deinit();
+        try std.testing.expectEqualStrings(snapshot_node.id, replayed_snapshot_node.id);
+        try std.testing.expectEqual(snapshot_node.revision, replayed_snapshot_node.revision);
     }
 }
 
@@ -118,6 +171,14 @@ test "three-voter runtime survives leader failover and restart" {
     var created = try createPool(runtimes[initial_leader].?, "request-failover", "failover");
     defer created.deinit();
     try waitForApplied(&runtimes, created.revision);
+    var registered = try registerNode(
+        runtimes[initial_leader].?,
+        &configs[initial_leader],
+        "request-node-failover",
+        "0198f54d-5c2a-7000-8000-000000000201",
+    );
+    defer registered.deinit();
+    try waitForApplied(&runtimes, registered.revision);
 
     try runtimes[initial_leader].?.shutdown();
     runtimes[initial_leader].?.deinit();
@@ -126,10 +187,21 @@ test "three-voter runtime survives leader failover and restart" {
     try std.testing.expect(replacement_leader != initial_leader);
     try expectPool(runtimes[replacement_leader].?, "failover", created.id);
     try expectList(runtimes[replacement_leader].?, 1);
+    try expectNode(runtimes[replacement_leader].?, &configs[replacement_leader], registered);
+    try expectNodeList(runtimes[replacement_leader].?, &.{registered});
     var replayed = try createPool(runtimes[replacement_leader].?, "request-failover", "failover");
     defer replayed.deinit();
     try std.testing.expectEqualStrings(created.id, replayed.id);
     try std.testing.expectEqual(created.revision, replayed.revision);
+    var replayed_node = try registerNode(
+        runtimes[replacement_leader].?,
+        &configs[replacement_leader],
+        "request-node-failover",
+        "0198f54d-5c2a-7000-8000-000000000201",
+    );
+    defer replayed_node.deinit();
+    try std.testing.expectEqualStrings(registered.id, replayed_node.id);
+    try std.testing.expectEqual(registered.revision, replayed_node.revision);
 
     runtimes[initial_leader] = try runtime_mod.Runtime.create(
         runtime_allocator,
@@ -139,6 +211,7 @@ test "three-voter runtime survives leader failover and restart" {
     );
     _ = try waitForStableLeader(&runtimes);
     try waitForApplied(&runtimes, replayed.revision);
+    try waitForApplied(&runtimes, registered.revision);
 }
 
 fn makeConfig(
@@ -254,6 +327,36 @@ fn createPool(runtime: *runtime_mod.Runtime, request_id: []const u8, name: []con
     };
 }
 
+fn registerNode(
+    runtime: *runtime_mod.Runtime,
+    config: *const config_mod.Config,
+    request_id: []const u8,
+    node_id: []const u8,
+) !RegisteredNode {
+    const request = try encodeMessage(pb.RegisterNodeRequest{
+        .request_id = request_id,
+        .node_id = node_id,
+        .cluster_id = &config.cluster_id,
+        .control_endpoint = node_control_endpoint,
+        .nvmf_endpoint = node_nvmf_endpoint,
+        .failure_domain = node_failure_domain,
+        .capability_bits = node_capability_bits,
+        .protocol_version = node_protocol_version,
+    });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.NodeService/RegisterNode", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.RegisterNodeResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    const node = response.node orelse return error.MissingNode;
+    return .{
+        .id = try config_allocator.dupe(u8, node.id),
+        .revision = node.registered_revision,
+    };
+}
+
 fn expectPool(runtime: *runtime_mod.Runtime, name: []const u8, expected_id: []const u8) !void {
     const request = try encodeMessage(pb.GetPoolRequest{ .selector = .{ .name = name } });
     defer runtime_allocator.free(request);
@@ -277,6 +380,53 @@ fn expectList(runtime: *runtime_mod.Runtime, expected_count: usize) !void {
     var response = try pb.ListPoolsResponse.decode(&reader, runtime_allocator);
     defer response.deinit(runtime_allocator);
     try std.testing.expectEqual(expected_count, response.pools.items.len);
+}
+
+fn expectNode(
+    runtime: *runtime_mod.Runtime,
+    config: *const config_mod.Config,
+    expected: RegisteredNode,
+) !void {
+    const request = try encodeMessage(pb.GetNodeRequest{ .node_id = expected.id });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.NodeService/GetNode", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.GetNodeResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    const node = response.node orelse return error.MissingNode;
+    try std.testing.expectEqualStrings(expected.id, node.id);
+    try std.testing.expectEqualSlices(u8, &config.cluster_id, node.cluster_id);
+    try std.testing.expectEqualStrings(node_control_endpoint, node.control_endpoint);
+    try std.testing.expectEqualStrings(node_nvmf_endpoint, node.nvmf_endpoint);
+    try std.testing.expectEqualStrings(node_failure_domain, node.failure_domain);
+    try std.testing.expectEqual(node_capability_bits, node.capability_bits);
+    try std.testing.expectEqual(node_protocol_version, node.protocol_version);
+    try std.testing.expect(node.registered_at_unix_ms > 0);
+    try std.testing.expectEqual(expected.revision, node.registered_revision);
+}
+
+fn expectNodeList(runtime: *runtime_mod.Runtime, expected_nodes: []const RegisteredNode) !void {
+    const request = try encodeMessage(pb.ListNodesRequest{});
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.NodeService/ListNodes", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.ListNodesResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    try std.testing.expectEqual(expected_nodes.len, response.nodes.items.len);
+    for (expected_nodes) |expected| {
+        var found = false;
+        for (response.nodes.items) |node| {
+            if (!std.mem.eql(u8, expected.id, node.id)) continue;
+            try std.testing.expectEqual(expected.revision, node.registered_revision);
+            found = true;
+            break;
+        }
+        try std.testing.expect(found);
+    }
 }
 
 fn call(runtime: *runtime_mod.Runtime, method: []const u8, request: []const u8) !grpc.CallResult {
