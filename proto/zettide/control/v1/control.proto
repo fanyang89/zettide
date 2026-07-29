@@ -8,6 +8,12 @@ service PoolService {
   rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
 }
 
+service NodeService {
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+}
+
 message Pool {
   string id = 1;
   string name = 2;
@@ -47,10 +53,56 @@ message ListPoolsResponse {
   bytes next_page_token = 2;
 }
 
+message Node {
+  string id = 1;
+  bytes cluster_id = 2;
+  string control_endpoint = 3;
+  string nvmf_endpoint = 4;
+  string failure_domain = 5;
+  uint64 capability_bits = 6;
+  uint32 protocol_version = 7;
+  int64 registered_at_unix_ms = 8;
+  uint64 registered_revision = 9;
+}
+
+message RegisterNodeRequest {
+  string request_id = 1;
+  string node_id = 2;
+  bytes cluster_id = 3;
+  string control_endpoint = 4;
+  string nvmf_endpoint = 5;
+  string failure_domain = 6;
+  uint64 capability_bits = 7;
+  uint32 protocol_version = 8;
+}
+
+message RegisterNodeResponse {
+  Node node = 1;
+}
+
+message GetNodeRequest {
+  string node_id = 1;
+}
+
+message GetNodeResponse {
+  Node node = 1;
+}
+
+message ListNodesRequest {
+  uint32 page_size = 1;
+  bytes page_token = 2;
+}
+
+message ListNodesResponse {
+  repeated Node nodes = 1;
+  bytes next_page_token = 2;
+}
+
 message CommandEnvelope {
   uint32 format_version = 1;
   oneof command {
     CreatePoolCommand create_pool = 2;
+    RegisterNodeCommand register_node = 3;
   }
 }
 
@@ -60,6 +112,18 @@ message CreatePoolCommand {
   string name = 3;
   string description = 4;
   int64 proposed_created_at_unix_ms = 5;
+}
+
+message RegisterNodeCommand {
+  string request_id = 1;
+  string node_id = 2;
+  bytes cluster_id = 3;
+  string control_endpoint = 4;
+  string nvmf_endpoint = 5;
+  string failure_domain = 6;
+  uint64 capability_bits = 7;
+  uint32 protocol_version = 8;
+  int64 proposed_registered_at_unix_ms = 9;
 }
 
 enum ApplyCode {
@@ -78,6 +142,20 @@ message ApplyResponse {
   Pool pool = 2;
 }
 
+enum RegisterNodeApplyCode {
+  REGISTER_NODE_APPLY_CODE_UNSPECIFIED = 0;
+  REGISTER_NODE_APPLY_CODE_REGISTERED = 1;
+  REGISTER_NODE_APPLY_CODE_REQUEST_CONFLICT = 2;
+  REGISTER_NODE_APPLY_CODE_ID_EXISTS = 3;
+  REGISTER_NODE_APPLY_CODE_REQUEST_LIMIT = 4;
+  REGISTER_NODE_APPLY_CODE_NODE_LIMIT = 5;
+}
+
+message RegisterNodeApplyResponse {
+  RegisterNodeApplyCode code = 1;
+  Node node = 2;
+}
+
 message RequestRecord {
   string request_id = 1;
   bytes request_fingerprint = 2;
@@ -90,4 +168,5 @@ message StateSnapshot {
   uint32 format_version = 1;
   repeated Pool pools = 2;
   repeated RequestRecord requests = 3;
+  repeated Node nodes = 4;
 }

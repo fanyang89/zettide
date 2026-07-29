@@ -195,7 +195,10 @@ pub const PoolStateMachine = struct {
         var envelope = pb.CommandEnvelope.decode(&reader, arena.allocator()) catch |err| return mapDecodeError(err);
         defer envelope.deinit(arena.allocator());
         if (envelope.format_version != command_format_version) return error.PayloadParseFailed;
-        const command = envelope.create_pool orelse return error.PayloadParseFailed;
+        const command = switch (envelope.command orelse return error.PayloadParseFailed) {
+            .create_pool => |command| command,
+            .register_node => return error.PayloadParseFailed,
+        };
         try validateCommand(command);
 
         const fingerprint = requestFingerprint(command);
@@ -408,7 +411,7 @@ pub fn encodeCreatePoolCommand(allocator: std.mem.Allocator, command: pb.CreateP
     try validateCommand(command);
     return encodeMessage(allocator, pb.CommandEnvelope{
         .format_version = command_format_version,
-        .create_pool = command,
+        .command = .{ .create_pool = command },
     });
 }
 
@@ -510,7 +513,10 @@ fn restoreRequest(
     var envelope = pb.CommandEnvelope.decode(&command_reader, decode_allocator) catch |err| return mapDecodeError(err);
     defer envelope.deinit(decode_allocator);
     if (envelope.format_version != command_format_version) return error.PayloadParseFailed;
-    const command = envelope.create_pool orelse return error.PayloadParseFailed;
+    const command = switch (envelope.command orelse return error.PayloadParseFailed) {
+        .create_pool => |command| command,
+        .register_node => return error.PayloadParseFailed,
+    };
     try validateCommand(command);
     if (!std.mem.eql(u8, source.request_id, command.request_id)) return error.PayloadParseFailed;
     const expected_fingerprint = requestFingerprint(command);
@@ -1106,7 +1112,7 @@ test "empty raft entry is a no-op and malformed command is terminal" {
     );
     const encoded = try encodeMessage(allocator, pb.CommandEnvelope{
         .format_version = command_format_version,
-        .create_pool = invalid_name,
+        .command = .{ .create_pool = invalid_name },
     });
     defer allocator.free(encoded);
     try std.testing.expectError(
