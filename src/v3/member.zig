@@ -412,7 +412,7 @@ pub const Member = struct {
     }
 
     fn releaseCatalogClaim(self: *Member, claim_id: u64) !void {
-        try self.mutex.lock(self.io);
+        self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
         if (self.catalog_claim_id.cmpxchgStrong(claim_id, 0, .acq_rel, .acquire) != null)

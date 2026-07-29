@@ -1,6 +1,7 @@
 const std = @import("std");
 const container = @import("../container.zig");
 const codec = @import("codec.zig");
+const member_format = @import("member_format.zig");
 const pool_catalog = @import("pool_catalog.zig");
 const pool_catalog_page = @import("pool_catalog_page.zig");
 const pool_layout = @import("pool_layout.zig");
@@ -197,7 +198,7 @@ fn validateInputs(binding: AuthorityBinding, graph: Graph, members: []const Memb
     _ = try pool_layout.dataAccess(binding.layout, binding.topology);
     if (binding.generation == 0 or codec.isZero(&binding.data_root_digest))
         return error.InvalidCatalogAuthority;
-    if (members.len == 0 or members.len != binding.topology.member_count)
+    if (members.len == 0 or members.len > binding.topology.member_count)
         return error.MissingMemberGeometry;
     for (members, 0..) |member, index| {
         const topology_member = pool_topology.findSlot(&binding.topology, member.slot) orelse
@@ -218,7 +219,7 @@ fn validateInputs(binding: AuthorityBinding, graph: Graph, members: []const Memb
         for (members) |geometry| {
             if (geometry.slot == member.slot) found = true;
         }
-        if (!found) return error.MissingMemberGeometry;
+        if (!found and member.state != .joining) return error.MissingMemberGeometry;
     }
     for (graph.pages, 0..) |image, index| {
         const reference: pool_catalog.PageReference = .{ .offset = image.offset, .digest = @splat(1) };
@@ -698,6 +699,23 @@ test "catalog graph resolves authority-bound pages" {
     try std.testing.expectEqual(@as(u16, 1), catalog.free_count);
     try std.testing.expectEqual(@as(u16, 1), catalog.metadata_count);
     try std.testing.expectEqual(@as(u16, 2), catalog.current_page_count);
+
+    const joining_members = [_]pool_topology.Member{
+        topology.members[0],
+        .{ .member_id = @splat(3), .slot = 2, .state = .joining, .role_flags = member_format.data_role },
+    };
+    const joining_topology = try pool_topology.Topology.init(
+        topology.set_id,
+        topology.epoch + 1,
+        try pool_topology.digest(topology),
+        &joining_members,
+    );
+    _ = try validateGraph(.{
+        .generation = 1,
+        .data_root_digest = try pool_catalog.rootDigest(root),
+        .topology = joining_topology,
+        .layout = layout,
+    }, .{ .root_bytes = &root_bytes, .pages = &images }, &geometry, &.{});
 
     var future_physical_bytes = try pool_catalog_page.encodePhysicalIntervals(.physical_allocator, 2, catalog.freeSlice());
     var future_images = images;

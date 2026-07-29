@@ -36,6 +36,19 @@ pub const RootCopies = struct {
 pub const RootSelection = struct {
     authoritative: ValidRoot,
     target: RootSlot,
+    mirror_degraded: bool,
+};
+
+pub const LoadScratch = struct {
+    root_bytes: [pool_catalog.root_encoded_size]u8 = undefined,
+    page_bytes: [pool_catalog_graph.max_current_page_count][pool_catalog.page_size]u8 = undefined,
+    images: [pool_catalog_graph.max_current_page_count]pool_catalog_graph.PageImage = undefined,
+    image_count: usize = 0,
+};
+
+pub const LoadedCatalog = struct {
+    selection: RootSelection,
+    validated: pool_catalog_graph.ValidatedCatalog,
 };
 
 pub fn readRootCopies(claim: *const member_api.CatalogClaim) RootCopies {
@@ -54,6 +67,51 @@ pub fn selectAuthorityRoot(copies: RootCopies, authority: pool_authority.Authori
     return .{
         .authoritative = if (a_matches) copies.a.valid else copies.b.valid,
         .target = if (a_matches and !b_matches) .b else .a,
+        .mirror_degraded = a_matches != b_matches,
+    };
+}
+
+pub fn loadAuthorityCatalog(
+    member: *member_api.Member,
+    authority: pool_authority.Authority,
+    geometry: []const pool_catalog_graph.MemberGeometry,
+    recoverable_pages: []const pool_catalog.PageReference,
+    scratch: *LoadScratch,
+) !LoadedCatalog {
+    scratch.image_count = 0;
+    const selection = try selectAuthorityRoot(readMemberRootCopies(member), authority);
+    scratch.root_bytes = selection.authoritative.bytes;
+    const root = selection.authoritative.root;
+
+    try loadPage(member, scratch, root.volume_tree_root);
+    try loadPage(member, scratch, root.name_index_root);
+    try loadPage(member, scratch, root.allocator_root);
+    try loadPage(member, scratch, root.retired_extent_root);
+    try loadPage(member, scratch, root.metadata_allocator_root);
+
+    if (!root.volume_tree_root.isNull()) {
+        const volume_index_bytes = findLoadedPage(scratch, root.volume_tree_root) orelse
+            return error.MissingVolumeIndexPage;
+        var descriptors: [pool_catalog_graph.max_volume_count]pool_catalog.VolumeDescriptor = undefined;
+        const decoded = try pool_catalog_page.decodeVolumeIndex(volume_index_bytes, &descriptors);
+        for (decoded) |descriptor| {
+            try loadPage(member, scratch, descriptor.header_page);
+            try loadPage(member, scratch, descriptor.extent_map_root);
+        }
+    }
+
+    const graph: pool_catalog_graph.Graph = .{
+        .root_bytes = &scratch.root_bytes,
+        .pages = scratch.images[0..scratch.image_count],
+    };
+    return .{
+        .selection = selection,
+        .validated = try pool_catalog_graph.validateGraph(.{
+            .generation = authority.generation,
+            .data_root_digest = authority.data_root_digest,
+            .topology = authority.topology,
+            .layout = authority.layout,
+        }, graph, geometry, recoverable_pages),
     };
 }
 
@@ -117,6 +175,23 @@ pub fn repairRootMirror(
 fn readRootCandidate(claim: *const member_api.CatalogClaim, slot: RootSlot) RootCandidate {
     var bytes: [pool_catalog.root_encoded_size]u8 = undefined;
     claim.read(rootOffset(slot), &bytes) catch |err| return .{ .unreadable = err };
+    return decodeRootCandidate(bytes);
+}
+
+fn readMemberRootCopies(member: *member_api.Member) RootCopies {
+    return .{
+        .a = readMemberRootCandidate(member, .a),
+        .b = readMemberRootCandidate(member, .b),
+    };
+}
+
+fn readMemberRootCandidate(member: *member_api.Member, slot: RootSlot) RootCandidate {
+    var bytes: [pool_catalog.root_encoded_size]u8 = undefined;
+    member.read(.metadata, rootOffset(slot), &bytes) catch |err| return .{ .unreadable = err };
+    return decodeRootCandidate(bytes);
+}
+
+fn decodeRootCandidate(bytes: [pool_catalog.root_encoded_size]u8) RootCandidate {
     if (codec.isZero(&bytes)) return .zero;
     const root = pool_catalog.decodeRoot(&bytes) catch |err| return .{ .invalid = .{
         .bytes = bytes,
@@ -214,6 +289,38 @@ fn findImage(
     return null;
 }
 
+fn loadPage(
+    member: *member_api.Member,
+    scratch: *LoadScratch,
+    reference: pool_catalog.PageReference,
+) !void {
+    if (reference.isNull()) return;
+    try reference.validate();
+    for (scratch.images[0..scratch.image_count]) |image| {
+        if (image.offset != reference.offset) continue;
+        if (!std.mem.eql(u8, &codec.blake3(image.bytes), &reference.digest))
+            return error.ConflictingPageReference;
+        return;
+    }
+    if (scratch.image_count == scratch.images.len) return error.TooManyCatalogPages;
+    const index = scratch.image_count;
+    try member.read(.metadata, reference.offset, &scratch.page_bytes[index]);
+    if (!std.mem.eql(u8, &codec.blake3(&scratch.page_bytes[index]), &reference.digest))
+        return error.PageDigestMismatch;
+    scratch.images[index] = .{ .offset = reference.offset, .bytes = &scratch.page_bytes[index] };
+    scratch.image_count += 1;
+}
+
+fn findLoadedPage(
+    scratch: *const LoadScratch,
+    reference: pool_catalog.PageReference,
+) ?*const [pool_catalog.page_size]u8 {
+    for (scratch.images[0..scratch.image_count]) |image| {
+        if (image.offset == reference.offset) return image.bytes;
+    }
+    return null;
+}
+
 fn rootOffset(slot: RootSlot) u64 {
     return if (slot == .a) 0 else pool_catalog.page_size;
 }
@@ -276,7 +383,7 @@ test "catalog store stages pages before root and preserves authority mirror" {
     var member = try member_api.Member.createPoolAt(std.testing.io, tmp.dir, "member", header, payload, .{});
     defer member.deinit();
     var claim = try member.claimCatalog();
-    defer claim.release() catch {};
+    defer claim.release() catch unreachable;
 
     const physical_bytes = try pool_catalog_page.encodePhysicalIntervals(.physical_allocator, 1, &.{.{
         .member_slot = 1,
@@ -334,6 +441,11 @@ test "catalog store stages pages before root and preserves authority mirror" {
     const redundant = readRootCopies(&claim);
     try std.testing.expect(candidateMatches(redundant.a, previous_authority));
     try std.testing.expect(candidateMatches(redundant.b, previous_authority));
+    var load_scratch: LoadScratch = .{};
+    const loaded_previous = try loadAuthorityCatalog(&member, previous_authority, &geometry, &.{}, &load_scratch);
+    try std.testing.expectEqual(@as(u64, 1), loaded_previous.validated.root.generation);
+    try std.testing.expectEqual(@as(usize, 2), load_scratch.image_count);
+    try std.testing.expect(!loaded_previous.selection.mirror_degraded);
 
     const next_metadata_bytes = try pool_catalog_page.encodeMetadataAllocator(2, &.{
         .{ .page_start = 3, .page_count = 1, .state = .retired, .retired_generation = 2 },
@@ -378,6 +490,9 @@ test "catalog store stages pages before root and preserves authority mirror" {
     const next_authority = testAuthority(topology, layout, 2, next_binding.data_root_digest);
     try std.testing.expect(candidateMatches(staged.a, next_authority));
     try std.testing.expect(candidateMatches(staged.b, previous_authority));
+    const loaded_next = try loadAuthorityCatalog(&member, next_authority, &geometry, &.{}, &load_scratch);
+    try std.testing.expectEqual(@as(u64, 2), loaded_next.validated.root.generation);
+    try std.testing.expect(loaded_next.selection.mirror_degraded);
 
     var repair_fault: member_api.FaultController = .{ .fail_write_at = 0 };
     member.setFaultController(&repair_fault);

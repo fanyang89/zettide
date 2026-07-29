@@ -248,7 +248,7 @@ pub const ReplicatedJournal = struct {
         for (voters, 0..) |voter, index| {
             catalog_claims[index] = voter.member.claimCatalog() catch {
                 for (catalog_claims[0..claimed_voter_count]) |*maybe_claim| {
-                    if (maybe_claim.*) |*claim| claim.release() catch {};
+                    if (maybe_claim.*) |*claim| claim.release() catch unreachable;
                 }
                 self.frozen.store(true, .release);
                 self.set.revokeWriteReady();
@@ -257,7 +257,7 @@ pub const ReplicatedJournal = struct {
             claimed_voter_count += 1;
         }
         defer for (catalog_claims[0..claimed_voter_count]) |*maybe_claim| {
-            if (maybe_claim.*) |*claim| claim.release() catch {};
+            if (maybe_claim.*) |*claim| claim.release() catch unreachable;
         };
 
         var geometry_buffer: [pool_member_set.max_member_count]pool_catalog_graph.MemberGeometry = undefined;
@@ -1379,6 +1379,22 @@ const GenesisCatalog = struct {
     }
 };
 
+fn commitTestGenesisCatalog(
+    coordinator: *ReplicatedJournal,
+    set: *pool_member_set.PoolMemberSet,
+) !CatalogCommitResult {
+    const catalog = try GenesisCatalog.init(set);
+    const images = [_]pool_catalog_graph.PageImage{
+        .{ .offset = catalog.physical_reference.offset, .bytes = &catalog.physical_bytes },
+        .{ .offset = catalog.metadata_reference.offset, .bytes = &catalog.metadata_bytes },
+    };
+    return coordinator.commitCatalogGeneration(.{
+        .prepare_proposal = try catalog.proposal(set.authority().?),
+        .previous_graph = null,
+        .current_graph = .{ .root_bytes = &catalog.root_bytes, .pages = &images },
+    });
+}
+
 test "active non-voter promotion requires catalog catch-up" {
     const active_non_voter: pool_topology.Member = .{
         .member_id = id(2),
@@ -1449,20 +1465,9 @@ test "three-voter catalog publication fault matrix" {
         for (&faults, 0..) |*fault, index|
             ((try set.memberAt(index)) orelse return error.MemberUnavailable).setFaultController(fault);
 
-        const catalog = try GenesisCatalog.init(&set);
-        const images = [_]pool_catalog_graph.PageImage{
-            .{ .offset = catalog.physical_reference.offset, .bytes = &catalog.physical_bytes },
-            .{ .offset = catalog.metadata_reference.offset, .bytes = &catalog.metadata_bytes },
-        };
-        const request: CatalogGenerationRequest = .{
-            .prepare_proposal = try catalog.proposal(set.authority().?),
-            .previous_graph = null,
-            .current_graph = .{ .root_bytes = &catalog.root_bytes, .pages = &images },
-        };
-
         switch (case) {
             .staging_first_page, .staging_second_page, .staging_root => {
-                try std.testing.expectError(error.CatalogStagingFailed, coordinator.commitCatalogGeneration(request));
+                try std.testing.expectError(error.CatalogStagingFailed, commitTestGenesisCatalog(&coordinator, &set));
                 try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
                 try std.testing.expectEqual(@as(u64, 0), faults[0].write_count);
                 try std.testing.expectEqual(@as(u64, 3), faults[1].write_count);
@@ -1475,17 +1480,17 @@ test "three-voter catalog publication fault matrix" {
                 try std.testing.expectEqual(failed_writes, faults[2].write_count);
             },
             .prepare_quorum_failure => {
-                try std.testing.expectError(error.PrepareQuorumFailed, coordinator.commitCatalogGeneration(request));
+                try std.testing.expectError(error.PrepareQuorumFailed, commitTestGenesisCatalog(&coordinator, &set));
                 try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
                 for (faults) |fault| try std.testing.expectEqual(@as(u64, 4), fault.write_count);
             },
             .unknown_commit_before, .unknown_commit_after => {
-                try std.testing.expectError(error.CommitOutcomeUnknown, coordinator.commitCatalogGeneration(request));
+                try std.testing.expectError(error.CommitOutcomeUnknown, commitTestGenesisCatalog(&coordinator, &set));
                 try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
                 for (faults) |fault| try std.testing.expectEqual(@as(u64, 5), fault.write_count);
             },
             .success, .single_prepare_failure, .repair_failure => {
-                const result = try coordinator.commitCatalogGeneration(request);
+                const result = try commitTestGenesisCatalog(&coordinator, &set);
                 try std.testing.expectEqual(@as(u64, 1), set.authority().?.generation);
                 const expected_commit_count: u16 = if (case == .single_prepare_failure) 2 else 3;
                 try std.testing.expectEqual(expected_commit_count, result.generation.committed_count);
@@ -1517,8 +1522,55 @@ test "three-voter catalog publication fault matrix" {
             defer reopened.deinit();
             const expected_generation: u64 = if (case == .unknown_commit_after) 1 else 0;
             try std.testing.expectEqual(expected_generation, reopened.authority().?.generation);
+        } else if (case == .repair_failure) {
+            coordinator.close();
+            try std.testing.expectError(error.WriteFrozen, set.close());
+            const locations = threeVoterTestLocations(tmp.dir);
+            var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+            defer reopened.deinit();
+            try std.testing.expectEqual(@as(u16, 3), reopened.controlWriteReady().?.active_count);
+            for (0..three_voter_names.len) |index| {
+                const member = (try reopened.memberAt(index)) orelse return error.MemberUnavailable;
+                var claim = try member.claimCatalog();
+                defer claim.release() catch unreachable;
+                const selection = try pool_catalog_store.selectAuthorityRoot(
+                    pool_catalog_store.readRootCopies(&claim),
+                    reopened.authority().?,
+                );
+                try std.testing.expect(!selection.mirror_degraded);
+                try claim.release();
+            }
         }
     }
+}
+
+test "catalog reopen excludes a voter with corrupt leaf pages" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var set = try createThreeVoterTestSet(tmp.dir);
+    defer set.deinit();
+    var coordinator = try open(std.testing.io, &set);
+    _ = try commitTestGenesisCatalog(&coordinator, &set);
+    coordinator.close();
+
+    const corrupt_index = 2;
+    const member = (try set.memberAt(corrupt_index)) orelse return error.MemberUnavailable;
+    var page: [pool_catalog.page_size]u8 = undefined;
+    try member.read(.metadata, 2 * pool_catalog.page_size, &page);
+    page[0] ^= 1;
+    try member.writeDurable(.metadata, 2 * pool_catalog.page_size, &page);
+    try set.close();
+
+    const locations = threeVoterTestLocations(tmp.dir);
+    var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(u16, 2), reopened.controlWriteReady().?.active_count);
+    switch (try reopened.statusAt(corrupt_index)) {
+        .catalog_failed => |reason| try std.testing.expectEqual(error.PageDigestMismatch, reason),
+        else => return error.ExpectedCatalogFailure,
+    }
+    var voters: [pool_member_set.max_member_count]pool_member_set.CatalogVoter = undefined;
+    try std.testing.expectError(error.CatalogVoterUnavailable, reopened.collectCatalogVoters(&voters));
 }
 
 test "one-member coordinator commits generation and membership then reopens" {

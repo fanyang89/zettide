@@ -6,6 +6,7 @@ const member_format = @import("member_format.zig");
 const pool_authority = @import("pool_authority.zig");
 const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
 const pool_catalog_graph = @import("pool_catalog_graph.zig");
+const pool_catalog_store = @import("pool_catalog_store.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_policy = @import("pool_policy.zig");
 const pool_topology = @import("pool_topology.zig");
@@ -27,6 +28,7 @@ pub const MemberStatus = union(enum) {
     legacy,
     removed,
     stale,
+    catalog_failed: anyerror,
     authority,
     active_voter,
 };
@@ -90,6 +92,7 @@ pub const PoolMemberSet = struct {
         try set.validateAuthorityGeometry(selected_authority);
         set.authority_state = selected_authority;
         set.classifyMembers(intent);
+        try set.reopenCatalog(intent);
         if (intent == .writable and set.control_write_state == null)
             return error.WriteQuorumUnavailable;
         return set.*;
@@ -128,6 +131,7 @@ pub const PoolMemberSet = struct {
         };
         set.control_write_state.?.active_members[0] = true;
         set.statuses[0] = .active_voter;
+        if (selected_authority.generation != 0) set.data_access_state = .unavailable;
         set.recovery_only = true;
         return set;
     }
@@ -209,20 +213,24 @@ pub const PoolMemberSet = struct {
     ) ![]pool_catalog_graph.MemberGeometry {
         const selected = self.authority_state orelse return error.MissingAuthority;
         if (output.len < selected.topology.member_count) return error.OutputTooSmall;
-        for (selected.topology.memberSlice(), 0..) |descriptor, index| {
-            const set_index = self.findSuppliedMember(descriptor.member_id) orelse
+        var count: usize = 0;
+        for (selected.topology.memberSlice()) |descriptor| {
+            const set_index = self.findSuppliedMember(descriptor.member_id) orelse {
+                if (descriptor.state == .joining) continue;
                 return error.MemberGeometryUnavailable;
+            };
             const member = if (self.members[set_index]) |*value| value else return error.MemberGeometryUnavailable;
             const header = member.header();
             if (header.member_slot != descriptor.slot) return error.MemberGeometryIdentityMismatch;
-            output[index] = .{
+            output[count] = .{
                 .member_id = header.member_id,
                 .slot = header.member_slot,
                 .metadata_length = header.metadata.length,
                 .data_length = header.data.length,
             };
+            count += 1;
         }
-        return output[0..selected.topology.member_count];
+        return output[0..count];
     }
 
     pub fn revokeWriteReady(self: *PoolMemberSet) void {
@@ -485,6 +493,79 @@ pub const PoolMemberSet = struct {
         ) catch .unavailable;
         if (intent == .writable and ready.active_count >= selected_authority.topology.quorum)
             self.control_write_state = ready;
+    }
+
+    fn reopenCatalog(self: *PoolMemberSet, intent: OpenIntent) !void {
+        const selected = self.authority_state orelse return error.MissingAuthority;
+        if (selected.generation == 0) return;
+
+        var geometry_buffer: [max_member_count]pool_catalog_graph.MemberGeometry = undefined;
+        const geometry = try self.collectCatalogGeometry(&geometry_buffer);
+        var scratch: pool_catalog_store.LoadScratch = .{};
+        var selections: [max_member_count]?pool_catalog_store.RootSelection = @splat(null);
+        var valid_count: u16 = 0;
+        for (selected.topology.memberSlice()) |descriptor| {
+            if (descriptor.control_role != pool_topology.voter_role) continue;
+            const set_index = self.findSuppliedMember(descriptor.member_id) orelse continue;
+            const member = if (self.members[set_index]) |*value| value else continue;
+            switch (self.statuses[set_index]) {
+                .authority, .active_voter => {},
+                else => continue,
+            }
+            const loaded = pool_catalog_store.loadAuthorityCatalog(
+                member,
+                selected,
+                geometry,
+                &.{},
+                &scratch,
+            ) catch |err| {
+                self.invalidateCatalogVoter(set_index, err);
+                continue;
+            };
+            selections[set_index] = loaded.selection;
+            valid_count += 1;
+        }
+        const read_threshold = try (try selected.layout.protection()).readThreshold();
+        if (valid_count < read_threshold) {
+            self.data_access_state = .unavailable;
+            self.control_write_state = null;
+            return error.CatalogReadQuorumUnavailable;
+        }
+        if (intent != .writable or self.control_write_state == null) return;
+
+        for (selections, 0..) |maybe_selection, set_index| {
+            const selection = maybe_selection orelse continue;
+            if (self.statuses[set_index] != .active_voter or !selection.mirror_degraded) continue;
+            const member = if (self.members[set_index]) |*value| value else continue;
+            var claim = member.claimCatalog() catch {
+                self.invalidateCatalogVoter(set_index, error.CatalogClaimUnavailable);
+                if (self.control_write_state == null) break;
+                continue;
+            };
+            _ = pool_catalog_store.repairRootMirror(
+                &claim,
+                selected,
+                &selection.authoritative.bytes,
+            ) catch |err| {
+                claim.release() catch unreachable;
+                self.invalidateCatalogVoter(set_index, err);
+                if (self.control_write_state == null) break;
+                continue;
+            };
+            claim.release() catch unreachable;
+        }
+    }
+
+    fn invalidateCatalogVoter(self: *PoolMemberSet, set_index: usize, reason: anyerror) void {
+        self.statuses[set_index] = .{ .catalog_failed = reason };
+        if (self.control_write_state) |*ready| {
+            if (ready.active_members[set_index]) {
+                ready.active_members[set_index] = false;
+                ready.active_count -= 1;
+            }
+            if (ready.active_count < self.authority_state.?.topology.quorum)
+                self.control_write_state = null;
+        }
     }
 
     fn updateVoterStatuses(

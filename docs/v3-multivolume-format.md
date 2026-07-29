@@ -7,6 +7,8 @@ codecs for multi-volume raw Pools. The codecs, graph validator, and durable cata
 staging path are implemented in `src/v3/pool_catalog.zig`, `src/v3/pool_catalog_page.zig`,
 `src/v3/pool_catalog_graph.zig`, and `src/v3/pool_catalog_store.zig`. They are not yet selected by
 Pool provisioning. Existing raw Pools still use the single-volume metadata format.
+This first catalog format does not migrate development-era dynamic generations that used an arbitrary
+non-catalog `data_root_digest`.
 
 All integers are little-endian. Digests are BLAKE3-256. Fixed records end with a CRC32C over all
 preceding bytes. Reserved bytes must be zero.
@@ -389,6 +391,23 @@ candidate only when its canonical digest equals the selected control authority's
 Replicated open requires matching candidate roots on a data read quorum. Equal-sequence divergent
 roots therefore do not create a tie: only the control-bound digest is eligible. A missing or damaged
 copy permits degraded read when quorum remains and is repaired before writable use.
+
+After control authority selection, reopen loads the root and every referenced leaf from each candidate
+voter independently. Root and leaves from different members are never combined. The complete graph
+must validate against the selected generation, root digest, topology, layout, and available member
+geometry. Catalog read quorum uses the layout data read threshold. A member with a corrupt graph is
+reported as `catalog-failed` and excluded from catalog writes while its data remains eligible under the
+separate data-availability policy.
+
+Writable reopen first establishes both catalog read quorum and control write quorum without modifying
+metadata. It then repairs only an already validated active voter with exactly one authority-matching
+root copy. Repair stops if a failure removes control write quorum. Genesis authority never repairs or
+clears an uncommitted staged candidate; an exact initialization retry must recognize it instead.
+
+A topology member without supplied geometry may be omitted from graph validation only while it remains
+`joining`. Catalog validation still rejects every allocator or extent reference that requires missing
+geometry. Administrative recovery with a nonzero catalog authority remains control-only and exposes no
+data access until normal catalog validation succeeds.
 
 Root publication retains one copy of the current authoritative root while writing the next root. Slot
 authority is determined by the selected control `data_root_digest`, never by root sequence. If exactly

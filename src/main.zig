@@ -317,6 +317,7 @@ fn memberStatusName(status: zettide.v3.pool_member_set.MemberStatus) []const u8 
         .legacy => "legacy",
         .removed => "removed",
         .stale => "stale",
+        .catalog_failed => "catalog-failed",
         .authority => "authority",
         .active_voter => "active-voter",
     };
