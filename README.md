@@ -2,22 +2,27 @@
 
 Replicated metadata control plane for Zettide.
 
-The initial service manages virtual Pools. A Pool is a global namespace for
-Volumes; Volumes, Extents, replica placement, and DataService reconciliation
-are separate metadata layers and are not part of the first milestone.
+The service manages virtual Pools and durable Data Node registrations. A Pool
+is a global namespace for Volumes. Node registration records stable identity,
+cluster binding, control and NVMf endpoints, failure domain, capabilities, and
+protocol version. Heartbeats, capacity, online state, Volumes, Extents,
+replica placement, and DataService reconciliation are separate metadata layers.
 
-Pool mutations are committed and applied through Raft before an RPC reports
-success. Reads use Raft ReadIndex rather than serving follower-local state.
+Pool and Node mutations are committed and applied through Raft before an RPC
+reports success. Reads use Raft ReadIndex rather than serving follower-local
+state.
 
 The state machine stores canonical commands and responses for idempotent
-request replay. Snapshots are deterministic protobuf messages and are
-validated before atomically replacing live state. The initial format limits a
-cluster to 25,000 Pools and 50,000 retained request records so committed input
-cannot grow memory and snapshots without bound.
+request replay. Request IDs share one namespace across resource kinds, so
+cross-kind reuse returns a request conflict. Snapshots are deterministic
+protobuf messages and are validated before atomically replacing live state.
+The current format limits a cluster to 25,000 Pools, 10,000 Nodes, and 50,000
+retained request records so committed input cannot grow memory and snapshots
+without bound. Snapshot format v3 reads both v2 Pool-only and v3 snapshots.
 
-`PoolService` requires Raft quorum checking, disabled proposal forwarding, and
-finite proposal and ReadIndex timeouts. Its allocator must be thread-safe.
-`PoolRpc` adapts the asynchronous operations to grpc-lite retained calls.
+The services require Raft quorum checking, disabled proposal forwarding, and
+finite proposal and ReadIndex timeouts. Their allocator must be thread-safe.
+`PoolRpc` adapts Pool and Node operations to grpc-lite retained calls.
 Response command failures use grpc-lite's allocation-free call abort path.
 The daemon uses persistent WAL storage and grpc-lite streams between statically
 configured voters. Existing storage is automatically opened in restart mode.
