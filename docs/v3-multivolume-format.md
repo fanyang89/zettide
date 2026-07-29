@@ -2,9 +2,10 @@
 
 ## Status
 
-This document freezes the first catalog root, volume descriptor, and extent run codecs for
-multi-volume raw Pools. The codecs are implemented in `src/v3/pool_catalog.zig` but are not yet
-selected by Pool provisioning. Existing raw Pools still use the single-volume metadata format.
+This document freezes the first catalog root, catalog leaf page, volume descriptor, and extent run
+codecs for multi-volume raw Pools. The codecs are implemented in `src/v3/pool_catalog.zig` and
+`src/v3/pool_catalog_page.zig` but are not yet selected by Pool provisioning. Existing raw Pools
+still use the single-volume metadata format.
 
 All integers are little-endian. Digests are BLAKE3-256. Fixed records end with a CRC32C over all
 preceding bytes. Reserved bytes must be zero.
@@ -58,6 +59,9 @@ leaf contents.
 Allocator and metadata allocator roots are mandatory. An empty catalog has null volume and name
 roots. A nonempty catalog has both roots; publishing only one index is invalid.
 
+All non-null direct root page references have distinct offsets. A single leaf cannot satisfy two
+different page kinds.
+
 ## Page Reference
 
 A page reference is 40 bytes.
@@ -66,6 +70,126 @@ A page reference is 40 bytes.
 |---:|---:|---|
 | `0x00` | 8 | Metadata-relative page offset |
 | `0x08` | 32 | BLAKE3 page digest |
+
+The digest covers the complete 4096-byte referenced page, including its CRC32C.
+
+## Catalog Leaf Page
+
+The initial catalog page format supports one fixed 4096-byte leaf for each root reference. It does
+not define internal nodes, sibling links, or multi-page trees. This deliberately limits a catalog to
+7 volumes and each volume to 62 extent runs until a future page format adds tree structure. A writer
+must reject a mutation that exceeds any page capacity; it must not emit a partial index.
+
+Every leaf has this 64-byte header:
+
+| Offset | Size | Field |
+|---:|---:|---|
+| `0x000` | 8 | Magic `DDVPG001` |
+| `0x008` | 2 | Page format version, 1 |
+| `0x00a` | 2 | Page kind |
+| `0x00c` | 2 | Tree level, zero for a leaf |
+| `0x00e` | 2 | Entry count |
+| `0x010` | 2 | Entry size selected by page kind |
+| `0x012` | 2 | Header size, 64 |
+| `0x014` | 4 | Page flags, zero |
+| `0x018` | 8 | Page creation generation |
+| `0x020` | 16 | Owner volume ID for an extent-map page; otherwise zero |
+| `0x030` | 16 | Reserved, zero |
+| `0x040` | variable | Fixed-size entries |
+| after entries | variable | Reserved, zero through `0xffb` |
+| `0xffc` | 4 | CRC32C |
+
+The page creation generation is nonzero. An immutable page may remain referenced by later catalog
+generations, so it need not equal the generation of every root that references it. Entry count times
+entry size plus 64 cannot exceed `0xffc`.
+
+Page kinds and their fixed entry layouts are:
+
+| Value | Kind | Entry size | Maximum entries |
+|---:|---|---:|---:|
+| 1 | Volume index | 512 | 7 |
+| 2 | Name index | 160 | 25 |
+| 3 | Extent map | 64 | 62 |
+| 4 | Physical allocator | 32 | 125 |
+| 5 | Retired extents | 32 | 125 |
+| 6 | Metadata allocator | 32 | 125 |
+
+The volume index embeds complete volume descriptors ordered by volume ID. The name index is ordered
+by the unsigned bytewise UTF-8 name representation. Names and volume IDs are unique because both
+orders are strict. The extent map embeds extent runs ordered by logical start. An extent-map owner is
+nonzero and must match the volume descriptor that references the page; all other page owners are
+zero.
+
+Before publication, catalog-level validation must additionally prove that the volume and name indexes
+contain the same one-to-one `(volume ID, name)` set, that the root volume count equals their counts,
+and that each extent-map reference resolves to a page owned by its descriptor's volume ID.
+
+## Name Index Entry
+
+A name index entry is exactly 160 bytes.
+
+| Relative offset | Size | Field |
+|---:|---:|---|
+| `0x00` | 16 | Volume ID |
+| `0x10` | 2 | Name length |
+| `0x12` | 14 | Reserved, zero |
+| `0x20` | 127 | UTF-8 volume name |
+| after name | variable | Reserved, zero through `0x9f` |
+
+The volume ID is nonzero. Name validation is identical to the volume descriptor name validation.
+
+## Physical Interval Entry
+
+Physical allocator and retired-extent pages use the same 32-byte interval entry.
+
+| Relative offset | Size | Field |
+|---:|---:|---|
+| `0x00` | 2 | Member slot |
+| `0x02` | 6 | Reserved, zero |
+| `0x08` | 8 | Physical extent ordinal start |
+| `0x10` | 8 | Extent count |
+| `0x18` | 8 | Retirement generation |
+
+The physical allocator is a free-space index. Its retirement generation is zero. A retired-extent
+entry is unavailable space removed from an older authoritative mapping. Its retirement generation is
+exactly the first catalog generation whose root omits that mapping; it is nonzero and no newer than
+its containing page's creation generation. A publication transition must derive newly retired ranges
+from the previous authoritative mappings and assign the new root generation. It must preserve the
+generation of ranges already retired instead of trusting caller-supplied values. Reclamation moves an
+interval to the free-space index only when the oldest recoverable root generation is at least the
+interval's retirement generation.
+
+Entries are ordered by member slot and then physical start. Ranges on one member do not overlap. Free
+ranges are maximally merged. Adjacent retired ranges are maximally merged only when their retirement
+generation is equal; preserving distinct generations is required for safe reclamation.
+
+## Metadata Interval Entry
+
+The metadata allocator contains both reusable and retired metadata pages. Its entries are exactly 32
+bytes.
+
+| Relative offset | Size | Field |
+|---:|---:|---|
+| `0x00` | 8 | Metadata page ordinal start |
+| `0x08` | 4 | Page count |
+| `0x0c` | 2 | Interval state |
+| `0x0e` | 2 | Reserved, zero |
+| `0x10` | 8 | Retirement generation |
+| `0x18` | 8 | Reserved, zero |
+
+State 1 is free and requires a zero retirement generation. State 2 is retired and requires a nonzero
+retirement generation no newer than the page creation generation. As with physical retirement, newly
+retired pages receive the first root generation that no longer references them and preserve that value
+across later COW allocator pages. They become free only when the oldest recoverable root generation is
+at least their retirement generation.
+
+Page ordinals 0 and 1 are the mirrored catalog roots and never appear in this index. Entries have a
+nonzero count, are ordered by page start, and do not overlap. Adjacent entries are maximally merged
+when state and retirement generation match. Multiplying the end page ordinal by 4096 must be
+representable and within every publishing member's metadata region. Neither free nor retired
+intervals may overlap a page referenced by the current root. Free intervals also cannot overlap any
+older recoverable root, while retired intervals may: that is the reason they remain quarantined.
+Current-root validation must include the metadata allocator leaf itself among the referenced pages.
 
 ## Volume Descriptor
 

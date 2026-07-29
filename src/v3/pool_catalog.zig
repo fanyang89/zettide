@@ -8,6 +8,7 @@ pub const volume_encoded_size: usize = 512;
 pub const extent_run_encoded_size: usize = 64;
 pub const page_size: u64 = 4096;
 pub const max_volume_name_len: usize = 127;
+pub const max_leaf_volume_count: u32 = 7;
 
 const root_magic = [8]u8{ 'D', 'D', 'V', 'P', 'R', 'O', 'O', 'T' };
 const volume_magic = [8]u8{ 'D', 'D', 'V', 'V', 'O', 'L', '1', 0 };
@@ -92,7 +93,7 @@ pub const Name = struct {
         return self.bytes[0..self.length];
     }
 
-    fn validate(self: *const Name) !void {
+    pub fn validate(self: *const Name) !void {
         if (self.length == 0 or self.length > max_volume_name_len or
             !std.unicode.utf8ValidateSlice(self.slice()) or
             !codec.isZero(self.bytes[self.length..])) return error.InvalidVolumeName;
@@ -224,6 +225,20 @@ pub fn validateRoot(root: Root) !void {
     try root.allocator_root.validate();
     try root.retired_extent_root.validate();
     try root.metadata_allocator_root.validate();
+    const references = [_]PageReference{
+        root.volume_tree_root,
+        root.name_index_root,
+        root.allocator_root,
+        root.retired_extent_root,
+        root.metadata_allocator_root,
+    };
+    for (references, 0..) |reference_value, index| {
+        if (reference_value.isNull()) continue;
+        for (references[0..index]) |previous| {
+            if (!previous.isNull() and previous.offset == reference_value.offset)
+                return error.AliasedRootPageReference;
+        }
+    }
     if (root.allocator_root.isNull() or root.metadata_allocator_root.isNull())
         return error.MissingAllocatorRoot;
     if (root.volume_count == 0) {
@@ -231,6 +246,7 @@ pub fn validateRoot(root: Root) !void {
     } else if (root.volume_tree_root.isNull() or root.name_index_root.isNull()) {
         return error.InvalidVolumeRoots;
     }
+    if (root.volume_count > max_leaf_volume_count) return error.VolumePageCapacityExceeded;
     if (root.flags != 0) return error.InvalidRootFlags;
 }
 
@@ -563,6 +579,12 @@ test "empty catalog root requires allocator roots" {
     invalid.volume_count = 1;
     invalid.volume_tree_root = reference(0x4000, 4);
     try std.testing.expectError(error.InvalidVolumeRoots, encodeRoot(invalid));
+    invalid.name_index_root = reference(0x5000, 5);
+    invalid.volume_count = max_leaf_volume_count + 1;
+    try std.testing.expectError(error.VolumePageCapacityExceeded, encodeRoot(invalid));
+    invalid = root;
+    invalid.metadata_allocator_root = invalid.allocator_root;
+    try std.testing.expectError(error.AliasedRootPageReference, encodeRoot(invalid));
     const overflowing_reference = reference(std.math.maxInt(u64) & ~(page_size - 1), 5);
     try std.testing.expectError(error.PageReferenceOverflow, overflowing_reference.validate());
 }
