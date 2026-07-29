@@ -564,14 +564,7 @@ const InboundCall = struct {
         const self: *InboundCall = @ptrCast(@alignCast(ctx));
         defer self.destroy();
         if (self.call.isCancelled() or self.call.isTerminal()) return;
-        self.call.sendInitialMetadata(&.{}, .identity) catch return;
-        if (result.status.isOk()) {
-            self.call.send(result.payload, .{}) catch {
-                self.call.finish(grpc.Status.init(.internal, "response send failed"), &.{}) catch {};
-                return;
-            };
-        }
-        self.call.finish(result.status, &.{}) catch {};
+        sendRpcResult(self.call, result);
     }
 
     fn destroy(self: *InboundCall) void {
@@ -582,6 +575,20 @@ const InboundCall = struct {
         owner.allocator.destroy(self);
     }
 };
+
+fn sendRpcResult(call: grpc.ServerCall, result: RpcResult) void {
+    call.sendInitialMetadata(&.{}, .identity) catch {
+        call.abort();
+        return;
+    };
+    if (result.status.isOk()) {
+        call.send(result.payload, .{}) catch {
+            call.abort();
+            return;
+        };
+    }
+    call.finish(result.status, &.{}) catch call.abort();
+}
 
 fn preflightCreatePoolRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
@@ -717,6 +724,82 @@ const CompletionProbe = struct {
         self.payload = self.allocator.dupe(u8, result.payload) catch &.{};
     }
 };
+
+test "response command failures abort retained calls" {
+    const Failure = enum { initial_metadata, message, finish };
+    const CallProbe = struct {
+        failure: Failure,
+        aborts: usize = 0,
+        initial_metadata: usize = 0,
+        messages: usize = 0,
+        finishes: usize = 0,
+
+        fn call(self: *@This()) grpc.ServerCall {
+            return grpc.ServerCall.initAbortable(
+                self,
+                id,
+                isCancelled,
+                isTerminal,
+                abort,
+                sendInitialMetadata,
+                send,
+                finish,
+                resumeReceive,
+                retain,
+                release,
+            );
+        }
+
+        fn id(_: *anyopaque) grpc.ServerCallId {
+            return @enumFromInt(1);
+        }
+
+        fn isCancelled(_: *anyopaque) bool {
+            return false;
+        }
+
+        fn isTerminal(_: *anyopaque) bool {
+            return false;
+        }
+
+        fn abort(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.aborts += 1;
+        }
+
+        fn sendInitialMetadata(ctx: *anyopaque, _: []const grpc.MetadataEntry, _: grpc.Compression) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.initial_metadata += 1;
+            if (self.failure == .initial_metadata) return error.OutOfMemory;
+        }
+
+        fn send(ctx: *anyopaque, _: []const u8, _: grpc.StreamSendOptions) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.messages += 1;
+            if (self.failure == .message) return error.OutOfMemory;
+        }
+
+        fn finish(ctx: *anyopaque, _: grpc.Status, _: []const grpc.MetadataEntry) !void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.finishes += 1;
+            if (self.failure == .finish) return error.OutOfMemory;
+        }
+
+        fn resumeReceive(_: *anyopaque) !void {}
+        fn retain(_: *anyopaque) void {}
+        fn release(_: *anyopaque) void {}
+    };
+
+    const failures = [_]Failure{ .initial_metadata, .message, .finish };
+    for (failures) |failure| {
+        var probe = CallProbe{ .failure = failure };
+        sendRpcResult(probe.call(), .{ .status = .ok, .payload = "response" });
+        try std.testing.expectEqual(@as(usize, 1), probe.aborts);
+        try std.testing.expectEqual(@as(usize, 1), probe.initial_metadata);
+        try std.testing.expectEqual(@as(usize, @intFromBool(failure != .initial_metadata)), probe.messages);
+        try std.testing.expectEqual(@as(usize, @intFromBool(failure == .finish)), probe.finishes);
+    }
+}
 
 test "Pool service rejects unbounded follower-forwarding Raft policy" {
     const allocator = std.testing.allocator;

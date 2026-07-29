@@ -18,6 +18,7 @@ cannot grow memory and snapshots without bound.
 `PoolService` requires Raft quorum checking, disabled proposal forwarding, and
 finite proposal and ReadIndex timeouts. Its allocator must be thread-safe.
 `PoolRpc` adapts the asynchronous operations to grpc-lite retained calls.
+Response command failures use grpc-lite's allocation-free call abort path.
 Shutdown order is: stop RPC admission, stop and wait for the gRPC server, call
 `PoolRpc.shutdown`, join the Raft driver, then deinitialize `PoolRpc` and the
 server.
