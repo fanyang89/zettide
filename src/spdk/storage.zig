@@ -7,8 +7,6 @@ const c = @cImport({
     @cInclude("spdk/bdev_dispatcher.h");
 });
 
-pub const Owner = c.struct_spdk_thread;
-
 const Context = struct {
     allocator: std.mem.Allocator,
     dispatcher: *c.struct_zettide_spdk_bdev_dispatcher,
@@ -16,10 +14,9 @@ const Context = struct {
     canonical_name: [*:0]u8,
 };
 
-/// The SPDK owner must remain alive and polling until the returned Storage closes.
 pub fn open(
     allocator: std.mem.Allocator,
-    owner: *Owner,
+    runtime: *c.struct_zettide_spdk_runtime,
     name: []const u8,
     writable: bool,
 ) !storage_api.Storage {
@@ -27,7 +24,7 @@ pub fn open(
     defer allocator.free(name_z);
 
     var dispatcher: ?*c.struct_zettide_spdk_bdev_dispatcher = null;
-    try statusError(c.zettide_spdk_bdev_dispatcher_open(owner, name_z.ptr, writable, &dispatcher));
+    try statusError(c.zettide_spdk_bdev_dispatcher_open(runtime, name_z.ptr, writable, &dispatcher));
     const opened = dispatcher orelse return error.UnexpectedSpdkStatus;
     errdefer statusError(c.zettide_spdk_bdev_dispatcher_close(opened)) catch {};
 
@@ -164,6 +161,7 @@ fn statusError(status: c_int) !void {
         c.ENOMEM => error.OutOfMemory,
         c.EDEADLK => error.SpdkThreadViolation,
         c.EBUSY => error.StorageOperationsActive,
+        c.ESHUTDOWN => error.RuntimeStopped,
         c.EIO => error.StorageIo,
         else => error.UnexpectedSpdkStatus,
     };

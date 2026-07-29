@@ -2,6 +2,7 @@
 #define ZETTIDE_SPDK_BDEV_DISPATCHER_H
 
 #include "bdev_endpoint.h"
+#include "runtime.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,14 +11,17 @@
 extern "C" {
 #endif
 
-struct spdk_thread;
 struct zettide_spdk_bdev_dispatcher;
 
 /*
  * These blocking calls must only be made from non-SPDK threads. The owner must
  * remain alive and polling until every call and dispatcher close has returned.
  */
-int zettide_spdk_bdev_dispatcher_open(struct spdk_thread *owner, const char *name,
+int zettide_spdk_bdev_dispatcher_open(struct zettide_spdk_runtime *runtime,
+		const char *name, bool writable,
+		struct zettide_spdk_bdev_dispatcher **dispatcher_out);
+/* Low-level entry point for tests that already own an SPDK application thread. */
+int zettide_spdk_bdev_dispatcher_open_on_thread(struct spdk_thread *owner, const char *name,
 		bool writable, struct zettide_spdk_bdev_dispatcher **dispatcher_out);
 int zettide_spdk_bdev_dispatcher_get_geometry(
 		struct zettide_spdk_bdev_dispatcher *dispatcher,

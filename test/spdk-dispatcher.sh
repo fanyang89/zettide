@@ -32,7 +32,7 @@ done
 # SPDK modules register through constructors and must not be dropped as unused.
 # shellcheck disable=SC2046
 "${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
-	src/spdk/bdev_endpoint.c src/spdk/bdev_dispatcher.c test/spdk_dispatcher.c \
+	src/spdk/runtime.c src/spdk/bdev_endpoint.c src/spdk/bdev_dispatcher.c test/spdk_dispatcher.c \
 	-o "$build_dir/zettide-spdk-dispatcher-test" -pthread \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \

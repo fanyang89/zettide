@@ -2,6 +2,8 @@ const std = @import("std");
 const zettide = @import("zettide");
 
 const c = @cImport({
+    @cInclude("errno.h");
+    @cInclude("spdk/runtime.h");
     @cInclude("spdk_runtime.h");
 });
 
@@ -20,39 +22,69 @@ const TestContext = struct {
 };
 
 pub export fn zettide_spdk_storage_test_main() c_int {
-    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = .empty });
-    defer threaded.deinit();
-    var context: TestContext = .{
-        .io = threaded.io(),
-        .allocator = std.heap.c_allocator,
-    };
-    return c.zettide_spdk_test_run(
-        "zettide_spdk_storage_test",
-        malloc_bdev_config.ptr,
-        malloc_bdev_config.len,
-        runTest,
-        &context,
-    );
-}
-
-fn runTest(owner: ?*c.struct_spdk_thread, context_ptr: ?*anyopaque) callconv(.c) c_int {
-    const context: *TestContext = @ptrCast(@alignCast(context_ptr orelse return 1));
-    const spdk_owner: *zettide.spdk_storage.Owner = @ptrCast(owner orelse return 1);
-    runStorageTest(context, spdk_owner) catch |err| {
+    runMain() catch |err| {
         std.debug.print("SPDK storage test failed: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn runStorageTest(context: *TestContext, owner: *zettide.spdk_storage.Owner) !void {
+fn runMain() !void {
+    var invalid_options: c.struct_zettide_spdk_runtime_opts = undefined;
+    c.zettide_spdk_runtime_opts_init(&invalid_options, @sizeOf(@TypeOf(invalid_options)));
+    var invalid_runtime: ?*c.struct_zettide_spdk_runtime = null;
+    if (c.zettide_spdk_runtime_start(&invalid_options, &invalid_runtime) != -c.EINVAL or
+        invalid_runtime != null)
+        return error.InvalidRuntimeOptionsAccepted;
+
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = .empty });
+    defer threaded.deinit();
+    var context: TestContext = .{
+        .io = threaded.io(),
+        .allocator = std.heap.c_allocator,
+    };
+    var reactor_mask_buffer: [32]u8 = undefined;
+    try runtimeStatus(c.zettide_spdk_test_reactor_mask(&reactor_mask_buffer, reactor_mask_buffer.len));
+    const reactor_mask = std.mem.sliceTo(&reactor_mask_buffer, 0);
+    const runtime_options: zettide.spdk_runtime.Runtime.Options = .{
+        .name = "zettide_spdk_storage_test",
+        .reactor_mask = reactor_mask,
+        .json_data = malloc_bdev_config,
+        .mem_size_mb = 512,
+        .no_pci = true,
+        .no_huge = true,
+        .disable_cpumask_locks = true,
+    };
+    var runtime = try zettide.spdk_runtime.Runtime.start(context.allocator, runtime_options);
+    defer runtime.deinit();
+    second_runtime: {
+        var unexpected = zettide.spdk_runtime.Runtime.start(context.allocator, runtime_options) catch |err| {
+            if (err != error.RuntimeBusy) return err;
+            break :second_runtime;
+        };
+        unexpected.deinit();
+        return error.SecondRuntimeStarted;
+    }
+    try runStorageTest(&context, &runtime);
+    try runtime.stop();
+    runtime.deinit();
+}
+
+fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime) !void {
     const names = [_][]const u8{ "ZettideStorage0", "ZettideStorage1", "ZettideStorage2" };
     var duplicate_storages: [2]zettide.v3.storage.Storage = undefined;
     var duplicate_count: usize = 0;
     errdefer zettide.v3.storage.closeAll(duplicate_storages[0..duplicate_count], context.io) catch {};
     for (&duplicate_storages) |*storage| {
-        storage.* = try zettide.spdk_storage.open(context.allocator, owner, names[0], true);
+        storage.* = try runtime.openStorage(context.allocator, names[0], true);
         duplicate_count += 1;
+    }
+    busy_stop: {
+        runtime.stop() catch |err| {
+            if (err != error.RuntimeBusy) return err;
+            break :busy_stop;
+        };
+        return error.RuntimeStoppedWithOpenStorage;
     }
     if (!duplicate_storages[0].sameIdentity(&duplicate_storages[1]))
         return error.UnstableStorageIdentity;
@@ -82,7 +114,7 @@ fn runStorageTest(context: *TestContext, owner: *zettide.spdk_storage.Owner) !vo
     var opened_count: usize = 0;
     errdefer for (storages[0..opened_count]) |*storage| storage.close(context.io) catch {};
     for (names, 0..) |name, index| {
-        storages[index] = try zettide.spdk_storage.open(context.allocator, owner, name, true);
+        storages[index] = try runtime.openStorage(context.allocator, name, true);
         opened_count += 1;
     }
 
@@ -98,7 +130,7 @@ fn runStorageTest(context: *TestContext, owner: *zettide.spdk_storage.Owner) !vo
     try provisioned.close();
 
     for (names, 0..) |name, index| {
-        storages[index] = try zettide.spdk_storage.open(context.allocator, owner, name, true);
+        storages[index] = try runtime.openStorage(context.allocator, name, true);
         opened_count += 1;
     }
     // PoolMemberSet likewise owns every storage once scanning starts.
@@ -115,4 +147,8 @@ fn runStorageTest(context: *TestContext, owner: *zettide.spdk_storage.Owner) !vo
     if (try volume.usedBlocks() == 0) return error.EmptyFilesystem;
     try volume.sync();
     try volume.close();
+}
+
+fn runtimeStatus(status: c_int) !void {
+    if (status != 0) return error.TestRuntimeSetupFailed;
 }

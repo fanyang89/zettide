@@ -112,7 +112,7 @@ run_coordinator(void *context)
 	uint32_t index;
 	int status;
 
-	status = zettide_spdk_bdev_dispatcher_open(test->owner, "ZettideDispatch0",
+	status = zettide_spdk_bdev_dispatcher_open_on_thread(test->owner, "ZettideDispatch0",
 			true, &test->dispatcher);
 	if (status != 0) {
 		finish_coordinator(test, status);
@@ -181,7 +181,7 @@ start_test(void *context)
 	int status;
 
 	test->owner = spdk_get_thread();
-	status = zettide_spdk_bdev_dispatcher_open(test->owner, "ZettideDispatch0",
+	status = zettide_spdk_bdev_dispatcher_open_on_thread(test->owner, "ZettideDispatch0",
 			true, &unexpected);
 	if (status != -EDEADLK || unexpected != NULL) {
 		test->status = status == 0 ? -EIO : status;

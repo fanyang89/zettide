@@ -12,6 +12,7 @@
 
 struct zettide_spdk_bdev_dispatcher {
 	struct spdk_thread *owner;
+	struct zettide_spdk_runtime *runtime;
 	struct zettide_spdk_bdev_endpoint *endpoint;
 };
 
@@ -215,8 +216,9 @@ dispatch_command(struct dispatcher_command *command)
 	return status;
 }
 
-int
-zettide_spdk_bdev_dispatcher_open(struct spdk_thread *owner, const char *name,
+static int
+open_on_owner(struct spdk_thread *owner, struct zettide_spdk_runtime *runtime,
+		const char *name,
 		bool writable, struct zettide_spdk_bdev_dispatcher **dispatcher_out)
 {
 	struct zettide_spdk_bdev_dispatcher *dispatcher;
@@ -232,6 +234,7 @@ zettide_spdk_bdev_dispatcher_open(struct spdk_thread *owner, const char *name,
 		return -ENOMEM;
 	}
 	dispatcher->owner = owner;
+	dispatcher->runtime = runtime;
 	command.operation = DISPATCHER_OPEN;
 	command.dispatcher = dispatcher;
 	command.arguments.open.name = name;
@@ -243,6 +246,36 @@ zettide_spdk_bdev_dispatcher_open(struct spdk_thread *owner, const char *name,
 	}
 	*dispatcher_out = dispatcher;
 	return 0;
+}
+
+int
+zettide_spdk_bdev_dispatcher_open(struct zettide_spdk_runtime *runtime,
+		const char *name, bool writable,
+		struct zettide_spdk_bdev_dispatcher **dispatcher_out)
+{
+	struct spdk_thread *owner;
+	int status;
+
+	if (runtime == NULL || dispatcher_out == NULL) {
+		return -EINVAL;
+	}
+	*dispatcher_out = NULL;
+	status = zettide_spdk_runtime_acquire(runtime, &owner);
+	if (status != 0) {
+		return status;
+	}
+	status = open_on_owner(owner, runtime, name, writable, dispatcher_out);
+	if (status != 0) {
+		zettide_spdk_runtime_release(runtime);
+	}
+	return status;
+}
+
+int
+zettide_spdk_bdev_dispatcher_open_on_thread(struct spdk_thread *owner, const char *name,
+		bool writable, struct zettide_spdk_bdev_dispatcher **dispatcher_out)
+{
+	return open_on_owner(owner, NULL, name, writable, dispatcher_out);
 }
 
 int
@@ -346,6 +379,9 @@ zettide_spdk_bdev_dispatcher_close(struct zettide_spdk_bdev_dispatcher *dispatch
 	command.dispatcher = dispatcher;
 	status = dispatch_command(&command);
 	if (status == 0) {
+		if (dispatcher->runtime != NULL) {
+			zettide_spdk_runtime_release(dispatcher->runtime);
+		}
 		free(dispatcher);
 	}
 	return status;
