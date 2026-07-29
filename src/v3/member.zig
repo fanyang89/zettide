@@ -193,7 +193,7 @@ pub const Member = struct {
         options: CreateOptions,
     ) !Member {
         var owned_storage = storage;
-        errdefer owned_storage.close(io);
+        errdefer owned_storage.close(io) catch {};
         try validateCreateStorage(initial_header, genesis_payload);
         const genesis_record = try genesis_payload_format.makeRecord(initial_header.member_id, genesis_payload);
         const encoded_genesis = try control_record.encode(genesis_record);
@@ -208,7 +208,7 @@ pub const Member = struct {
         options: CreateOptions,
     ) !Member {
         var owned_storage = storage;
-        errdefer owned_storage.close(io);
+        errdefer owned_storage.close(io) catch {};
         try validateCreatePoolStorage(initial_header, genesis_payload);
         const genesis_record = try pool_genesis_payload.makeRecord(initial_header.member_id, genesis_payload);
         const encoded_genesis = try control_record.encodeDynamicPool(genesis_record);
@@ -223,7 +223,7 @@ pub const Member = struct {
         options: CreateOptions,
     ) !Member {
         var owned_storage = storage;
-        errdefer owned_storage.close(io);
+        errdefer owned_storage.close(io) catch {};
         try validateCreateJoiningStorage(initial_header, bootstrap_record);
         const encoded_bootstrap = try control_record.encodeDynamicPool(bootstrap_record);
         return createWithFirstRecord(io, owned_storage, initial_header, &encoded_bootstrap, options);
@@ -268,7 +268,7 @@ pub const Member = struct {
 
     pub fn openStorage(io: Io, storage_value: Storage, open_mode: OpenMode) !Member {
         var storage = storage_value;
-        errdefer storage.close(io);
+        errdefer storage.close(io) catch {};
 
         var first_transport_error: ?anyerror = null;
         const a = readCandidate(&storage, io, 0) catch |err| candidate: {
@@ -474,7 +474,7 @@ pub const Member = struct {
             }
         }
         self.closed.store(true, .release);
-        self.storage.close(self.io);
+        try self.storage.close(self.io);
         if (first_error) |err| return err;
     }
 

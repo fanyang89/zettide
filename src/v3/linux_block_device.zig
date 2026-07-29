@@ -140,7 +140,7 @@ pub fn hasData(storage: *storage_api.Storage, io: Io, allocator: std.mem.Allocat
 
 pub fn pathHasData(io: Io, allocator: std.mem.Allocator, path: []const u8) !bool {
     var opened = try openStorage(io, allocator, path, false);
-    defer opened.storage.close(io);
+    defer opened.storage.close(io) catch {};
     return hasData(&opened.storage, io, allocator);
 }
 

@@ -445,14 +445,14 @@ fn scanStorages(
     mode: member_format.OpenMode,
 ) !PoolMemberSet {
     if (storages.len == 0 or storages.len > max_member_count) {
-        for (storages) |*storage| storage.close(io);
+        for (storages) |*storage| storage.close(io) catch {};
         return error.InvalidMemberCount;
     }
     var set: PoolMemberSet = .{ .supplied_count = storages.len };
     var consumed_count: usize = 0;
     errdefer {
         set.deinit();
-        for (storages[consumed_count..]) |*storage| storage.close(io);
+        for (storages[consumed_count..]) |*storage| storage.close(io) catch {};
     }
     for (storages, 0..) |storage, index| {
         consumed_count += 1;

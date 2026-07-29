@@ -70,12 +70,12 @@ pub fn acquire(plan: *const Plan, io: std.Io, allocator: std.mem.Allocator) ![]s
     const storages = try allocator.alloc(storage_api.Storage, plan.paths.len);
     var acquired: usize = 0;
     errdefer {
-        for (storages[0..acquired]) |*storage| storage.close(io);
+        for (storages[0..acquired]) |*storage| storage.close(io) catch {};
         allocator.free(storages);
     }
     for (plan.paths, 0..) |path, index| {
         var opened = try linux_block.openStorage(io, allocator, path, true);
-        errdefer opened.storage.close(io);
+        errdefer opened.storage.close(io) catch {};
         const expected = plan.devices[index];
         if (!linux_block.DeviceId.eql(expected.id, opened.info.id) or
             expected.disk_sequence != opened.info.disk_sequence or

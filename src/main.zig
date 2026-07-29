@@ -283,7 +283,7 @@ fn openRawPoolSet(
     const storages = try allocator.alloc(zettide.v3.storage.Storage, paths.len);
     defer allocator.free(storages);
     var opened_count: usize = 0;
-    errdefer for (storages[0..opened_count]) |*storage| storage.close(io);
+    errdefer for (storages[0..opened_count]) |*storage| storage.close(io) catch {};
     var device_ids: [zettide.v3.pool_topology.max_member_count]zettide.v3.linux_block_device.DeviceId = undefined;
     for (paths, 0..) |path, member_index| {
         const opened = try zettide.v3.linux_block_device.openStorageOptions(
@@ -296,7 +296,7 @@ fn openRawPoolSet(
         for (device_ids[0..member_index]) |previous| {
             if (zettide.v3.linux_block_device.DeviceId.eql(previous, opened.info.id)) {
                 var duplicate = opened.storage;
-                duplicate.close(io);
+                duplicate.close(io) catch {};
                 return error.DuplicateDevice;
             }
         }

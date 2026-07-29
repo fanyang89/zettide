@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
             return err;
         };
         var storage = opened.storage;
-        storage.close(init.io);
+        storage.close(init.io) catch {};
         return error.ExpectedBusyDevice;
     }
     return error.InvalidOperation;

@@ -64,7 +64,7 @@ pub fn create(
     options: Options,
 ) !CreateOutcome {
     var consumed_count: usize = 0;
-    errdefer for (storages[consumed_count..]) |*storage| storage.close(io);
+    errdefer for (storages[consumed_count..]) |*storage| storage.close(io) catch {};
     if (storages.len == 0 or storages.len > pool_topology.max_member_count)
         return error.InvalidMemberCount;
     if (options.member_create_options.len != 0 and options.member_create_options.len != storages.len)
@@ -91,7 +91,7 @@ pub fn create(
     var minimum_io_size: u32 = 512;
     for (storages, 0..) |storage, index| {
         for (storages[0..index]) |previous| {
-            if (storage.file.handle == previous.file.handle) return error.DuplicateStorage;
+            if (storage.sameIdentity(&previous)) return error.DuplicateStorage;
         }
         if (!std.math.isPowerOfTwo(storage.minimum_io_size) or storage.minimum_io_size > 4096 or
             4096 % storage.minimum_io_size != 0) return error.UnsupportedStorageAlignment;
@@ -173,7 +173,7 @@ pub fn create(
             options.member_create_options[index];
         members[index] = member_api.createPoolStorage(io, storages[index], headers[index], genesis, create_options) catch |cause| {
             for (members[0..created_count]) |*member| member.deinit();
-            for (storages[consumed_count..]) |*storage| storage.close(io);
+            for (storages[consumed_count..]) |*storage| storage.close(io) catch {};
             allocator.free(members);
             consumed_count = storages.len;
             return .{ .partial = .{
