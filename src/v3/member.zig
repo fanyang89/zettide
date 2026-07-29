@@ -129,6 +129,7 @@ pub const Member = struct {
     selected_header: member_format.Header,
     selected_source: SourceSlot,
     degraded: bool,
+    checkpoint_reclaim_ready: bool,
     open_mode: OpenMode,
     mutex: Io.Mutex = .init,
     fault: ?*FaultController = null,
@@ -256,6 +257,7 @@ pub const Member = struct {
             .selected_header = initial_header,
             .selected_source = .a,
             .degraded = false,
+            .checkpoint_reclaim_ready = false,
             .open_mode = .writable,
         };
     }
@@ -298,6 +300,7 @@ pub const Member = struct {
             .selected_header = selection.header,
             .selected_source = selection.source,
             .degraded = selection.redundancy_degraded,
+            .checkpoint_reclaim_ready = false,
             .open_mode = open_mode,
         };
     }
@@ -312,6 +315,10 @@ pub const Member = struct {
 
     pub fn redundancyDegraded(self: *const Member) bool {
         return self.degraded;
+    }
+
+    pub fn checkpointReclaimReady(self: *const Member) bool {
+        return !self.isClosed() and self.checkpoint_reclaim_ready;
     }
 
     pub fn mode(self: *const Member) OpenMode {
@@ -399,11 +406,46 @@ pub const Member = struct {
         const target: SourceSlot = if (self.selected_source == .a) .b else .a;
         const file_offset: u64 = if (target == .a) 0 else member_format.encoded_size;
 
+        self.checkpoint_reclaim_ready = false;
         try self.writeHeaderLocked(file_offset, &encoded);
         try self.syncLocked();
         self.selected_header = next_header;
         self.selected_source = target;
         self.degraded = false;
+    }
+
+    pub fn publishCheckpointRedundant(
+        self: *Member,
+        absolute_offset: u64,
+        record_sequence: u64,
+        record_digest: codec.Digest,
+    ) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.isClosed()) return error.MemberClosed;
+        if (self.open_mode != .writable) return error.ReadOnlyMember;
+        if (self.isFrozen()) return error.WriteFrozen;
+
+        var next_header = self.selected_header;
+        next_header.header_sequence = std.math.add(u64, next_header.header_sequence, 1) catch
+            return error.HeaderSequenceOverflow;
+        next_header.checkpoint_offset = absolute_offset;
+        next_header.checkpoint_record_sequence = record_sequence;
+        next_header.checkpoint_record_digest = record_digest;
+        const encoded = try member_format.encode(next_header);
+        const first_offset: u64 = if (self.selected_source == .a) member_format.encoded_size else 0;
+        const second_offset: u64 = if (self.selected_source == .a) 0 else member_format.encoded_size;
+
+        self.checkpoint_reclaim_ready = false;
+        try self.writeHeaderLocked(first_offset, &encoded);
+        try self.syncLocked();
+        try self.writeHeaderLocked(second_offset, &encoded);
+        try self.syncLocked();
+        self.selected_header = next_header;
+        self.selected_source = .a;
+        self.degraded = false;
+        self.checkpoint_reclaim_ready = true;
     }
 
     fn writeLocked(self: *Member, kind: RegionKind, offset: u64, bytes: []const u8) !void {
@@ -462,6 +504,7 @@ pub const Member = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.isClosed()) return;
+        self.checkpoint_reclaim_ready = false;
 
         var first_error: ?anyerror = null;
         if (self.open_mode == .writable and self.dirty) {
@@ -1147,6 +1190,57 @@ test "open selects independent headers and enforces policy and exact length" {
     member = try openAt(std.testing.io, tmp.dir, "member", .read_only);
     try member.close();
     try std.testing.expectError(error.UnsupportedReadOnlyFeature, openAt(std.testing.io, tmp.dir, "member", .writable));
+}
+
+test "redundant checkpoint publication persists the same anchor in both headers" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var header = try testCreateHeader(0);
+    header.control.length = 4 * 4096;
+    const payload = testCreatePayload();
+    var member = try createAt(std.testing.io, tmp.dir, "anchor", header, payload, .{});
+    try member.publishCheckpoint(header.control.offset + 4096, 2, @splat(0x44));
+    try std.testing.expect(!member.checkpointReclaimReady());
+    try member.close();
+
+    member = try openAt(std.testing.io, tmp.dir, "anchor", .writable);
+    try std.testing.expect(!member.checkpointReclaimReady());
+    try member.publishCheckpointRedundant(header.control.offset + 8192, 3, @splat(0x55));
+    try std.testing.expect(member.checkpointReclaimReady());
+    try std.testing.expectEqual(SourceSlot.a, member.source());
+    try member.close();
+
+    member = try openAt(std.testing.io, tmp.dir, "anchor", .read_only);
+    defer member.deinit();
+    try std.testing.expect(!member.checkpointReclaimReady());
+    try std.testing.expectEqual(@as(u64, header.control.offset + 8192), member.header().checkpoint_offset);
+    try std.testing.expectEqual(@as(u64, 3), member.header().checkpoint_record_sequence);
+    const expected_digest: codec.Digest = @splat(0x55);
+    try std.testing.expectEqualSlices(u8, &expected_digest, &member.header().checkpoint_record_digest);
+}
+
+test "interrupted redundant publication never reports a reclaim barrier" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var header = try testCreateHeader(0);
+    header.control.length = 4 * 4096;
+    const payload = testCreatePayload();
+    var member = try createAt(std.testing.io, tmp.dir, "anchor-fault", header, payload, .{});
+    try member.publishCheckpointRedundant(header.control.offset + 4096, 2, @splat(0x33));
+    try std.testing.expect(member.checkpointReclaimReady());
+    var fault: FaultController = .{ .fail_write_at = 1 };
+    member.setFaultController(&fault);
+    try std.testing.expectError(
+        error.InjectedFault,
+        member.publishCheckpointRedundant(header.control.offset + 8192, 3, @splat(0x44)),
+    );
+    try std.testing.expect(!member.checkpointReclaimReady());
+    member.deinit();
+
+    member = try openAt(std.testing.io, tmp.dir, "anchor-fault", .read_only);
+    defer member.deinit();
+    try std.testing.expect(!member.checkpointReclaimReady());
+    try std.testing.expectEqual(@as(u64, header.control.offset + 8192), member.header().checkpoint_offset);
 }
 
 test "open rejects invalid basenames and invalid or short header pairs" {

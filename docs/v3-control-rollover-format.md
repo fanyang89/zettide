@@ -59,3 +59,13 @@ selected authority becomes its next authority only after current voter quorum ha
 same shared-history event. An unknown append outcome freezes the coordinator and requires full reopen.
 Rollover still requires compacted-root authority selection, a dual-header reclaim barrier, anchored
 scan, and crash-safe slot clearing before any old record can be overwritten.
+
+## Anchor Publication
+
+The member anchor API writes one identical incremented header to the non-selected copy and syncs it,
+then writes the same header to the other copy and syncs again. Only completion of both writes updates
+the in-memory selected header and marks reclaim ready for the current writable open. Any publication
+attempt first revokes that state. An interrupted publication may leave one newer valid header, but
+never establishes a reclaim barrier on that member. Reopen observes header contents for recovery but
+requires a fresh successful redundant publication before reclaim. No old control slot may be cleared
+before the current voter quorum has established this current-open barrier.
