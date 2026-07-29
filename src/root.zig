@@ -50,4 +50,5 @@ test {
     _ = state_machine;
     _ = service;
     _ = @import("integration_test.zig");
+    _ = @import("runtime_integration_test.zig");
 }
