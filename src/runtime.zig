@@ -89,7 +89,7 @@ pub const Runtime = struct {
         );
         errdefer self.raftor.destroy();
 
-        self.pool_service = try service_mod.PoolService.init(allocator, io, self.raftor, &self.machine);
+        self.pool_service = try service_mod.PoolService.init(allocator, io, self.raftor, &self.machine, config.cluster_id);
         self.pool_rpc = service_mod.PoolRpc.init(allocator, &self.pool_service);
         errdefer {
             self.pool_rpc.stopAccepting();

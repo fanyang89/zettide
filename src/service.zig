@@ -11,7 +11,7 @@ pub const default_page_size: usize = 100;
 pub const max_page_size: usize = 1000;
 pub const max_pending_rpc_calls: usize = 1024;
 
-const max_request_wire_bytes: usize = 2048;
+const max_request_wire_bytes: usize = 4096;
 
 pub const RpcResult = struct {
     status: grpc.Status,
@@ -33,12 +33,14 @@ pub const PoolService = struct {
     io: std.Io,
     raftor: *raft.Raftor,
     machine: *state_machine.PoolStateMachine,
+    expected_cluster_id: raft.ClusterId,
 
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         raftor: *raft.Raftor,
         machine: *state_machine.PoolStateMachine,
+        expected_cluster_id: raft.ClusterId,
     ) error{UnsafeRaftConfiguration}!PoolService {
         if (!raftor.leaderServicePolicy().isSafe()) return error.UnsafeRaftConfiguration;
         return .{
@@ -46,6 +48,7 @@ pub const PoolService = struct {
             .io = io,
             .raftor = raftor,
             .machine = machine,
+            .expected_cluster_id = expected_cluster_id,
         };
     }
 
@@ -181,6 +184,140 @@ pub const PoolService = struct {
             .after_id = after_id,
         };
         self.raftor.readIndex("list-pools", pending.callback()) catch |err| {
+            pending.destroy();
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn registerNode(self: *PoolService, payload: []const u8, completion: Completion) void {
+        preflightRegisterNodeRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid RegisterNode request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        var request = pb.RegisterNodeRequest.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid RegisterNode request"));
+            return;
+        };
+        defer request.deinit(arena.allocator());
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+        if (!std.mem.eql(u8, request.cluster_id, &self.expected_cluster_id)) {
+            completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "cluster_id does not match this cluster") });
+            return;
+        }
+
+        const timestamp = std.math.cast(i64, std.Io.Timestamp.now(self.io, .real).toMilliseconds()) orelse {
+            completion.invoke(internalError());
+            return;
+        };
+        const command = state_machine.encodeRegisterNodeCommand(self.allocator, .{
+            .request_id = request.request_id,
+            .node_id = request.node_id,
+            .cluster_id = request.cluster_id,
+            .control_endpoint = request.control_endpoint,
+            .nvmf_endpoint = request.nvmf_endpoint,
+            .failure_domain = request.failure_domain,
+            .capability_bits = request.capability_bits,
+            .protocol_version = request.protocol_version,
+            .proposed_registered_at_unix_ms = timestamp,
+        }) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        defer self.allocator.free(command);
+
+        const pending = self.allocator.create(RegisterNodePending) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion };
+        self.raftor.propose(command, pending.callback()) catch |err| {
+            self.allocator.destroy(pending);
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn getNode(self: *PoolService, payload: []const u8, completion: Completion) void {
+        preflightGetNodeRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid GetNode request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        var request = pb.GetNodeRequest.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid GetNode request"));
+            return;
+        };
+        defer request.deinit(arena.allocator());
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+
+        const node_id = self.allocator.dupe(u8, request.node_id) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        const pending = self.allocator.create(GetNodePending) catch {
+            self.allocator.free(node_id);
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion, .node_id = node_id };
+        self.raftor.readIndex("get-node", pending.callback()) catch |err| {
+            pending.destroy();
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn listNodes(self: *PoolService, payload: []const u8, completion: Completion) void {
+        preflightListNodesRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid ListNodes request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        var request = pb.ListNodesRequest.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid ListNodes request"));
+            return;
+        };
+        defer request.deinit(arena.allocator());
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+
+        const page_size: usize = if (request.page_size == 0) default_page_size else request.page_size;
+        if (page_size > max_page_size) {
+            completion.invoke(invalidArgument("page_size exceeds 1000"));
+            return;
+        }
+        const after_id = if (request.page_token.len == 0)
+            null
+        else
+            self.allocator.dupe(u8, request.page_token) catch {
+                completion.invoke(internalError());
+                return;
+            };
+        const pending = self.allocator.create(ListNodesPending) catch {
+            if (after_id) |id| self.allocator.free(id);
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{
+            .owner = self,
+            .completion = completion,
+            .page_size = page_size,
+            .after_id = after_id,
+        };
+        self.raftor.readIndex("list-nodes", pending.callback()) catch |err| {
             pending.destroy();
             completion.invoke(raftFailure(err));
         };
@@ -353,6 +490,156 @@ const ListPending = struct {
     }
 };
 
+const RegisterNodePending = struct {
+    owner: *PoolService,
+    completion: Completion,
+
+    fn callback(self: *RegisterNodePending) raft.ProposalCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+
+    fn complete(ctx: *anyopaque, result: raft.ProposalResult) void {
+        const self: *RegisterNodePending = @ptrCast(@alignCast(ctx));
+        defer self.owner.allocator.destroy(self);
+        switch (result) {
+            .ok => |payload| self.completeApplied(payload),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+
+    fn completeApplied(self: *RegisterNodePending, payload: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(self.owner.allocator);
+        defer arena.deinit();
+        var response = state_machine.decodeRegisterNodeApplyResponse(arena.allocator(), payload) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        defer response.deinit(arena.allocator());
+        switch (response.code) {
+            .REGISTER_NODE_APPLY_CODE_REGISTERED => {
+                const node = response.node orelse {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                const encoded = encodeMessage(self.owner.allocator, pb.RegisterNodeResponse{ .node = node }) catch {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                defer self.owner.allocator.free(encoded);
+                self.completion.invoke(.{ .status = .ok, .payload = encoded });
+            },
+            .REGISTER_NODE_APPLY_CODE_ID_EXISTS => self.completion.invoke(.{
+                .status = grpc.Status.init(.already_exists, "Node ID already exists"),
+            }),
+            .REGISTER_NODE_APPLY_CODE_REQUEST_CONFLICT => self.completion.invoke(.{
+                .status = grpc.Status.init(.failed_precondition, "request_id was reused with different fields"),
+            }),
+            .REGISTER_NODE_APPLY_CODE_REQUEST_LIMIT => self.completion.invoke(.{
+                .status = grpc.Status.init(.resource_exhausted, "request history limit reached"),
+            }),
+            .REGISTER_NODE_APPLY_CODE_NODE_LIMIT => self.completion.invoke(.{
+                .status = grpc.Status.init(.resource_exhausted, "Node limit reached"),
+            }),
+            else => self.completion.invoke(internalError()),
+        }
+    }
+};
+
+const GetNodePending = struct {
+    owner: *PoolService,
+    completion: Completion,
+    node_id: []u8,
+
+    fn callback(self: *GetNodePending) raft.ReadIndexCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+
+    fn destroy(self: *GetNodePending) void {
+        const allocator = self.owner.allocator;
+        allocator.free(self.node_id);
+        allocator.destroy(self);
+    }
+
+    fn complete(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *GetNodePending = @ptrCast(@alignCast(ctx));
+        defer self.destroy();
+        switch (result) {
+            .ok => self.completeRead(),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+
+    fn completeRead(self: *GetNodePending) void {
+        var node = self.owner.machine.getNodeById(self.owner.allocator, self.node_id) catch {
+            self.completion.invoke(internalError());
+            return;
+        } orelse {
+            self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Node not found") });
+            return;
+        };
+        defer node.deinit(self.owner.allocator);
+        const encoded = encodeMessage(self.owner.allocator, pb.GetNodeResponse{ .node = node }) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        defer self.owner.allocator.free(encoded);
+        self.completion.invoke(.{ .status = .ok, .payload = encoded });
+    }
+};
+
+const ListNodesPending = struct {
+    owner: *PoolService,
+    completion: Completion,
+    page_size: usize,
+    after_id: ?[]u8,
+
+    fn callback(self: *ListNodesPending) raft.ReadIndexCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+
+    fn destroy(self: *ListNodesPending) void {
+        const allocator = self.owner.allocator;
+        if (self.after_id) |id| allocator.free(id);
+        allocator.destroy(self);
+    }
+
+    fn complete(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *ListNodesPending = @ptrCast(@alignCast(ctx));
+        defer self.destroy();
+        switch (result) {
+            .ok => self.completeRead(),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+
+    fn completeRead(self: *ListNodesPending) void {
+        var result = self.owner.machine.listNodesPage(
+            self.owner.allocator,
+            if (self.after_id) |id| id else null,
+            self.page_size,
+        ) catch |err| {
+            self.completion.invoke(if (err == error.InvalidPageToken)
+                invalidArgument("invalid page_token")
+            else
+                internalError());
+            return;
+        };
+        defer result.deinit(self.owner.allocator);
+        const page_items = result.nodes;
+        const page: std.ArrayList(pb.Node) = .{ .items = page_items, .capacity = page_items.len };
+        const next_token: []const u8 = if (result.has_more) page_items[page_items.len - 1].id else &.{};
+        const encoded = encodeMessage(self.owner.allocator, pb.ListNodesResponse{
+            .nodes = page,
+            .next_page_token = next_token,
+        }) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        defer self.owner.allocator.free(encoded);
+        self.completion.invoke(.{ .status = .ok, .payload = encoded });
+    }
+};
+
 pub const PoolRpc = struct {
     /// Must be thread-safe when the server has multiple reactors.
     allocator: std.mem.Allocator,
@@ -370,6 +657,9 @@ pub const PoolRpc = struct {
         try server.registerStream("/zettide.control.v1.PoolService/CreatePool", handler(self, .create));
         try server.registerStream("/zettide.control.v1.PoolService/GetPool", handler(self, .get));
         try server.registerStream("/zettide.control.v1.PoolService/ListPools", handler(self, .list));
+        try server.registerStream("/zettide.control.v1.NodeService/RegisterNode", handler(self, .register_node));
+        try server.registerStream("/zettide.control.v1.NodeService/GetNode", handler(self, .get_node));
+        try server.registerStream("/zettide.control.v1.NodeService/ListNodes", handler(self, .list_nodes));
     }
 
     pub fn pendingCallCount(self: *const PoolRpc) usize {
@@ -399,7 +689,7 @@ pub const PoolRpc = struct {
         self.* = undefined;
     }
 
-    const Method = enum { create, get, list };
+    const Method = enum { create, get, list, register_node, get_node, list_nodes };
 
     fn handler(self: *PoolRpc, comptime method: Method) grpc.ServerStreamHandler {
         return .{
@@ -410,6 +700,9 @@ pub const PoolRpc = struct {
                 .create => onCreate,
                 .get => onGet,
                 .list => onList,
+                .register_node => onRegisterNode,
+                .get_node => onGetNode,
+                .list_nodes => onListNodes,
             },
             .on_remote_end = onRemoteEnd,
             .on_cancel = onCancel,
@@ -463,6 +756,21 @@ pub const PoolRpc = struct {
     fn onList(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
         _ = context;
         return receive(ctx, .list, stream, payload);
+    }
+
+    fn onRegisterNode(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .register_node, stream, payload);
+    }
+
+    fn onGetNode(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .get_node, stream, payload);
+    }
+
+    fn onListNodes(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .list_nodes, stream, payload);
     }
 
     fn receive(
@@ -521,6 +829,9 @@ pub const PoolRpc = struct {
             .create => self.service.createPool(payload, pending.completion()),
             .get => self.service.getPool(payload, pending.completion()),
             .list => self.service.listPools(payload, pending.completion()),
+            .register_node => self.service.registerNode(payload, pending.completion()),
+            .get_node => self.service.getNode(payload, pending.completion()),
+            .list_nodes => self.service.listNodes(payload, pending.completion()),
         }
     }
 
@@ -653,8 +964,86 @@ fn preflightListPoolsRequest(payload: []const u8) wire.Error!void {
     }
 }
 
+fn preflightRegisterNodeRequest(payload: []const u8) wire.Error!void {
+    if (payload.len > max_request_wire_bytes) return error.InvalidWire;
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen = [_]bool{false} ** 9;
+    while (try cursor.next()) |field| {
+        if (field.number > 8) {
+            try cursor.skip(field, max_request_wire_bytes);
+            continue;
+        }
+        if (seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_request_id_bytes), state_machine.max_request_id_bytes, false)) return error.InvalidWire,
+            2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3 => if (field.wire_type != 2 or !validClusterId(try cursor.readBytes(16))) return error.InvalidWire,
+            4, 5 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_node_endpoint_bytes), state_machine.max_node_endpoint_bytes, false)) return error.InvalidWire,
+            6 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_failure_domain_bytes), state_machine.max_failure_domain_bytes, false)) return error.InvalidWire,
+            7 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                _ = try cursor.readVarint();
+            },
+            8 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const version = try cursor.readVarint();
+                if (version == 0 or version > std.math.maxInt(u32)) return error.InvalidWire;
+            },
+            else => unreachable,
+        }
+    }
+    for ([_]usize{ 1, 2, 3, 4, 5, 6, 8 }) |field| {
+        if (!seen[field]) return error.InvalidWire;
+    }
+}
+
+fn preflightGetNodeRequest(payload: []const u8) wire.Error!void {
+    if (payload.len > max_request_wire_bytes) return error.InvalidWire;
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen_node_id = false;
+    while (try cursor.next()) |field| {
+        if (field.number != 1) {
+            try cursor.skip(field, max_request_wire_bytes);
+            continue;
+        }
+        if (seen_node_id or field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire;
+        seen_node_id = true;
+    }
+    if (!seen_node_id) return error.InvalidWire;
+}
+
+fn preflightListNodesRequest(payload: []const u8) wire.Error!void {
+    if (payload.len > max_request_wire_bytes) return error.InvalidWire;
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen = [_]bool{false} ** 3;
+    while (try cursor.next()) |field| {
+        if (field.number > 2) {
+            try cursor.skip(field, max_request_wire_bytes);
+            continue;
+        }
+        if (seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => {
+                if (field.wire_type != 0 or try cursor.readVarint() > std.math.maxInt(u32)) return error.InvalidWire;
+            },
+            2 => {
+                if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire;
+            },
+            else => unreachable,
+        }
+    }
+}
+
 fn validText(value: []const u8, max_bytes: usize, allow_empty: bool) bool {
     return (allow_empty or value.len != 0) and value.len <= max_bytes and std.unicode.utf8ValidateSlice(value);
+}
+
+fn validClusterId(value: []const u8) bool {
+    if (value.len != 16) return false;
+    for (value) |byte| if (byte != 0) return true;
+    return false;
 }
 
 fn validUuidV7(value: []const u8) bool {
@@ -724,6 +1113,29 @@ const CompletionProbe = struct {
         self.payload = self.allocator.dupe(u8, result.payload) catch &.{};
     }
 };
+
+const test_cluster_id: raft.ClusterId = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+
+fn testRegisterNodeRequest(request_id: []const u8, node_id: []const u8, cluster_id: []const u8, control_endpoint: []const u8) pb.RegisterNodeRequest {
+    return .{
+        .request_id = request_id,
+        .node_id = node_id,
+        .cluster_id = cluster_id,
+        .control_endpoint = control_endpoint,
+        .nvmf_endpoint = "127.0.0.1:4420",
+        .failure_domain = "rack-a",
+        .capability_bits = 5,
+        .protocol_version = 1,
+    };
+}
+
+fn awaitCompletion(raftor: *raft.Raftor, probe: *const CompletionProbe) !void {
+    for (0..32) |_| {
+        if (probe.completed) return;
+        _ = try raftor.tick();
+    }
+    return error.TestTimeout;
+}
 
 test "response command failures abort retained calls" {
     const Failure = enum { initial_metadata, message, finish };
@@ -811,7 +1223,7 @@ test "Pool service rejects unbounded follower-forwarding Raft policy" {
     defer raftor.destroy();
     try std.testing.expectError(
         error.UnsafeRaftConfiguration,
-        PoolService.init(allocator, std.testing.io, raftor, &machine),
+        PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id),
     );
 }
 
@@ -828,7 +1240,7 @@ test "Pool service gates followers and completes linearizable CRUD reads" {
     config.read_index_timeout_ticks = 32;
     const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
     defer raftor.destroy();
-    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine);
+    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id);
 
     const create_payload = try encodeMessage(allocator, pb.CreatePoolRequest{
         .request_id = "request-1",
@@ -922,6 +1334,197 @@ test "Pool service gates followers and completes linearizable CRUD reads" {
     try std.testing.expectEqual(@as(usize, 0), second_page_response.next_page_token.len);
 }
 
+test "Node service validates registration and completes linearizable reads" {
+    const allocator = std.testing.allocator;
+    const first_id = "0198f54d-5c2a-7000-8000-000000000011";
+    const second_id = "0198f54d-5c2a-7000-8000-000000000022";
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var config: raft.RaftorConfig = .{};
+    config.raft.id = 1;
+    config.raft.election_timeout_seed = 42;
+    config.raft.check_quorum = true;
+    config.raft.disable_proposal_forwarding = true;
+    config.proposal_timeout_ticks = 32;
+    config.read_index_timeout_ticks = 32;
+    const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
+    defer raftor.destroy();
+    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id);
+
+    const register_payload = try encodeMessage(allocator, testRegisterNodeRequest(
+        "node-request-1",
+        first_id,
+        &test_cluster_id,
+        "127.0.0.1:9000",
+    ));
+    defer allocator.free(register_payload);
+    const get_payload = try encodeMessage(allocator, pb.GetNodeRequest{ .node_id = first_id });
+    defer allocator.free(get_payload);
+    const list_payload = try encodeMessage(allocator, pb.ListNodesRequest{});
+    defer allocator.free(list_payload);
+    var follower_register = CompletionProbe{ .allocator = allocator };
+    defer follower_register.deinit();
+    service.registerNode(register_payload, follower_register.completion());
+    try std.testing.expectEqual(grpc.StatusCode.unavailable, follower_register.code);
+    var follower_get = CompletionProbe{ .allocator = allocator };
+    defer follower_get.deinit();
+    service.getNode(get_payload, follower_get.completion());
+    try std.testing.expectEqual(grpc.StatusCode.unavailable, follower_get.code);
+    var follower_list = CompletionProbe{ .allocator = allocator };
+    defer follower_list.deinit();
+    service.listNodes(list_payload, follower_list.completion());
+    try std.testing.expectEqual(grpc.StatusCode.unavailable, follower_list.code);
+
+    try raftor.campaign();
+    const other_cluster_id: raft.ClusterId = .{0x99} ++ .{0x88} ** 15;
+    const mismatch_payload = try encodeMessage(allocator, testRegisterNodeRequest(
+        "node-mismatch",
+        first_id,
+        &other_cluster_id,
+        "127.0.0.1:9000",
+    ));
+    defer allocator.free(mismatch_payload);
+    var mismatch_probe = CompletionProbe{ .allocator = allocator };
+    defer mismatch_probe.deinit();
+    service.registerNode(mismatch_payload, mismatch_probe.completion());
+    try std.testing.expectEqual(grpc.StatusCode.failed_precondition, mismatch_probe.code);
+
+    const short_cluster_payload = try encodeMessage(allocator, testRegisterNodeRequest(
+        "node-short-cluster",
+        first_id,
+        "short",
+        "127.0.0.1:9000",
+    ));
+    defer allocator.free(short_cluster_payload);
+    var short_cluster_probe = CompletionProbe{ .allocator = allocator };
+    defer short_cluster_probe.deinit();
+    service.registerNode(short_cluster_payload, short_cluster_probe.completion());
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, short_cluster_probe.code);
+
+    const zero_cluster_id: raft.ClusterId = .{0} ** 16;
+    const zero_cluster_payload = try encodeMessage(allocator, testRegisterNodeRequest(
+        "node-zero-cluster",
+        first_id,
+        &zero_cluster_id,
+        "127.0.0.1:9000",
+    ));
+    defer allocator.free(zero_cluster_payload);
+    var zero_cluster_probe = CompletionProbe{ .allocator = allocator };
+    defer zero_cluster_probe.deinit();
+    service.registerNode(zero_cluster_payload, zero_cluster_probe.completion());
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, zero_cluster_probe.code);
+
+    var invalid_version = testRegisterNodeRequest("node-invalid-version", first_id, &test_cluster_id, "127.0.0.1:9000");
+    invalid_version.protocol_version = 0;
+    const invalid_version_payload = try encodeMessage(allocator, invalid_version);
+    defer allocator.free(invalid_version_payload);
+    var invalid_version_probe = CompletionProbe{ .allocator = allocator };
+    defer invalid_version_probe.deinit();
+    service.registerNode(invalid_version_payload, invalid_version_probe.completion());
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, invalid_version_probe.code);
+
+    var register_probe = CompletionProbe{ .allocator = allocator };
+    defer register_probe.deinit();
+    service.registerNode(register_payload, register_probe.completion());
+    try awaitCompletion(raftor, &register_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, register_probe.code);
+    var register_reader: std.Io.Reader = .fixed(register_probe.payload);
+    var register_response = try pb.RegisterNodeResponse.decode(&register_reader, allocator);
+    defer register_response.deinit(allocator);
+    try std.testing.expectEqualStrings(first_id, register_response.node.?.id);
+    try std.testing.expectEqualSlices(u8, &test_cluster_id, register_response.node.?.cluster_id);
+
+    const conflict_payload = try encodeMessage(allocator, testRegisterNodeRequest(
+        "node-request-1",
+        first_id,
+        &test_cluster_id,
+        "127.0.0.2:9000",
+    ));
+    defer allocator.free(conflict_payload);
+    var conflict_probe = CompletionProbe{ .allocator = allocator };
+    defer conflict_probe.deinit();
+    service.registerNode(conflict_payload, conflict_probe.completion());
+    try awaitCompletion(raftor, &conflict_probe);
+    try std.testing.expectEqual(grpc.StatusCode.failed_precondition, conflict_probe.code);
+
+    const duplicate_payload = try encodeMessage(allocator, testRegisterNodeRequest(
+        "node-request-duplicate",
+        first_id,
+        &test_cluster_id,
+        "127.0.0.2:9000",
+    ));
+    defer allocator.free(duplicate_payload);
+    var duplicate_probe = CompletionProbe{ .allocator = allocator };
+    defer duplicate_probe.deinit();
+    service.registerNode(duplicate_payload, duplicate_probe.completion());
+    try awaitCompletion(raftor, &duplicate_probe);
+    try std.testing.expectEqual(grpc.StatusCode.already_exists, duplicate_probe.code);
+
+    const second_payload = try encodeMessage(allocator, testRegisterNodeRequest(
+        "node-request-2",
+        second_id,
+        &test_cluster_id,
+        "127.0.0.2:9000",
+    ));
+    defer allocator.free(second_payload);
+    var second_probe = CompletionProbe{ .allocator = allocator };
+    defer second_probe.deinit();
+    service.registerNode(second_payload, second_probe.completion());
+    try awaitCompletion(raftor, &second_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, second_probe.code);
+
+    var get_probe = CompletionProbe{ .allocator = allocator };
+    defer get_probe.deinit();
+    service.getNode(get_payload, get_probe.completion());
+    try awaitCompletion(raftor, &get_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, get_probe.code);
+    var get_reader: std.Io.Reader = .fixed(get_probe.payload);
+    var get_response = try pb.GetNodeResponse.decode(&get_reader, allocator);
+    defer get_response.deinit(allocator);
+    try std.testing.expectEqualStrings("127.0.0.1:9000", get_response.node.?.control_endpoint);
+
+    const missing_payload = try encodeMessage(allocator, pb.GetNodeRequest{
+        .node_id = "0198f54d-5c2a-7000-8000-000000000033",
+    });
+    defer allocator.free(missing_payload);
+    var missing_probe = CompletionProbe{ .allocator = allocator };
+    defer missing_probe.deinit();
+    service.getNode(missing_payload, missing_probe.completion());
+    try awaitCompletion(raftor, &missing_probe);
+    try std.testing.expectEqual(grpc.StatusCode.not_found, missing_probe.code);
+
+    const first_page_payload = try encodeMessage(allocator, pb.ListNodesRequest{ .page_size = 1 });
+    defer allocator.free(first_page_payload);
+    var first_page_probe = CompletionProbe{ .allocator = allocator };
+    defer first_page_probe.deinit();
+    service.listNodes(first_page_payload, first_page_probe.completion());
+    try awaitCompletion(raftor, &first_page_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, first_page_probe.code);
+    var first_page_reader: std.Io.Reader = .fixed(first_page_probe.payload);
+    var first_page = try pb.ListNodesResponse.decode(&first_page_reader, allocator);
+    defer first_page.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), first_page.nodes.items.len);
+    try std.testing.expectEqualStrings(first_id, first_page.nodes.items[0].id);
+    try std.testing.expectEqualStrings(first_id, first_page.next_page_token);
+
+    const second_page_payload = try encodeMessage(allocator, pb.ListNodesRequest{
+        .page_size = 1,
+        .page_token = first_page.next_page_token,
+    });
+    defer allocator.free(second_page_payload);
+    var second_page_probe = CompletionProbe{ .allocator = allocator };
+    defer second_page_probe.deinit();
+    service.listNodes(second_page_payload, second_page_probe.completion());
+    try awaitCompletion(raftor, &second_page_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, second_page_probe.code);
+    var second_page_reader: std.Io.Reader = .fixed(second_page_probe.payload);
+    var second_page = try pb.ListNodesResponse.decode(&second_page_reader, allocator);
+    defer second_page.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), second_page.nodes.items.len);
+    try std.testing.expectEqualStrings(second_id, second_page.nodes.items[0].id);
+    try std.testing.expectEqual(@as(usize, 0), second_page.next_page_token.len);
+}
+
 const RaftDriver = struct {
     raftor: *raft.Raftor,
     failed: std.atomic.Value(bool) = .init(false),
@@ -953,7 +1556,7 @@ const StreamProbe = struct {
     }
 };
 
-test "raw unary client reaches asynchronous Pool RPC" {
+test "raw unary client reaches asynchronous Pool and Node RPCs" {
     const allocator = std.heap.smp_allocator;
     var machine = state_machine.PoolStateMachine.init(allocator);
     defer machine.deinit();
@@ -968,7 +1571,7 @@ test "raw unary client reaches asynchronous Pool RPC" {
     defer raftor.destroy();
     try raftor.campaign();
 
-    var pool_service = try PoolService.init(allocator, std.testing.io, raftor, &machine);
+    var pool_service = try PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id);
     var pool_rpc = PoolRpc.init(allocator, &pool_service);
     var server = try grpc.Server.init(allocator, .{});
     try pool_rpc.register(&server);
@@ -1007,6 +1610,58 @@ test "raw unary client reaches asynchronous Pool RPC" {
     var response = try pb.CreatePoolResponse.decode(&response_reader, allocator);
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings("grpc-primary", response.pool.?.name);
+
+    const node_id = "0198f54d-5c2a-7000-8000-000000000044";
+    const register_node_request = try encodeMessage(allocator, testRegisterNodeRequest(
+        "grpc-node-request-1",
+        node_id,
+        &test_cluster_id,
+        "127.0.0.1:9000",
+    ));
+    defer allocator.free(register_node_request);
+    var register_node_result = try channel.callUnary(
+        allocator,
+        "/zettide.control.v1.NodeService/RegisterNode",
+        register_node_request,
+        .{ .timeout_ns = 5 * std.time.ns_per_s },
+    );
+    defer register_node_result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, register_node_result.status.code);
+    var register_node_reader: std.Io.Reader = .fixed(register_node_result.payload);
+    var register_node_response = try pb.RegisterNodeResponse.decode(&register_node_reader, allocator);
+    defer register_node_response.deinit(allocator);
+    try std.testing.expectEqualStrings(node_id, register_node_response.node.?.id);
+
+    const get_node_request = try encodeMessage(allocator, pb.GetNodeRequest{ .node_id = node_id });
+    defer allocator.free(get_node_request);
+    var get_node_result = try channel.callUnary(
+        allocator,
+        "/zettide.control.v1.NodeService/GetNode",
+        get_node_request,
+        .{ .timeout_ns = 5 * std.time.ns_per_s },
+    );
+    defer get_node_result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, get_node_result.status.code);
+    var get_node_reader: std.Io.Reader = .fixed(get_node_result.payload);
+    var get_node_response = try pb.GetNodeResponse.decode(&get_node_reader, allocator);
+    defer get_node_response.deinit(allocator);
+    try std.testing.expectEqualStrings(node_id, get_node_response.node.?.id);
+
+    const list_nodes_request = try encodeMessage(allocator, pb.ListNodesRequest{});
+    defer allocator.free(list_nodes_request);
+    var list_nodes_result = try channel.callUnary(
+        allocator,
+        "/zettide.control.v1.NodeService/ListNodes",
+        list_nodes_request,
+        .{ .timeout_ns = 5 * std.time.ns_per_s },
+    );
+    defer list_nodes_result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, list_nodes_result.status.code);
+    var list_nodes_reader: std.Io.Reader = .fixed(list_nodes_result.payload);
+    var list_nodes_response = try pb.ListNodesResponse.decode(&list_nodes_reader, allocator);
+    defer list_nodes_response.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), list_nodes_response.nodes.items.len);
+    try std.testing.expectEqualStrings(node_id, list_nodes_response.nodes.items[0].id);
 
     const multi_request = try encodeMessage(allocator, pb.CreatePoolRequest{
         .request_id = "grpc-multi-1",
