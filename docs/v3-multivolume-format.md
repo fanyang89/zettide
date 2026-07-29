@@ -379,10 +379,31 @@ overwritten.
 
 The integrated path currently supports metadata-only transitions. Any new, moved, or state-changed
 data mapping is rejected until data initialization/write durability can be represented by a trusted
-witness. Voter promotion under a nonzero catalog authority is likewise rejected until the joining or
-non-voter member has an authority-bound catalog catch-up proof. Member removal is rejected until an
-authority-bound catalog drain proof shows that no mapping or allocator interval references its slot.
-These are deliberate fail-closed functional limits.
+witness. Member removal is rejected until an authority-bound catalog drain proof shows that no mapping
+or allocator interval references its slot. These are deliberate fail-closed functional limits.
+
+## Joining Catalog Install
+
+A bootstrapped `joining` non-voter whose control tail exactly equals current authority may install the
+current catalog from an active voter. The source is held under a catalog claim while its complete graph
+is loaded and validated. The target root slots are checked for zero, exact retry, or a recognized
+partial candidate before metadata is changed. Conflicting roots or pages are never overwritten.
+
+Install writes all missing or partial pages with one durable barrier, then writes and synchronizes root
+A and root B separately. It finally reloads the target graph and requires both roots to match current
+control authority. A crash at any write or sync boundary leaves zero, exact, or recognizable-prefix
+state that the same candidate can retry after reopen.
+
+Promotion never trusts a previous install result. It claims each promoted member, reloads the catalog,
+requires redundant roots, validates the graph under both current and proposed topology, and retains the
+claim through membership prepare and commit. This binds the target's durable metadata to its new-voter
+attestation.
+
+The first install API is intentionally limited to `joining` members with a healthy bootstrap history.
+The same transaction must activate it as a voter. Activating a joining member as an active non-voter is
+rejected because non-voters do not receive the membership commit. The API does not replay control
+history for an existing active non-voter. If authority advances before promotion, the target becomes
+stale and remains ineligible until a separate control-history catch-up protocol exists.
 
 ## Mirrored Root Selection
 

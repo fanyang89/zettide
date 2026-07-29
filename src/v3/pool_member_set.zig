@@ -237,6 +237,10 @@ pub const PoolMemberSet = struct {
         self.control_write_state = null;
     }
 
+    pub fn revokeDataAccess(self: *PoolMemberSet) void {
+        self.data_access_state = .unavailable;
+    }
+
     pub fn claimCoordinator(self: *PoolMemberSet) !void {
         if (self.coordinator_state.cmpxchgStrong(0, 1, .acq_rel, .acquire)) |state|
             return if (state == 2 or state == 3) error.MemberSetClosed else error.CoordinatorAlreadyOpen;
@@ -265,6 +269,24 @@ pub const PoolMemberSet = struct {
 
     pub fn noteControlFailure(self: *PoolMemberSet, index: usize) void {
         self.statuses[index] = .stale;
+    }
+
+    pub fn noteCatalogFailure(self: *PoolMemberSet, index: usize, reason: anyerror) void {
+        self.invalidateCatalogVoter(index, reason);
+    }
+
+    pub fn noteCatalogInstalled(self: *PoolMemberSet, index: usize) void {
+        if (self.statuses[index] == .catalog_failed) self.statuses[index] = .authority;
+    }
+
+    pub fn validateCatalogTargetGeometry(
+        self: *PoolMemberSet,
+        source_index: usize,
+        target_index: usize,
+    ) !void {
+        const source = (try self.memberAt(source_index)) orelse return error.MemberUnavailable;
+        const target = (try self.memberAt(target_index)) orelse return error.MemberUnavailable;
+        if (!samePoolGeometry(source.header(), target.header())) return error.InconsistentMemberGeometry;
     }
 
     pub fn noteCommittedGeneration(
@@ -299,6 +321,7 @@ pub const PoolMemberSet = struct {
         self: *PoolMemberSet,
         record: control_record.Record,
         topology: pool_topology.Topology,
+        committed_members: [max_member_count]bool,
         active_members: [max_member_count]bool,
         active_count: u16,
         administrative_recovery: bool,
@@ -328,10 +351,13 @@ pub const PoolMemberSet = struct {
                 self.statuses[index] = .removed;
             } else if (active_members[index]) {
                 self.statuses[index] = .active_voter;
-            } else {
+            } else if (committed_members[index]) {
                 self.statuses[index] = .authority;
+            } else {
+                self.statuses[index] = .stale;
             }
         }
+        self.recomputeDataAccess(topology);
     }
 
     pub fn noteCommittedBootstrap(
@@ -566,6 +592,24 @@ pub const PoolMemberSet = struct {
             if (ready.active_count < self.authority_state.?.topology.quorum)
                 self.control_write_state = null;
         }
+    }
+
+    fn recomputeDataAccess(self: *PoolMemberSet, topology: pool_topology.Topology) void {
+        var available_data_members: usize = 0;
+        for (self.members[0..self.supplied_count], 0..) |maybe_member, index| {
+            const member = if (maybe_member) |value| value else continue;
+            const descriptor = pool_topology.findMember(&topology, member.header().member_id) orelse continue;
+            if (descriptor.state == .joining) continue;
+            switch (self.statuses[index]) {
+                .authority, .active_voter, .catalog_failed => available_data_members += 1,
+                else => {},
+            }
+        }
+        const protection = self.authority_state.?.layout.protection() catch {
+            self.data_access_state = .unavailable;
+            return;
+        };
+        self.data_access_state = pool_policy.dataAccess(protection, available_data_members) catch .unavailable;
     }
 
     fn updateVoterStatuses(

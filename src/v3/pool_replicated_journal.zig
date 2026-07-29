@@ -363,6 +363,89 @@ pub const ReplicatedJournal = struct {
         };
     }
 
+    pub fn installCatalogForMember(
+        self: *ReplicatedJournal,
+        target_member_id: [16]u8,
+    ) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.CoordinatorClosed;
+        if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.recovery_only) return error.RecoveryOnlyCoordinator;
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        if (authority.generation == 0 or codec.isZero(&authority.data_root_digest))
+            return error.GenesisHasNoCatalogRoot;
+        const descriptor = pool_topology.findMember(&authority.topology, target_member_id) orelse
+            return error.CatalogTargetNotInTopology;
+        if (descriptor.control_role == pool_topology.voter_role) return error.CatalogTargetAlreadyVoter;
+        if (descriptor.state != .joining) return error.CatalogTargetMustBeJoining;
+
+        var target_index: ?usize = null;
+        for (0..self.set.suppliedCount()) |index| {
+            const member = (try self.set.memberAt(index)) orelse continue;
+            if (std.mem.eql(u8, &member.header().member_id, &target_member_id)) {
+                target_index = index;
+                break;
+            }
+        }
+        const resolved_target_index = target_index orelse return error.CatalogTargetUnavailable;
+        const target_history = if (self.set.histories[resolved_target_index]) |*value| value else return error.CatalogTargetNotCaughtUp;
+        const target_tail = target_history.scan_result.tail orelse return error.CatalogTargetNotCaughtUp;
+        if (!std.mem.eql(u8, &target_tail.history_digest, &authority.history_digest) or
+            target_history.findHistoryDigest(authority.history_digest) == null or
+            target_history.scan_result.unresolved_tail_damage or target_history.scan_result.journal_full)
+            return error.CatalogTargetNotCaughtUp;
+        const target_entries = target_history.entries();
+        if (target_entries.len == 0 or target_entries[0].record.kind != control_record.member_bootstrap_kind)
+            return error.MemberBootstrapRequired;
+        const bootstrap = try member_bootstrap.validateRecord(target_entries[0].record);
+        if (!std.mem.eql(u8, &bootstrap.target_member_id, &target_member_id))
+            return error.MemberBootstrapRequired;
+
+        var voter_buffer: [pool_member_set.max_member_count]pool_member_set.CatalogVoter = undefined;
+        const voters = try self.set.collectCatalogVoters(&voter_buffer);
+        const source = voters[0];
+        self.set.validateCatalogTargetGeometry(source.set_index, resolved_target_index) catch |err| {
+            self.set.noteCatalogFailure(resolved_target_index, err);
+            return error.CatalogTargetGeometryMismatch;
+        };
+        var geometry_buffer: [pool_member_set.max_member_count]pool_catalog_graph.MemberGeometry = undefined;
+        const geometry = try self.set.collectCatalogGeometry(&geometry_buffer);
+        var source_claim = try source.member.claimCatalog();
+        defer source_claim.release() catch unreachable;
+        const target_member = (try self.set.memberAt(resolved_target_index)) orelse
+            return error.CatalogTargetUnavailable;
+        var target_claim = target_member.claimCatalog() catch return error.CatalogTargetUnavailable;
+        defer target_claim.release() catch unreachable;
+
+        var source_scratch: pool_catalog_store.LoadScratch = .{};
+        _ = pool_catalog_store.loadAuthorityCatalog(
+            source.member,
+            authority,
+            geometry,
+            &.{},
+            &source_scratch,
+        ) catch |err| {
+            self.set.noteCatalogFailure(source.set_index, err);
+            self.frozen.store(true, .release);
+            self.set.revokeWriteReady();
+            self.set.revokeDataAccess();
+            return error.CatalogSourceInvalid;
+        };
+        var verify_scratch: pool_catalog_store.LoadScratch = .{};
+        pool_catalog_store.installAuthorityCatalog(
+            &target_claim,
+            authority,
+            geometry,
+            &source_scratch,
+            &verify_scratch,
+        ) catch |err| {
+            self.set.noteCatalogFailure(resolved_target_index, err);
+            return err;
+        };
+        self.set.noteCatalogInstalled(resolved_target_index);
+    }
+
     fn validateGenerationProposal(
         self: *ReplicatedJournal,
         prepare_proposal: control_record.Record,
@@ -410,6 +493,15 @@ pub const ReplicatedJournal = struct {
         try membership.validateTransition(authority.topology, proposal);
         if (proposal.mode == .normal) try self.validateAnchorRetention(proposal.topology);
         try self.validateCatalogMembershipGates(authority.topology, proposal.topology, authority.history_digest);
+        var promotion_claims: [pool_member_set.max_member_count]?member_api.CatalogClaim = @splat(null);
+        const promotion_claim_count = try self.claimPromotionCatalogs(
+            authority,
+            proposal.topology,
+            &promotion_claims,
+        );
+        defer for (promotion_claims[0..promotion_claim_count]) |*maybe_claim| {
+            if (maybe_claim.*) |*claim| claim.release() catch unreachable;
+        };
         if (prepare_proposal.generation != authority.generation or
             !std.mem.eql(u8, &prepare_proposal.data_root_digest, &authority.data_root_digest))
             return error.MembershipChangedAuthorityData;
@@ -544,6 +636,7 @@ pub const ReplicatedJournal = struct {
         self.set.noteCommittedMembership(
             committed,
             proposal.topology,
+            committed_members,
             active_members,
             active_count,
             proposal.mode == .administrative_recovery,
@@ -1069,12 +1162,9 @@ pub const ReplicatedJournal = struct {
             return error.CatalogDrainRequired;
         for (current.memberSlice()) |old_member| {
             const new_member = pool_topology.findMember(&next, old_member.member_id) orelse continue;
-            if (promotesActiveNonVoter(old_member, new_member.*)) {
-                if (!codec.isZero(&selected.data_root_digest)) return error.CatalogCatchupRequired;
-                continue;
-            }
             if (old_member.state != .joining) continue;
             if (new_member.state != .active) continue;
+            if (activatesAsNonVoter(old_member, new_member.*)) return error.ActiveNonVoterCatchupNotSupported;
             var matching_history: ?*const journal_api.HistoryScan = null;
             for (self.set.histories[0..self.set.supplied_count]) |*maybe_history| {
                 const history = if (maybe_history.*) |*value| value else continue;
@@ -1092,8 +1182,54 @@ pub const ReplicatedJournal = struct {
             const tail = history.scan_result.tail orelse return error.MemberNotCaughtUp;
             if (!std.mem.eql(u8, &tail.history_digest, &authority_digest) or
                 history.findHistoryDigest(authority_digest) == null) return error.MemberNotCaughtUp;
-            if (!codec.isZero(&selected.data_root_digest)) return error.CatalogCatchupRequired;
         }
+    }
+
+    fn claimPromotionCatalogs(
+        self: *ReplicatedJournal,
+        authority: pool_authority.Authority,
+        next: pool_topology.Topology,
+        claims: *[pool_member_set.max_member_count]?member_api.CatalogClaim,
+    ) !usize {
+        if (codec.isZero(&authority.data_root_digest)) return 0;
+        var geometry_buffer: [pool_member_set.max_member_count]pool_catalog_graph.MemberGeometry = undefined;
+        const geometry = try self.set.collectCatalogGeometry(&geometry_buffer);
+        var scratch: pool_catalog_store.LoadScratch = .{};
+        var count: usize = 0;
+        errdefer for (claims[0..count]) |*maybe_claim| {
+            if (maybe_claim.*) |*claim| claim.release() catch unreachable;
+        };
+        for (authority.topology.memberSlice()) |old_member| {
+            const new_member = pool_topology.findMember(&next, old_member.member_id) orelse continue;
+            if (!requiresCatalogPromotionProof(old_member, new_member.*)) continue;
+            var target_index: ?usize = null;
+            for (0..self.set.suppliedCount()) |index| {
+                const member = (try self.set.memberAt(index)) orelse continue;
+                if (std.mem.eql(u8, &member.header().member_id, &old_member.member_id)) {
+                    target_index = index;
+                    break;
+                }
+            }
+            const index = target_index orelse return error.CatalogCatchupRequired;
+            const member = (try self.set.memberAt(index)) orelse return error.CatalogCatchupRequired;
+            claims[count] = member.claimCatalog() catch return error.CatalogCatchupRequired;
+            count += 1;
+            const loaded = pool_catalog_store.loadAuthorityCatalog(
+                member,
+                authority,
+                geometry,
+                &.{},
+                &scratch,
+            ) catch return error.CatalogCatchupRequired;
+            if (loaded.selection.mirror_degraded) return error.CatalogCatchupRequired;
+            _ = pool_catalog_graph.validateGraph(.{
+                .generation = authority.generation,
+                .data_root_digest = authority.data_root_digest,
+                .topology = next,
+                .layout = authority.layout,
+            }, scratch.graph(), geometry, &.{}) catch return error.CatalogCatchupRequired;
+        }
+        return count;
     }
 };
 
@@ -1224,10 +1360,15 @@ fn voterCount(topology: pool_topology.Topology) u16 {
     return count;
 }
 
-fn promotesActiveNonVoter(old_member: pool_topology.Member, new_member: pool_topology.Member) bool {
-    return old_member.state != .joining and
-        old_member.control_role != pool_topology.voter_role and
-        new_member.control_role == pool_topology.voter_role;
+fn requiresCatalogPromotionProof(old_member: pool_topology.Member, new_member: pool_topology.Member) bool {
+    return (old_member.state == .joining and new_member.state == .active) or
+        (old_member.control_role != pool_topology.voter_role and
+            new_member.control_role == pool_topology.voter_role);
+}
+
+fn activatesAsNonVoter(old_member: pool_topology.Member, new_member: pool_topology.Member) bool {
+    return old_member.state == .joining and new_member.state == .active and
+        new_member.control_role != pool_topology.voter_role;
 }
 
 fn removesMember(current: pool_topology.Topology, next: pool_topology.Topology) bool {
@@ -1395,7 +1536,7 @@ fn commitTestGenesisCatalog(
     });
 }
 
-test "active non-voter promotion requires catalog catch-up" {
+test "catalog promotion proof covers joining and active non-voters" {
     const active_non_voter: pool_topology.Member = .{
         .member_id = id(2),
         .slot = 7,
@@ -1404,11 +1545,12 @@ test "active non-voter promotion requires catalog catch-up" {
     };
     var promoted = active_non_voter;
     promoted.control_role = pool_topology.voter_role;
-    try std.testing.expect(promotesActiveNonVoter(active_non_voter, promoted));
+    try std.testing.expect(requiresCatalogPromotionProof(active_non_voter, promoted));
 
     var joining = active_non_voter;
     joining.state = .joining;
-    try std.testing.expect(!promotesActiveNonVoter(joining, promoted));
+    try std.testing.expect(requiresCatalogPromotionProof(joining, promoted));
+    try std.testing.expect(activatesAsNonVoter(joining, active_non_voter));
 }
 
 test "member removal requires catalog drain" {
@@ -1847,8 +1989,31 @@ test "one-member coordinator commits generation and membership then reopens" {
         error.CatalogCatchupRequired,
         membership_coordinator.commitMembership(promotion_prepare),
     );
+    try membership_coordinator.installCatalogForMember(id(5));
+    const promotion_result = try membership_coordinator.commitMembership(promotion_prepare);
+    try std.testing.expectEqual(@as(u16, 2), promotion_result.committed_count);
+    try std.testing.expectEqual(@as(u16, 2), reopened.controlWriteReady().?.active_count);
     membership_coordinator.close();
     try reopened.close();
+
+    const recovered_locations = [_]pool_member_set.Location{
+        .{ .parent = tmp.dir, .basename = "member" },
+        .{ .parent = tmp.dir, .basename = "joining" },
+    };
+    var recovered = try pool_member_set.open(
+        std.testing.io,
+        std.testing.allocator,
+        &recovered_locations,
+        .writable,
+    );
+    defer recovered.deinit();
+    try std.testing.expectEqual(pool_authority.Kind.membership_commit, recovered.authority().?.kind);
+    try std.testing.expectEqual(@as(u16, 2), recovered.authority().?.topology.member_count);
+    try std.testing.expectEqual(pool_topology.MemberState.active, recovered.authority().?.topology.members[1].state);
+    try std.testing.expect(recovered.controlWriteReady().?.reclaim_required);
+    var resumed = try open(std.testing.io, &recovered);
+    defer resumed.deinit();
+    try std.testing.expectEqual(@as(u16, 2), (try resumed.resumeRollover()).active_count);
 }
 
 test "administrative recovery converts a lost two-of-two quorum to one-of-one" {

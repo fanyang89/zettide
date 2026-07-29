@@ -44,6 +44,10 @@ pub const LoadScratch = struct {
     page_bytes: [pool_catalog_graph.max_current_page_count][pool_catalog.page_size]u8 = undefined,
     images: [pool_catalog_graph.max_current_page_count]pool_catalog_graph.PageImage = undefined,
     image_count: usize = 0,
+
+    pub fn graph(self: *const LoadScratch) pool_catalog_graph.Graph {
+        return .{ .root_bytes = &self.root_bytes, .pages = self.images[0..self.image_count] };
+    }
 };
 
 pub const LoadedCatalog = struct {
@@ -113,6 +117,48 @@ pub fn loadAuthorityCatalog(
             .layout = authority.layout,
         }, graph, geometry, recoverable_pages),
     };
+}
+
+pub fn installAuthorityCatalog(
+    target: *const member_api.CatalogClaim,
+    authority: pool_authority.Authority,
+    geometry: []const pool_catalog_graph.MemberGeometry,
+    source: *const LoadScratch,
+    verify_scratch: *LoadScratch,
+) !void {
+    const source_root = try pool_catalog.decodeRoot(&source.root_bytes);
+    if (source_root.generation != authority.generation or
+        !std.mem.eql(u8, &source_root.set_id, &authority.topology.set_id) or
+        !std.mem.eql(u8, &(try pool_catalog.rootDigest(source_root)), &authority.data_root_digest))
+        return error.CatalogAuthorityRootMismatch;
+    _ = try pool_catalog_graph.validateGraph(.{
+        .generation = authority.generation,
+        .data_root_digest = authority.data_root_digest,
+        .topology = authority.topology,
+        .layout = authority.layout,
+    }, source.graph(), geometry, &.{});
+
+    const copies = readRootCopies(target);
+    const write_a = try installRootNeedsWrite(copies.a, &source.root_bytes);
+    const write_b = try installRootNeedsWrite(copies.b, &source.root_bytes);
+
+    var writes: [pool_catalog_graph.max_current_page_count]member_api.RegionWrite = undefined;
+    var write_count: usize = 0;
+    var actual: [pool_catalog.page_size]u8 = undefined;
+    for (source.images[0..source.image_count]) |image| {
+        try target.read(image.offset, &actual);
+        if (std.mem.eql(u8, &actual, image.bytes)) continue;
+        if (!codec.isZero(&actual) and !isExpectedPrefix(&actual, image.bytes))
+            return error.MetadataPageConflict;
+        writes[write_count] = .{ .offset = image.offset, .bytes = image.bytes };
+        write_count += 1;
+    }
+    try target.writeBatchDurable(writes[0..write_count]);
+    if (write_a) try target.writeRootDurable(rootOffset(.a), &source.root_bytes);
+    if (write_b) try target.writeRootDurable(rootOffset(.b), &source.root_bytes);
+
+    const loaded = try loadAuthorityCatalog(target.member, authority, geometry, &.{}, verify_scratch);
+    if (loaded.selection.mirror_degraded) return error.CatalogInstallIncomplete;
 }
 
 pub fn selectInitializationTarget(
@@ -222,12 +268,25 @@ fn initializationCandidate(
 }
 
 fn isExpectedPrefix(
-    actual: *const [pool_catalog.root_encoded_size]u8,
-    expected: *const [pool_catalog.root_encoded_size]u8,
+    actual: []const u8,
+    expected: []const u8,
 ) bool {
+    if (actual.len != expected.len) return false;
     var split: usize = 0;
     while (split < actual.len and actual[split] == expected[split]) split += 1;
     return split != 0 and split != actual.len and codec.isZero(actual[split..]);
+}
+
+fn installRootNeedsWrite(
+    candidate: RootCandidate,
+    expected: *const [pool_catalog.root_encoded_size]u8,
+) !bool {
+    return switch (candidate) {
+        .zero => true,
+        .valid => |valid| if (std.mem.eql(u8, &valid.bytes, expected)) false else error.MetadataRootSlotConflict,
+        .invalid => |invalid| if (isExpectedPrefix(&invalid.bytes, expected)) true else error.MetadataRootSlotConflict,
+        .unreadable => error.MetadataRootSlotUnreadable,
+    };
 }
 
 fn candidateMatches(candidate: RootCandidate, authority: pool_authority.Authority) bool {
@@ -493,6 +552,27 @@ test "catalog store stages pages before root and preserves authority mirror" {
     const loaded_next = try loadAuthorityCatalog(&member, next_authority, &geometry, &.{}, &load_scratch);
     try std.testing.expectEqual(@as(u64, 2), loaded_next.validated.root.generation);
     try std.testing.expect(loaded_next.selection.mirror_degraded);
+
+    var target = try member_api.Member.createPoolAt(std.testing.io, tmp.dir, "target", header, payload, .{});
+    defer target.deinit();
+    var target_fault: member_api.FaultController = .{ .fail_write_partial_at = 0 };
+    target.setFaultController(&target_fault);
+    var target_claim = try target.claimCatalog();
+    var verify_scratch: LoadScratch = .{};
+    try std.testing.expectError(
+        error.InjectedFault,
+        installAuthorityCatalog(&target_claim, next_authority, &geometry, &load_scratch, &verify_scratch),
+    );
+    try target_claim.release();
+    try std.testing.expectError(error.WriteFrozen, target.close());
+
+    var reopened_target = try member_api.Member.openAt(std.testing.io, tmp.dir, "target", .writable);
+    defer reopened_target.deinit();
+    var retry_claim = try reopened_target.claimCatalog();
+    defer retry_claim.release() catch unreachable;
+    try installAuthorityCatalog(&retry_claim, next_authority, &geometry, &load_scratch, &verify_scratch);
+    const installed = try loadAuthorityCatalog(&reopened_target, next_authority, &geometry, &.{}, &verify_scratch);
+    try std.testing.expect(!installed.selection.mirror_degraded);
 
     var repair_fault: member_api.FaultController = .{ .fail_write_at = 0 };
     member.setFaultController(&repair_fault);

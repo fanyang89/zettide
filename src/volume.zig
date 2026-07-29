@@ -141,6 +141,7 @@ pub const Volume = struct {
         const authority = set.authority() orelse return error.MissingAuthority;
         if (set.dataAccess() == .unavailable or (writable and set.dataAccess() != .read_write))
             return error.PoolDataUnavailable;
+        if (writable and set.controlWriteReady() == null) return error.PoolDataUnavailable;
         const header = try inspectPoolHeader(io, &set);
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(&set, &member_pointers);
