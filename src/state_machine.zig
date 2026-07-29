@@ -6,17 +6,22 @@ const uuid = @import("uuid");
 const wire = @import("protobuf_wire.zig");
 
 pub const command_format_version: u32 = 1;
-pub const snapshot_format_version: u32 = 2;
+pub const snapshot_format_version: u32 = 3;
 pub const max_name_bytes: usize = 127;
 pub const max_description_bytes: usize = 1024;
 pub const max_request_id_bytes: usize = 127;
+pub const max_node_endpoint_bytes: usize = 1024;
+pub const max_failure_domain_bytes: usize = 255;
 pub const max_pools: usize = 25_000;
+pub const max_nodes: usize = 10_000;
 pub const max_requests: usize = 50_000;
 pub const max_snapshot_bytes: usize = 256 * 1024 * 1024;
 
 const max_pool_wire_bytes: usize = 2048;
-const max_response_wire_bytes: usize = 2048;
-const max_request_wire_bytes: usize = max_request_id_bytes + @sizeOf(Fingerprint) + max_response_wire_bytes + max_pool_wire_bytes + 40;
+const max_node_wire_bytes: usize = 4096;
+const max_command_wire_bytes: usize = 8192;
+const max_response_wire_bytes: usize = 8192;
+const max_request_wire_bytes: usize = max_request_id_bytes + @sizeOf(Fingerprint) + max_response_wire_bytes + max_command_wire_bytes + 40;
 
 const Fingerprint = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 
@@ -60,8 +65,72 @@ const Pool = struct {
     }
 };
 
+const Node = struct {
+    id: []u8,
+    cluster_id: []u8,
+    control_endpoint: []u8,
+    nvmf_endpoint: []u8,
+    failure_domain: []u8,
+    capability_bits: u64,
+    protocol_version: u32,
+    registered_at_unix_ms: i64,
+    registered_revision: u64,
+
+    fn init(allocator: std.mem.Allocator, source: pb.Node) !Node {
+        const id = try allocator.dupe(u8, source.id);
+        errdefer allocator.free(id);
+        const cluster_id = try allocator.dupe(u8, source.cluster_id);
+        errdefer allocator.free(cluster_id);
+        const control_endpoint = try allocator.dupe(u8, source.control_endpoint);
+        errdefer allocator.free(control_endpoint);
+        const nvmf_endpoint = try allocator.dupe(u8, source.nvmf_endpoint);
+        errdefer allocator.free(nvmf_endpoint);
+        const failure_domain = try allocator.dupe(u8, source.failure_domain);
+        return .{
+            .id = id,
+            .cluster_id = cluster_id,
+            .control_endpoint = control_endpoint,
+            .nvmf_endpoint = nvmf_endpoint,
+            .failure_domain = failure_domain,
+            .capability_bits = source.capability_bits,
+            .protocol_version = source.protocol_version,
+            .registered_at_unix_ms = source.registered_at_unix_ms,
+            .registered_revision = source.registered_revision,
+        };
+    }
+
+    fn deinit(self: *Node, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.cluster_id);
+        allocator.free(self.control_endpoint);
+        allocator.free(self.nvmf_endpoint);
+        allocator.free(self.failure_domain);
+        self.* = undefined;
+    }
+
+    fn proto(self: Node) pb.Node {
+        return .{
+            .id = self.id,
+            .cluster_id = self.cluster_id,
+            .control_endpoint = self.control_endpoint,
+            .nvmf_endpoint = self.nvmf_endpoint,
+            .failure_domain = self.failure_domain,
+            .capability_bits = self.capability_bits,
+            .protocol_version = self.protocol_version,
+            .registered_at_unix_ms = self.registered_at_unix_ms,
+            .registered_revision = self.registered_revision,
+        };
+    }
+};
+
+const RequestKind = enum {
+    create_pool,
+    register_node,
+};
+
 const Request = struct {
     request_id: []u8,
+    kind: RequestKind,
     fingerprint: Fingerprint,
     encoded_response: []u8,
     encoded_command: []u8,
@@ -79,13 +148,21 @@ const State = struct {
     pools_by_id: std.StringHashMapUnmanaged(Pool) = .empty,
     pool_ids_by_name: std.StringHashMapUnmanaged([]const u8) = .empty,
     pool_ids_by_revision: std.ArrayList([]const u8) = .empty,
+    nodes_by_id: std.StringHashMapUnmanaged(Node) = .empty,
+    node_ids_by_revision: std.ArrayList([]const u8) = .empty,
     requests: std.StringHashMapUnmanaged(Request) = .empty,
     max_pool_created_revision: u64 = 0,
+    max_node_registered_revision: u64 = 0,
 
     fn deinit(self: *State, allocator: std.mem.Allocator) void {
         var request_iterator = self.requests.valueIterator();
         while (request_iterator.next()) |request| request.deinit(allocator);
         self.requests.deinit(allocator);
+
+        self.node_ids_by_revision.deinit(allocator);
+        var node_iterator = self.nodes_by_id.valueIterator();
+        while (node_iterator.next()) |node| node.deinit(allocator);
+        self.nodes_by_id.deinit(allocator);
 
         self.pool_ids_by_revision.deinit(allocator);
         var pool_iterator = self.pools_by_id.valueIterator();
@@ -119,6 +196,10 @@ pub const PoolStateMachine = struct {
 
     pub fn requestCount(self: *const PoolStateMachine) usize {
         return self.state.requests.count();
+    }
+
+    pub fn nodeCount(self: *const PoolStateMachine) usize {
+        return self.state.nodes_by_id.count();
     }
 
     pub fn getPoolById(self: *const PoolStateMachine, allocator: std.mem.Allocator, id: []const u8) !?pb.Pool {
@@ -184,6 +265,51 @@ pub const PoolStateMachine = struct {
         };
     }
 
+    pub fn getNodeById(self: *const PoolStateMachine, allocator: std.mem.Allocator, id: []const u8) !?pb.Node {
+        const node = self.state.nodes_by_id.get(id) orelse return null;
+        return try dupeNode(allocator, node.proto());
+    }
+
+    pub const NodePage = struct {
+        nodes: []pb.Node,
+        has_more: bool,
+
+        pub fn deinit(self: *NodePage, allocator: std.mem.Allocator) void {
+            deinitNodeList(allocator, self.nodes);
+            self.* = undefined;
+        }
+    };
+
+    pub fn listNodesPage(
+        self: *const PoolStateMachine,
+        allocator: std.mem.Allocator,
+        after_id: ?[]const u8,
+        limit: usize,
+    ) !NodePage {
+        var start: usize = 0;
+        if (after_id) |target| {
+            while (start < self.state.node_ids_by_revision.items.len and
+                !std.mem.eql(u8, self.state.node_ids_by_revision.items[start], target)) : (start += 1)
+            {}
+            if (start == self.state.node_ids_by_revision.items.len) return error.InvalidPageToken;
+            start += 1;
+        }
+        const end = @min(start +| limit, self.state.node_ids_by_revision.items.len);
+        var nodes: std.ArrayList(pb.Node) = .empty;
+        errdefer {
+            for (nodes.items) |*node| node.deinit(allocator);
+            nodes.deinit(allocator);
+        }
+        try nodes.ensureTotalCapacity(allocator, end - start);
+        for (self.state.node_ids_by_revision.items[start..end]) |id| {
+            nodes.appendAssumeCapacity(try dupeNode(allocator, self.state.nodes_by_id.get(id).?.proto()));
+        }
+        return .{
+            .nodes = try nodes.toOwnedSlice(allocator),
+            .has_more = end < self.state.node_ids_by_revision.items.len,
+        };
+    }
+
     fn apply(ctx: *anyopaque, entry: raft.Entry) raft.Error!raft.ApplyResult {
         const self: *PoolStateMachine = @ptrCast(@alignCast(ctx));
         if (entry.data.len == 0) return .{};
@@ -195,15 +321,18 @@ pub const PoolStateMachine = struct {
         var envelope = pb.CommandEnvelope.decode(&reader, arena.allocator()) catch |err| return mapDecodeError(err);
         defer envelope.deinit(arena.allocator());
         if (envelope.format_version != command_format_version) return error.PayloadParseFailed;
-        const command = switch (envelope.command orelse return error.PayloadParseFailed) {
-            .create_pool => |command| command,
-            .register_node => return error.PayloadParseFailed,
+        return switch (envelope.command orelse return error.PayloadParseFailed) {
+            .create_pool => |command| self.applyCreatePool(entry.index, command),
+            .register_node => |command| self.applyRegisterNode(entry.index, command),
         };
+    }
+
+    fn applyCreatePool(self: *PoolStateMachine, revision: u64, command: pb.CreatePoolCommand) raft.Error!raft.ApplyResult {
         try validateCommand(command);
 
         const fingerprint = requestFingerprint(command);
         if (self.state.requests.get(command.request_id)) |request| {
-            if (!std.mem.eql(u8, &fingerprint, &request.fingerprint)) {
+            if (request.kind != .create_pool or !std.mem.eql(u8, &fingerprint, &request.fingerprint)) {
                 return .{ .response = try encodeApplyResponse(self.allocator, .APPLY_CODE_REQUEST_CONFLICT, null) };
             }
             return .{ .response = try self.allocator.dupe(u8, request.encoded_response) };
@@ -214,27 +343,27 @@ pub const PoolStateMachine = struct {
 
         if (self.state.pool_ids_by_name.get(command.name)) |existing_id| {
             const existing = self.state.pools_by_id.get(existing_id).?;
-            return try self.recordResponse(
+            return try self.recordPoolResponse(
                 command,
                 fingerprint,
                 try encodeApplyResponse(self.allocator, .APPLY_CODE_NAME_EXISTS, existing.proto()),
-                entry.index,
+                revision,
             );
         }
         if (self.state.pools_by_id.get(command.proposed_pool_id)) |existing| {
-            return try self.recordResponse(
+            return try self.recordPoolResponse(
                 command,
                 fingerprint,
                 try encodeApplyResponse(self.allocator, .APPLY_CODE_ID_EXISTS, existing.proto()),
-                entry.index,
+                revision,
             );
         }
         if (self.state.pools_by_id.count() >= max_pools) {
-            return try self.recordResponse(
+            return try self.recordPoolResponse(
                 command,
                 fingerprint,
                 try encodeApplyResponse(self.allocator, .APPLY_CODE_POOL_LIMIT, null),
-                entry.index,
+                revision,
             );
         }
 
@@ -243,7 +372,7 @@ pub const PoolStateMachine = struct {
             .name = command.name,
             .description = command.description,
             .created_at_unix_ms = command.proposed_created_at_unix_ms,
-            .created_revision = entry.index,
+            .created_revision = revision,
         };
         const encoded_response = try encodeApplyResponse(self.allocator, .APPLY_CODE_CREATED, pool_proto);
         errdefer self.allocator.free(encoded_response);
@@ -266,15 +395,16 @@ pub const PoolStateMachine = struct {
         self.state.max_pool_created_revision = @max(self.state.max_pool_created_revision, pool.created_revision);
         self.state.requests.putAssumeCapacity(request_id, .{
             .request_id = request_id,
+            .kind = .create_pool,
             .fingerprint = fingerprint,
             .encoded_response = encoded_response,
             .encoded_command = encoded_command,
-            .applied_revision = entry.index,
+            .applied_revision = revision,
         });
         return .{ .response = returned_response };
     }
 
-    fn recordResponse(
+    fn recordPoolResponse(
         self: *PoolStateMachine,
         command: pb.CreatePoolCommand,
         fingerprint: Fingerprint,
@@ -291,6 +421,104 @@ pub const PoolStateMachine = struct {
         try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
         self.state.requests.putAssumeCapacity(request_id, .{
             .request_id = request_id,
+            .kind = .create_pool,
+            .fingerprint = fingerprint,
+            .encoded_response = encoded_response,
+            .encoded_command = encoded_command,
+            .applied_revision = applied_revision,
+        });
+        return .{ .response = returned_response };
+    }
+
+    fn applyRegisterNode(self: *PoolStateMachine, revision: u64, command: pb.RegisterNodeCommand) raft.Error!raft.ApplyResult {
+        try validateRegisterNodeCommand(command);
+        if (revision == 0) return error.PayloadParseFailed;
+
+        const fingerprint = registerNodeFingerprint(command);
+        if (self.state.requests.get(command.request_id)) |request| {
+            if (request.kind != .register_node or !std.mem.eql(u8, &fingerprint, &request.fingerprint)) {
+                return .{ .response = try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_REQUEST_CONFLICT, null) };
+            }
+            return .{ .response = try self.allocator.dupe(u8, request.encoded_response) };
+        }
+        if (self.state.requests.count() >= max_requests) {
+            return .{ .response = try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_REQUEST_LIMIT, null) };
+        }
+
+        if (self.state.nodes_by_id.get(command.node_id)) |existing| {
+            return self.recordNodeResponse(
+                command,
+                fingerprint,
+                try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_ID_EXISTS, existing.proto()),
+                revision,
+            );
+        }
+        if (self.state.nodes_by_id.count() >= max_nodes) {
+            return self.recordNodeResponse(
+                command,
+                fingerprint,
+                try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_NODE_LIMIT, null),
+                revision,
+            );
+        }
+
+        const node_proto: pb.Node = .{
+            .id = command.node_id,
+            .cluster_id = command.cluster_id,
+            .control_endpoint = command.control_endpoint,
+            .nvmf_endpoint = command.nvmf_endpoint,
+            .failure_domain = command.failure_domain,
+            .capability_bits = command.capability_bits,
+            .protocol_version = command.protocol_version,
+            .registered_at_unix_ms = command.proposed_registered_at_unix_ms,
+            .registered_revision = revision,
+        };
+        const encoded_response = try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_REGISTERED, node_proto);
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodeRegisterNodeCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        var node = try Node.init(self.allocator, node_proto);
+        errdefer node.deinit(self.allocator);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+
+        try self.state.nodes_by_id.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.node_ids_by_revision.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        self.state.nodes_by_id.putAssumeCapacity(node.id, node);
+        self.state.node_ids_by_revision.appendAssumeCapacity(node.id);
+        self.state.max_node_registered_revision = @max(self.state.max_node_registered_revision, node.registered_revision);
+        self.state.requests.putAssumeCapacity(request_id, .{
+            .request_id = request_id,
+            .kind = .register_node,
+            .fingerprint = fingerprint,
+            .encoded_response = encoded_response,
+            .encoded_command = encoded_command,
+            .applied_revision = revision,
+        });
+        return .{ .response = returned_response };
+    }
+
+    fn recordNodeResponse(
+        self: *PoolStateMachine,
+        command: pb.RegisterNodeCommand,
+        fingerprint: Fingerprint,
+        encoded_response: []u8,
+        applied_revision: u64,
+    ) raft.Error!raft.ApplyResult {
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodeRegisterNodeCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        self.state.requests.putAssumeCapacity(request_id, .{
+            .request_id = request_id,
+            .kind = .register_node,
             .fingerprint = fingerprint,
             .encoded_response = encoded_response,
             .encoded_command = encoded_command,
@@ -314,6 +542,13 @@ pub const PoolStateMachine = struct {
         while (pool_iterator.next()) |pool| pools.appendAssumeCapacity(pool.proto());
         std.mem.sort(pb.Pool, pools.items, {}, poolIdLessThan);
 
+        var nodes: std.ArrayList(pb.Node) = .empty;
+        defer nodes.deinit(allocator);
+        try nodes.ensureTotalCapacity(allocator, self.state.nodes_by_id.count());
+        var node_iterator = self.state.nodes_by_id.valueIterator();
+        while (node_iterator.next()) |node| nodes.appendAssumeCapacity(node.proto());
+        std.mem.sort(pb.Node, nodes.items, {}, nodeIdLessThan);
+
         var requests: std.ArrayList(pb.RequestRecord) = .empty;
         defer requests.deinit(allocator);
         try requests.ensureTotalCapacity(allocator, self.state.requests.count());
@@ -333,6 +568,7 @@ pub const PoolStateMachine = struct {
             .format_version = snapshot_format_version,
             .pools = pools,
             .requests = requests,
+            .nodes = nodes,
         });
         errdefer allocator.free(data);
         if (data.len > max_snapshot_bytes) return error.MessageTooLarge;
@@ -364,8 +600,14 @@ pub const PoolStateMachine = struct {
         var wire_reader: std.Io.Reader = .fixed(bytes.items);
         var snapshot = pb.StateSnapshot.decode(&wire_reader, arena.allocator()) catch |err| return mapDecodeError(err);
         defer snapshot.deinit(arena.allocator());
-        if (snapshot.format_version != snapshot_format_version) return error.PayloadParseFailed;
-        if (snapshot.pools.items.len > max_pools or snapshot.requests.items.len > max_requests) return error.PayloadParseFailed;
+        if (snapshot.format_version != 2 and snapshot.format_version != snapshot_format_version) return error.PayloadParseFailed;
+        if (snapshot.pools.items.len > max_pools or
+            snapshot.nodes.items.len > max_nodes or
+            snapshot.requests.items.len > max_requests or
+            (snapshot.format_version == 2 and snapshot.nodes.items.len != 0))
+        {
+            return error.PayloadParseFailed;
+        }
 
         var restored: State = .{};
         errdefer restored.deinit(self.allocator);
@@ -377,9 +619,17 @@ pub const PoolStateMachine = struct {
             try restorePool(self.allocator, &restored, source);
         }
         std.mem.sort([]const u8, restored.pool_ids_by_revision.items, &restored, poolRevisionIdLessThan);
+        for (snapshot.nodes.items) |source| {
+            if (source.registered_revision > metadata.index or revisions.contains(source.registered_revision)) return error.PayloadParseFailed;
+            try revisions.put(self.allocator, source.registered_revision, {});
+            try restoreNode(self.allocator, &restored, source);
+        }
+        std.mem.sort([]const u8, restored.node_ids_by_revision.items, &restored, nodeRevisionIdLessThan);
 
         var created_pool_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer created_pool_ids.deinit(self.allocator);
+        var registered_node_ids: std.StringHashMapUnmanaged(void) = .empty;
+        defer registered_node_ids.deinit(self.allocator);
         var request_revisions: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer request_revisions.deinit(self.allocator);
         for (snapshot.requests.items) |source| {
@@ -390,12 +640,24 @@ pub const PoolStateMachine = struct {
                 return error.PayloadParseFailed;
             }
             try request_revisions.put(self.allocator, source.applied_revision, {});
-            if (try restoreRequest(self.allocator, arena.allocator(), &restored, source)) |created_pool_id| {
-                if (created_pool_ids.contains(created_pool_id)) return error.PayloadParseFailed;
-                try created_pool_ids.put(self.allocator, created_pool_id, {});
+            if (try restoreRequest(self.allocator, arena.allocator(), &restored, source, snapshot.format_version)) |creation| {
+                switch (creation) {
+                    .pool => |id| {
+                        if (created_pool_ids.contains(id)) return error.PayloadParseFailed;
+                        try created_pool_ids.put(self.allocator, id, {});
+                    },
+                    .node => |id| {
+                        if (registered_node_ids.contains(id)) return error.PayloadParseFailed;
+                        try registered_node_ids.put(self.allocator, id, {});
+                    },
+                }
             }
         }
-        if (created_pool_ids.count() != restored.pools_by_id.count()) return error.PayloadParseFailed;
+        if (created_pool_ids.count() != restored.pools_by_id.count() or
+            registered_node_ids.count() != restored.nodes_by_id.count())
+        {
+            return error.PayloadParseFailed;
+        }
         self.state.deinit(self.allocator);
         self.state = restored;
     }
@@ -415,14 +677,32 @@ pub fn encodeCreatePoolCommand(allocator: std.mem.Allocator, command: pb.CreateP
     });
 }
 
+pub fn encodeRegisterNodeCommand(allocator: std.mem.Allocator, command: pb.RegisterNodeCommand) ![]u8 {
+    try validateRegisterNodeCommand(command);
+    return encodeMessage(allocator, pb.CommandEnvelope{
+        .format_version = command_format_version,
+        .command = .{ .register_node = command },
+    });
+}
+
 pub fn decodeApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.ApplyResponse {
     var reader: std.Io.Reader = .fixed(bytes);
     return pb.ApplyResponse.decode(&reader, allocator);
 }
 
+pub fn decodeRegisterNodeApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.RegisterNodeApplyResponse {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return pb.RegisterNodeApplyResponse.decode(&reader, allocator);
+}
+
 pub fn deinitPoolList(allocator: std.mem.Allocator, pools: []pb.Pool) void {
     for (pools) |*pool| pool.deinit(allocator);
     allocator.free(pools);
+}
+
+pub fn deinitNodeList(allocator: std.mem.Allocator, nodes: []pb.Node) void {
+    for (nodes) |*node| node.deinit(allocator);
+    allocator.free(nodes);
 }
 
 fn validateCommand(command: pb.CreatePoolCommand) raft.Error!void {
@@ -440,6 +720,31 @@ fn validatePool(pool: pb.Pool) raft.Error!void {
     if (pool.created_at_unix_ms <= 0 or pool.created_revision == 0) return error.PayloadParseFailed;
 }
 
+fn validateRegisterNodeCommand(command: pb.RegisterNodeCommand) raft.Error!void {
+    if (!validText(command.request_id, max_request_id_bytes, false)) return error.PayloadParseFailed;
+    if (!validUuidV7(command.node_id)) return error.PayloadParseFailed;
+    if (!validClusterId(command.cluster_id)) return error.PayloadParseFailed;
+    if (!validText(command.control_endpoint, max_node_endpoint_bytes, false)) return error.PayloadParseFailed;
+    if (!validText(command.nvmf_endpoint, max_node_endpoint_bytes, false)) return error.PayloadParseFailed;
+    if (!validText(command.failure_domain, max_failure_domain_bytes, false)) return error.PayloadParseFailed;
+    if (command.protocol_version == 0 or command.proposed_registered_at_unix_ms <= 0) return error.PayloadParseFailed;
+}
+
+fn validateNode(node: pb.Node) raft.Error!void {
+    if (!validUuidV7(node.id)) return error.PayloadParseFailed;
+    if (!validClusterId(node.cluster_id)) return error.PayloadParseFailed;
+    if (!validText(node.control_endpoint, max_node_endpoint_bytes, false)) return error.PayloadParseFailed;
+    if (!validText(node.nvmf_endpoint, max_node_endpoint_bytes, false)) return error.PayloadParseFailed;
+    if (!validText(node.failure_domain, max_failure_domain_bytes, false)) return error.PayloadParseFailed;
+    if (node.protocol_version == 0 or node.registered_at_unix_ms <= 0 or node.registered_revision == 0) return error.PayloadParseFailed;
+}
+
+fn validClusterId(value: []const u8) bool {
+    if (value.len != 16) return false;
+    for (value) |byte| if (byte != 0) return true;
+    return false;
+}
+
 fn validText(value: []const u8, max_bytes: usize, allow_empty: bool) bool {
     return (allow_empty or value.len != 0) and value.len <= max_bytes and std.unicode.utf8ValidateSlice(value);
 }
@@ -452,6 +757,20 @@ fn validUuidV7(value: []const u8) bool {
 
 fn requestFingerprint(command: pb.CreatePoolCommand) Fingerprint {
     return semanticFingerprint(command.name, command.description);
+}
+
+fn registerNodeFingerprint(command: pb.RegisterNodeCommand) Fingerprint {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hasher, command.node_id);
+    hashField(&hasher, command.cluster_id);
+    hashField(&hasher, command.control_endpoint);
+    hashField(&hasher, command.nvmf_endpoint);
+    hashField(&hasher, command.failure_domain);
+    hashInt(&hasher, u64, command.capability_bits);
+    hashInt(&hasher, u32, command.protocol_version);
+    var result: Fingerprint = undefined;
+    hasher.final(&result);
+    return result;
 }
 
 fn semanticFingerprint(name: []const u8, description: []const u8) Fingerprint {
@@ -470,8 +789,22 @@ fn hashField(hasher: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
     hasher.update(value);
 }
 
+fn hashInt(hasher: *std.crypto.hash.sha2.Sha256, comptime T: type, value: T) void {
+    var encoded: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &encoded, value, .little);
+    hashField(hasher, &encoded);
+}
+
 fn encodeApplyResponse(allocator: std.mem.Allocator, code: pb.ApplyCode, pool: ?pb.Pool) raft.Error![]u8 {
     return encodeMessage(allocator, pb.ApplyResponse{ .code = code, .pool = pool });
+}
+
+fn encodeRegisterNodeApplyResponse(
+    allocator: std.mem.Allocator,
+    code: pb.RegisterNodeApplyCode,
+    node: ?pb.Node,
+) raft.Error![]u8 {
+    return encodeMessage(allocator, pb.RegisterNodeApplyResponse{ .code = code, .node = node });
 }
 
 fn encodeMessage(allocator: std.mem.Allocator, message: anytype) raft.Error![]u8 {
@@ -499,12 +832,30 @@ fn restorePool(allocator: std.mem.Allocator, state: *State, source: pb.Pool) raf
     state.max_pool_created_revision = @max(state.max_pool_created_revision, pool.created_revision);
 }
 
+fn restoreNode(allocator: std.mem.Allocator, state: *State, source: pb.Node) raft.Error!void {
+    try validateNode(source);
+    if (state.nodes_by_id.contains(source.id)) return error.PayloadParseFailed;
+    var node = try Node.init(allocator, source);
+    errdefer node.deinit(allocator);
+    try state.nodes_by_id.ensureUnusedCapacity(allocator, 1);
+    try state.node_ids_by_revision.ensureUnusedCapacity(allocator, 1);
+    state.nodes_by_id.putAssumeCapacity(node.id, node);
+    state.node_ids_by_revision.appendAssumeCapacity(node.id);
+    state.max_node_registered_revision = @max(state.max_node_registered_revision, node.registered_revision);
+}
+
+const RestoredCreation = union(enum) {
+    pool: []const u8,
+    node: []const u8,
+};
+
 fn restoreRequest(
     allocator: std.mem.Allocator,
     decode_allocator: std.mem.Allocator,
     state: *State,
     source: pb.RequestRecord,
-) raft.Error!?[]const u8 {
+    snapshot_version: u32,
+) raft.Error!?RestoredCreation {
     if (!validText(source.request_id, max_request_id_bytes, false)) return error.PayloadParseFailed;
     if (source.request_fingerprint.len != @sizeOf(Fingerprint) or source.encoded_response.len == 0 or source.encoded_command.len == 0) return error.PayloadParseFailed;
     if (state.requests.contains(source.request_id)) return error.PayloadParseFailed;
@@ -513,37 +864,66 @@ fn restoreRequest(
     var envelope = pb.CommandEnvelope.decode(&command_reader, decode_allocator) catch |err| return mapDecodeError(err);
     defer envelope.deinit(decode_allocator);
     if (envelope.format_version != command_format_version) return error.PayloadParseFailed;
-    const command = switch (envelope.command orelse return error.PayloadParseFailed) {
-        .create_pool => |command| command,
-        .register_node => return error.PayloadParseFailed,
-    };
-    try validateCommand(command);
-    if (!std.mem.eql(u8, source.request_id, command.request_id)) return error.PayloadParseFailed;
-    const expected_fingerprint = requestFingerprint(command);
-    if (!std.mem.eql(u8, source.request_fingerprint, &expected_fingerprint)) return error.PayloadParseFailed;
+    switch (envelope.command orelse return error.PayloadParseFailed) {
+        .create_pool => |command| {
+            try validateCommand(command);
+            if (!std.mem.eql(u8, source.request_id, command.request_id)) return error.PayloadParseFailed;
+            const expected_fingerprint = requestFingerprint(command);
+            if (!std.mem.eql(u8, source.request_fingerprint, &expected_fingerprint)) return error.PayloadParseFailed;
 
-    var response_reader: std.Io.Reader = .fixed(source.encoded_response);
-    var response = pb.ApplyResponse.decode(&response_reader, decode_allocator) catch |err| return mapDecodeError(err);
-    defer response.deinit(decode_allocator);
-    const created_pool_id = try validateStoredResponse(state, command, response, source.applied_revision);
+            var response_reader: std.Io.Reader = .fixed(source.encoded_response);
+            var response = pb.ApplyResponse.decode(&response_reader, decode_allocator) catch |err| return mapDecodeError(err);
+            defer response.deinit(decode_allocator);
+            const created_pool_id = try validateStoredResponse(state, command, response, source.applied_revision);
+            const encoded_response = try encodeApplyResponse(allocator, response.code, response.pool);
+            errdefer allocator.free(encoded_response);
+            const encoded_command = try encodeCreatePoolCommand(allocator, command);
+            errdefer allocator.free(encoded_command);
+            try insertRestoredRequest(allocator, state, source, .create_pool, encoded_response, encoded_command);
+            return if (created_pool_id) |id| RestoredCreation{ .pool = id } else null;
+        },
+        .register_node => |command| {
+            if (snapshot_version == 2) return error.PayloadParseFailed;
+            try validateRegisterNodeCommand(command);
+            if (!std.mem.eql(u8, source.request_id, command.request_id)) return error.PayloadParseFailed;
+            const expected_fingerprint = registerNodeFingerprint(command);
+            if (!std.mem.eql(u8, source.request_fingerprint, &expected_fingerprint)) return error.PayloadParseFailed;
 
+            var response_reader: std.Io.Reader = .fixed(source.encoded_response);
+            var response = pb.RegisterNodeApplyResponse.decode(&response_reader, decode_allocator) catch |err| return mapDecodeError(err);
+            defer response.deinit(decode_allocator);
+            const registered_node_id = try validateStoredNodeResponse(state, command, response, source.applied_revision);
+            const encoded_response = try encodeRegisterNodeApplyResponse(allocator, response.code, response.node);
+            errdefer allocator.free(encoded_response);
+            const encoded_command = try encodeRegisterNodeCommand(allocator, command);
+            errdefer allocator.free(encoded_command);
+            try insertRestoredRequest(allocator, state, source, .register_node, encoded_response, encoded_command);
+            return if (registered_node_id) |id| RestoredCreation{ .node = id } else null;
+        },
+    }
+}
+
+fn insertRestoredRequest(
+    allocator: std.mem.Allocator,
+    state: *State,
+    source: pb.RequestRecord,
+    kind: RequestKind,
+    encoded_response: []u8,
+    encoded_command: []u8,
+) raft.Error!void {
     const request_id = try allocator.dupe(u8, source.request_id);
     errdefer allocator.free(request_id);
-    const encoded_response = try encodeApplyResponse(allocator, response.code, response.pool);
-    errdefer allocator.free(encoded_response);
-    const encoded_command = try encodeCreatePoolCommand(allocator, command);
-    errdefer allocator.free(encoded_command);
     var fingerprint: Fingerprint = undefined;
     @memcpy(&fingerprint, source.request_fingerprint);
     try state.requests.ensureUnusedCapacity(allocator, 1);
     state.requests.putAssumeCapacity(request_id, .{
         .request_id = request_id,
+        .kind = kind,
         .fingerprint = fingerprint,
         .encoded_response = encoded_response,
         .encoded_command = encoded_command,
         .applied_revision = source.applied_revision,
     });
-    return created_pool_id;
 }
 
 fn validateStoredResponse(
@@ -617,6 +997,60 @@ fn validateStoredResponse(
     }
 }
 
+fn validateStoredNodeResponse(
+    state: *const State,
+    command: pb.RegisterNodeCommand,
+    response: pb.RegisterNodeApplyResponse,
+    applied_revision: u64,
+) raft.Error!?[]const u8 {
+    switch (response.code) {
+        .REGISTER_NODE_APPLY_CODE_REGISTERED => {
+            const response_node = response.node orelse return error.PayloadParseFailed;
+            const stored_node = state.nodes_by_id.get(response_node.id) orelse return error.PayloadParseFailed;
+            if (!nodesEqual(stored_node.proto(), response_node) or
+                !std.mem.eql(u8, command.node_id, response_node.id) or
+                !std.mem.eql(u8, command.cluster_id, response_node.cluster_id) or
+                !std.mem.eql(u8, command.control_endpoint, response_node.control_endpoint) or
+                !std.mem.eql(u8, command.nvmf_endpoint, response_node.nvmf_endpoint) or
+                !std.mem.eql(u8, command.failure_domain, response_node.failure_domain) or
+                command.capability_bits != response_node.capability_bits or
+                command.protocol_version != response_node.protocol_version or
+                command.proposed_registered_at_unix_ms != response_node.registered_at_unix_ms or
+                applied_revision != response_node.registered_revision)
+            {
+                return error.PayloadParseFailed;
+            }
+            return stored_node.id;
+        },
+        .REGISTER_NODE_APPLY_CODE_ID_EXISTS => {
+            const response_node = response.node orelse return error.PayloadParseFailed;
+            const stored_node = state.nodes_by_id.get(response_node.id) orelse return error.PayloadParseFailed;
+            if (!nodesEqual(stored_node.proto(), response_node) or
+                !std.mem.eql(u8, command.node_id, response_node.id) or
+                response_node.registered_revision >= applied_revision)
+            {
+                return error.PayloadParseFailed;
+            }
+            return null;
+        },
+        .REGISTER_NODE_APPLY_CODE_NODE_LIMIT => {
+            const id_conflict_before_request = if (state.nodes_by_id.get(command.node_id)) |node|
+                node.registered_revision < applied_revision
+            else
+                false;
+            if (response.node != null or
+                state.nodes_by_id.count() != max_nodes or
+                state.max_node_registered_revision >= applied_revision or
+                id_conflict_before_request)
+            {
+                return error.PayloadParseFailed;
+            }
+            return null;
+        },
+        else => return error.PayloadParseFailed,
+    }
+}
+
 fn poolsEqual(lhs: pb.Pool, rhs: pb.Pool) bool {
     return std.mem.eql(u8, lhs.id, rhs.id) and
         std.mem.eql(u8, lhs.name, rhs.name) and
@@ -625,8 +1059,25 @@ fn poolsEqual(lhs: pb.Pool, rhs: pb.Pool) bool {
         lhs.created_revision == rhs.created_revision;
 }
 
+fn nodesEqual(lhs: pb.Node, rhs: pb.Node) bool {
+    return std.mem.eql(u8, lhs.id, rhs.id) and
+        std.mem.eql(u8, lhs.cluster_id, rhs.cluster_id) and
+        std.mem.eql(u8, lhs.control_endpoint, rhs.control_endpoint) and
+        std.mem.eql(u8, lhs.nvmf_endpoint, rhs.nvmf_endpoint) and
+        std.mem.eql(u8, lhs.failure_domain, rhs.failure_domain) and
+        lhs.capability_bits == rhs.capability_bits and
+        lhs.protocol_version == rhs.protocol_version and
+        lhs.registered_at_unix_ms == rhs.registered_at_unix_ms and
+        lhs.registered_revision == rhs.registered_revision;
+}
+
 fn dupePool(allocator: std.mem.Allocator, source: pb.Pool) !pb.Pool {
     const owned = try Pool.init(allocator, source);
+    return owned.proto();
+}
+
+fn dupeNode(allocator: std.mem.Allocator, source: pb.Node) !pb.Node {
+    const owned = try Node.init(allocator, source);
     return owned.proto();
 }
 
@@ -634,10 +1085,14 @@ const WireError = wire.Error;
 const WireCursor = wire.Cursor;
 
 fn preflightCommand(bytes: []const u8) WireError!void {
-    if (bytes.len > max_pool_wire_bytes) return error.InvalidWire;
+    _ = try preflightCommandKind(bytes);
+}
+
+fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
+    if (bytes.len > max_command_wire_bytes) return error.InvalidWire;
     var cursor = WireCursor{ .bytes = bytes };
     var seen_format = false;
-    var seen_create = false;
+    var kind: ?RequestKind = null;
     while (try cursor.next()) |field| switch (field.number) {
         1 => {
             if (field.wire_type != 0 or seen_format) return error.InvalidWire;
@@ -645,13 +1100,19 @@ fn preflightCommand(bytes: []const u8) WireError!void {
             if (try cursor.readVarint() != command_format_version) return error.InvalidWire;
         },
         2 => {
-            if (field.wire_type != 2 or seen_create) return error.InvalidWire;
-            seen_create = true;
+            if (field.wire_type != 2 or kind != null) return error.InvalidWire;
+            kind = .create_pool;
             try preflightCreatePool(try cursor.readBytes(max_pool_wire_bytes));
+        },
+        3 => {
+            if (field.wire_type != 2 or kind != null) return error.InvalidWire;
+            kind = .register_node;
+            try preflightRegisterNode(try cursor.readBytes(max_node_wire_bytes));
         },
         else => return error.InvalidWire,
     };
-    if (!seen_format or !seen_create) return error.InvalidWire;
+    if (!seen_format) return error.InvalidWire;
+    return kind orelse error.InvalidWire;
 }
 
 fn preflightCreatePool(bytes: []const u8) WireError!void {
@@ -684,32 +1145,81 @@ fn preflightCreatePool(bytes: []const u8) WireError!void {
     if (!seen[1] or !seen[2] or !seen[3] or !seen[5]) return error.InvalidWire;
 }
 
+fn preflightRegisterNode(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 10;
+    while (try cursor.next()) |field| {
+        if (field.number > 9 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_request_id_bytes), max_request_id_bytes, false)) return error.InvalidWire,
+            2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3 => if (field.wire_type != 2 or !validClusterId(try cursor.readBytes(16))) return error.InvalidWire,
+            4, 5 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_node_endpoint_bytes), max_node_endpoint_bytes, false)) return error.InvalidWire,
+            6 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_failure_domain_bytes), max_failure_domain_bytes, false)) return error.InvalidWire,
+            7 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                _ = try cursor.readVarint();
+            },
+            8 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const version = try cursor.readVarint();
+                if (version == 0 or version > std.math.maxInt(u32)) return error.InvalidWire;
+            },
+            9 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5] or !seen[6] or !seen[8] or !seen[9]) return error.InvalidWire;
+}
+
 fn preflightSnapshot(bytes: []const u8) WireError!void {
     if (bytes.len > max_snapshot_bytes) return error.InvalidWire;
     var cursor = WireCursor{ .bytes = bytes };
     var seen_format = false;
+    var snapshot_version: u32 = 0;
     var pool_count: usize = 0;
     var request_count: usize = 0;
+    var node_count: usize = 0;
     while (try cursor.next()) |field| switch (field.number) {
         1 => {
             if (field.wire_type != 0 or seen_format) return error.InvalidWire;
             seen_format = true;
             const version = try cursor.readVarint();
-            if (version > std.math.maxInt(u32)) return error.InvalidWire;
+            if (version != 2 and version != snapshot_format_version) return error.InvalidWire;
+            snapshot_version = @intCast(version);
         },
         2 => {
             if (field.wire_type != 2 or pool_count == max_pools) return error.InvalidWire;
             pool_count += 1;
-            try preflightPool(try cursor.readBytes(max_pool_wire_bytes));
+            _ = try cursor.readBytes(max_pool_wire_bytes);
         },
         3 => {
             if (field.wire_type != 2 or request_count == max_requests) return error.InvalidWire;
             request_count += 1;
-            try preflightRequest(try cursor.readBytes(max_request_wire_bytes));
+            _ = try cursor.readBytes(max_request_wire_bytes);
+        },
+        4 => {
+            if (field.wire_type != 2 or node_count == max_nodes) return error.InvalidWire;
+            node_count += 1;
+            _ = try cursor.readBytes(max_node_wire_bytes);
         },
         else => return error.InvalidWire,
     };
-    if (!seen_format) return error.InvalidWire;
+    if (!seen_format or (snapshot_version == 2 and node_count != 0)) return error.InvalidWire;
+
+    cursor = .{ .bytes = bytes };
+    while (try cursor.next()) |field| switch (field.number) {
+        1 => _ = try cursor.readVarint(),
+        2 => try preflightPool(try cursor.readBytes(max_pool_wire_bytes)),
+        3 => try preflightRequest(try cursor.readBytes(max_request_wire_bytes), snapshot_version),
+        4 => try preflightNode(try cursor.readBytes(max_node_wire_bytes)),
+        else => unreachable,
+    };
 }
 
 fn preflightPool(bytes: []const u8) WireError!void {
@@ -742,9 +1252,43 @@ fn preflightPool(bytes: []const u8) WireError!void {
     if (!seen[1] or !seen[2] or !seen[4] or !seen[5]) return error.InvalidWire;
 }
 
-fn preflightRequest(bytes: []const u8) WireError!void {
+fn preflightNode(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 10;
+    while (try cursor.next()) |field| {
+        if (field.number > 9 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            2 => if (field.wire_type != 2 or !validClusterId(try cursor.readBytes(16))) return error.InvalidWire,
+            3, 4 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_node_endpoint_bytes), max_node_endpoint_bytes, false)) return error.InvalidWire,
+            5 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_failure_domain_bytes), max_failure_domain_bytes, false)) return error.InvalidWire,
+            6 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                _ = try cursor.readVarint();
+            },
+            7 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const version = try cursor.readVarint();
+                if (version == 0 or version > std.math.maxInt(u32)) return error.InvalidWire;
+            },
+            8 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            9 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5] or !seen[7] or !seen[8] or !seen[9]) return error.InvalidWire;
+}
+
+fn preflightRequest(bytes: []const u8, snapshot_version: u32) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
     var seen = [_]bool{false} ** 6;
+    var response_bytes: ?[]const u8 = null;
+    var command_bytes: ?[]const u8 = null;
     while (try cursor.next()) |field| {
         if (field.number > 5 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -757,11 +1301,11 @@ fn preflightRequest(bytes: []const u8) WireError!void {
             },
             3 => {
                 if (field.wire_type != 2) return error.InvalidWire;
-                try preflightApplyResponse(try cursor.readBytes(max_response_wire_bytes));
+                response_bytes = try cursor.readBytes(max_response_wire_bytes);
             },
             4 => {
                 if (field.wire_type != 2) return error.InvalidWire;
-                try preflightCommand(try cursor.readBytes(max_pool_wire_bytes));
+                command_bytes = try cursor.readBytes(max_command_wire_bytes);
             },
             5 => {
                 if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire;
@@ -770,6 +1314,12 @@ fn preflightRequest(bytes: []const u8) WireError!void {
         }
     }
     if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5]) return error.InvalidWire;
+    const kind = try preflightCommandKind(command_bytes.?);
+    if (snapshot_version == 2 and kind != .create_pool) return error.InvalidWire;
+    switch (kind) {
+        .create_pool => try preflightApplyResponse(response_bytes.?),
+        .register_node => try preflightRegisterNodeApplyResponse(response_bytes.?),
+    }
 }
 
 fn preflightApplyResponse(bytes: []const u8) WireError!void {
@@ -793,6 +1343,27 @@ fn preflightApplyResponse(bytes: []const u8) WireError!void {
     if (!seen_code) return error.InvalidWire;
 }
 
+fn preflightRegisterNodeApplyResponse(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen_code = false;
+    var seen_node = false;
+    while (try cursor.next()) |field| switch (field.number) {
+        1 => {
+            if (field.wire_type != 0 or seen_code) return error.InvalidWire;
+            seen_code = true;
+            const code = try cursor.readVarint();
+            if (code == 0 or code > 5) return error.InvalidWire;
+        },
+        2 => {
+            if (field.wire_type != 2 or seen_node) return error.InvalidWire;
+            seen_node = true;
+            try preflightNode(try cursor.readBytes(max_node_wire_bytes));
+        },
+        else => return error.InvalidWire,
+    };
+    if (!seen_code) return error.InvalidWire;
+}
+
 fn poolRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8) bool {
     const lhs = state.pools_by_id.get(lhs_id).?;
     const rhs = state.pools_by_id.get(rhs_id).?;
@@ -800,7 +1371,18 @@ fn poolRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8)
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }
 
+fn nodeRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8) bool {
+    const lhs = state.nodes_by_id.get(lhs_id).?;
+    const rhs = state.nodes_by_id.get(rhs_id).?;
+    if (lhs.registered_revision != rhs.registered_revision) return lhs.registered_revision < rhs.registered_revision;
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
 fn poolIdLessThan(_: void, lhs: pb.Pool, rhs: pb.Pool) bool {
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
+fn nodeIdLessThan(_: void, lhs: pb.Node, rhs: pb.Node) bool {
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }
 
@@ -820,6 +1402,28 @@ fn testCommand(request_id: []const u8, pool_id: []const u8, name: []const u8, de
 
 fn applyTestCommand(allocator: std.mem.Allocator, machine: *PoolStateMachine, index: u64, command: pb.CreatePoolCommand) !raft.ApplyResult {
     const encoded = try encodeCreatePoolCommand(allocator, command);
+    defer allocator.free(encoded);
+    return machine.stateMachine().apply(.{ .index = index, .term = 1, .data = encoded });
+}
+
+const test_cluster_id = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+
+fn testNodeCommand(request_id: []const u8, node_id: []const u8, control_endpoint: []const u8, timestamp: i64) pb.RegisterNodeCommand {
+    return .{
+        .request_id = request_id,
+        .node_id = node_id,
+        .cluster_id = &test_cluster_id,
+        .control_endpoint = control_endpoint,
+        .nvmf_endpoint = "127.0.0.1:4420",
+        .failure_domain = "rack-a",
+        .capability_bits = 5,
+        .protocol_version = 1,
+        .proposed_registered_at_unix_ms = timestamp,
+    };
+}
+
+fn applyTestNodeCommand(allocator: std.mem.Allocator, machine: *PoolStateMachine, index: u64, command: pb.RegisterNodeCommand) !raft.ApplyResult {
+    const encoded = try encodeRegisterNodeCommand(allocator, command);
     defer allocator.free(encoded);
     return machine.stateMachine().apply(.{ .index = index, .term = 1, .data = encoded });
 }
@@ -853,6 +1457,275 @@ const TestSnapshotReader = struct {
 
     const vtable: raft.SnapshotReader.VTable = .{ .read = read };
 };
+
+test "register node replays matching requests and rejects semantic conflicts" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+
+    const command = testNodeCommand(
+        "node-request-1",
+        "0198f54d-5c2a-7000-8000-000000000011",
+        "127.0.0.1:9000",
+        1_753_744_000_000,
+    );
+    var first = try applyTestNodeCommand(allocator, &machine, 7, command);
+    defer first.deinit(allocator);
+    var registered = try decodeRegisterNodeApplyResponse(allocator, first.response.?);
+    defer registered.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterNodeApplyCode.REGISTER_NODE_APPLY_CODE_REGISTERED, registered.code);
+    try std.testing.expectEqual(@as(u64, 7), registered.node.?.registered_revision);
+
+    var retry_command = command;
+    retry_command.proposed_registered_at_unix_ms += 999;
+    var replay = try applyTestNodeCommand(allocator, &machine, 8, retry_command);
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, first.response.?, replay.response.?);
+
+    var conflict_command = retry_command;
+    conflict_command.protocol_version = 2;
+    var conflict = try applyTestNodeCommand(allocator, &machine, 9, conflict_command);
+    defer conflict.deinit(allocator);
+    var conflict_response = try decodeRegisterNodeApplyResponse(allocator, conflict.response.?);
+    defer conflict_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterNodeApplyCode.REGISTER_NODE_APPLY_CODE_REQUEST_CONFLICT, conflict_response.code);
+    try std.testing.expectEqual(@as(usize, 1), machine.nodeCount());
+    try std.testing.expectEqual(@as(usize, 1), machine.requestCount());
+}
+
+test "request ids conflict across pool and node command kinds" {
+    const allocator = std.testing.allocator;
+    var pool_first = PoolStateMachine.init(allocator);
+    defer pool_first.deinit();
+    var pool_result = try applyTestCommand(allocator, &pool_first, 1, testCommand(
+        "shared-request",
+        "0198f54d-5c2a-7000-8000-000000000001",
+        "primary",
+        "",
+        1_753_744_000_000,
+    ));
+    defer pool_result.deinit(allocator);
+    var node_conflict = try applyTestNodeCommand(allocator, &pool_first, 2, testNodeCommand(
+        "shared-request",
+        "0198f54d-5c2a-7000-8000-000000000011",
+        "127.0.0.1:9000",
+        1_753_744_000_001,
+    ));
+    defer node_conflict.deinit(allocator);
+    var node_response = try decodeRegisterNodeApplyResponse(allocator, node_conflict.response.?);
+    defer node_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterNodeApplyCode.REGISTER_NODE_APPLY_CODE_REQUEST_CONFLICT, node_response.code);
+
+    var node_first = PoolStateMachine.init(allocator);
+    defer node_first.deinit();
+    var node_result = try applyTestNodeCommand(allocator, &node_first, 1, testNodeCommand(
+        "shared-request",
+        "0198f54d-5c2a-7000-8000-000000000011",
+        "127.0.0.1:9000",
+        1_753_744_000_001,
+    ));
+    defer node_result.deinit(allocator);
+    var pool_conflict = try applyTestCommand(allocator, &node_first, 2, testCommand(
+        "shared-request",
+        "0198f54d-5c2a-7000-8000-000000000001",
+        "primary",
+        "",
+        1_753_744_000_000,
+    ));
+    defer pool_conflict.deinit(allocator);
+    var pool_response = try decodeApplyResponse(allocator, pool_conflict.response.?);
+    defer pool_response.deinit(allocator);
+    try std.testing.expectEqual(pb.ApplyCode.APPLY_CODE_REQUEST_CONFLICT, pool_response.code);
+}
+
+test "node id exists response is durable" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    const node_id = "0198f54d-5c2a-7000-8000-000000000011";
+    var registered = try applyTestNodeCommand(allocator, &machine, 1, testNodeCommand(
+        "node-request-1",
+        node_id,
+        "127.0.0.1:9000",
+        1_753_744_000_000,
+    ));
+    defer registered.deinit(allocator);
+    const duplicate_command = testNodeCommand(
+        "node-request-2",
+        node_id,
+        "127.0.0.2:9000",
+        1_753_744_000_001,
+    );
+    var duplicate = try applyTestNodeCommand(allocator, &machine, 2, duplicate_command);
+    defer duplicate.deinit(allocator);
+    var duplicate_response = try decodeRegisterNodeApplyResponse(allocator, duplicate.response.?);
+    defer duplicate_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterNodeApplyCode.REGISTER_NODE_APPLY_CODE_ID_EXISTS, duplicate_response.code);
+    try std.testing.expectEqualStrings("127.0.0.1:9000", duplicate_response.node.?.control_endpoint);
+
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, 2, 1, .{});
+    defer snapshot.deinit(allocator);
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var reader = TestSnapshotReader{ .data = snapshot.data };
+    try restored.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
+    var retry_command = duplicate_command;
+    retry_command.proposed_registered_at_unix_ms += 999;
+    var replay = try applyTestNodeCommand(allocator, &restored, 3, retry_command);
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, duplicate.response.?, replay.response.?);
+}
+
+test "get and list nodes use registration revision order" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    const first_id = "0198f54d-5c2a-7000-8000-000000000022";
+    const second_id = "0198f54d-5c2a-7000-8000-000000000011";
+    var first = try applyTestNodeCommand(allocator, &machine, 2, testNodeCommand("node-request-1", first_id, "node-a:9000", 1_753_744_000_000));
+    defer first.deinit(allocator);
+    var second = try applyTestNodeCommand(allocator, &machine, 4, testNodeCommand("node-request-2", second_id, "node-b:9000", 1_753_744_000_001));
+    defer second.deinit(allocator);
+
+    var fetched = (try machine.getNodeById(allocator, second_id)).?;
+    defer fetched.deinit(allocator);
+    try std.testing.expectEqualStrings("node-b:9000", fetched.control_endpoint);
+
+    var first_page = try machine.listNodesPage(allocator, null, 1);
+    defer first_page.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), first_page.nodes.len);
+    try std.testing.expectEqualStrings(first_id, first_page.nodes[0].id);
+    try std.testing.expect(first_page.has_more);
+    var second_page = try machine.listNodesPage(allocator, first_id, 10);
+    defer second_page.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), second_page.nodes.len);
+    try std.testing.expectEqualStrings(second_id, second_page.nodes[0].id);
+    try std.testing.expect(!second_page.has_more);
+    try std.testing.expectError(error.InvalidPageToken, machine.listNodesPage(allocator, "missing", 1));
+}
+
+test "mixed snapshots are deterministic and restore pool and node history" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var pool = try applyTestCommand(allocator, &machine, 1, testCommand(
+        "pool-request",
+        "0198f54d-5c2a-7000-8000-000000000001",
+        "primary",
+        "",
+        1_753_744_000_000,
+    ));
+    defer pool.deinit(allocator);
+    var node_b = try applyTestNodeCommand(allocator, &machine, 2, testNodeCommand(
+        "node-request-b",
+        "0198f54d-5c2a-7000-8000-000000000022",
+        "node-b:9000",
+        1_753_744_000_001,
+    ));
+    defer node_b.deinit(allocator);
+    var node_a = try applyTestNodeCommand(allocator, &machine, 3, testNodeCommand(
+        "node-request-a",
+        "0198f54d-5c2a-7000-8000-000000000011",
+        "node-a:9000",
+        1_753_744_000_002,
+    ));
+    defer node_a.deinit(allocator);
+
+    var first = try machine.stateMachine().takeSnapshot(allocator, 3, 1, .{});
+    defer first.deinit(allocator);
+    var second = try machine.stateMachine().takeSnapshot(allocator, 3, 1, .{});
+    defer second.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, first.data, second.data);
+    var snapshot_reader: std.Io.Reader = .fixed(first.data);
+    var decoded = try pb.StateSnapshot.decode(&snapshot_reader, allocator);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(snapshot_format_version, decoded.format_version);
+    try std.testing.expectEqualStrings("0198f54d-5c2a-7000-8000-000000000011", decoded.nodes.items[0].id);
+
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var reader = TestSnapshotReader{ .data = first.data };
+    try restored.stateMachine().restoreSnapshot(first.metadata, reader.reader());
+    try std.testing.expectEqual(@as(usize, 1), restored.poolCount());
+    try std.testing.expectEqual(@as(usize, 2), restored.nodeCount());
+    var page = try restored.listNodesPage(allocator, null, 10);
+    defer page.deinit(allocator);
+    try std.testing.expectEqualStrings("0198f54d-5c2a-7000-8000-000000000022", page.nodes[0].id);
+    var normalized = try restored.stateMachine().takeSnapshot(allocator, 3, 1, .{});
+    defer normalized.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, first.data, normalized.data);
+}
+
+test "version 2 pool-only snapshot wire restores" {
+    const allocator = std.testing.allocator;
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    const command = testCommand(
+        "pool-request",
+        "0198f54d-5c2a-7000-8000-000000000001",
+        "primary",
+        "",
+        1_753_744_000_000,
+    );
+    var created = try applyTestCommand(allocator, &source, 1, command);
+    defer created.deinit(allocator);
+    var current = try source.stateMachine().takeSnapshot(allocator, 1, 1, .{});
+    defer current.deinit(allocator);
+    var current_reader: std.Io.Reader = .fixed(current.data);
+    var decoded = try pb.StateSnapshot.decode(&current_reader, allocator);
+    defer decoded.deinit(allocator);
+    decoded.format_version = 2;
+    const version_2_wire = try encodeMessage(allocator, decoded);
+    defer allocator.free(version_2_wire);
+
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var reader = TestSnapshotReader{ .data = version_2_wire };
+    try restored.stateMachine().restoreSnapshot(current.metadata, reader.reader());
+    try std.testing.expectEqual(@as(usize, 1), restored.poolCount());
+    try std.testing.expectEqual(@as(usize, 0), restored.nodeCount());
+    var replay = try applyTestCommand(allocator, &restored, 2, command);
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, created.response.?, replay.response.?);
+}
+
+test "corrupt node snapshot is rejected atomically" {
+    const allocator = std.testing.allocator;
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    var registered = try applyTestNodeCommand(allocator, &source, 2, testNodeCommand(
+        "source-request",
+        "0198f54d-5c2a-7000-8000-000000000022",
+        "source:9000",
+        1_753_744_000_000,
+    ));
+    defer registered.deinit(allocator);
+    var snapshot = try source.stateMachine().takeSnapshot(allocator, 2, 1, .{});
+    defer snapshot.deinit(allocator);
+    var snapshot_reader: std.Io.Reader = .fixed(snapshot.data);
+    var decoded = try pb.StateSnapshot.decode(&snapshot_reader, allocator);
+    defer decoded.deinit(allocator);
+    decoded.nodes.items[0].registered_revision = 3;
+    const corrupt = try encodeMessage(allocator, decoded);
+    defer allocator.free(corrupt);
+
+    var target = PoolStateMachine.init(allocator);
+    defer target.deinit();
+    const existing_id = "0198f54d-5c2a-7000-8000-000000000011";
+    var existing = try applyTestNodeCommand(allocator, &target, 1, testNodeCommand(
+        "target-request",
+        existing_id,
+        "target:9000",
+        1_753_744_000_001,
+    ));
+    defer existing.deinit(allocator);
+    var reader = TestSnapshotReader{ .data = corrupt };
+    try std.testing.expectError(error.PayloadParseFailed, target.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader()));
+    try std.testing.expectEqual(@as(usize, 1), target.nodeCount());
+    var stored = (try target.getNodeById(allocator, existing_id)).?;
+    defer stored.deinit(allocator);
+    try std.testing.expectEqualStrings("target:9000", stored.control_endpoint);
+}
 
 test "create pool is idempotent by request semantics" {
     const allocator = std.testing.allocator;
