@@ -4,6 +4,7 @@ pub const pb = @import("control_proto");
 pub const grpc = @import("grpc_lite");
 pub const raft = @import("raft_zig");
 pub const uuid = @import("uuid");
+pub const config = @import("config.zig");
 pub const protobuf_wire = @import("protobuf_wire.zig");
 pub const state_machine = @import("state_machine.zig");
 pub const PoolStateMachine = state_machine.PoolStateMachine;
@@ -41,6 +42,7 @@ test "uuid dependency generates version seven identifiers" {
 test {
     _ = grpc;
     _ = raft;
+    _ = config;
     _ = protobuf_wire;
     _ = state_machine;
     _ = service;

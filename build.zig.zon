@@ -4,6 +4,10 @@
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0xfa2f3383beccff5f,
     .dependencies = .{
+        .clap = .{
+            .url = "https://github.com/fanyang89/zig-clap/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
+        },
         .raft_zig = .{
             .url = "https://codeload.github.com/fanyang89/raft-zig/tar.gz/1103254",
             .hash = "raft_zig-0.1.0-w0P1RP4dIABX-s-MIPJczUZnfz_TNgrNiRw09t-E7qRz",

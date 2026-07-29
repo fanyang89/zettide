@@ -12,6 +12,10 @@ pub fn build(b: *std.Build) void {
     const grpc_dependency = raft_build.grpcLiteDependency(raft_dependency, target, optimize);
     const grpc_module = grpc_dependency.module("grpc_lite");
     const protobuf_module = grpc_module.import_table.get("protobuf").?;
+    const clap_dependency = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const uuid_dependency = b.dependency("uuid", .{
         .target = target,
         .optimize = optimize,
@@ -37,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
+            .{ .name = "clap", .module = clap_dependency.module("clap") },
             .{ .name = "control_proto", .module = control_proto },
             .{ .name = "grpc_lite", .module = grpc_module },
             .{ .name = "raft_zig", .module = raft_dependency.module("raft_zig") },
