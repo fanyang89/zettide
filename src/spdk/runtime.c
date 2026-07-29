@@ -25,7 +25,7 @@ struct zettide_spdk_runtime {
 	pthread_t thread;
 	enum runtime_state state;
 	struct spdk_thread *owner;
-	size_t active_dispatchers;
+	size_t active_leases;
 	int app_status;
 	char *name;
 	char *reactor_mask;
@@ -281,7 +281,7 @@ zettide_spdk_runtime_stop(struct zettide_spdk_runtime *runtime)
 		goto restore_cancel;
 	}
 	if (runtime->state == RUNTIME_FAILED) {
-		if (runtime->active_dispatchers != 0) {
+		if (runtime->active_leases != 0) {
 			(void)pthread_mutex_unlock(&runtime->mutex);
 			status = -EIO;
 			goto restore_cancel;
@@ -289,7 +289,7 @@ zettide_spdk_runtime_stop(struct zettide_spdk_runtime *runtime)
 		runtime->state = RUNTIME_STOPPING;
 		owner = NULL;
 	} else if (runtime->state == RUNTIME_READY) {
-		if (runtime->active_dispatchers != 0) {
+		if (runtime->active_leases != 0) {
 			(void)pthread_mutex_unlock(&runtime->mutex);
 			status = -EBUSY;
 			goto restore_cancel;
@@ -371,7 +371,7 @@ zettide_spdk_runtime_acquire(struct zettide_spdk_runtime *runtime,
 		(void)pthread_mutex_unlock(&runtime->mutex);
 		return -ESHUTDOWN;
 	}
-	runtime->active_dispatchers++;
+	runtime->active_leases++;
 	*owner_out = runtime->owner;
 	rc = pthread_mutex_unlock(&runtime->mutex);
 	assert(rc == 0);
@@ -385,8 +385,8 @@ zettide_spdk_runtime_release(struct zettide_spdk_runtime *runtime)
 
 	rc = pthread_mutex_lock(&runtime->mutex);
 	assert(rc == 0);
-	assert(runtime->active_dispatchers > 0);
-	runtime->active_dispatchers--;
+	assert(runtime->active_leases > 0);
+	runtime->active_leases--;
 	rc = pthread_mutex_unlock(&runtime->mutex);
 	assert(rc == 0);
 }

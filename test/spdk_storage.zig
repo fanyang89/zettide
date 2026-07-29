@@ -65,9 +65,99 @@ fn runMain() !void {
         unexpected.deinit();
         return error.SecondRuntimeStarted;
     }
+    try runControllerTest(&context, &runtime);
     try runStorageTest(&context, &runtime);
     try runtime.stop();
     runtime.deinit();
+}
+
+fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime) !void {
+    const base_options: zettide.spdk_nvme_controller.Controller.Options = .{
+        .name = "ZettideRemote",
+        .transport_address = "127.0.0.1",
+        .transport_service_id = "44219",
+        .subsystem_nqn = "nqn.2026-07.io.zettide:test",
+        .connect_timeout_us = std.time.us_per_s,
+    };
+    invalid_options: {
+        var unexpected = zettide.spdk_nvme_controller.Controller.attach(
+            context.allocator,
+            runtime,
+            .{
+                .name = "",
+                .transport_address = base_options.transport_address,
+                .transport_service_id = base_options.transport_service_id,
+                .subsystem_nqn = base_options.subsystem_nqn,
+            },
+        ) catch |err| {
+            if (err != error.InvalidControllerOptions) return err;
+            break :invalid_options;
+        };
+        unexpected.deinit();
+        return error.InvalidControllerOptionsAccepted;
+    }
+    missing_subsystem: {
+        var unexpected = zettide.spdk_nvme_controller.Controller.attach(
+            context.allocator,
+            runtime,
+            .{
+                .name = "ZettideMissing",
+                .transport_address = base_options.transport_address,
+                .transport_service_id = base_options.transport_service_id,
+                .subsystem_nqn = "nqn.2026-07.io.zettide:missing",
+                .connect_timeout_us = base_options.connect_timeout_us,
+            },
+        ) catch break :missing_subsystem;
+        unexpected.deinit();
+        return error.MissingSubsystemAttached;
+    }
+
+    var controller = try zettide.spdk_nvme_controller.Controller.attach(
+        context.allocator,
+        runtime,
+        base_options,
+    );
+    defer controller.deinit();
+    if (controller.namespaceCount() != 2 or controller.namespaceNamesTruncated())
+        return error.UnexpectedNamespaceCount;
+    const namespace_name = try controller.namespaceName(0);
+    if (!std.mem.eql(u8, namespace_name, "ZettideRemoten1"))
+        return error.UnexpectedNamespaceName;
+    if (!std.mem.eql(u8, try controller.namespaceName(1), "ZettideRemoten2"))
+        return error.UnexpectedNamespaceName;
+    if (controller.namespaceName(2)) |_| {
+        return error.NamespaceIndexAccepted;
+    } else |err| if (err != error.NamespaceIndexOutOfBounds) {
+        return err;
+    }
+    busy_stop: {
+        runtime.stop() catch |err| {
+            if (err != error.RuntimeBusy) return err;
+            break :busy_stop;
+        };
+        return error.RuntimeStoppedWithAttachedController;
+    }
+
+    var storage = try runtime.openStorage(context.allocator, namespace_name, true);
+    try storage.close(context.io);
+    try controller.detach();
+
+    var truncated = try zettide.spdk_nvme_controller.Controller.attach(
+        context.allocator,
+        runtime,
+        .{
+            .name = "ZettideTruncated",
+            .transport_address = base_options.transport_address,
+            .transport_service_id = base_options.transport_service_id,
+            .subsystem_nqn = base_options.subsystem_nqn,
+            .connect_timeout_us = base_options.connect_timeout_us,
+            .namespace_name_capacity = 1,
+        },
+    );
+    defer truncated.deinit();
+    if (truncated.namespaceCount() != 1 or !truncated.namespaceNamesTruncated())
+        return error.NamespaceNamesNotTruncated;
+    try truncated.detach();
 }
 
 fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime) !void {

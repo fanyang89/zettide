@@ -36,7 +36,7 @@ int zettide_spdk_runtime_start(const struct zettide_spdk_runtime_opts *opts,
 int zettide_spdk_runtime_stop(struct zettide_spdk_runtime *runtime);
 int zettide_spdk_runtime_destroy(struct zettide_spdk_runtime *runtime);
 
-/* Used by dispatchers to hold the runtime ready until endpoint close succeeds. */
+/* Used by clients to hold the runtime ready until asynchronous teardown succeeds. */
 int zettide_spdk_runtime_acquire(struct zettide_spdk_runtime *runtime,
 		struct spdk_thread **owner_out);
 void zettide_spdk_runtime_release(struct zettide_spdk_runtime *runtime);
