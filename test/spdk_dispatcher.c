@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char malloc_bdev_config[] =
@@ -122,6 +123,17 @@ run_coordinator(void *context)
 		(test->geometry.flags & ZETTIDE_SPDK_BDEV_FLUSH_SUPPORTED) == 0) {
 		status = status != 0 ? status : -EINVAL;
 		goto close;
+	}
+	{
+		char *name = NULL;
+
+		status = zettide_spdk_bdev_dispatcher_get_name(test->dispatcher, &name);
+		if (status != 0 || name == NULL || strcmp(name, "ZettideDispatch0") != 0) {
+			status = status != 0 ? status : -EINVAL;
+			free(name);
+			goto close;
+		}
+		free(name);
 	}
 	for (index = 0; index < worker_count; index++) {
 		workers[index].test = test;

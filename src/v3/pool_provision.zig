@@ -34,8 +34,12 @@ pub const ProvisionedPool = struct {
         for (self.members) |*member| member.close() catch |err| if (first_error == null) {
             first_error = err;
         };
-        self.allocator.free(self.members);
-        self.members = &.{};
+        var all_closed = true;
+        for (self.members) |*member| all_closed = all_closed and member.isClosed();
+        if (all_closed) {
+            self.allocator.free(self.members);
+            self.members = &.{};
+        }
         if (first_error) |err| return err;
     }
 
@@ -64,7 +68,7 @@ pub fn create(
     options: Options,
 ) !CreateOutcome {
     var consumed_count: usize = 0;
-    errdefer for (storages[consumed_count..]) |*storage| storage.close(io) catch {};
+    errdefer storage_api.closeAll(storages[consumed_count..], io) catch {};
     if (storages.len == 0 or storages.len > pool_topology.max_member_count)
         return error.InvalidMemberCount;
     if (options.member_create_options.len != 0 and options.member_create_options.len != storages.len)
@@ -173,7 +177,7 @@ pub fn create(
             options.member_create_options[index];
         members[index] = member_api.createPoolStorage(io, storages[index], headers[index], genesis, create_options) catch |cause| {
             for (members[0..created_count]) |*member| member.deinit();
-            for (storages[consumed_count..]) |*storage| storage.close(io) catch {};
+            storage_api.closeAll(storages[consumed_count..], io) catch {};
             allocator.free(members);
             consumed_count = storages.len;
             return .{ .partial = .{

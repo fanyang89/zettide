@@ -473,8 +473,8 @@ pub const Member = struct {
                 };
             }
         }
-        self.closed.store(true, .release);
         try self.storage.close(self.io);
+        self.closed.store(true, .release);
         if (first_error) |err| return err;
     }
 

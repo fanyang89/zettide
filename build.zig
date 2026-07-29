@@ -85,6 +85,12 @@ pub fn build(b: *std.Build) void {
     const spdk_dispatcher_step = b.step("test-spdk-dispatcher", "Run the Linux SPDK dispatcher test");
     spdk_dispatcher_step.dependOn(&spdk_dispatcher_cmd.step);
 
+    const spdk_storage_test = createSpdkStorageTest(b, target, optimize, portable_core);
+    const spdk_storage_cmd = b.addSystemCommand(&.{ "bash", "test/spdk-storage.sh" });
+    spdk_storage_cmd.addArtifactArg(spdk_storage_test);
+    const spdk_storage_step = b.step("test-spdk-storage", "Run the Linux SPDK storage integration test");
+    spdk_storage_step.dependOn(&spdk_storage_cmd.step);
+
     const probe = if (target.result.os.tag == .linux) createFsProbe(b, target, optimize) else null;
     const durability_probe = if (target.result.os.tag == .linux) createDurabilityProbe(b, target, optimize) else null;
     const fuse_test_cmd = b.addSystemCommand(&.{ "bash", "test/fuse.sh" });
@@ -253,6 +259,27 @@ fn createLinuxBlockProbe(
             .optimize = optimize,
             .imports = &.{.{ .name = "zettide", .module = core }},
         }),
+    });
+}
+
+fn createSpdkStorageTest(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    core: *std.Build.Module,
+) *std.Build.Step.Compile {
+    const module = b.createModule(.{
+        .root_source_file = b.path("test/spdk_storage.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = core }},
+    });
+    module.addIncludePath(b.path("src"));
+    module.addIncludePath(b.path("test"));
+    return b.addLibrary(.{
+        .name = "zettide-spdk-storage-test",
+        .root_module = module,
     });
 }
 

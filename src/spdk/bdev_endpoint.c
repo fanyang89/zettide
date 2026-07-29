@@ -183,6 +183,15 @@ zettide_spdk_bdev_get_geometry(const struct zettide_spdk_bdev_endpoint *endpoint
 	return endpoint == NULL ? NULL : &endpoint->geometry;
 }
 
+const char *
+zettide_spdk_bdev_get_name(const struct zettide_spdk_bdev_endpoint *endpoint)
+{
+	if (endpoint == NULL || !on_owner_thread(endpoint)) {
+		return NULL;
+	}
+	return spdk_bdev_get_name(endpoint->bdev);
+}
+
 static int
 validate_range(const struct zettide_spdk_bdev_endpoint *endpoint, const void *buffer,
 		uint64_t offset, uint64_t length, bool write)

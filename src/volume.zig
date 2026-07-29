@@ -287,16 +287,17 @@ pub const Volume = struct {
             };
             self.mounted = false;
         }
-        self.object_pins.deinit();
-        self.link_counts.deinit();
         if (self.backing == .pool) {
-            if (self.pool_set) |*set| set.close() catch |err| if (first_error == null) {
-                first_error = err;
+            if (self.pool_set) |*set| set.close() catch |err| {
+                if (!set.isClosed()) return err;
+                if (first_error == null) first_error = err;
             };
             self.pool_set = null;
         } else {
             self.file.close(self.io);
         }
+        self.object_pins.deinit();
+        self.link_counts.deinit();
         self.closed = true;
 
         if (first_error) |err| return err;

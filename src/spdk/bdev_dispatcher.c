@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 struct zettide_spdk_bdev_dispatcher {
 	struct spdk_thread *owner;
@@ -17,6 +18,7 @@ struct zettide_spdk_bdev_dispatcher {
 enum dispatcher_operation {
 	DISPATCHER_OPEN,
 	DISPATCHER_GET_GEOMETRY,
+	DISPATCHER_GET_NAME,
 	DISPATCHER_READ,
 	DISPATCHER_WRITE,
 	DISPATCHER_FLUSH,
@@ -37,6 +39,7 @@ struct dispatcher_command {
 			bool writable;
 		} open;
 		struct zettide_spdk_bdev_geometry geometry;
+		char *name;
 		struct {
 			void *buffer;
 			uint64_t offset;
@@ -112,6 +115,17 @@ run_command(void *context)
 			complete_command(command, 0);
 		}
 		break;
+	case DISPATCHER_GET_NAME: {
+		const char *name = zettide_spdk_bdev_get_name(dispatcher->endpoint);
+
+		if (name == NULL) {
+			complete_command(command, -ENODEV);
+		} else {
+			command->arguments.name = strdup(name);
+			complete_command(command, command->arguments.name == NULL ? -ENOMEM : 0);
+		}
+		break;
+	}
 	case DISPATCHER_READ:
 		status = zettide_spdk_bdev_read(dispatcher->endpoint,
 				command->arguments.io.buffer, command->arguments.io.offset,
@@ -247,6 +261,26 @@ zettide_spdk_bdev_dispatcher_get_geometry(
 	status = dispatch_command(&command);
 	if (status == 0) {
 		*geometry_out = command.arguments.geometry;
+	}
+	return status;
+}
+
+int
+zettide_spdk_bdev_dispatcher_get_name(
+		struct zettide_spdk_bdev_dispatcher *dispatcher, char **name_out)
+{
+	struct dispatcher_command command = {0};
+	int status;
+
+	if (dispatcher == NULL || name_out == NULL) {
+		return -EINVAL;
+	}
+	*name_out = NULL;
+	command.operation = DISPATCHER_GET_NAME;
+	command.dispatcher = dispatcher;
+	status = dispatch_command(&command);
+	if (status == 0) {
+		*name_out = command.arguments.name;
 	}
 	return status;
 }

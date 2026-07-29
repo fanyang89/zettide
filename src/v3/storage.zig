@@ -17,6 +17,7 @@ pub const Storage = struct {
     minimum_io_size: u32,
 
     pub const VTable = struct {
+        same_identity: *const fn (context: *anyopaque, other_context: *anyopaque) bool,
         read_at: *const fn (context: *anyopaque, io: Io, buffer: []u8, offset: u64) anyerror!usize,
         write_all_at: *const fn (context: *anyopaque, io: Io, bytes: []const u8, offset: u64) anyerror!void,
         sync: *const fn (context: *anyopaque, io: Io) anyerror!void,
@@ -128,6 +129,20 @@ pub const Storage = struct {
             },
             .custom => |self_custom| switch (other.backend) {
                 .file => false,
+                .custom => |other_custom| self_custom.vtable == other_custom.vtable and
+                    self_custom.vtable.same_identity(self_custom.context, other_custom.context),
+            },
+        };
+    }
+
+    fn sameOwner(self: *const Storage, other: *const Storage) bool {
+        return switch (self.backend) {
+            .file => |self_file| switch (other.backend) {
+                .file => |other_file| self_file.file.handle == other_file.file.handle,
+                .custom => false,
+            },
+            .custom => |self_custom| switch (other.backend) {
+                .file => false,
                 .custom => |other_custom| self_custom.context == other_custom.context,
             },
         };
@@ -165,6 +180,24 @@ pub const Storage = struct {
     }
 };
 
+/// Closes each owned backend once even if the slice contains copied Storage values.
+pub fn closeAll(storages: []Storage, io: Io) !void {
+    var first_error: ?anyerror = null;
+    for (storages, 0..) |*storage, index| {
+        var copied_later = false;
+        for (storages[index + 1 ..]) |*later| {
+            if (storage.sameOwner(later)) {
+                copied_later = true;
+                break;
+            }
+        }
+        if (!copied_later) storage.close(io) catch |err| if (first_error == null) {
+            first_error = err;
+        };
+    }
+    if (first_error) |err| return err;
+}
+
 test "file storage reports capacity and supports positional IO" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -196,6 +229,10 @@ test "custom storage delegates operations and preserves identity" {
             return buffer.len;
         }
 
+        fn sameIdentity(context: *anyopaque, other_context: *anyopaque) bool {
+            return context == other_context;
+        }
+
         fn writeAllAt(context: *anyopaque, _: Io, bytes: []const u8, offset: u64) !void {
             const self: *@This() = @ptrCast(@alignCast(context));
             const start = std.math.cast(usize, offset) orelse return error.OutOfBounds;
@@ -214,6 +251,7 @@ test "custom storage delegates operations and preserves identity" {
         }
 
         const vtable: Storage.VTable = .{
+            .same_identity = sameIdentity,
             .read_at = readAt,
             .write_all_at = writeAllAt,
             .sync = sync,
@@ -234,7 +272,8 @@ test "custom storage delegates operations and preserves identity" {
     try std.testing.expectEqual(actual.len, try storage.readAt(std.testing.io, &actual, 2048));
     try std.testing.expectEqualStrings("data", &actual);
     try storage.sync(std.testing.io);
-    try storage.close(std.testing.io);
+    var copies = [_]Storage{ storage, alias };
+    try closeAll(&copies, std.testing.io);
     try std.testing.expect(backend.synced);
     try std.testing.expect(backend.closed);
 }

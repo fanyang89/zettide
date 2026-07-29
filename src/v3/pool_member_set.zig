@@ -7,6 +7,7 @@ const pool_authority = @import("pool_authority.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_policy = @import("pool_policy.zig");
 const pool_topology = @import("pool_topology.zig");
+const storage_api = @import("storage.zig");
 
 pub const max_member_count = pool_topology.max_member_count;
 
@@ -152,6 +153,10 @@ pub const PoolMemberSet = struct {
         return result;
     }
 
+    pub fn isClosed(self: *const PoolMemberSet) bool {
+        return self.coordinator_state.load(.acquire) == 2;
+    }
+
     pub fn memberById(self: *PoolMemberSet, member_id: [16]u8) !*member_api.Member {
         for (self.members[0..self.supplied_count]) |*maybe_member| {
             const member = if (maybe_member.*) |*value| value else continue;
@@ -162,7 +167,7 @@ pub const PoolMemberSet = struct {
 
     pub fn claimCoordinator(self: *PoolMemberSet) !void {
         if (self.coordinator_state.cmpxchgStrong(0, 1, .acq_rel, .acquire)) |state|
-            return if (state == 2) error.MemberSetClosed else error.CoordinatorAlreadyOpen;
+            return if (state == 2 or state == 3) error.MemberSetClosed else error.CoordinatorAlreadyOpen;
     }
 
     pub fn releaseCoordinator(self: *PoolMemberSet) void {
@@ -311,23 +316,33 @@ pub const PoolMemberSet = struct {
     }
 
     pub fn close(self: *PoolMemberSet) !void {
-        if (self.coordinator_state.cmpxchgStrong(0, 2, .acq_rel, .acquire)) |state| {
+        while (true) {
+            const state = self.coordinator_state.load(.acquire);
             if (state == 1) return error.CoordinatorActive;
-            return;
+            if (state == 2) return;
+            if (self.coordinator_state.cmpxchgStrong(state, 2, .acq_rel, .acquire) == null) break;
         }
         var first_error: ?anyerror = null;
+        var close_incomplete = false;
         for (&self.histories) |*maybe_history| {
             if (maybe_history.*) |*history| history.deinit();
             maybe_history.* = null;
         }
         for (&self.members) |*maybe_member| {
-            if (maybe_member.*) |*member| member.close() catch |err| if (first_error == null) {
-                first_error = err;
-            };
-            maybe_member.* = null;
+            if (maybe_member.*) |*member| {
+                member.close() catch |err| {
+                    if (first_error == null) first_error = err;
+                    if (member.isClosed()) maybe_member.* = null else close_incomplete = true;
+                    continue;
+                };
+                maybe_member.* = null;
+            }
         }
         self.control_write_state = null;
-        if (first_error) |err| return err;
+        if (first_error) |err| {
+            if (close_incomplete) self.coordinator_state.store(3, .release);
+            return err;
+        }
     }
 
     pub fn deinit(self: *PoolMemberSet) void {
@@ -445,14 +460,20 @@ fn scanStorages(
     mode: member_format.OpenMode,
 ) !PoolMemberSet {
     if (storages.len == 0 or storages.len > max_member_count) {
-        for (storages) |*storage| storage.close(io) catch {};
+        storage_api.closeAll(storages, io) catch {};
         return error.InvalidMemberCount;
     }
+    for (storages, 0..) |*storage, index| for (storages[0..index]) |*previous| {
+        if (storage.sameIdentity(previous)) {
+            storage_api.closeAll(storages, io) catch {};
+            return error.DuplicateStorage;
+        }
+    };
     var set: PoolMemberSet = .{ .supplied_count = storages.len };
     var consumed_count: usize = 0;
     errdefer {
         set.deinit();
-        for (storages[consumed_count..]) |*storage| storage.close(io) catch {};
+        storage_api.closeAll(storages[consumed_count..], io) catch {};
     }
     for (storages, 0..) |storage, index| {
         consumed_count += 1;

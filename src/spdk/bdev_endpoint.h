@@ -42,6 +42,7 @@ int zettide_spdk_bdev_close(struct zettide_spdk_bdev_endpoint *endpoint);
 
 const struct zettide_spdk_bdev_geometry *
 zettide_spdk_bdev_get_geometry(const struct zettide_spdk_bdev_endpoint *endpoint);
+const char *zettide_spdk_bdev_get_name(const struct zettide_spdk_bdev_endpoint *endpoint);
 
 /*
  * Data buffers must come from zettide_spdk_dma_zmalloc(). A successful

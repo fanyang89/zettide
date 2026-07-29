@@ -22,6 +22,9 @@ int zettide_spdk_bdev_dispatcher_open(struct spdk_thread *owner, const char *nam
 int zettide_spdk_bdev_dispatcher_get_geometry(
 		struct zettide_spdk_bdev_dispatcher *dispatcher,
 		struct zettide_spdk_bdev_geometry *geometry_out);
+/* The caller owns name_out with free() after a successful call. */
+int zettide_spdk_bdev_dispatcher_get_name(
+		struct zettide_spdk_bdev_dispatcher *dispatcher, char **name_out);
 int zettide_spdk_bdev_dispatcher_read(struct zettide_spdk_bdev_dispatcher *dispatcher,
 		void *buffer, uint64_t offset, uint64_t length);
 int zettide_spdk_bdev_dispatcher_write(struct zettide_spdk_bdev_dispatcher *dispatcher,
