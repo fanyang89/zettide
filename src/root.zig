@@ -36,6 +36,40 @@ test "protobuf model round trips" {
     try std.testing.expectEqual(pool.created_revision, decoded.created_revision);
 }
 
+test "Volume model round trips" {
+    var volume: pb.Volume = .{
+        .id = "0198f54d-5c2a-7000-8000-000000000011",
+        .pool_id = "0198f54d-5c2a-7000-8000-000000000001",
+        .name = "database",
+        .description = "Database volume",
+        .size_bytes = 1024 * 1024,
+        .protection_kind = .VOLUME_PROTECTION_KIND_REPLICATED,
+        .target_replica_count = 3,
+        .write_quorum = 2,
+        .read_quorum = 1,
+        .lifecycle_state = .VOLUME_LIFECYCLE_STATE_PROVISIONING,
+        .availability_state = .VOLUME_AVAILABILITY_STATE_UNKNOWN,
+        .operation_phase = .VOLUME_OPERATION_PHASE_NONE,
+        .generation = 1,
+        .write_epoch = 1,
+        .created_at_unix_ms = 1_753_744_000_000,
+        .created_revision = 8,
+        .resource_version = 8,
+    };
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try volume.encode(&writer.writer, std.testing.allocator);
+
+    var reader: std.Io.Reader = .fixed(writer.written());
+    var decoded = try pb.Volume.decode(&reader, std.testing.allocator);
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(volume.id, decoded.id);
+    try std.testing.expectEqualStrings(volume.pool_id, decoded.pool_id);
+    try std.testing.expectEqual(volume.size_bytes, decoded.size_bytes);
+    try std.testing.expectEqual(volume.lifecycle_state, decoded.lifecycle_state);
+    try std.testing.expectEqual(volume.resource_version, decoded.resource_version);
+}
+
 test "uuid dependency generates version seven identifiers" {
     const id = uuid.v7.new(std.testing.io);
     const encoded = uuid.urn.serialize(id);

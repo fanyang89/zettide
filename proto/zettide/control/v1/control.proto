@@ -25,6 +25,12 @@ service HeartbeatService {
   rpc GetHeartbeat(GetHeartbeatRequest) returns (GetHeartbeatResponse);
 }
 
+service VolumeService {
+  rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+  rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
+  rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+}
+
 message Pool {
   string id = 1;
   string name = 2;
@@ -219,12 +225,167 @@ message GetHeartbeatResponse {
   uint64 age_ms = 3;
 }
 
+enum VolumeLifecycleState {
+  VOLUME_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  VOLUME_LIFECYCLE_STATE_PROVISIONING = 1;
+  VOLUME_LIFECYCLE_STATE_ACTIVE = 2;
+  VOLUME_LIFECYCLE_STATE_DELETING = 3;
+  VOLUME_LIFECYCLE_STATE_FAILED = 4;
+}
+
+enum VolumeAvailabilityState {
+  VOLUME_AVAILABILITY_STATE_UNSPECIFIED = 0;
+  VOLUME_AVAILABILITY_STATE_UNKNOWN = 1;
+  VOLUME_AVAILABILITY_STATE_HEALTHY = 2;
+  VOLUME_AVAILABILITY_STATE_DEGRADED = 3;
+  VOLUME_AVAILABILITY_STATE_READ_ONLY = 4;
+  VOLUME_AVAILABILITY_STATE_UNAVAILABLE = 5;
+}
+
+enum VolumeOperationPhase {
+  VOLUME_OPERATION_PHASE_UNSPECIFIED = 0;
+  VOLUME_OPERATION_PHASE_NONE = 1;
+  VOLUME_OPERATION_PHASE_PLACING = 2;
+  VOLUME_OPERATION_PHASE_FENCING = 3;
+  VOLUME_OPERATION_PHASE_RECOVERING = 4;
+  VOLUME_OPERATION_PHASE_REPAIRING = 5;
+}
+
+enum VolumeProtectionKind {
+  VOLUME_PROTECTION_KIND_UNSPECIFIED = 0;
+  VOLUME_PROTECTION_KIND_REPLICATED = 1;
+}
+
+message Volume {
+  string id = 1;
+  string pool_id = 2;
+  string name = 3;
+  string description = 4;
+  uint64 size_bytes = 5;
+  VolumeProtectionKind protection_kind = 6;
+  uint32 target_replica_count = 7;
+  uint32 write_quorum = 8;
+  uint32 read_quorum = 9;
+  VolumeLifecycleState lifecycle_state = 10;
+  VolumeAvailabilityState availability_state = 11;
+  VolumeOperationPhase operation_phase = 12;
+  uint64 generation = 13;
+  uint64 write_epoch = 14;
+  uint64 placement_revision = 15;
+  int64 created_at_unix_ms = 16;
+  uint64 created_revision = 17;
+  uint64 resource_version = 18;
+}
+
+message CreateVolumeRequest {
+  string request_id = 1;
+  string pool_id = 2;
+  string name = 3;
+  string description = 4;
+  uint64 size_bytes = 5;
+}
+
+message CreateVolumeResponse {
+  Volume volume = 1;
+}
+
+message GetVolumeRequest {
+  string volume_id = 1;
+}
+
+message GetVolumeResponse {
+  Volume volume = 1;
+}
+
+message DeleteVolumeRequest {
+  string request_id = 1;
+  string volume_id = 2;
+  uint64 expected_resource_version = 3;
+}
+
+message DeleteVolumeResponse {
+  string volume_id = 1;
+  int64 deleted_at_unix_ms = 2;
+  uint64 deleted_revision = 3;
+}
+
+enum ReplicaPlacementState {
+  REPLICA_PLACEMENT_STATE_UNSPECIFIED = 0;
+  REPLICA_PLACEMENT_STATE_RESERVED = 1;
+  REPLICA_PLACEMENT_STATE_ACTIVE = 2;
+  REPLICA_PLACEMENT_STATE_RETIRING = 3;
+}
+
+message ReplicaPlacement {
+  string id = 1;
+  string volume_id = 2;
+  string node_id = 3;
+  uint32 replica_index = 4;
+  uint64 generation = 5;
+  ReplicaPlacementState state = 6;
+  uint64 created_revision = 7;
+  uint64 resource_version = 8;
+}
+
+enum ReplicaAllocationState {
+  REPLICA_ALLOCATION_STATE_UNSPECIFIED = 0;
+  REPLICA_ALLOCATION_STATE_RESERVED = 1;
+  REPLICA_ALLOCATION_STATE_ACTIVE = 2;
+  REPLICA_ALLOCATION_STATE_RETIRING = 3;
+}
+
+message ReplicaAllocation {
+  string id = 1;
+  string replica_id = 2;
+  bytes member_id = 3;
+  uint64 offset_bytes = 4;
+  uint64 length_bytes = 5;
+  uint64 generation = 6;
+  ReplicaAllocationState state = 7;
+  uint64 created_revision = 8;
+  uint64 resource_version = 9;
+}
+
+enum VolumeAccessMode {
+  VOLUME_ACCESS_MODE_UNSPECIFIED = 0;
+  VOLUME_ACCESS_MODE_SINGLE_NODE_WRITER = 1;
+  VOLUME_ACCESS_MODE_SINGLE_NODE_READER = 2;
+}
+
+enum VolumeAttachmentState {
+  VOLUME_ATTACHMENT_STATE_UNSPECIFIED = 0;
+  VOLUME_ATTACHMENT_STATE_ATTACHING = 1;
+  VOLUME_ATTACHMENT_STATE_ATTACHED = 2;
+  VOLUME_ATTACHMENT_STATE_DETACHING = 3;
+  VOLUME_ATTACHMENT_STATE_FAILED = 4;
+}
+
+message VolumeAttachment {
+  string id = 1;
+  string volume_id = 2;
+  string target_node_id = 3;
+  string consumer_id = 4;
+  VolumeAccessMode access_mode = 5;
+  VolumeAttachmentState state = 6;
+  uint64 generation = 7;
+  uint64 created_revision = 8;
+  uint64 resource_version = 9;
+}
+
+message VolumeTombstone {
+  Volume volume = 1;
+  int64 deleted_at_unix_ms = 2;
+  uint64 deleted_revision = 3;
+}
+
 message CommandEnvelope {
   uint32 format_version = 1;
   oneof command {
     CreatePoolCommand create_pool = 2;
     RegisterNodeCommand register_node = 3;
     RegisterMemberCommand register_member = 4;
+    CreateVolumeCommand create_volume = 5;
+    DeleteVolumeCommand delete_volume = 6;
   }
 }
 
@@ -261,6 +422,23 @@ message RegisterMemberCommand {
   uint64 data_capacity_bytes = 10;
   uint32 extent_size_bytes = 11;
   int64 proposed_registered_at_unix_ms = 12;
+}
+
+message CreateVolumeCommand {
+  string request_id = 1;
+  string proposed_volume_id = 2;
+  string pool_id = 3;
+  string name = 4;
+  string description = 5;
+  uint64 size_bytes = 6;
+  int64 proposed_created_at_unix_ms = 7;
+}
+
+message DeleteVolumeCommand {
+  string request_id = 1;
+  string volume_id = 2;
+  uint64 expected_resource_version = 3;
+  int64 proposed_deleted_at_unix_ms = 4;
 }
 
 enum ApplyCode {
@@ -312,6 +490,40 @@ message RegisterMemberApplyResponse {
   Member member = 2;
 }
 
+enum CreateVolumeApplyCode {
+  CREATE_VOLUME_APPLY_CODE_UNSPECIFIED = 0;
+  CREATE_VOLUME_APPLY_CODE_CREATED = 1;
+  CREATE_VOLUME_APPLY_CODE_REQUEST_CONFLICT = 2;
+  CREATE_VOLUME_APPLY_CODE_ID_EXISTS = 3;
+  CREATE_VOLUME_APPLY_CODE_NAME_EXISTS = 4;
+  CREATE_VOLUME_APPLY_CODE_REQUEST_LIMIT = 5;
+  CREATE_VOLUME_APPLY_CODE_VOLUME_LIMIT = 6;
+  CREATE_VOLUME_APPLY_CODE_POOL_NOT_FOUND = 7;
+}
+
+message CreateVolumeApplyResponse {
+  CreateVolumeApplyCode code = 1;
+  Volume volume = 2;
+}
+
+enum DeleteVolumeApplyCode {
+  DELETE_VOLUME_APPLY_CODE_UNSPECIFIED = 0;
+  DELETE_VOLUME_APPLY_CODE_DELETED = 1;
+  DELETE_VOLUME_APPLY_CODE_REQUEST_CONFLICT = 2;
+  DELETE_VOLUME_APPLY_CODE_NOT_FOUND = 3;
+  DELETE_VOLUME_APPLY_CODE_VERSION_CONFLICT = 4;
+  DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES = 5;
+  DELETE_VOLUME_APPLY_CODE_REQUEST_LIMIT = 6;
+  DELETE_VOLUME_APPLY_CODE_TOMBSTONE_LIMIT = 7;
+}
+
+message DeleteVolumeApplyResponse {
+  DeleteVolumeApplyCode code = 1;
+  string volume_id = 2;
+  int64 deleted_at_unix_ms = 3;
+  uint64 deleted_revision = 4;
+}
+
 message RequestRecord {
   string request_id = 1;
   bytes request_fingerprint = 2;
@@ -326,4 +538,9 @@ message StateSnapshot {
   repeated RequestRecord requests = 3;
   repeated Node nodes = 4;
   repeated Member members = 5;
+  repeated Volume volumes = 6;
+  repeated VolumeTombstone volume_tombstones = 7;
+  repeated ReplicaPlacement replica_placements = 8;
+  repeated ReplicaAllocation replica_allocations = 9;
+  repeated VolumeAttachment volume_attachments = 10;
 }

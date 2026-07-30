@@ -506,6 +506,7 @@ pub const PoolStateMachine = struct {
             .create_pool => |command| self.applyCreatePool(entry.index, command),
             .register_node => |command| self.applyRegisterNode(entry.index, command),
             .register_member => |command| self.applyRegisterMember(entry.index, command),
+            .create_volume, .delete_volume => error.PayloadParseFailed,
         };
     }
 
@@ -1369,6 +1370,7 @@ fn restoreRequest(
             try insertRestoredRequest(allocator, state, source, .register_member, encoded_response, encoded_command);
             return if (registered_member_id) |id| RestoredCreation{ .member = id } else null;
         },
+        .create_volume, .delete_volume => return error.PayloadParseFailed,
     }
 }
 
