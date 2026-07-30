@@ -6,8 +6,8 @@ const raft = @import("raft_zig");
 const uuid = @import("uuid");
 const wire = @import("protobuf_wire.zig");
 
-pub const command_format_version: u32 = 1;
-pub const snapshot_format_version: u32 = 4;
+pub const command_format_version: u32 = 2;
+pub const snapshot_format_version: u32 = 5;
 pub const max_name_bytes: usize = 127;
 pub const max_description_bytes: usize = 1024;
 pub const max_request_id_bytes: usize = 127;
@@ -16,12 +16,29 @@ pub const max_failure_domain_bytes: usize = 255;
 pub const max_pools: usize = 25_000;
 pub const max_nodes: usize = 10_000;
 pub const max_members: usize = 10_000;
+pub const min_volume_size_bytes: u64 = 256 * 1024;
+pub const volume_block_size_bytes: u64 = 4096;
+pub const max_volume_size_bytes: u64 = @as(u64, std.math.maxInt(u32)) * volume_block_size_bytes;
+pub const volume_target_replica_count: u32 = 3;
+pub const volume_write_quorum: u32 = 2;
+pub const volume_read_quorum: u32 = 1;
+pub const max_volumes: usize = 25_000;
+pub const max_volume_tombstones: usize = 25_000;
+pub const max_replica_placements: usize = max_volumes * @as(usize, volume_target_replica_count);
+pub const max_replica_allocations: usize = max_replica_placements;
+pub const max_volume_attachments: usize = max_volumes;
+pub const max_consumer_id_bytes: usize = 255;
 pub const max_requests: usize = 50_000;
 pub const max_snapshot_bytes: usize = 256 * 1024 * 1024;
 
 const max_pool_wire_bytes: usize = 2048;
 const max_node_wire_bytes: usize = 4096;
 const max_member_wire_bytes: usize = 4096;
+const max_volume_wire_bytes: usize = 4096;
+const max_volume_tombstone_wire_bytes: usize = 8192;
+const max_replica_placement_wire_bytes: usize = 2048;
+const max_replica_allocation_wire_bytes: usize = 2048;
+const max_volume_attachment_wire_bytes: usize = 4096;
 const max_command_wire_bytes: usize = 8192;
 const max_response_wire_bytes: usize = 8192;
 const max_request_wire_bytes: usize = max_request_id_bytes + @sizeOf(Fingerprint) + max_response_wire_bytes + max_command_wire_bytes + 40;
@@ -195,10 +212,234 @@ const MemberSlotKey = struct {
     member_slot: u16,
 };
 
+const Volume = struct {
+    id: []u8,
+    pool_id: []u8,
+    name: []u8,
+    scoped_name: []u8,
+    description: []u8,
+    size_bytes: u64,
+    protection_kind: pb.VolumeProtectionKind,
+    target_replica_count: u32,
+    write_quorum: u32,
+    read_quorum: u32,
+    lifecycle_state: pb.VolumeLifecycleState,
+    availability_state: pb.VolumeAvailabilityState,
+    operation_phase: pb.VolumeOperationPhase,
+    generation: u64,
+    write_epoch: u64,
+    placement_revision: u64,
+    created_at_unix_ms: i64,
+    created_revision: u64,
+    resource_version: u64,
+
+    fn init(allocator: std.mem.Allocator, source: pb.Volume) !Volume {
+        const id = try allocator.dupe(u8, source.id);
+        errdefer allocator.free(id);
+        const pool_id = try allocator.dupe(u8, source.pool_id);
+        errdefer allocator.free(pool_id);
+        const name = try allocator.dupe(u8, source.name);
+        errdefer allocator.free(name);
+        const scoped_name = try makeScopedKey(allocator, source.pool_id, source.name);
+        errdefer allocator.free(scoped_name);
+        const description = try allocator.dupe(u8, source.description);
+        return .{
+            .id = id,
+            .pool_id = pool_id,
+            .name = name,
+            .scoped_name = scoped_name,
+            .description = description,
+            .size_bytes = source.size_bytes,
+            .protection_kind = source.protection_kind,
+            .target_replica_count = source.target_replica_count,
+            .write_quorum = source.write_quorum,
+            .read_quorum = source.read_quorum,
+            .lifecycle_state = source.lifecycle_state,
+            .availability_state = source.availability_state,
+            .operation_phase = source.operation_phase,
+            .generation = source.generation,
+            .write_epoch = source.write_epoch,
+            .placement_revision = source.placement_revision,
+            .created_at_unix_ms = source.created_at_unix_ms,
+            .created_revision = source.created_revision,
+            .resource_version = source.resource_version,
+        };
+    }
+
+    fn deinit(self: *Volume, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.pool_id);
+        allocator.free(self.name);
+        allocator.free(self.scoped_name);
+        allocator.free(self.description);
+        self.* = undefined;
+    }
+
+    fn proto(self: Volume) pb.Volume {
+        return .{
+            .id = self.id,
+            .pool_id = self.pool_id,
+            .name = self.name,
+            .description = self.description,
+            .size_bytes = self.size_bytes,
+            .protection_kind = self.protection_kind,
+            .target_replica_count = self.target_replica_count,
+            .write_quorum = self.write_quorum,
+            .read_quorum = self.read_quorum,
+            .lifecycle_state = self.lifecycle_state,
+            .availability_state = self.availability_state,
+            .operation_phase = self.operation_phase,
+            .generation = self.generation,
+            .write_epoch = self.write_epoch,
+            .placement_revision = self.placement_revision,
+            .created_at_unix_ms = self.created_at_unix_ms,
+            .created_revision = self.created_revision,
+            .resource_version = self.resource_version,
+        };
+    }
+};
+
+const VolumeTombstone = struct {
+    volume: Volume,
+    deleted_at_unix_ms: i64,
+    deleted_revision: u64,
+
+    fn deinit(self: *VolumeTombstone, allocator: std.mem.Allocator) void {
+        self.volume.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn proto(self: VolumeTombstone) pb.VolumeTombstone {
+        return .{
+            .volume = self.volume.proto(),
+            .deleted_at_unix_ms = self.deleted_at_unix_ms,
+            .deleted_revision = self.deleted_revision,
+        };
+    }
+};
+
+const ReplicaPlacement = struct {
+    id: []u8,
+    volume_id: []u8,
+    node_id: []u8,
+    replica_key: []u8,
+    replica_index: u32,
+    generation: u64,
+    state: pb.ReplicaPlacementState,
+    created_revision: u64,
+    resource_version: u64,
+
+    fn init(allocator: std.mem.Allocator, source: pb.ReplicaPlacement) !ReplicaPlacement {
+        const id = try allocator.dupe(u8, source.id);
+        errdefer allocator.free(id);
+        const volume_id = try allocator.dupe(u8, source.volume_id);
+        errdefer allocator.free(volume_id);
+        const node_id = try allocator.dupe(u8, source.node_id);
+        errdefer allocator.free(node_id);
+        const replica_key = try makeReplicaKey(allocator, source.volume_id, source.replica_index);
+        return .{
+            .id = id,
+            .volume_id = volume_id,
+            .node_id = node_id,
+            .replica_key = replica_key,
+            .replica_index = source.replica_index,
+            .generation = source.generation,
+            .state = source.state,
+            .created_revision = source.created_revision,
+            .resource_version = source.resource_version,
+        };
+    }
+
+    fn deinit(self: *ReplicaPlacement, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.volume_id);
+        allocator.free(self.node_id);
+        allocator.free(self.replica_key);
+        self.* = undefined;
+    }
+
+    fn proto(self: ReplicaPlacement) pb.ReplicaPlacement {
+        return .{ .id = self.id, .volume_id = self.volume_id, .node_id = self.node_id, .replica_index = self.replica_index, .generation = self.generation, .state = self.state, .created_revision = self.created_revision, .resource_version = self.resource_version };
+    }
+};
+
+const ReplicaAllocation = struct {
+    id: []u8,
+    replica_id: []u8,
+    member_id: []u8,
+    offset_bytes: u64,
+    length_bytes: u64,
+    generation: u64,
+    state: pb.ReplicaAllocationState,
+    created_revision: u64,
+    resource_version: u64,
+
+    fn init(allocator: std.mem.Allocator, source: pb.ReplicaAllocation) !ReplicaAllocation {
+        const id = try allocator.dupe(u8, source.id);
+        errdefer allocator.free(id);
+        const replica_id = try allocator.dupe(u8, source.replica_id);
+        errdefer allocator.free(replica_id);
+        const member_id = try allocator.dupe(u8, source.member_id);
+        return .{ .id = id, .replica_id = replica_id, .member_id = member_id, .offset_bytes = source.offset_bytes, .length_bytes = source.length_bytes, .generation = source.generation, .state = source.state, .created_revision = source.created_revision, .resource_version = source.resource_version };
+    }
+
+    fn deinit(self: *ReplicaAllocation, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.replica_id);
+        allocator.free(self.member_id);
+        self.* = undefined;
+    }
+
+    fn proto(self: ReplicaAllocation) pb.ReplicaAllocation {
+        return .{ .id = self.id, .replica_id = self.replica_id, .member_id = self.member_id, .offset_bytes = self.offset_bytes, .length_bytes = self.length_bytes, .generation = self.generation, .state = self.state, .created_revision = self.created_revision, .resource_version = self.resource_version };
+    }
+};
+
+const VolumeAttachment = struct {
+    id: []u8,
+    volume_id: []u8,
+    target_node_id: []u8,
+    consumer_id: []u8,
+    consumer_key: []u8,
+    access_mode: pb.VolumeAccessMode,
+    state: pb.VolumeAttachmentState,
+    generation: u64,
+    created_revision: u64,
+    resource_version: u64,
+
+    fn init(allocator: std.mem.Allocator, source: pb.VolumeAttachment) !VolumeAttachment {
+        const id = try allocator.dupe(u8, source.id);
+        errdefer allocator.free(id);
+        const volume_id = try allocator.dupe(u8, source.volume_id);
+        errdefer allocator.free(volume_id);
+        const target_node_id = try allocator.dupe(u8, source.target_node_id);
+        errdefer allocator.free(target_node_id);
+        const consumer_id = try allocator.dupe(u8, source.consumer_id);
+        errdefer allocator.free(consumer_id);
+        const consumer_key = try makeScopedKey(allocator, source.volume_id, source.consumer_id);
+        return .{ .id = id, .volume_id = volume_id, .target_node_id = target_node_id, .consumer_id = consumer_id, .consumer_key = consumer_key, .access_mode = source.access_mode, .state = source.state, .generation = source.generation, .created_revision = source.created_revision, .resource_version = source.resource_version };
+    }
+
+    fn deinit(self: *VolumeAttachment, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.volume_id);
+        allocator.free(self.target_node_id);
+        allocator.free(self.consumer_id);
+        allocator.free(self.consumer_key);
+        self.* = undefined;
+    }
+
+    fn proto(self: VolumeAttachment) pb.VolumeAttachment {
+        return .{ .id = self.id, .volume_id = self.volume_id, .target_node_id = self.target_node_id, .consumer_id = self.consumer_id, .access_mode = self.access_mode, .state = self.state, .generation = self.generation, .created_revision = self.created_revision, .resource_version = self.resource_version };
+    }
+};
+
 const RequestKind = enum {
     create_pool,
     register_node,
     register_member,
+    create_volume,
+    delete_volume,
 };
 
 const Request = struct {
@@ -227,15 +468,50 @@ const State = struct {
     member_ids_by_revision: std.ArrayList([]const u8) = .empty,
     pool_ids_by_local_set: std.StringHashMapUnmanaged([]const u8) = .empty,
     member_ids_by_slot: std.AutoHashMapUnmanaged(MemberSlotKey, []const u8) = .empty,
+    volumes_by_id: std.StringHashMapUnmanaged(Volume) = .empty,
+    volume_ids_by_scoped_name: std.StringHashMapUnmanaged([]const u8) = .empty,
+    volume_ids_by_revision: std.ArrayList([]const u8) = .empty,
+    volume_tombstones_by_id: std.StringHashMapUnmanaged(VolumeTombstone) = .empty,
+    replica_placements_by_id: std.StringHashMapUnmanaged(ReplicaPlacement) = .empty,
+    replica_ids_by_volume_index: std.StringHashMapUnmanaged([]const u8) = .empty,
+    replica_allocations_by_id: std.StringHashMapUnmanaged(ReplicaAllocation) = .empty,
+    volume_attachments_by_id: std.StringHashMapUnmanaged(VolumeAttachment) = .empty,
+    attachment_ids_by_volume_consumer: std.StringHashMapUnmanaged([]const u8) = .empty,
     requests: std.StringHashMapUnmanaged(Request) = .empty,
     max_pool_created_revision: u64 = 0,
     max_node_registered_revision: u64 = 0,
     max_member_registered_revision: u64 = 0,
+    max_volume_created_revision: u64 = 0,
+    max_volume_deleted_revision: u64 = 0,
 
     fn deinit(self: *State, allocator: std.mem.Allocator) void {
         var request_iterator = self.requests.valueIterator();
         while (request_iterator.next()) |request| request.deinit(allocator);
         self.requests.deinit(allocator);
+
+        self.attachment_ids_by_volume_consumer.deinit(allocator);
+        var attachment_iterator = self.volume_attachments_by_id.valueIterator();
+        while (attachment_iterator.next()) |attachment| attachment.deinit(allocator);
+        self.volume_attachments_by_id.deinit(allocator);
+
+        var allocation_iterator = self.replica_allocations_by_id.valueIterator();
+        while (allocation_iterator.next()) |allocation| allocation.deinit(allocator);
+        self.replica_allocations_by_id.deinit(allocator);
+
+        self.replica_ids_by_volume_index.deinit(allocator);
+        var replica_iterator = self.replica_placements_by_id.valueIterator();
+        while (replica_iterator.next()) |replica| replica.deinit(allocator);
+        self.replica_placements_by_id.deinit(allocator);
+
+        var tombstone_iterator = self.volume_tombstones_by_id.valueIterator();
+        while (tombstone_iterator.next()) |tombstone| tombstone.deinit(allocator);
+        self.volume_tombstones_by_id.deinit(allocator);
+
+        self.volume_ids_by_revision.deinit(allocator);
+        self.volume_ids_by_scoped_name.deinit(allocator);
+        var volume_iterator = self.volumes_by_id.valueIterator();
+        while (volume_iterator.next()) |volume| volume.deinit(allocator);
+        self.volumes_by_id.deinit(allocator);
 
         self.member_ids_by_slot.deinit(allocator);
         self.pool_ids_by_local_set.deinit(allocator);
@@ -308,6 +584,14 @@ pub const PoolStateMachine = struct {
         return self.state.members_by_id.count();
     }
 
+    pub fn volumeCount(self: *const PoolStateMachine) usize {
+        return self.state.volumes_by_id.count();
+    }
+
+    pub fn volumeTombstoneCount(self: *const PoolStateMachine) usize {
+        return self.state.volume_tombstones_by_id.count();
+    }
+
     pub fn validateHeartbeatBinding(self: *const PoolStateMachine, request: pb.ReportHeartbeatRequest) HeartbeatBindingResult {
         if (request.node_id.len == 0 or request.cluster_id.len != 16 or request.incarnation == 0 or request.sequence == 0) {
             return .binding_mismatch;
@@ -341,6 +625,11 @@ pub const PoolStateMachine = struct {
     pub fn getPoolById(self: *const PoolStateMachine, allocator: std.mem.Allocator, id: []const u8) !?pb.Pool {
         const pool = self.state.pools_by_id.get(id) orelse return null;
         return try dupePool(allocator, pool.proto());
+    }
+
+    pub fn getVolumeById(self: *const PoolStateMachine, allocator: std.mem.Allocator, id: []const u8) !?pb.Volume {
+        const volume = self.state.volumes_by_id.get(id) orelse return null;
+        return try dupeVolume(allocator, volume.proto());
     }
 
     pub fn getPoolByName(self: *const PoolStateMachine, allocator: std.mem.Allocator, name: []const u8) !?pb.Pool {
@@ -501,12 +790,19 @@ pub const PoolStateMachine = struct {
         var reader: std.Io.Reader = .fixed(entry.data);
         var envelope = pb.CommandEnvelope.decode(&reader, arena.allocator()) catch |err| return mapDecodeError(err);
         defer envelope.deinit(arena.allocator());
-        if (envelope.format_version != command_format_version) return error.PayloadParseFailed;
+        if (envelope.format_version != 1 and envelope.format_version != command_format_version) return error.PayloadParseFailed;
         return switch (envelope.command orelse return error.PayloadParseFailed) {
             .create_pool => |command| self.applyCreatePool(entry.index, command),
             .register_node => |command| self.applyRegisterNode(entry.index, command),
             .register_member => |command| self.applyRegisterMember(entry.index, command),
-            .create_volume, .delete_volume => error.PayloadParseFailed,
+            .create_volume => |command| if (envelope.format_version == command_format_version)
+                self.applyCreateVolume(entry.index, command)
+            else
+                error.PayloadParseFailed,
+            .delete_volume => |command| if (envelope.format_version == command_format_version)
+                self.applyDeleteVolume(entry.index, command)
+            else
+                error.PayloadParseFailed,
         };
     }
 
@@ -853,6 +1149,157 @@ pub const PoolStateMachine = struct {
         return .{ .response = returned_response };
     }
 
+    fn applyCreateVolume(self: *PoolStateMachine, revision: u64, command: pb.CreateVolumeCommand) raft.Error!raft.ApplyResult {
+        try validateCreateVolumeCommand(command);
+        if (revision == 0) return error.PayloadParseFailed;
+
+        const fingerprint = createVolumeFingerprint(command);
+        if (self.state.requests.get(command.request_id)) |request| {
+            if (request.kind != .create_volume or !std.mem.eql(u8, &fingerprint, &request.fingerprint)) {
+                return .{ .response = try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_REQUEST_CONFLICT, null) };
+            }
+            return .{ .response = try self.allocator.dupe(u8, request.encoded_response) };
+        }
+        if (self.state.requests.count() >= max_requests) {
+            return .{ .response = try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_REQUEST_LIMIT, null) };
+        }
+        if (!self.state.pools_by_id.contains(command.pool_id)) {
+            return self.recordCreateVolumeResponse(command, fingerprint, try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_POOL_NOT_FOUND, null), revision);
+        }
+        if (self.state.volumes_by_id.get(command.proposed_volume_id)) |existing| {
+            return self.recordCreateVolumeResponse(command, fingerprint, try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_ID_EXISTS, existing.proto()), revision);
+        }
+        if (self.state.volume_tombstones_by_id.get(command.proposed_volume_id)) |existing| {
+            return self.recordCreateVolumeResponse(command, fingerprint, try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_ID_EXISTS, existing.volume.proto()), revision);
+        }
+        var scoped_buffer: [36 + 1 + max_name_bytes]u8 = undefined;
+        const scoped_name = scopedKey(command.pool_id, command.name, &scoped_buffer);
+        if (self.state.volume_ids_by_scoped_name.get(scoped_name)) |existing_id| {
+            const existing = self.state.volumes_by_id.get(existing_id).?;
+            return self.recordCreateVolumeResponse(command, fingerprint, try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_NAME_EXISTS, existing.proto()), revision);
+        }
+        if (self.state.volumes_by_id.count() >= max_volumes) {
+            return self.recordCreateVolumeResponse(command, fingerprint, try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_VOLUME_LIMIT, null), revision);
+        }
+
+        const volume_proto: pb.Volume = .{
+            .id = command.proposed_volume_id,
+            .pool_id = command.pool_id,
+            .name = command.name,
+            .description = command.description,
+            .size_bytes = command.size_bytes,
+            .protection_kind = .VOLUME_PROTECTION_KIND_REPLICATED,
+            .target_replica_count = volume_target_replica_count,
+            .write_quorum = volume_write_quorum,
+            .read_quorum = volume_read_quorum,
+            .lifecycle_state = .VOLUME_LIFECYCLE_STATE_PROVISIONING,
+            .availability_state = .VOLUME_AVAILABILITY_STATE_UNKNOWN,
+            .operation_phase = .VOLUME_OPERATION_PHASE_NONE,
+            .generation = 1,
+            .write_epoch = 1,
+            .placement_revision = 0,
+            .created_at_unix_ms = command.proposed_created_at_unix_ms,
+            .created_revision = revision,
+            .resource_version = revision,
+        };
+        const encoded_response = try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_CREATED, volume_proto);
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodeCreateVolumeCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        var volume = try Volume.init(self.allocator, volume_proto);
+        errdefer volume.deinit(self.allocator);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+
+        try self.state.volumes_by_id.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.volume_ids_by_scoped_name.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.volume_ids_by_revision.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        self.state.volumes_by_id.putAssumeCapacity(volume.id, volume);
+        self.state.volume_ids_by_scoped_name.putAssumeCapacity(volume.scoped_name, volume.id);
+        self.state.volume_ids_by_revision.appendAssumeCapacity(volume.id);
+        self.state.max_volume_created_revision = @max(self.state.max_volume_created_revision, revision);
+        self.state.requests.putAssumeCapacity(request_id, .{ .request_id = request_id, .kind = .create_volume, .fingerprint = fingerprint, .encoded_response = encoded_response, .encoded_command = encoded_command, .applied_revision = revision });
+        return .{ .response = returned_response };
+    }
+
+    fn recordCreateVolumeResponse(self: *PoolStateMachine, command: pb.CreateVolumeCommand, fingerprint: Fingerprint, encoded_response: []u8, revision: u64) raft.Error!raft.ApplyResult {
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodeCreateVolumeCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        self.state.requests.putAssumeCapacity(request_id, .{ .request_id = request_id, .kind = .create_volume, .fingerprint = fingerprint, .encoded_response = encoded_response, .encoded_command = encoded_command, .applied_revision = revision });
+        return .{ .response = returned_response };
+    }
+
+    fn applyDeleteVolume(self: *PoolStateMachine, revision: u64, command: pb.DeleteVolumeCommand) raft.Error!raft.ApplyResult {
+        try validateDeleteVolumeCommand(command);
+        if (revision == 0) return error.PayloadParseFailed;
+
+        const fingerprint = deleteVolumeFingerprint(command);
+        if (self.state.requests.get(command.request_id)) |request| {
+            if (request.kind != .delete_volume or !std.mem.eql(u8, &fingerprint, &request.fingerprint)) {
+                return .{ .response = try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_REQUEST_CONFLICT, "", 0, 0) };
+            }
+            return .{ .response = try self.allocator.dupe(u8, request.encoded_response) };
+        }
+        if (self.state.requests.count() >= max_requests) {
+            return .{ .response = try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_REQUEST_LIMIT, "", 0, 0) };
+        }
+        const volume = self.state.volumes_by_id.get(command.volume_id) orelse {
+            return self.recordDeleteVolumeResponse(command, fingerprint, try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_NOT_FOUND, "", 0, 0), revision);
+        };
+        if (volume.resource_version != command.expected_resource_version) {
+            return self.recordDeleteVolumeResponse(command, fingerprint, try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_VERSION_CONFLICT, "", 0, 0), revision);
+        }
+        if (hasVolumeDependencies(&self.state, command.volume_id)) {
+            return self.recordDeleteVolumeResponse(command, fingerprint, try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES, "", 0, 0), revision);
+        }
+        if (self.state.volume_tombstones_by_id.count() >= max_volume_tombstones) {
+            return self.recordDeleteVolumeResponse(command, fingerprint, try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_TOMBSTONE_LIMIT, "", 0, 0), revision);
+        }
+
+        const encoded_response = try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_DELETED, command.volume_id, command.proposed_deleted_at_unix_ms, revision);
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodeDeleteVolumeCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+        try self.state.volume_tombstones_by_id.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+
+        var revision_index: usize = 0;
+        while (!std.mem.eql(u8, self.state.volume_ids_by_revision.items[revision_index], command.volume_id)) : (revision_index += 1) {}
+        const removed = self.state.volumes_by_id.fetchRemove(command.volume_id).?;
+        _ = self.state.volume_ids_by_scoped_name.remove(removed.value.scoped_name);
+        _ = self.state.volume_ids_by_revision.orderedRemove(revision_index);
+        self.state.volume_tombstones_by_id.putAssumeCapacity(removed.value.id, .{ .volume = removed.value, .deleted_at_unix_ms = command.proposed_deleted_at_unix_ms, .deleted_revision = revision });
+        self.state.max_volume_deleted_revision = @max(self.state.max_volume_deleted_revision, revision);
+        self.state.requests.putAssumeCapacity(request_id, .{ .request_id = request_id, .kind = .delete_volume, .fingerprint = fingerprint, .encoded_response = encoded_response, .encoded_command = encoded_command, .applied_revision = revision });
+        return .{ .response = returned_response };
+    }
+
+    fn recordDeleteVolumeResponse(self: *PoolStateMachine, command: pb.DeleteVolumeCommand, fingerprint: Fingerprint, encoded_response: []u8, revision: u64) raft.Error!raft.ApplyResult {
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodeDeleteVolumeCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        self.state.requests.putAssumeCapacity(request_id, .{ .request_id = request_id, .kind = .delete_volume, .fingerprint = fingerprint, .encoded_response = encoded_response, .encoded_command = encoded_command, .applied_revision = revision });
+        return .{ .response = returned_response };
+    }
+
     fn takeSnapshot(
         ctx: *anyopaque,
         allocator: std.mem.Allocator,
@@ -882,6 +1329,41 @@ pub const PoolStateMachine = struct {
         while (member_iterator.next()) |member| members.appendAssumeCapacity(member.proto());
         std.mem.sort(pb.Member, members.items, {}, memberIdLessThan);
 
+        var volumes: std.ArrayList(pb.Volume) = .empty;
+        defer volumes.deinit(allocator);
+        try volumes.ensureTotalCapacity(allocator, self.state.volumes_by_id.count());
+        var volume_iterator = self.state.volumes_by_id.valueIterator();
+        while (volume_iterator.next()) |volume| volumes.appendAssumeCapacity(volume.proto());
+        std.mem.sort(pb.Volume, volumes.items, {}, volumeIdLessThan);
+
+        var volume_tombstones: std.ArrayList(pb.VolumeTombstone) = .empty;
+        defer volume_tombstones.deinit(allocator);
+        try volume_tombstones.ensureTotalCapacity(allocator, self.state.volume_tombstones_by_id.count());
+        var tombstone_iterator = self.state.volume_tombstones_by_id.valueIterator();
+        while (tombstone_iterator.next()) |tombstone| volume_tombstones.appendAssumeCapacity(tombstone.proto());
+        std.mem.sort(pb.VolumeTombstone, volume_tombstones.items, {}, volumeTombstoneIdLessThan);
+
+        var replica_placements: std.ArrayList(pb.ReplicaPlacement) = .empty;
+        defer replica_placements.deinit(allocator);
+        try replica_placements.ensureTotalCapacity(allocator, self.state.replica_placements_by_id.count());
+        var replica_iterator = self.state.replica_placements_by_id.valueIterator();
+        while (replica_iterator.next()) |replica| replica_placements.appendAssumeCapacity(replica.proto());
+        std.mem.sort(pb.ReplicaPlacement, replica_placements.items, {}, replicaPlacementIdLessThan);
+
+        var replica_allocations: std.ArrayList(pb.ReplicaAllocation) = .empty;
+        defer replica_allocations.deinit(allocator);
+        try replica_allocations.ensureTotalCapacity(allocator, self.state.replica_allocations_by_id.count());
+        var allocation_iterator = self.state.replica_allocations_by_id.valueIterator();
+        while (allocation_iterator.next()) |allocation| replica_allocations.appendAssumeCapacity(allocation.proto());
+        std.mem.sort(pb.ReplicaAllocation, replica_allocations.items, {}, replicaAllocationIdLessThan);
+
+        var volume_attachments: std.ArrayList(pb.VolumeAttachment) = .empty;
+        defer volume_attachments.deinit(allocator);
+        try volume_attachments.ensureTotalCapacity(allocator, self.state.volume_attachments_by_id.count());
+        var attachment_iterator = self.state.volume_attachments_by_id.valueIterator();
+        while (attachment_iterator.next()) |attachment| volume_attachments.appendAssumeCapacity(attachment.proto());
+        std.mem.sort(pb.VolumeAttachment, volume_attachments.items, {}, volumeAttachmentIdLessThan);
+
         var requests: std.ArrayList(pb.RequestRecord) = .empty;
         defer requests.deinit(allocator);
         try requests.ensureTotalCapacity(allocator, self.state.requests.count());
@@ -903,6 +1385,11 @@ pub const PoolStateMachine = struct {
             .requests = requests,
             .nodes = nodes,
             .members = members,
+            .volumes = volumes,
+            .volume_tombstones = volume_tombstones,
+            .replica_placements = replica_placements,
+            .replica_allocations = replica_allocations,
+            .volume_attachments = volume_attachments,
         });
         errdefer allocator.free(data);
         if (data.len > max_snapshot_bytes) return error.MessageTooLarge;
@@ -934,13 +1421,19 @@ pub const PoolStateMachine = struct {
         var wire_reader: std.Io.Reader = .fixed(bytes.items);
         var snapshot = pb.StateSnapshot.decode(&wire_reader, arena.allocator()) catch |err| return mapDecodeError(err);
         defer snapshot.deinit(arena.allocator());
-        if (snapshot.format_version != 2 and snapshot.format_version != 3 and snapshot.format_version != snapshot_format_version) return error.PayloadParseFailed;
+        if (snapshot.format_version < 2 or snapshot.format_version > snapshot_format_version) return error.PayloadParseFailed;
         if (snapshot.pools.items.len > max_pools or
             snapshot.nodes.items.len > max_nodes or
             snapshot.members.items.len > max_members or
+            snapshot.volumes.items.len > max_volumes or
+            snapshot.volume_tombstones.items.len > max_volume_tombstones or
+            snapshot.replica_placements.items.len > max_replica_placements or
+            snapshot.replica_allocations.items.len > max_replica_allocations or
+            snapshot.volume_attachments.items.len > max_volume_attachments or
             snapshot.requests.items.len > max_requests or
             (snapshot.format_version == 2 and snapshot.nodes.items.len != 0) or
-            (snapshot.format_version < 4 and snapshot.members.items.len != 0))
+            (snapshot.format_version < 4 and snapshot.members.items.len != 0) or
+            (snapshot.format_version < 5 and (snapshot.volumes.items.len != 0 or snapshot.volume_tombstones.items.len != 0 or snapshot.replica_placements.items.len != 0 or snapshot.replica_allocations.items.len != 0 or snapshot.volume_attachments.items.len != 0)))
         {
             return error.PayloadParseFailed;
         }
@@ -967,6 +1460,27 @@ pub const PoolStateMachine = struct {
             try restoreMember(self.allocator, &restored, source);
         }
         std.mem.sort([]const u8, restored.member_ids_by_revision.items, &restored, memberRevisionIdLessThan);
+        for (snapshot.volumes.items) |source| {
+            if (source.created_revision > metadata.index or source.resource_version > metadata.index or revisions.contains(source.created_revision)) return error.PayloadParseFailed;
+            try revisions.put(self.allocator, source.created_revision, {});
+            try restoreVolume(self.allocator, &restored, source);
+        }
+        std.mem.sort([]const u8, restored.volume_ids_by_revision.items, &restored, volumeRevisionIdLessThan);
+        for (snapshot.volume_tombstones.items) |source| {
+            const source_volume = source.volume orelse return error.PayloadParseFailed;
+            if (source_volume.created_revision > metadata.index or revisions.contains(source_volume.created_revision)) return error.PayloadParseFailed;
+            try revisions.put(self.allocator, source_volume.created_revision, {});
+            try restoreVolumeTombstone(self.allocator, &restored, source, metadata.index);
+        }
+        for (snapshot.replica_placements.items) |source| {
+            try restoreReplicaPlacement(self.allocator, &restored, source, metadata.index);
+        }
+        for (snapshot.replica_allocations.items) |source| {
+            try restoreReplicaAllocation(self.allocator, &restored, source, metadata.index);
+        }
+        for (snapshot.volume_attachments.items) |source| {
+            try restoreVolumeAttachment(self.allocator, &restored, source, metadata.index);
+        }
 
         var created_pool_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer created_pool_ids.deinit(self.allocator);
@@ -974,6 +1488,10 @@ pub const PoolStateMachine = struct {
         defer registered_node_ids.deinit(self.allocator);
         var registered_member_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer registered_member_ids.deinit(self.allocator);
+        var created_volume_ids: std.StringHashMapUnmanaged(void) = .empty;
+        defer created_volume_ids.deinit(self.allocator);
+        var deleted_volume_ids: std.StringHashMapUnmanaged(void) = .empty;
+        defer deleted_volume_ids.deinit(self.allocator);
         var request_revisions: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer request_revisions.deinit(self.allocator);
         for (snapshot.requests.items) |source| {
@@ -998,12 +1516,22 @@ pub const PoolStateMachine = struct {
                         if (registered_member_ids.contains(id)) return error.PayloadParseFailed;
                         try registered_member_ids.put(self.allocator, id, {});
                     },
+                    .volume => |id| {
+                        if (created_volume_ids.contains(id)) return error.PayloadParseFailed;
+                        try created_volume_ids.put(self.allocator, id, {});
+                    },
+                    .volume_deleted => |id| {
+                        if (deleted_volume_ids.contains(id)) return error.PayloadParseFailed;
+                        try deleted_volume_ids.put(self.allocator, id, {});
+                    },
                 }
             }
         }
         if (created_pool_ids.count() != restored.pools_by_id.count() or
             registered_node_ids.count() != restored.nodes_by_id.count() or
-            registered_member_ids.count() != restored.members_by_id.count())
+            registered_member_ids.count() != restored.members_by_id.count() or
+            created_volume_ids.count() != restored.volumes_by_id.count() + restored.volume_tombstones_by_id.count() or
+            deleted_volume_ids.count() != restored.volume_tombstones_by_id.count())
         {
             return error.PayloadParseFailed;
         }
@@ -1049,6 +1577,22 @@ pub fn encodeRegisterMemberCommand(allocator: std.mem.Allocator, command: pb.Reg
     });
 }
 
+pub fn encodeCreateVolumeCommand(allocator: std.mem.Allocator, command: pb.CreateVolumeCommand) ![]u8 {
+    try validateCreateVolumeCommand(command);
+    return encodeMessage(allocator, pb.CommandEnvelope{
+        .format_version = command_format_version,
+        .command = .{ .create_volume = command },
+    });
+}
+
+pub fn encodeDeleteVolumeCommand(allocator: std.mem.Allocator, command: pb.DeleteVolumeCommand) ![]u8 {
+    try validateDeleteVolumeCommand(command);
+    return encodeMessage(allocator, pb.CommandEnvelope{
+        .format_version = command_format_version,
+        .command = .{ .delete_volume = command },
+    });
+}
+
 pub fn decodeApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.ApplyResponse {
     var reader: std.Io.Reader = .fixed(bytes);
     return pb.ApplyResponse.decode(&reader, allocator);
@@ -1062,6 +1606,16 @@ pub fn decodeRegisterNodeApplyResponse(allocator: std.mem.Allocator, bytes: []co
 pub fn decodeRegisterMemberApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.RegisterMemberApplyResponse {
     var reader: std.Io.Reader = .fixed(bytes);
     return pb.RegisterMemberApplyResponse.decode(&reader, allocator);
+}
+
+pub fn decodeCreateVolumeApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.CreateVolumeApplyResponse {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return pb.CreateVolumeApplyResponse.decode(&reader, allocator);
+}
+
+pub fn decodeDeleteVolumeApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.DeleteVolumeApplyResponse {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return pb.DeleteVolumeApplyResponse.decode(&reader, allocator);
 }
 
 pub fn deinitPoolList(allocator: std.mem.Allocator, pools: []pb.Pool) void {
@@ -1135,6 +1689,55 @@ fn validateMember(member: pb.Member) raft.Error!void {
     if (member.registered_at_unix_ms <= 0 or member.registered_revision == 0) return error.PayloadParseFailed;
 }
 
+fn validateCreateVolumeCommand(command: pb.CreateVolumeCommand) raft.Error!void {
+    if (!validText(command.request_id, max_request_id_bytes, false)) return error.PayloadParseFailed;
+    if (!validUuidV7(command.proposed_volume_id) or !validUuidV7(command.pool_id)) return error.PayloadParseFailed;
+    if (!validText(command.name, max_name_bytes, false)) return error.PayloadParseFailed;
+    if (!validText(command.description, max_description_bytes, true)) return error.PayloadParseFailed;
+    if (!validVolumeSize(command.size_bytes) or command.proposed_created_at_unix_ms <= 0) return error.PayloadParseFailed;
+}
+
+fn validateDeleteVolumeCommand(command: pb.DeleteVolumeCommand) raft.Error!void {
+    if (!validText(command.request_id, max_request_id_bytes, false)) return error.PayloadParseFailed;
+    if (!validUuidV7(command.volume_id) or command.expected_resource_version == 0 or command.proposed_deleted_at_unix_ms <= 0) return error.PayloadParseFailed;
+}
+
+fn validateVolume(volume: pb.Volume) raft.Error!void {
+    if (!validUuidV7(volume.id) or !validUuidV7(volume.pool_id)) return error.PayloadParseFailed;
+    if (!validText(volume.name, max_name_bytes, false) or !validText(volume.description, max_description_bytes, true)) return error.PayloadParseFailed;
+    if (!validVolumeSize(volume.size_bytes) or
+        volume.protection_kind != .VOLUME_PROTECTION_KIND_REPLICATED or
+        volume.target_replica_count != volume_target_replica_count or
+        volume.write_quorum != volume_write_quorum or
+        volume.read_quorum != volume_read_quorum or
+        !validVolumeLifecycleState(volume.lifecycle_state) or
+        !validVolumeAvailabilityState(volume.availability_state) or
+        !validVolumeOperationPhase(volume.operation_phase) or
+        volume.generation == 0 or volume.write_epoch == 0 or
+        volume.created_at_unix_ms <= 0 or volume.created_revision == 0 or
+        volume.resource_version < volume.created_revision or
+        volume.placement_revision > volume.resource_version)
+    {
+        return error.PayloadParseFailed;
+    }
+}
+
+fn validVolumeSize(size_bytes: u64) bool {
+    return size_bytes >= min_volume_size_bytes and size_bytes <= max_volume_size_bytes and size_bytes % volume_block_size_bytes == 0;
+}
+
+fn validVolumeLifecycleState(value: pb.VolumeLifecycleState) bool {
+    return value != .VOLUME_LIFECYCLE_STATE_UNSPECIFIED;
+}
+
+fn validVolumeAvailabilityState(value: pb.VolumeAvailabilityState) bool {
+    return value != .VOLUME_AVAILABILITY_STATE_UNSPECIFIED;
+}
+
+fn validVolumeOperationPhase(value: pb.VolumeOperationPhase) bool {
+    return value != .VOLUME_OPERATION_PHASE_UNSPECIFIED;
+}
+
 fn validClusterId(value: []const u8) bool {
     return validFixedNonzero(value, 16);
 }
@@ -1190,6 +1793,26 @@ fn registerMemberFingerprint(command: pb.RegisterMemberCommand) Fingerprint {
     return result;
 }
 
+fn createVolumeFingerprint(command: pb.CreateVolumeCommand) Fingerprint {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hasher, command.pool_id);
+    hashField(&hasher, command.name);
+    hashField(&hasher, command.description);
+    hashInt(&hasher, u64, command.size_bytes);
+    var result: Fingerprint = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+fn deleteVolumeFingerprint(command: pb.DeleteVolumeCommand) Fingerprint {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hasher, command.volume_id);
+    hashInt(&hasher, u64, command.expected_resource_version);
+    var result: Fingerprint = undefined;
+    hasher.final(&result);
+    return result;
+}
+
 fn semanticFingerprint(name: []const u8, description: []const u8) Fingerprint {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hasher, name);
@@ -1230,6 +1853,14 @@ fn encodeRegisterMemberApplyResponse(
     member: ?pb.Member,
 ) raft.Error![]u8 {
     return encodeMessage(allocator, pb.RegisterMemberApplyResponse{ .code = code, .member = member });
+}
+
+fn encodeCreateVolumeApplyResponse(allocator: std.mem.Allocator, code: pb.CreateVolumeApplyCode, volume: ?pb.Volume) raft.Error![]u8 {
+    return encodeMessage(allocator, pb.CreateVolumeApplyResponse{ .code = code, .volume = volume });
+}
+
+fn encodeDeleteVolumeApplyResponse(allocator: std.mem.Allocator, code: pb.DeleteVolumeApplyCode, volume_id: []const u8, deleted_at_unix_ms: i64, deleted_revision: u64) raft.Error![]u8 {
+    return encodeMessage(allocator, pb.DeleteVolumeApplyResponse{ .code = code, .volume_id = volume_id, .deleted_at_unix_ms = deleted_at_unix_ms, .deleted_revision = deleted_revision });
 }
 
 fn encodeMessage(allocator: std.mem.Allocator, message: anytype) raft.Error![]u8 {
@@ -1295,10 +1926,147 @@ fn restoreMember(allocator: std.mem.Allocator, state: *State, source: pb.Member)
     state.max_member_registered_revision = @max(state.max_member_registered_revision, member.registered_revision);
 }
 
+fn restoreVolume(allocator: std.mem.Allocator, state: *State, source: pb.Volume) raft.Error!void {
+    try validateVolume(source);
+    if (!state.pools_by_id.contains(source.pool_id) or state.volumes_by_id.contains(source.id) or state.volume_tombstones_by_id.contains(source.id)) return error.PayloadParseFailed;
+    var scoped_buffer: [36 + 1 + max_name_bytes]u8 = undefined;
+    if (state.volume_ids_by_scoped_name.contains(scopedKey(source.pool_id, source.name, &scoped_buffer))) return error.PayloadParseFailed;
+    var volume = try Volume.init(allocator, source);
+    errdefer volume.deinit(allocator);
+    try state.volumes_by_id.ensureUnusedCapacity(allocator, 1);
+    try state.volume_ids_by_scoped_name.ensureUnusedCapacity(allocator, 1);
+    try state.volume_ids_by_revision.ensureUnusedCapacity(allocator, 1);
+    state.volumes_by_id.putAssumeCapacity(volume.id, volume);
+    state.volume_ids_by_scoped_name.putAssumeCapacity(volume.scoped_name, volume.id);
+    state.volume_ids_by_revision.appendAssumeCapacity(volume.id);
+    state.max_volume_created_revision = @max(state.max_volume_created_revision, volume.created_revision);
+}
+
+fn restoreVolumeTombstone(allocator: std.mem.Allocator, state: *State, source: pb.VolumeTombstone, snapshot_index: u64) raft.Error!void {
+    const source_volume = source.volume orelse return error.PayloadParseFailed;
+    try validateVolume(source_volume);
+    if (!state.pools_by_id.contains(source_volume.pool_id) or
+        state.volumes_by_id.contains(source_volume.id) or
+        state.volume_tombstones_by_id.contains(source_volume.id) or
+        source_volume.resource_version > snapshot_index or
+        source.deleted_at_unix_ms <= 0 or
+        source.deleted_revision <= source_volume.resource_version or
+        source.deleted_revision > snapshot_index)
+    {
+        return error.PayloadParseFailed;
+    }
+    var volume = try Volume.init(allocator, source_volume);
+    errdefer volume.deinit(allocator);
+    try state.volume_tombstones_by_id.ensureUnusedCapacity(allocator, 1);
+    state.volume_tombstones_by_id.putAssumeCapacity(volume.id, .{ .volume = volume, .deleted_at_unix_ms = source.deleted_at_unix_ms, .deleted_revision = source.deleted_revision });
+    state.max_volume_created_revision = @max(state.max_volume_created_revision, volume.created_revision);
+    state.max_volume_deleted_revision = @max(state.max_volume_deleted_revision, source.deleted_revision);
+}
+
+fn restoreReplicaPlacement(allocator: std.mem.Allocator, state: *State, source: pb.ReplicaPlacement, snapshot_index: u64) raft.Error!void {
+    if (!validUuidV7(source.id) or !validUuidV7(source.volume_id) or !validUuidV7(source.node_id) or
+        source.replica_index >= volume_target_replica_count or source.generation == 0 or
+        !validReplicaPlacementState(source.state) or !validResourceRevisions(source.created_revision, source.resource_version, snapshot_index))
+    {
+        return error.PayloadParseFailed;
+    }
+    const volume = state.volumes_by_id.get(source.volume_id) orelse return error.PayloadParseFailed;
+    const node = state.nodes_by_id.get(source.node_id) orelse return error.PayloadParseFailed;
+    if (source.generation > volume.generation or state.replica_placements_by_id.contains(source.id)) return error.PayloadParseFailed;
+    var key_buffer: [36 + @sizeOf(u32)]u8 = undefined;
+    if (state.replica_ids_by_volume_index.contains(replicaKey(source.volume_id, source.replica_index, &key_buffer))) return error.PayloadParseFailed;
+    for (0..volume_target_replica_count) |replica_index| {
+        var existing_key_buffer: [36 + @sizeOf(u32)]u8 = undefined;
+        const existing_id = state.replica_ids_by_volume_index.get(replicaKey(source.volume_id, @intCast(replica_index), &existing_key_buffer)) orelse continue;
+        const existing = state.replica_placements_by_id.get(existing_id).?;
+        const existing_node = state.nodes_by_id.get(existing.node_id).?;
+        if (std.mem.eql(u8, existing.node_id, source.node_id) or std.mem.eql(u8, existing_node.failure_domain, node.failure_domain)) return error.PayloadParseFailed;
+    }
+    var replica = try ReplicaPlacement.init(allocator, source);
+    errdefer replica.deinit(allocator);
+    try state.replica_placements_by_id.ensureUnusedCapacity(allocator, 1);
+    try state.replica_ids_by_volume_index.ensureUnusedCapacity(allocator, 1);
+    state.replica_placements_by_id.putAssumeCapacity(replica.id, replica);
+    state.replica_ids_by_volume_index.putAssumeCapacity(replica.replica_key, replica.id);
+}
+
+fn restoreReplicaAllocation(allocator: std.mem.Allocator, state: *State, source: pb.ReplicaAllocation, snapshot_index: u64) raft.Error!void {
+    if (!validUuidV7(source.id) or !validUuidV7(source.replica_id) or !validFixedNonzero(source.member_id, 16) or
+        source.length_bytes == 0 or source.generation == 0 or !validReplicaAllocationState(source.state) or
+        !validResourceRevisions(source.created_revision, source.resource_version, snapshot_index) or
+        state.replica_allocations_by_id.contains(source.id))
+    {
+        return error.PayloadParseFailed;
+    }
+    const replica = state.replica_placements_by_id.get(source.replica_id) orelse return error.PayloadParseFailed;
+    const volume = state.volumes_by_id.get(replica.volume_id) orelse return error.PayloadParseFailed;
+    const member = state.members_by_id.get(source.member_id) orelse return error.PayloadParseFailed;
+    const end = std.math.add(u64, source.offset_bytes, source.length_bytes) catch return error.PayloadParseFailed;
+    if (!std.mem.eql(u8, member.pool_id, volume.pool_id) or !std.mem.eql(u8, member.node_id, replica.node_id) or
+        source.generation > replica.generation or source.offset_bytes % member.extent_size_bytes != 0 or
+        source.length_bytes % member.extent_size_bytes != 0 or end > member.data_capacity_bytes)
+    {
+        return error.PayloadParseFailed;
+    }
+    var allocation_iterator = state.replica_allocations_by_id.valueIterator();
+    while (allocation_iterator.next()) |existing| {
+        if (!std.mem.eql(u8, existing.member_id, source.member_id)) continue;
+        const existing_end = existing.offset_bytes + existing.length_bytes;
+        if (source.offset_bytes < existing_end and existing.offset_bytes < end) return error.PayloadParseFailed;
+    }
+    var allocation = try ReplicaAllocation.init(allocator, source);
+    errdefer allocation.deinit(allocator);
+    try state.replica_allocations_by_id.ensureUnusedCapacity(allocator, 1);
+    state.replica_allocations_by_id.putAssumeCapacity(allocation.id, allocation);
+}
+
+fn restoreVolumeAttachment(allocator: std.mem.Allocator, state: *State, source: pb.VolumeAttachment, snapshot_index: u64) raft.Error!void {
+    if (!validUuidV7(source.id) or !validUuidV7(source.volume_id) or !validUuidV7(source.target_node_id) or
+        !validText(source.consumer_id, max_consumer_id_bytes, false) or !validVolumeAccessMode(source.access_mode) or
+        !validVolumeAttachmentState(source.state) or source.generation == 0 or
+        !validResourceRevisions(source.created_revision, source.resource_version, snapshot_index) or
+        state.volume_attachments_by_id.contains(source.id))
+    {
+        return error.PayloadParseFailed;
+    }
+    const volume = state.volumes_by_id.get(source.volume_id) orelse return error.PayloadParseFailed;
+    if (!state.nodes_by_id.contains(source.target_node_id) or source.generation > volume.generation) return error.PayloadParseFailed;
+    var key_buffer: [36 + 1 + max_consumer_id_bytes]u8 = undefined;
+    if (state.attachment_ids_by_volume_consumer.contains(scopedKey(source.volume_id, source.consumer_id, &key_buffer))) return error.PayloadParseFailed;
+    var attachment = try VolumeAttachment.init(allocator, source);
+    errdefer attachment.deinit(allocator);
+    try state.volume_attachments_by_id.ensureUnusedCapacity(allocator, 1);
+    try state.attachment_ids_by_volume_consumer.ensureUnusedCapacity(allocator, 1);
+    state.volume_attachments_by_id.putAssumeCapacity(attachment.id, attachment);
+    state.attachment_ids_by_volume_consumer.putAssumeCapacity(attachment.consumer_key, attachment.id);
+}
+
+fn validResourceRevisions(created_revision: u64, resource_version: u64, snapshot_index: u64) bool {
+    return created_revision != 0 and resource_version >= created_revision and resource_version <= snapshot_index;
+}
+
+fn validReplicaPlacementState(value: pb.ReplicaPlacementState) bool {
+    return value == .REPLICA_PLACEMENT_STATE_RESERVED or value == .REPLICA_PLACEMENT_STATE_ACTIVE or value == .REPLICA_PLACEMENT_STATE_RETIRING;
+}
+
+fn validReplicaAllocationState(value: pb.ReplicaAllocationState) bool {
+    return value == .REPLICA_ALLOCATION_STATE_RESERVED or value == .REPLICA_ALLOCATION_STATE_ACTIVE or value == .REPLICA_ALLOCATION_STATE_RETIRING;
+}
+
+fn validVolumeAccessMode(value: pb.VolumeAccessMode) bool {
+    return value == .VOLUME_ACCESS_MODE_SINGLE_NODE_WRITER or value == .VOLUME_ACCESS_MODE_SINGLE_NODE_READER;
+}
+
+fn validVolumeAttachmentState(value: pb.VolumeAttachmentState) bool {
+    return value == .VOLUME_ATTACHMENT_STATE_ATTACHING or value == .VOLUME_ATTACHMENT_STATE_ATTACHED or value == .VOLUME_ATTACHMENT_STATE_DETACHING or value == .VOLUME_ATTACHMENT_STATE_FAILED;
+}
+
 const RestoredCreation = union(enum) {
     pool: []const u8,
     node: []const u8,
     member: []const u8,
+    volume: []const u8,
+    volume_deleted: []const u8,
 };
 
 fn restoreRequest(
@@ -1315,7 +2083,7 @@ fn restoreRequest(
     var command_reader: std.Io.Reader = .fixed(source.encoded_command);
     var envelope = pb.CommandEnvelope.decode(&command_reader, decode_allocator) catch |err| return mapDecodeError(err);
     defer envelope.deinit(decode_allocator);
-    if (envelope.format_version != command_format_version) return error.PayloadParseFailed;
+    if (envelope.format_version != 1 and envelope.format_version != command_format_version) return error.PayloadParseFailed;
     switch (envelope.command orelse return error.PayloadParseFailed) {
         .create_pool => |command| {
             try validateCommand(command);
@@ -1370,7 +2138,42 @@ fn restoreRequest(
             try insertRestoredRequest(allocator, state, source, .register_member, encoded_response, encoded_command);
             return if (registered_member_id) |id| RestoredCreation{ .member = id } else null;
         },
-        .create_volume, .delete_volume => return error.PayloadParseFailed,
+        .create_volume => |command| {
+            if (snapshot_version < 5 or envelope.format_version != command_format_version) return error.PayloadParseFailed;
+            try validateCreateVolumeCommand(command);
+            if (!std.mem.eql(u8, source.request_id, command.request_id)) return error.PayloadParseFailed;
+            const expected_fingerprint = createVolumeFingerprint(command);
+            if (!std.mem.eql(u8, source.request_fingerprint, &expected_fingerprint)) return error.PayloadParseFailed;
+
+            var response_reader: std.Io.Reader = .fixed(source.encoded_response);
+            var response = pb.CreateVolumeApplyResponse.decode(&response_reader, decode_allocator) catch |err| return mapDecodeError(err);
+            defer response.deinit(decode_allocator);
+            const created_volume_id = try validateStoredVolumeResponse(state, command, response, source.applied_revision);
+            const encoded_response = try encodeCreateVolumeApplyResponse(allocator, response.code, response.volume);
+            errdefer allocator.free(encoded_response);
+            const encoded_command = try encodeCreateVolumeCommand(allocator, command);
+            errdefer allocator.free(encoded_command);
+            try insertRestoredRequest(allocator, state, source, .create_volume, encoded_response, encoded_command);
+            return if (created_volume_id) |id| RestoredCreation{ .volume = id } else null;
+        },
+        .delete_volume => |command| {
+            if (snapshot_version < 5 or envelope.format_version != command_format_version) return error.PayloadParseFailed;
+            try validateDeleteVolumeCommand(command);
+            if (!std.mem.eql(u8, source.request_id, command.request_id)) return error.PayloadParseFailed;
+            const expected_fingerprint = deleteVolumeFingerprint(command);
+            if (!std.mem.eql(u8, source.request_fingerprint, &expected_fingerprint)) return error.PayloadParseFailed;
+
+            var response_reader: std.Io.Reader = .fixed(source.encoded_response);
+            var response = pb.DeleteVolumeApplyResponse.decode(&response_reader, decode_allocator) catch |err| return mapDecodeError(err);
+            defer response.deinit(decode_allocator);
+            try validateStoredDeleteVolumeResponse(state, command, response, source.applied_revision);
+            const encoded_response = try encodeDeleteVolumeApplyResponse(allocator, response.code, response.volume_id, response.deleted_at_unix_ms, response.deleted_revision);
+            errdefer allocator.free(encoded_response);
+            const encoded_command = try encodeDeleteVolumeCommand(allocator, command);
+            errdefer allocator.free(encoded_command);
+            try insertRestoredRequest(allocator, state, source, .delete_volume, encoded_response, encoded_command);
+            return if (response.code == .DELETE_VOLUME_APPLY_CODE_DELETED) RestoredCreation{ .volume_deleted = state.volume_tombstones_by_id.get(command.volume_id).?.volume.id } else null;
+        },
     }
 }
 
@@ -1614,6 +2417,159 @@ fn validateStoredMemberResponse(
     }
 }
 
+fn validateStoredVolumeResponse(
+    state: *const State,
+    command: pb.CreateVolumeCommand,
+    response: pb.CreateVolumeApplyResponse,
+    applied_revision: u64,
+) raft.Error!?[]const u8 {
+    const pool = state.pools_by_id.get(command.pool_id);
+    const pool_existed = if (pool) |value| value.created_revision < applied_revision else false;
+    const id_volume = storedVolumeById(state, command.proposed_volume_id);
+    const id_existed = if (id_volume) |value| volumeWasLiveAt(state, value.id, applied_revision) else false;
+    const name_volume = volumeByScopedNameAt(state, command.pool_id, command.name, applied_revision);
+
+    switch (response.code) {
+        .CREATE_VOLUME_APPLY_CODE_CREATED => {
+            const response_volume = response.volume orelse return error.PayloadParseFailed;
+            const stored_volume = storedVolumeById(state, response_volume.id) orelse return error.PayloadParseFailed;
+            if (!volumesEqual(stored_volume, response_volume) or
+                !std.mem.eql(u8, command.proposed_volume_id, response_volume.id) or
+                !std.mem.eql(u8, command.pool_id, response_volume.pool_id) or
+                !std.mem.eql(u8, command.name, response_volume.name) or
+                !std.mem.eql(u8, command.description, response_volume.description) or
+                command.size_bytes != response_volume.size_bytes or
+                command.proposed_created_at_unix_ms != response_volume.created_at_unix_ms or
+                response_volume.created_revision != applied_revision or
+                response_volume.resource_version != applied_revision or !pool_existed or id_existed or name_volume != null)
+            {
+                return error.PayloadParseFailed;
+            }
+            return storedVolumeId(state, response_volume.id).?;
+        },
+        .CREATE_VOLUME_APPLY_CODE_POOL_NOT_FOUND => {
+            if (response.volume != null or pool_existed) return error.PayloadParseFailed;
+            return null;
+        },
+        .CREATE_VOLUME_APPLY_CODE_ID_EXISTS => {
+            const response_volume = response.volume orelse return error.PayloadParseFailed;
+            if (!pool_existed or !id_existed or !std.mem.eql(u8, response_volume.id, command.proposed_volume_id) or
+                !volumesEqual(id_volume.?, response_volume)) return error.PayloadParseFailed;
+            return null;
+        },
+        .CREATE_VOLUME_APPLY_CODE_NAME_EXISTS => {
+            const response_volume = response.volume orelse return error.PayloadParseFailed;
+            if (!pool_existed or id_existed or name_volume == null or !volumesEqual(name_volume.?, response_volume)) return error.PayloadParseFailed;
+            return null;
+        },
+        .CREATE_VOLUME_APPLY_CODE_VOLUME_LIMIT => {
+            if (response.volume != null or !pool_existed or id_existed or name_volume != null or
+                liveVolumeCountAt(state, applied_revision) != max_volumes)
+            {
+                return error.PayloadParseFailed;
+            }
+            return null;
+        },
+        else => return error.PayloadParseFailed,
+    }
+}
+
+fn validateStoredDeleteVolumeResponse(
+    state: *const State,
+    command: pb.DeleteVolumeCommand,
+    response: pb.DeleteVolumeApplyResponse,
+    applied_revision: u64,
+) raft.Error!void {
+    const volume = storedVolumeById(state, command.volume_id);
+    const was_live = if (volume) |value| volumeWasLiveAt(state, value.id, applied_revision) else false;
+    const response_is_empty = response.volume_id.len == 0 and response.deleted_at_unix_ms == 0 and response.deleted_revision == 0;
+    switch (response.code) {
+        .DELETE_VOLUME_APPLY_CODE_DELETED => {
+            const tombstone = state.volume_tombstones_by_id.get(command.volume_id) orelse return error.PayloadParseFailed;
+            if (!std.mem.eql(u8, response.volume_id, command.volume_id) or
+                response.deleted_at_unix_ms != command.proposed_deleted_at_unix_ms or
+                response.deleted_revision != applied_revision or
+                tombstone.deleted_at_unix_ms != response.deleted_at_unix_ms or
+                tombstone.deleted_revision != response.deleted_revision or
+                tombstone.volume.resource_version != command.expected_resource_version)
+            {
+                return error.PayloadParseFailed;
+            }
+        },
+        .DELETE_VOLUME_APPLY_CODE_NOT_FOUND => {
+            if (!response_is_empty or was_live) return error.PayloadParseFailed;
+        },
+        .DELETE_VOLUME_APPLY_CODE_VERSION_CONFLICT => {
+            if (!response_is_empty or !was_live or volume.?.resource_version == command.expected_resource_version) return error.PayloadParseFailed;
+        },
+        .DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES => {
+            if (!response_is_empty or !was_live or volume.?.resource_version != command.expected_resource_version or !hasVolumeDependenciesBefore(state, command.volume_id, applied_revision)) return error.PayloadParseFailed;
+        },
+        .DELETE_VOLUME_APPLY_CODE_TOMBSTONE_LIMIT => {
+            if (!response_is_empty or !was_live or volume.?.resource_version != command.expected_resource_version or
+                hasVolumeDependenciesBefore(state, command.volume_id, applied_revision) or tombstoneCountBefore(state, applied_revision) != max_volume_tombstones or
+                state.max_volume_deleted_revision >= applied_revision)
+            {
+                return error.PayloadParseFailed;
+            }
+        },
+        else => return error.PayloadParseFailed,
+    }
+}
+
+fn storedVolumeById(state: *const State, id: []const u8) ?pb.Volume {
+    if (state.volumes_by_id.get(id)) |volume| return volume.proto();
+    if (state.volume_tombstones_by_id.get(id)) |tombstone| return tombstone.volume.proto();
+    return null;
+}
+
+fn storedVolumeId(state: *const State, id: []const u8) ?[]const u8 {
+    if (state.volumes_by_id.get(id)) |volume| return volume.id;
+    if (state.volume_tombstones_by_id.get(id)) |tombstone| return tombstone.volume.id;
+    return null;
+}
+
+fn volumeWasLiveAt(state: *const State, id: []const u8, revision: u64) bool {
+    if (state.volumes_by_id.get(id)) |volume| return volume.created_revision < revision;
+    if (state.volume_tombstones_by_id.get(id)) |tombstone| return tombstone.volume.created_revision < revision and tombstone.deleted_revision >= revision;
+    return false;
+}
+
+fn volumeByScopedNameAt(state: *const State, pool_id: []const u8, name: []const u8, revision: u64) ?pb.Volume {
+    var iterator = state.volumes_by_id.valueIterator();
+    while (iterator.next()) |volume| {
+        if (volume.created_revision < revision and std.mem.eql(u8, volume.pool_id, pool_id) and std.mem.eql(u8, volume.name, name)) return volume.proto();
+    }
+    var tombstone_iterator = state.volume_tombstones_by_id.valueIterator();
+    while (tombstone_iterator.next()) |tombstone| {
+        const volume = tombstone.volume;
+        if (volume.created_revision < revision and tombstone.deleted_revision >= revision and std.mem.eql(u8, volume.pool_id, pool_id) and std.mem.eql(u8, volume.name, name)) return volume.proto();
+    }
+    return null;
+}
+
+fn liveVolumeCountAt(state: *const State, revision: u64) usize {
+    var count: usize = 0;
+    var iterator = state.volumes_by_id.valueIterator();
+    while (iterator.next()) |volume| if (volume.created_revision < revision) {
+        count += 1;
+    };
+    var tombstone_iterator = state.volume_tombstones_by_id.valueIterator();
+    while (tombstone_iterator.next()) |tombstone| if (tombstone.volume.created_revision < revision and tombstone.deleted_revision >= revision) {
+        count += 1;
+    };
+    return count;
+}
+
+fn tombstoneCountBefore(state: *const State, revision: u64) usize {
+    var count: usize = 0;
+    var iterator = state.volume_tombstones_by_id.valueIterator();
+    while (iterator.next()) |tombstone| if (tombstone.deleted_revision < revision) {
+        count += 1;
+    };
+    return count;
+}
+
 fn memberLocalSetPoolBefore(state: *const State, local_set_id: []const u8, revision: u64) ?[]const u8 {
     for (state.member_ids_by_revision.items) |id| {
         const member = state.members_by_id.get(id).?;
@@ -1657,6 +2613,20 @@ fn membersEqual(lhs: pb.Member, rhs: pb.Member) bool {
         lhs.registered_revision == rhs.registered_revision;
 }
 
+fn volumesEqual(lhs: pb.Volume, rhs: pb.Volume) bool {
+    return std.mem.eql(u8, lhs.id, rhs.id) and
+        std.mem.eql(u8, lhs.pool_id, rhs.pool_id) and
+        std.mem.eql(u8, lhs.name, rhs.name) and
+        std.mem.eql(u8, lhs.description, rhs.description) and
+        lhs.size_bytes == rhs.size_bytes and lhs.protection_kind == rhs.protection_kind and
+        lhs.target_replica_count == rhs.target_replica_count and lhs.write_quorum == rhs.write_quorum and
+        lhs.read_quorum == rhs.read_quorum and lhs.lifecycle_state == rhs.lifecycle_state and
+        lhs.availability_state == rhs.availability_state and lhs.operation_phase == rhs.operation_phase and
+        lhs.generation == rhs.generation and lhs.write_epoch == rhs.write_epoch and
+        lhs.placement_revision == rhs.placement_revision and lhs.created_at_unix_ms == rhs.created_at_unix_ms and
+        lhs.created_revision == rhs.created_revision and lhs.resource_version == rhs.resource_version;
+}
+
 fn dupePool(allocator: std.mem.Allocator, source: pb.Pool) !pb.Pool {
     const owned = try Pool.init(allocator, source);
     return owned.proto();
@@ -1670,6 +2640,56 @@ fn dupeNode(allocator: std.mem.Allocator, source: pb.Node) !pb.Node {
 fn dupeMember(allocator: std.mem.Allocator, source: pb.Member) !pb.Member {
     const owned = try Member.init(allocator, source);
     return owned.proto();
+}
+
+fn dupeVolume(allocator: std.mem.Allocator, source: pb.Volume) !pb.Volume {
+    var owned = try Volume.init(allocator, source);
+    allocator.free(owned.scoped_name);
+    owned.scoped_name = undefined;
+    return owned.proto();
+}
+
+fn scopedKey(prefix: []const u8, suffix: []const u8, buffer: []u8) []const u8 {
+    std.debug.assert(buffer.len >= prefix.len + 1 + suffix.len);
+    @memcpy(buffer[0..prefix.len], prefix);
+    buffer[prefix.len] = 0;
+    @memcpy(buffer[prefix.len + 1 .. prefix.len + 1 + suffix.len], suffix);
+    return buffer[0 .. prefix.len + 1 + suffix.len];
+}
+
+fn makeScopedKey(allocator: std.mem.Allocator, prefix: []const u8, suffix: []const u8) ![]u8 {
+    const result = try allocator.alloc(u8, prefix.len + 1 + suffix.len);
+    _ = scopedKey(prefix, suffix, result);
+    return result;
+}
+
+fn replicaKey(volume_id: []const u8, replica_index: u32, buffer: []u8) []const u8 {
+    std.debug.assert(buffer.len >= volume_id.len + 1 and replica_index < volume_target_replica_count);
+    @memcpy(buffer[0..volume_id.len], volume_id);
+    buffer[volume_id.len] = @intCast(replica_index);
+    return buffer[0 .. volume_id.len + 1];
+}
+
+fn makeReplicaKey(allocator: std.mem.Allocator, volume_id: []const u8, replica_index: u32) ![]u8 {
+    const result = try allocator.alloc(u8, volume_id.len + 1);
+    _ = replicaKey(volume_id, replica_index, result);
+    return result;
+}
+
+fn hasVolumeDependencies(state: *const State, volume_id: []const u8) bool {
+    var replica_iterator = state.replica_placements_by_id.valueIterator();
+    while (replica_iterator.next()) |replica| if (std.mem.eql(u8, replica.volume_id, volume_id)) return true;
+    var attachment_iterator = state.volume_attachments_by_id.valueIterator();
+    while (attachment_iterator.next()) |attachment| if (std.mem.eql(u8, attachment.volume_id, volume_id)) return true;
+    return false;
+}
+
+fn hasVolumeDependenciesBefore(state: *const State, volume_id: []const u8, revision: u64) bool {
+    var replica_iterator = state.replica_placements_by_id.valueIterator();
+    while (replica_iterator.next()) |replica| if (replica.created_revision < revision and std.mem.eql(u8, replica.volume_id, volume_id)) return true;
+    var attachment_iterator = state.volume_attachments_by_id.valueIterator();
+    while (attachment_iterator.next()) |attachment| if (attachment.created_revision < revision and std.mem.eql(u8, attachment.volume_id, volume_id)) return true;
+    return false;
 }
 
 fn memberSlotKey(local_set_id: []const u8, member_slot: u32) MemberSlotKey {
@@ -1690,12 +2710,14 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
     if (bytes.len > max_command_wire_bytes) return error.InvalidWire;
     var cursor = WireCursor{ .bytes = bytes };
     var seen_format = false;
+    var format_version: u64 = 0;
     var kind: ?RequestKind = null;
     while (try cursor.next()) |field| switch (field.number) {
         1 => {
             if (field.wire_type != 0 or seen_format) return error.InvalidWire;
             seen_format = true;
-            if (try cursor.readVarint() != command_format_version) return error.InvalidWire;
+            format_version = try cursor.readVarint();
+            if (format_version != 1 and format_version != command_format_version) return error.InvalidWire;
         },
         2 => {
             if (field.wire_type != 2 or kind != null) return error.InvalidWire;
@@ -1712,10 +2734,22 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
             kind = .register_member;
             try preflightRegisterMember(try cursor.readBytes(max_member_wire_bytes));
         },
+        5 => {
+            if (field.wire_type != 2 or kind != null) return error.InvalidWire;
+            kind = .create_volume;
+            try preflightCreateVolumeCommand(try cursor.readBytes(max_volume_wire_bytes));
+        },
+        6 => {
+            if (field.wire_type != 2 or kind != null) return error.InvalidWire;
+            kind = .delete_volume;
+            try preflightDeleteVolumeCommand(try cursor.readBytes(max_volume_wire_bytes));
+        },
         else => return error.InvalidWire,
     };
     if (!seen_format) return error.InvalidWire;
-    return kind orelse error.InvalidWire;
+    const result = kind orelse return error.InvalidWire;
+    if ((result == .create_volume or result == .delete_volume) and format_version != command_format_version) return error.InvalidWire;
+    return result;
 }
 
 fn preflightCreatePool(bytes: []const u8) WireError!void {
@@ -1823,6 +2857,50 @@ fn preflightRegisterMember(bytes: []const u8) WireError!void {
         std.mem.eql(u8, member_id.?, local_set_id.?)) return error.InvalidWire;
 }
 
+fn preflightCreateVolumeCommand(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 8;
+    while (try cursor.next()) |field| {
+        if (field.number > 7 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_request_id_bytes), max_request_id_bytes, false)) return error.InvalidWire,
+            2, 3 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            4 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_name_bytes), max_name_bytes, false)) return error.InvalidWire,
+            5 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_description_bytes), max_description_bytes, true)) return error.InvalidWire,
+            6 => if (field.wire_type != 0 or !validVolumeSize(try cursor.readVarint())) return error.InvalidWire,
+            7 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[6] or !seen[7]) return error.InvalidWire;
+}
+
+fn preflightDeleteVolumeCommand(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 5;
+    while (try cursor.next()) |field| {
+        if (field.number > 4 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_request_id_bytes), max_request_id_bytes, false)) return error.InvalidWire,
+            2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            4 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[4]) return error.InvalidWire;
+}
+
 fn preflightSnapshot(bytes: []const u8) WireError!void {
     if (bytes.len > max_snapshot_bytes) return error.InvalidWire;
     var cursor = WireCursor{ .bytes = bytes };
@@ -1832,12 +2910,17 @@ fn preflightSnapshot(bytes: []const u8) WireError!void {
     var request_count: usize = 0;
     var node_count: usize = 0;
     var member_count: usize = 0;
+    var volume_count: usize = 0;
+    var tombstone_count: usize = 0;
+    var replica_count: usize = 0;
+    var allocation_count: usize = 0;
+    var attachment_count: usize = 0;
     while (try cursor.next()) |field| switch (field.number) {
         1 => {
             if (field.wire_type != 0 or seen_format) return error.InvalidWire;
             seen_format = true;
             const version = try cursor.readVarint();
-            if (version != 2 and version != 3 and version != snapshot_format_version) return error.InvalidWire;
+            if (version < 2 or version > snapshot_format_version) return error.InvalidWire;
             snapshot_version = @intCast(version);
         },
         2 => {
@@ -1860,10 +2943,36 @@ fn preflightSnapshot(bytes: []const u8) WireError!void {
             member_count += 1;
             _ = try cursor.readBytes(max_member_wire_bytes);
         },
+        6 => {
+            if (field.wire_type != 2 or volume_count == max_volumes) return error.InvalidWire;
+            volume_count += 1;
+            _ = try cursor.readBytes(max_volume_wire_bytes);
+        },
+        7 => {
+            if (field.wire_type != 2 or tombstone_count == max_volume_tombstones) return error.InvalidWire;
+            tombstone_count += 1;
+            _ = try cursor.readBytes(max_volume_tombstone_wire_bytes);
+        },
+        8 => {
+            if (field.wire_type != 2 or replica_count == max_replica_placements) return error.InvalidWire;
+            replica_count += 1;
+            _ = try cursor.readBytes(max_replica_placement_wire_bytes);
+        },
+        9 => {
+            if (field.wire_type != 2 or allocation_count == max_replica_allocations) return error.InvalidWire;
+            allocation_count += 1;
+            _ = try cursor.readBytes(max_replica_allocation_wire_bytes);
+        },
+        10 => {
+            if (field.wire_type != 2 or attachment_count == max_volume_attachments) return error.InvalidWire;
+            attachment_count += 1;
+            _ = try cursor.readBytes(max_volume_attachment_wire_bytes);
+        },
         else => return error.InvalidWire,
     };
     if (!seen_format or (snapshot_version == 2 and node_count != 0) or
-        (snapshot_version < 4 and member_count != 0)) return error.InvalidWire;
+        (snapshot_version < 4 and member_count != 0) or
+        (snapshot_version < 5 and (volume_count != 0 or tombstone_count != 0 or replica_count != 0 or allocation_count != 0 or attachment_count != 0))) return error.InvalidWire;
 
     cursor = .{ .bytes = bytes };
     while (try cursor.next()) |field| switch (field.number) {
@@ -1872,6 +2981,11 @@ fn preflightSnapshot(bytes: []const u8) WireError!void {
         3 => try preflightRequest(try cursor.readBytes(max_request_wire_bytes), snapshot_version),
         4 => try preflightNode(try cursor.readBytes(max_node_wire_bytes)),
         5 => try preflightMember(try cursor.readBytes(max_member_wire_bytes)),
+        6 => try preflightVolume(try cursor.readBytes(max_volume_wire_bytes)),
+        7 => try preflightVolumeTombstone(try cursor.readBytes(max_volume_tombstone_wire_bytes)),
+        8 => try preflightReplicaPlacement(try cursor.readBytes(max_replica_placement_wire_bytes)),
+        9 => try preflightReplicaAllocation(try cursor.readBytes(max_replica_allocation_wire_bytes)),
+        10 => try preflightVolumeAttachment(try cursor.readBytes(max_volume_attachment_wire_bytes)),
         else => unreachable,
     };
 }
@@ -1980,6 +3094,144 @@ fn preflightMember(bytes: []const u8) WireError!void {
         std.mem.eql(u8, member_id.?, local_set_id.?)) return error.InvalidWire;
 }
 
+fn preflightVolume(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 19;
+    while (try cursor.next()) |field| {
+        if (field.number > 18 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1, 2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_name_bytes), max_name_bytes, false)) return error.InvalidWire,
+            4 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_description_bytes), max_description_bytes, true)) return error.InvalidWire,
+            5 => if (field.wire_type != 0 or !validVolumeSize(try cursor.readVarint())) return error.InvalidWire,
+            6 => if (field.wire_type != 0 or try cursor.readVarint() != 1) return error.InvalidWire,
+            7 => if (field.wire_type != 0 or try cursor.readVarint() != volume_target_replica_count) return error.InvalidWire,
+            8 => if (field.wire_type != 0 or try cursor.readVarint() != volume_write_quorum) return error.InvalidWire,
+            9 => if (field.wire_type != 0 or try cursor.readVarint() != volume_read_quorum) return error.InvalidWire,
+            10 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const value = try cursor.readVarint();
+                if (value == 0 or value > 4) return error.InvalidWire;
+            },
+            11, 12 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const value = try cursor.readVarint();
+                if (value == 0 or value > 5) return error.InvalidWire;
+            },
+            13, 14 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            15 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                _ = try cursor.readVarint();
+            },
+            16 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            17, 18 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[5] or !seen[6] or !seen[7] or !seen[8] or !seen[9] or
+        !seen[10] or !seen[11] or !seen[12] or !seen[13] or !seen[14] or !seen[16] or !seen[17] or !seen[18]) return error.InvalidWire;
+}
+
+fn preflightVolumeTombstone(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 4;
+    while (try cursor.next()) |field| {
+        if (field.number > 3 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                try preflightVolume(try cursor.readBytes(max_volume_wire_bytes));
+            },
+            2 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            3 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3]) return error.InvalidWire;
+}
+
+fn preflightReplicaPlacement(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 9;
+    while (try cursor.next()) |field| {
+        if (field.number > 8 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1, 2, 3 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            4 => if (field.wire_type != 0 or try cursor.readVarint() >= volume_target_replica_count) return error.InvalidWire,
+            5, 7, 8 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            6 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const value = try cursor.readVarint();
+                if (value == 0 or value > 3) return error.InvalidWire;
+            },
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[5] or !seen[6] or !seen[7] or !seen[8]) return error.InvalidWire;
+}
+
+fn preflightReplicaAllocation(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 10;
+    while (try cursor.next()) |field| {
+        if (field.number > 9 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1, 2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3 => if (field.wire_type != 2 or !validFixedNonzero(try cursor.readBytes(16), 16)) return error.InvalidWire,
+            4 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                _ = try cursor.readVarint();
+            },
+            5, 6, 8, 9 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            7 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const value = try cursor.readVarint();
+                if (value == 0 or value > 3) return error.InvalidWire;
+            },
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[5] or !seen[6] or !seen[7] or !seen[8] or !seen[9]) return error.InvalidWire;
+}
+
+fn preflightVolumeAttachment(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 10;
+    while (try cursor.next()) |field| {
+        if (field.number > 9 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1, 2, 3 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            4 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_consumer_id_bytes), max_consumer_id_bytes, false)) return error.InvalidWire,
+            5 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const value = try cursor.readVarint();
+                if (value == 0 or value > 2) return error.InvalidWire;
+            },
+            6 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const value = try cursor.readVarint();
+                if (value == 0 or value > 4) return error.InvalidWire;
+            },
+            7, 8, 9 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5] or !seen[6] or !seen[7] or !seen[8] or !seen[9]) return error.InvalidWire;
+}
+
 fn preflightRequest(bytes: []const u8, snapshot_version: u32) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
     var seen = [_]bool{false} ** 6;
@@ -2012,11 +3264,14 @@ fn preflightRequest(bytes: []const u8, snapshot_version: u32) WireError!void {
     if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5]) return error.InvalidWire;
     const kind = try preflightCommandKind(command_bytes.?);
     if ((snapshot_version == 2 and kind != .create_pool) or
-        (snapshot_version < 4 and kind == .register_member)) return error.InvalidWire;
+        (snapshot_version < 4 and kind == .register_member) or
+        (snapshot_version < 5 and (kind == .create_volume or kind == .delete_volume))) return error.InvalidWire;
     switch (kind) {
         .create_pool => try preflightApplyResponse(response_bytes.?),
         .register_node => try preflightRegisterNodeApplyResponse(response_bytes.?),
         .register_member => try preflightRegisterMemberApplyResponse(response_bytes.?),
+        .create_volume => try preflightCreateVolumeApplyResponse(response_bytes.?),
+        .delete_volume => try preflightDeleteVolumeApplyResponse(response_bytes.?),
     }
 }
 
@@ -2083,6 +3338,53 @@ fn preflightRegisterMemberApplyResponse(bytes: []const u8) WireError!void {
     if (!seen_code) return error.InvalidWire;
 }
 
+fn preflightCreateVolumeApplyResponse(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen_code = false;
+    var seen_volume = false;
+    while (try cursor.next()) |field| switch (field.number) {
+        1 => {
+            if (field.wire_type != 0 or seen_code) return error.InvalidWire;
+            seen_code = true;
+            const code = try cursor.readVarint();
+            if (code == 0 or code > 7) return error.InvalidWire;
+        },
+        2 => {
+            if (field.wire_type != 2 or seen_volume) return error.InvalidWire;
+            seen_volume = true;
+            try preflightVolume(try cursor.readBytes(max_volume_wire_bytes));
+        },
+        else => return error.InvalidWire,
+    };
+    if (!seen_code) return error.InvalidWire;
+}
+
+fn preflightDeleteVolumeApplyResponse(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 5;
+    while (try cursor.next()) |field| {
+        if (field.number > 4 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const code = try cursor.readVarint();
+                if (code == 0 or code > 7) return error.InvalidWire;
+            },
+            2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            4 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            else => unreachable,
+        }
+    }
+    if (!seen[1]) return error.InvalidWire;
+    if (seen[2] != seen[3] or seen[2] != seen[4]) return error.InvalidWire;
+}
+
 fn poolRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8) bool {
     const lhs = state.pools_by_id.get(lhs_id).?;
     const rhs = state.pools_by_id.get(rhs_id).?;
@@ -2104,6 +3406,13 @@ fn memberRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }
 
+fn volumeRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8) bool {
+    const lhs = state.volumes_by_id.get(lhs_id).?;
+    const rhs = state.volumes_by_id.get(rhs_id).?;
+    if (lhs.created_revision != rhs.created_revision) return lhs.created_revision < rhs.created_revision;
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
 fn poolIdLessThan(_: void, lhs: pb.Pool, rhs: pb.Pool) bool {
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }
@@ -2113,6 +3422,26 @@ fn nodeIdLessThan(_: void, lhs: pb.Node, rhs: pb.Node) bool {
 }
 
 fn memberIdLessThan(_: void, lhs: pb.Member, rhs: pb.Member) bool {
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
+fn volumeIdLessThan(_: void, lhs: pb.Volume, rhs: pb.Volume) bool {
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
+fn volumeTombstoneIdLessThan(_: void, lhs: pb.VolumeTombstone, rhs: pb.VolumeTombstone) bool {
+    return std.mem.order(u8, lhs.volume.?.id, rhs.volume.?.id) == .lt;
+}
+
+fn replicaPlacementIdLessThan(_: void, lhs: pb.ReplicaPlacement, rhs: pb.ReplicaPlacement) bool {
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
+fn replicaAllocationIdLessThan(_: void, lhs: pb.ReplicaAllocation, rhs: pb.ReplicaAllocation) bool {
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
+fn volumeAttachmentIdLessThan(_: void, lhs: pb.VolumeAttachment, rhs: pb.VolumeAttachment) bool {
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }
 
@@ -2140,6 +3469,15 @@ const test_cluster_id = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
 const test_pool_id = "0198f54d-5c2a-7000-8000-000000000001";
 const test_second_pool_id = "0198f54d-5c2a-7000-8000-000000000002";
 const test_node_id = "0198f54d-5c2a-7000-8000-000000000011";
+const test_second_node_id = "0198f54d-5c2a-7000-8000-000000000012";
+const test_volume_id = "0198f54d-5c2a-7000-8000-000000000021";
+const test_second_volume_id = "0198f54d-5c2a-7000-8000-000000000022";
+const test_replica_id = "0198f54d-5c2a-7000-8000-000000000031";
+const test_second_replica_id = "0198f54d-5c2a-7000-8000-000000000032";
+const test_third_replica_id = "0198f54d-5c2a-7000-8000-000000000033";
+const test_allocation_id = "0198f54d-5c2a-7000-8000-000000000041";
+const test_second_allocation_id = "0198f54d-5c2a-7000-8000-000000000042";
+const test_attachment_id = "0198f54d-5c2a-7000-8000-000000000051";
 const test_member_id_a = [_]u8{ 0x10, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 const test_member_id_b = [_]u8{ 0x20, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 const test_member_id_c = [_]u8{ 0x30, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
@@ -2197,6 +3535,34 @@ fn applyTestMemberCommand(allocator: std.mem.Allocator, machine: *PoolStateMachi
     return machine.stateMachine().apply(.{ .index = index, .term = 1, .data = encoded });
 }
 
+fn testVolumeCommand(request_id: []const u8, volume_id: []const u8, name: []const u8, description: []const u8, size_bytes: u64, timestamp: i64) pb.CreateVolumeCommand {
+    return .{
+        .request_id = request_id,
+        .proposed_volume_id = volume_id,
+        .pool_id = test_pool_id,
+        .name = name,
+        .description = description,
+        .size_bytes = size_bytes,
+        .proposed_created_at_unix_ms = timestamp,
+    };
+}
+
+fn applyTestVolumeCommand(allocator: std.mem.Allocator, machine: *PoolStateMachine, index: u64, command: pb.CreateVolumeCommand) !raft.ApplyResult {
+    const encoded = try encodeCreateVolumeCommand(allocator, command);
+    defer allocator.free(encoded);
+    return machine.stateMachine().apply(.{ .index = index, .term = 1, .data = encoded });
+}
+
+fn testDeleteVolumeCommand(request_id: []const u8, volume_id: []const u8, expected_resource_version: u64, timestamp: i64) pb.DeleteVolumeCommand {
+    return .{ .request_id = request_id, .volume_id = volume_id, .expected_resource_version = expected_resource_version, .proposed_deleted_at_unix_ms = timestamp };
+}
+
+fn applyTestDeleteVolumeCommand(allocator: std.mem.Allocator, machine: *PoolStateMachine, index: u64, command: pb.DeleteVolumeCommand) !raft.ApplyResult {
+    const encoded = try encodeDeleteVolumeCommand(allocator, command);
+    defer allocator.free(encoded);
+    return machine.stateMachine().apply(.{ .index = index, .term = 1, .data = encoded });
+}
+
 fn addTestPoolAndNode(allocator: std.mem.Allocator, machine: *PoolStateMachine) !void {
     var pool = try applyTestCommand(allocator, machine, 1, testCommand(
         "member-pool-request",
@@ -2213,6 +3579,434 @@ fn addTestPoolAndNode(allocator: std.mem.Allocator, machine: *PoolStateMachine) 
         1_753_744_000_001,
     ));
     defer node.deinit(allocator);
+}
+
+test "volume create get delete replay and durable conflicts" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+
+    var pool = try applyTestCommand(allocator, &machine, 1, testCommand("pool-request", test_pool_id, "primary", "", 1_753_744_000_000));
+    defer pool.deinit(allocator);
+    var created = try applyTestVolumeCommand(allocator, &machine, 2, testVolumeCommand("create-volume", test_volume_id, "database", "primary data", min_volume_size_bytes, 1_753_744_000_001));
+    defer created.deinit(allocator);
+    var created_response = try decodeCreateVolumeApplyResponse(allocator, created.response.?);
+    defer created_response.deinit(allocator);
+    try std.testing.expectEqual(pb.CreateVolumeApplyCode.CREATE_VOLUME_APPLY_CODE_CREATED, created_response.code);
+    try std.testing.expectEqual(@as(u64, 2), created_response.volume.?.resource_version);
+    try std.testing.expectEqual(@as(usize, 1), machine.volumeCount());
+    var fetched = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer fetched.deinit(allocator);
+    try std.testing.expect(volumesEqual(created_response.volume.?, fetched));
+
+    var replay = try applyTestVolumeCommand(allocator, &machine, 3, testVolumeCommand("create-volume", test_second_volume_id, "database", "primary data", min_volume_size_bytes, 1_753_744_000_099));
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, created.response.?, replay.response.?);
+    const request_conflict_command = testVolumeCommand("create-volume", test_second_volume_id, "database", "primary data", min_volume_size_bytes * 2, 1_753_744_000_003);
+    var request_conflict = try applyTestVolumeCommand(allocator, &machine, 4, request_conflict_command);
+    defer request_conflict.deinit(allocator);
+    var request_conflict_response = try decodeCreateVolumeApplyResponse(allocator, request_conflict.response.?);
+    defer request_conflict_response.deinit(allocator);
+    try std.testing.expectEqual(pb.CreateVolumeApplyCode.CREATE_VOLUME_APPLY_CODE_REQUEST_CONFLICT, request_conflict_response.code);
+
+    var name_conflict = try applyTestVolumeCommand(allocator, &machine, 5, testVolumeCommand("name-conflict", test_second_volume_id, "database", "", min_volume_size_bytes, 1_753_744_000_004));
+    defer name_conflict.deinit(allocator);
+    var name_conflict_response = try decodeCreateVolumeApplyResponse(allocator, name_conflict.response.?);
+    defer name_conflict_response.deinit(allocator);
+    try std.testing.expectEqual(pb.CreateVolumeApplyCode.CREATE_VOLUME_APPLY_CODE_NAME_EXISTS, name_conflict_response.code);
+
+    var version_conflict = try applyTestDeleteVolumeCommand(allocator, &machine, 6, testDeleteVolumeCommand("delete-version", test_volume_id, 1, 1_753_744_000_005));
+    defer version_conflict.deinit(allocator);
+    var version_conflict_response = try decodeDeleteVolumeApplyResponse(allocator, version_conflict.response.?);
+    defer version_conflict_response.deinit(allocator);
+    try std.testing.expectEqual(pb.DeleteVolumeApplyCode.DELETE_VOLUME_APPLY_CODE_VERSION_CONFLICT, version_conflict_response.code);
+    var version_replay = try applyTestDeleteVolumeCommand(allocator, &machine, 7, testDeleteVolumeCommand("delete-version", test_volume_id, 1, 1_753_744_000_099));
+    defer version_replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, version_conflict.response.?, version_replay.response.?);
+
+    var deleted = try applyTestDeleteVolumeCommand(allocator, &machine, 8, testDeleteVolumeCommand("delete-volume", test_volume_id, 2, 1_753_744_000_006));
+    defer deleted.deinit(allocator);
+    var deleted_response = try decodeDeleteVolumeApplyResponse(allocator, deleted.response.?);
+    defer deleted_response.deinit(allocator);
+    try std.testing.expectEqual(pb.DeleteVolumeApplyCode.DELETE_VOLUME_APPLY_CODE_DELETED, deleted_response.code);
+    try std.testing.expectEqual(@as(u64, 8), deleted_response.deleted_revision);
+    try std.testing.expectEqual(@as(usize, 0), machine.volumeCount());
+    try std.testing.expectEqual(@as(usize, 1), machine.volumeTombstoneCount());
+    try std.testing.expectEqual(@as(?pb.Volume, null), try machine.getVolumeById(allocator, test_volume_id));
+
+    var reused_name = try applyTestVolumeCommand(allocator, &machine, 9, testVolumeCommand("reuse-name", test_second_volume_id, "database", "replacement", min_volume_size_bytes, 1_753_744_000_007));
+    defer reused_name.deinit(allocator);
+    var reused_name_response = try decodeCreateVolumeApplyResponse(allocator, reused_name.response.?);
+    defer reused_name_response.deinit(allocator);
+    try std.testing.expectEqual(pb.CreateVolumeApplyCode.CREATE_VOLUME_APPLY_CODE_CREATED, reused_name_response.code);
+    var tombstoned_id = try applyTestVolumeCommand(allocator, &machine, 10, testVolumeCommand("reuse-id", test_volume_id, "other", "", min_volume_size_bytes, 1_753_744_000_008));
+    defer tombstoned_id.deinit(allocator);
+    var tombstoned_id_response = try decodeCreateVolumeApplyResponse(allocator, tombstoned_id.response.?);
+    defer tombstoned_id_response.deinit(allocator);
+    try std.testing.expectEqual(pb.CreateVolumeApplyCode.CREATE_VOLUME_APPLY_CODE_ID_EXISTS, tombstoned_id_response.code);
+    var missing = try applyTestDeleteVolumeCommand(allocator, &machine, 11, testDeleteVolumeCommand("delete-tombstone", test_volume_id, 2, 1_753_744_000_009));
+    defer missing.deinit(allocator);
+    var missing_response = try decodeDeleteVolumeApplyResponse(allocator, missing.response.?);
+    defer missing_response.deinit(allocator);
+    try std.testing.expectEqual(pb.DeleteVolumeApplyCode.DELETE_VOLUME_APPLY_CODE_NOT_FOUND, missing_response.code);
+}
+
+test "replica placement restore rejects same node and failure domain" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    var volume = try applyTestVolumeCommand(allocator, &machine, 3, testVolumeCommand("volume-request", test_volume_id, "database", "", min_volume_size_bytes, 1_753_744_000_002));
+    defer volume.deinit(allocator);
+    try restoreNode(allocator, &machine.state, .{
+        .id = test_second_node_id,
+        .cluster_id = &test_cluster_id,
+        .control_endpoint = "127.0.0.2:9000",
+        .nvmf_endpoint = "127.0.0.2:4420",
+        .failure_domain = "rack-a",
+        .capability_bits = 5,
+        .protocol_version = 1,
+        .registered_at_unix_ms = 1_753_744_000_003,
+        .registered_revision = 4,
+    });
+    try restoreReplicaPlacement(allocator, &machine.state, .{
+        .id = test_replica_id,
+        .volume_id = test_volume_id,
+        .node_id = test_node_id,
+        .replica_index = 0,
+        .generation = 1,
+        .state = .REPLICA_PLACEMENT_STATE_ACTIVE,
+        .created_revision = 5,
+        .resource_version = 5,
+    }, 7);
+    try std.testing.expectError(error.PayloadParseFailed, restoreReplicaPlacement(allocator, &machine.state, .{
+        .id = test_second_replica_id,
+        .volume_id = test_volume_id,
+        .node_id = test_node_id,
+        .replica_index = 1,
+        .generation = 1,
+        .state = .REPLICA_PLACEMENT_STATE_RESERVED,
+        .created_revision = 6,
+        .resource_version = 6,
+    }, 7));
+    try std.testing.expectError(error.PayloadParseFailed, restoreReplicaPlacement(allocator, &machine.state, .{
+        .id = test_third_replica_id,
+        .volume_id = test_volume_id,
+        .node_id = test_second_node_id,
+        .replica_index = 1,
+        .generation = 1,
+        .state = .REPLICA_PLACEMENT_STATE_RESERVED,
+        .created_revision = 7,
+        .resource_version = 7,
+    }, 7));
+    try std.testing.expectEqual(@as(usize, 1), machine.state.replica_placements_by_id.count());
+}
+
+test "historical volume limit validation allows a later replacement" {
+    const allocator = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const state_allocator = arena.allocator();
+    var state: State = .{};
+    defer state.deinit(state_allocator);
+    try restorePool(state_allocator, &state, .{
+        .id = test_pool_id,
+        .name = "primary",
+        .created_at_unix_ms = 1_753_744_000_000,
+        .created_revision = 1,
+    });
+    try state.volumes_by_id.ensureUnusedCapacity(state_allocator, max_volumes);
+    const limit_revision: u64 = 30_000;
+    for (0..max_volumes - 1) |index| {
+        const id = try std.fmt.allocPrint(state_allocator, "historical-volume-{d}", .{index});
+        const name = try std.fmt.allocPrint(state_allocator, "historical-name-{d}", .{index});
+        const owned = try Volume.init(state_allocator, .{
+            .id = id,
+            .pool_id = test_pool_id,
+            .name = name,
+            .size_bytes = min_volume_size_bytes,
+            .protection_kind = .VOLUME_PROTECTION_KIND_REPLICATED,
+            .target_replica_count = volume_target_replica_count,
+            .write_quorum = volume_write_quorum,
+            .read_quorum = volume_read_quorum,
+            .lifecycle_state = .VOLUME_LIFECYCLE_STATE_PROVISIONING,
+            .availability_state = .VOLUME_AVAILABILITY_STATE_UNKNOWN,
+            .operation_phase = .VOLUME_OPERATION_PHASE_NONE,
+            .generation = 1,
+            .write_epoch = 1,
+            .created_at_unix_ms = 1_753_744_000_001,
+            .created_revision = 2,
+            .resource_version = 2,
+        });
+        state.volumes_by_id.putAssumeCapacity(owned.id, owned);
+    }
+    const deleted = try Volume.init(state_allocator, .{
+        .id = "historical-deleted-volume",
+        .pool_id = test_pool_id,
+        .name = "historical-deleted-name",
+        .size_bytes = min_volume_size_bytes,
+        .protection_kind = .VOLUME_PROTECTION_KIND_REPLICATED,
+        .target_replica_count = volume_target_replica_count,
+        .write_quorum = volume_write_quorum,
+        .read_quorum = volume_read_quorum,
+        .lifecycle_state = .VOLUME_LIFECYCLE_STATE_PROVISIONING,
+        .availability_state = .VOLUME_AVAILABILITY_STATE_UNKNOWN,
+        .operation_phase = .VOLUME_OPERATION_PHASE_NONE,
+        .generation = 1,
+        .write_epoch = 1,
+        .created_at_unix_ms = 1_753_744_000_001,
+        .created_revision = 2,
+        .resource_version = 2,
+    });
+    try state.volume_tombstones_by_id.put(state_allocator, deleted.id, .{
+        .volume = deleted,
+        .deleted_at_unix_ms = 1_753_744_000_010,
+        .deleted_revision = limit_revision + 1,
+    });
+    const replacement = try Volume.init(state_allocator, .{
+        .id = "later-replacement-volume",
+        .pool_id = test_pool_id,
+        .name = "later-replacement-name",
+        .size_bytes = min_volume_size_bytes,
+        .protection_kind = .VOLUME_PROTECTION_KIND_REPLICATED,
+        .target_replica_count = volume_target_replica_count,
+        .write_quorum = volume_write_quorum,
+        .read_quorum = volume_read_quorum,
+        .lifecycle_state = .VOLUME_LIFECYCLE_STATE_PROVISIONING,
+        .availability_state = .VOLUME_AVAILABILITY_STATE_UNKNOWN,
+        .operation_phase = .VOLUME_OPERATION_PHASE_NONE,
+        .generation = 1,
+        .write_epoch = 1,
+        .created_at_unix_ms = 1_753_744_000_011,
+        .created_revision = limit_revision + 2,
+        .resource_version = limit_revision + 2,
+    });
+    state.volumes_by_id.putAssumeCapacity(replacement.id, replacement);
+    state.max_volume_created_revision = limit_revision + 2;
+
+    try std.testing.expectEqual(max_volumes, liveVolumeCountAt(&state, limit_revision));
+    try std.testing.expect(state.max_volume_created_revision > limit_revision);
+    try std.testing.expectEqual(@as(?[]const u8, null), try validateStoredVolumeResponse(&state, testVolumeCommand(
+        "limit-request",
+        test_volume_id,
+        "limit-target",
+        "",
+        min_volume_size_bytes,
+        1_753_744_000_002,
+    ), .{ .code = .CREATE_VOLUME_APPLY_CODE_VOLUME_LIMIT }, limit_revision));
+}
+
+test "volume snapshot requires delete records and rejects forged name overlap" {
+    const allocator = std.testing.allocator;
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    var pool = try applyTestCommand(allocator, &source, 1, testCommand("pool-request", test_pool_id, "primary", "", 1_753_744_000_000));
+    defer pool.deinit(allocator);
+    var original = try applyTestVolumeCommand(allocator, &source, 2, testVolumeCommand("create-original", test_volume_id, "database", "", min_volume_size_bytes, 1_753_744_000_001));
+    defer original.deinit(allocator);
+    var deleted = try applyTestDeleteVolumeCommand(allocator, &source, 3, testDeleteVolumeCommand("delete-original", test_volume_id, 2, 1_753_744_000_002));
+    defer deleted.deinit(allocator);
+    var replacement = try applyTestVolumeCommand(allocator, &source, 4, testVolumeCommand("create-replacement", test_second_volume_id, "database", "", min_volume_size_bytes, 1_753_744_000_003));
+    defer replacement.deinit(allocator);
+    var snapshot = try source.stateMachine().takeSnapshot(allocator, 5, 1, .{});
+    defer snapshot.deinit(allocator);
+
+    var legitimate = PoolStateMachine.init(allocator);
+    defer legitimate.deinit();
+    var legitimate_reader = TestSnapshotReader{ .data = snapshot.data };
+    try legitimate.stateMachine().restoreSnapshot(snapshot.metadata, legitimate_reader.reader());
+    try std.testing.expectEqual(@as(usize, 1), legitimate.volumeCount());
+    try std.testing.expectEqual(@as(usize, 1), legitimate.volumeTombstoneCount());
+
+    var missing_arena: std.heap.ArenaAllocator = .init(allocator);
+    defer missing_arena.deinit();
+    var snapshot_reader: std.Io.Reader = .fixed(snapshot.data);
+    var missing = try pb.StateSnapshot.decode(&snapshot_reader, missing_arena.allocator());
+    var delete_index: usize = 0;
+    while (!std.mem.eql(u8, missing.requests.items[delete_index].request_id, "delete-original")) : (delete_index += 1) {}
+    _ = missing.requests.orderedRemove(delete_index);
+    const missing_wire = try encodeMessage(allocator, missing);
+    defer allocator.free(missing_wire);
+    var missing_machine = PoolStateMachine.init(allocator);
+    defer missing_machine.deinit();
+    var missing_reader = TestSnapshotReader{ .data = missing_wire };
+    try std.testing.expectError(error.PayloadParseFailed, missing_machine.stateMachine().restoreSnapshot(snapshot.metadata, missing_reader.reader()));
+
+    var forged_arena: std.heap.ArenaAllocator = .init(allocator);
+    defer forged_arena.deinit();
+    var forged_reader: std.Io.Reader = .fixed(snapshot.data);
+    var forged = try pb.StateSnapshot.decode(&forged_reader, forged_arena.allocator());
+    forged.volume_tombstones.items[0].deleted_revision = 5;
+    for (forged.requests.items) |*request| {
+        if (!std.mem.eql(u8, request.request_id, "delete-original")) continue;
+        request.applied_revision = 5;
+        var response_reader: std.Io.Reader = .fixed(request.encoded_response);
+        var response = try pb.DeleteVolumeApplyResponse.decode(&response_reader, forged_arena.allocator());
+        response.deleted_revision = 5;
+        request.encoded_response = try encodeMessage(forged_arena.allocator(), response);
+    }
+    const forged_wire = try encodeMessage(allocator, forged);
+    defer allocator.free(forged_wire);
+    var forged_machine = PoolStateMachine.init(allocator);
+    defer forged_machine.deinit();
+    var forged_snapshot_reader = TestSnapshotReader{ .data = forged_wire };
+    try std.testing.expectError(error.PayloadParseFailed, forged_machine.stateMachine().restoreSnapshot(snapshot.metadata, forged_snapshot_reader.reader()));
+}
+
+test "version 5 snapshot deterministically preserves volume children" {
+    const allocator = std.testing.allocator;
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    try addTestPoolAndNode(allocator, &source);
+    var member = try applyTestMemberCommand(allocator, &source, 3, testMemberCommand("member-request", &test_member_id_a, test_pool_id, test_node_id, &test_local_set_id, 0, 1_753_744_000_002));
+    defer member.deinit(allocator);
+    var volume = try applyTestVolumeCommand(allocator, &source, 4, testVolumeCommand("volume-request", test_volume_id, "database", "", min_volume_size_bytes, 1_753_744_000_003));
+    defer volume.deinit(allocator);
+    var base = try source.stateMachine().takeSnapshot(allocator, 7, 1, .{});
+    defer base.deinit(allocator);
+
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    var base_reader: std.Io.Reader = .fixed(base.data);
+    var decoded = try pb.StateSnapshot.decode(&base_reader, arena.allocator());
+    try decoded.replica_placements.append(arena.allocator(), .{
+        .id = test_replica_id,
+        .volume_id = test_volume_id,
+        .node_id = test_node_id,
+        .replica_index = 0,
+        .generation = 1,
+        .state = .REPLICA_PLACEMENT_STATE_ACTIVE,
+        .created_revision = 5,
+        .resource_version = 5,
+    });
+    try decoded.replica_allocations.append(arena.allocator(), .{
+        .id = test_allocation_id,
+        .replica_id = test_replica_id,
+        .member_id = &test_member_id_a,
+        .offset_bytes = 0,
+        .length_bytes = 4096,
+        .generation = 1,
+        .state = .REPLICA_ALLOCATION_STATE_ACTIVE,
+        .created_revision = 6,
+        .resource_version = 6,
+    });
+    try decoded.volume_attachments.append(arena.allocator(), .{
+        .id = test_attachment_id,
+        .volume_id = test_volume_id,
+        .target_node_id = test_node_id,
+        .consumer_id = "test-consumer",
+        .access_mode = .VOLUME_ACCESS_MODE_SINGLE_NODE_WRITER,
+        .state = .VOLUME_ATTACHMENT_STATE_ATTACHED,
+        .generation = 1,
+        .created_revision = 7,
+        .resource_version = 7,
+    });
+    const child_wire = try encodeMessage(allocator, decoded);
+    defer allocator.free(child_wire);
+
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var child_reader = TestSnapshotReader{ .data = child_wire };
+    try restored.stateMachine().restoreSnapshot(base.metadata, child_reader.reader());
+    try std.testing.expectEqual(@as(usize, 1), restored.volumeCount());
+    try std.testing.expectEqual(@as(usize, 1), restored.state.replica_placements_by_id.count());
+    try std.testing.expectEqual(@as(usize, 1), restored.state.replica_allocations_by_id.count());
+    try std.testing.expectEqual(@as(usize, 1), restored.state.volume_attachments_by_id.count());
+
+    var first = try restored.stateMachine().takeSnapshot(allocator, 7, 1, .{});
+    defer first.deinit(allocator);
+    var second = try restored.stateMachine().takeSnapshot(allocator, 7, 1, .{});
+    defer second.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, first.data, second.data);
+    var round_tripped = PoolStateMachine.init(allocator);
+    defer round_tripped.deinit();
+    var first_reader = TestSnapshotReader{ .data = first.data };
+    try round_tripped.stateMachine().restoreSnapshot(first.metadata, first_reader.reader());
+    var normalized = try round_tripped.stateMachine().takeSnapshot(allocator, 7, 1, .{});
+    defer normalized.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, first.data, normalized.data);
+
+    var blocked_delete = try applyTestDeleteVolumeCommand(allocator, &restored, 8, testDeleteVolumeCommand("blocked-delete", test_volume_id, 4, 1_753_744_000_004));
+    defer blocked_delete.deinit(allocator);
+    var blocked_response = try decodeDeleteVolumeApplyResponse(allocator, blocked_delete.response.?);
+    defer blocked_response.deinit(allocator);
+    try std.testing.expectEqual(pb.DeleteVolumeApplyCode.DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES, blocked_response.code);
+
+    var corrupt_arena: std.heap.ArenaAllocator = .init(allocator);
+    defer corrupt_arena.deinit();
+    var valid_reader: std.Io.Reader = .fixed(first.data);
+    var corrupt = try pb.StateSnapshot.decode(&valid_reader, corrupt_arena.allocator());
+    try corrupt.replica_allocations.append(corrupt_arena.allocator(), .{
+        .id = test_second_allocation_id,
+        .replica_id = test_replica_id,
+        .member_id = &test_member_id_a,
+        .offset_bytes = 0,
+        .length_bytes = 4096,
+        .generation = 1,
+        .state = .REPLICA_ALLOCATION_STATE_RESERVED,
+        .created_revision = 7,
+        .resource_version = 7,
+    });
+    const corrupt_wire = try encodeMessage(allocator, corrupt);
+    defer allocator.free(corrupt_wire);
+    var rejected = PoolStateMachine.init(allocator);
+    defer rejected.deinit();
+    var corrupt_reader = TestSnapshotReader{ .data = corrupt_wire };
+    try std.testing.expectError(error.PayloadParseFailed, rejected.stateMachine().restoreSnapshot(first.metadata, corrupt_reader.reader()));
+}
+
+test "legacy command version 1 and snapshot version 4 remain restorable" {
+    const allocator = std.testing.allocator;
+    const pool_command = testCommand("legacy-pool", test_pool_id, "primary", "", 1_753_744_000_000);
+    const legacy_wire = try encodeMessage(allocator, pb.CommandEnvelope{ .format_version = 1, .command = .{ .create_pool = pool_command } });
+    defer allocator.free(legacy_wire);
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    var applied = try source.stateMachine().apply(.{ .index = 1, .term = 1, .data = legacy_wire });
+    defer applied.deinit(allocator);
+    var current = try source.stateMachine().takeSnapshot(allocator, 1, 1, .{});
+    defer current.deinit(allocator);
+
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    var current_reader: std.Io.Reader = .fixed(current.data);
+    var decoded = try pb.StateSnapshot.decode(&current_reader, arena.allocator());
+    decoded.format_version = 4;
+    var request_reader: std.Io.Reader = .fixed(decoded.requests.items[0].encoded_command);
+    var request_envelope = try pb.CommandEnvelope.decode(&request_reader, arena.allocator());
+    request_envelope.format_version = 1;
+    decoded.requests.items[0].encoded_command = try encodeMessage(arena.allocator(), request_envelope);
+    const version_4_wire = try encodeMessage(allocator, decoded);
+    defer allocator.free(version_4_wire);
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var legacy_reader = TestSnapshotReader{ .data = version_4_wire };
+    try restored.stateMachine().restoreSnapshot(current.metadata, legacy_reader.reader());
+    try std.testing.expectEqual(@as(usize, 1), restored.poolCount());
+
+    decoded.volumes = .empty;
+    try decoded.volumes.append(arena.allocator(), .{
+        .id = test_volume_id,
+        .pool_id = test_pool_id,
+        .name = "forbidden",
+        .size_bytes = min_volume_size_bytes,
+        .protection_kind = .VOLUME_PROTECTION_KIND_REPLICATED,
+        .target_replica_count = volume_target_replica_count,
+        .write_quorum = volume_write_quorum,
+        .read_quorum = volume_read_quorum,
+        .lifecycle_state = .VOLUME_LIFECYCLE_STATE_PROVISIONING,
+        .availability_state = .VOLUME_AVAILABILITY_STATE_UNKNOWN,
+        .operation_phase = .VOLUME_OPERATION_PHASE_NONE,
+        .generation = 1,
+        .write_epoch = 1,
+        .created_at_unix_ms = 1_753_744_000_001,
+        .created_revision = 1,
+        .resource_version = 1,
+    });
+    const invalid_legacy_wire = try encodeMessage(allocator, decoded);
+    defer allocator.free(invalid_legacy_wire);
+    var invalid_reader = TestSnapshotReader{ .data = invalid_legacy_wire };
+    try std.testing.expectError(error.PayloadParseFailed, restored.stateMachine().restoreSnapshot(current.metadata, invalid_reader.reader()));
 }
 
 fn testHeartbeatRequest(
@@ -2363,11 +4157,11 @@ test "heartbeat observations stay outside snapshots and restore" {
     try std.testing.expectEqual(@as(?heartbeat.GetResult, null), try restored_store.get(test_node_id, 10, 200));
 }
 
-fn overlongOne(allocator: std.mem.Allocator, canonical: []const u8) ![]u8 {
-    try std.testing.expect(canonical.len >= 2 and canonical[0] == 0x08 and canonical[1] == 0x01);
+fn overlongFirstVarint(allocator: std.mem.Allocator, canonical: []const u8) ![]u8 {
+    try std.testing.expect(canonical.len >= 2 and canonical[0] == 0x08 and canonical[1] < 0x80);
     const result = try allocator.alloc(u8, canonical.len + 1);
     result[0] = 0x08;
-    result[1] = 0x81;
+    result[1] = canonical[1] | 0x80;
     result[2] = 0x00;
     @memcpy(result[3..], canonical[2..]);
     return result;
@@ -3142,10 +4936,10 @@ test "snapshot bytes are deterministic and restore request history" {
     defer decoded_snapshot.deinit(allocator);
     std.mem.swap(pb.Pool, &decoded_snapshot.pools.items[0], &decoded_snapshot.pools.items[1]);
     std.mem.swap(pb.RequestRecord, &decoded_snapshot.requests.items[0], &decoded_snapshot.requests.items[1]);
-    const noncanonical_response = try overlongOne(allocator, decoded_snapshot.requests.items[0].encoded_response);
+    const noncanonical_response = try overlongFirstVarint(allocator, decoded_snapshot.requests.items[0].encoded_response);
     allocator.free(decoded_snapshot.requests.items[0].encoded_response);
     decoded_snapshot.requests.items[0].encoded_response = noncanonical_response;
-    const noncanonical_command = try overlongOne(allocator, decoded_snapshot.requests.items[0].encoded_command);
+    const noncanonical_command = try overlongFirstVarint(allocator, decoded_snapshot.requests.items[0].encoded_command);
     allocator.free(decoded_snapshot.requests.items[0].encoded_command);
     decoded_snapshot.requests.items[0].encoded_command = noncanonical_command;
     const reversed_snapshot = try encodeMessage(allocator, decoded_snapshot);
@@ -3249,6 +5043,54 @@ test "empty raft entry is a no-op and malformed command is terminal" {
         machine.stateMachine().apply(.{ .index = 2, .term = 1, .data = encoded }),
     );
     try std.testing.expectEqual(@as(usize, 0), machine.poolCount());
+}
+
+const VolumeApplyAllocationCheck = struct {
+    fn run(allocator: std.mem.Allocator, pool_command: []const u8, create_command: []const u8, delete_command: []const u8) !void {
+        var machine = PoolStateMachine.init(allocator);
+        defer machine.deinit();
+        var pool = machine.stateMachine().apply(.{ .index = 1, .term = 1, .data = pool_command }) catch |err| {
+            try std.testing.expectEqual(@as(usize, 0), machine.poolCount());
+            try std.testing.expectEqual(@as(usize, 0), machine.requestCount());
+            return err;
+        };
+        defer pool.deinit(allocator);
+        var created = machine.stateMachine().apply(.{ .index = 2, .term = 1, .data = create_command }) catch |err| {
+            try std.testing.expectEqual(@as(usize, 1), machine.poolCount());
+            try std.testing.expectEqual(@as(usize, 0), machine.volumeCount());
+            try std.testing.expectEqual(@as(usize, 0), machine.volumeTombstoneCount());
+            try std.testing.expectEqual(@as(usize, 1), machine.requestCount());
+            try std.testing.expectEqual(@as(usize, 0), machine.state.volume_ids_by_scoped_name.count());
+            try std.testing.expectEqual(@as(usize, 0), machine.state.volume_ids_by_revision.items.len);
+            return err;
+        };
+        defer created.deinit(allocator);
+        var deleted = machine.stateMachine().apply(.{ .index = 3, .term = 1, .data = delete_command }) catch |err| {
+            try std.testing.expectEqual(@as(usize, 1), machine.volumeCount());
+            try std.testing.expectEqual(@as(usize, 0), machine.volumeTombstoneCount());
+            try std.testing.expectEqual(@as(usize, 2), machine.requestCount());
+            try std.testing.expectEqual(@as(usize, 1), machine.state.volume_ids_by_scoped_name.count());
+            try std.testing.expectEqual(@as(usize, 1), machine.state.volume_ids_by_revision.items.len);
+            return err;
+        };
+        defer deleted.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 0), machine.volumeCount());
+        try std.testing.expectEqual(@as(usize, 1), machine.volumeTombstoneCount());
+        try std.testing.expectEqual(@as(usize, 3), machine.requestCount());
+        try std.testing.expectEqual(@as(usize, 0), machine.state.volume_ids_by_scoped_name.count());
+        try std.testing.expectEqual(@as(usize, 0), machine.state.volume_ids_by_revision.items.len);
+    }
+};
+
+test "volume create and delete are atomic across allocation failures" {
+    const allocator = std.testing.allocator;
+    const pool_command = try encodeCreatePoolCommand(allocator, testCommand("pool-request", test_pool_id, "primary", "", 1_753_744_000_000));
+    defer allocator.free(pool_command);
+    const create_command = try encodeCreateVolumeCommand(allocator, testVolumeCommand("volume-request", test_volume_id, "database", "", min_volume_size_bytes, 1_753_744_000_001));
+    defer allocator.free(create_command);
+    const delete_command = try encodeDeleteVolumeCommand(allocator, testDeleteVolumeCommand("delete-request", test_volume_id, 2, 1_753_744_000_002));
+    defer allocator.free(delete_command);
+    try std.testing.checkAllAllocationFailures(allocator, VolumeApplyAllocationCheck.run, .{ pool_command, create_command, delete_command });
 }
 
 const ApplyAllocationCheck = struct {
