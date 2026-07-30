@@ -195,6 +195,132 @@ pub const PoolService = struct {
         };
     }
 
+    pub fn createVolume(self: *PoolService, payload: []const u8, completion: Completion) void {
+        preflightCreateVolumeRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid CreateVolume request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        var request = pb.CreateVolumeRequest.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid CreateVolume request"));
+            return;
+        };
+        defer request.deinit(arena.allocator());
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+
+        const timestamp = std.math.cast(i64, std.Io.Timestamp.now(self.io, .real).toMilliseconds()) orelse {
+            completion.invoke(internalError());
+            return;
+        };
+        const volume_id = uuid.urn.serialize(uuid.v7.new(self.io));
+        const command = state_machine.encodeCreateVolumeCommand(self.allocator, .{
+            .request_id = request.request_id,
+            .proposed_volume_id = &volume_id,
+            .pool_id = request.pool_id,
+            .name = request.name,
+            .description = request.description,
+            .size_bytes = request.size_bytes,
+            .proposed_created_at_unix_ms = timestamp,
+        }) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        defer self.allocator.free(command);
+
+        const pending = self.allocator.create(CreateVolumePending) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion };
+        self.raftor.propose(command, pending.callback()) catch |err| {
+            self.allocator.destroy(pending);
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn getVolume(self: *PoolService, payload: []const u8, completion: Completion) void {
+        preflightGetVolumeRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid GetVolume request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        var request = pb.GetVolumeRequest.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid GetVolume request"));
+            return;
+        };
+        defer request.deinit(arena.allocator());
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+
+        const volume_id = self.allocator.dupe(u8, request.volume_id) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        const pending = self.allocator.create(GetVolumePending) catch {
+            self.allocator.free(volume_id);
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion, .volume_id = volume_id };
+        self.raftor.readIndex("get-volume", pending.callback()) catch |err| {
+            pending.destroy();
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn deleteVolume(self: *PoolService, payload: []const u8, completion: Completion) void {
+        preflightDeleteVolumeRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid DeleteVolume request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        var request = pb.DeleteVolumeRequest.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid DeleteVolume request"));
+            return;
+        };
+        defer request.deinit(arena.allocator());
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+
+        const timestamp = std.math.cast(i64, std.Io.Timestamp.now(self.io, .real).toMilliseconds()) orelse {
+            completion.invoke(internalError());
+            return;
+        };
+        const command = state_machine.encodeDeleteVolumeCommand(self.allocator, .{
+            .request_id = request.request_id,
+            .volume_id = request.volume_id,
+            .expected_resource_version = request.expected_resource_version,
+            .proposed_deleted_at_unix_ms = timestamp,
+        }) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        defer self.allocator.free(command);
+
+        const pending = self.allocator.create(DeleteVolumePending) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion };
+        self.raftor.propose(command, pending.callback()) catch |err| {
+            self.allocator.destroy(pending);
+            completion.invoke(raftFailure(err));
+        };
+    }
+
     pub fn registerNode(self: *PoolService, payload: []const u8, completion: Completion) void {
         preflightRegisterNodeRequest(payload) catch {
             completion.invoke(invalidArgument("invalid RegisterNode request"));
@@ -685,6 +811,170 @@ const ListPending = struct {
     }
 };
 
+const CreateVolumePending = struct {
+    owner: *PoolService,
+    completion: Completion,
+
+    fn callback(self: *CreateVolumePending) raft.ProposalCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+
+    fn complete(ctx: *anyopaque, result: raft.ProposalResult) void {
+        const self: *CreateVolumePending = @ptrCast(@alignCast(ctx));
+        defer self.owner.allocator.destroy(self);
+        switch (result) {
+            .ok => |payload| self.completeApplied(payload),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+
+    fn completeApplied(self: *CreateVolumePending, payload: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(self.owner.allocator);
+        defer arena.deinit();
+        var response = state_machine.decodeCreateVolumeApplyResponse(arena.allocator(), payload) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        defer response.deinit(arena.allocator());
+        switch (response.code) {
+            .CREATE_VOLUME_APPLY_CODE_CREATED => {
+                const volume = response.volume orelse {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                const encoded = encodeMessage(self.owner.allocator, pb.CreateVolumeResponse{ .volume = volume }) catch {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                defer self.owner.allocator.free(encoded);
+                self.completion.invoke(.{ .status = .ok, .payload = encoded });
+            },
+            .CREATE_VOLUME_APPLY_CODE_POOL_NOT_FOUND => self.completion.invoke(.{
+                .status = grpc.Status.init(.not_found, "Pool not found"),
+            }),
+            .CREATE_VOLUME_APPLY_CODE_ID_EXISTS => self.completion.invoke(.{
+                .status = grpc.Status.init(.already_exists, "Volume ID already exists"),
+            }),
+            .CREATE_VOLUME_APPLY_CODE_NAME_EXISTS => self.completion.invoke(.{
+                .status = grpc.Status.init(.already_exists, "Volume name already exists"),
+            }),
+            .CREATE_VOLUME_APPLY_CODE_REQUEST_CONFLICT => self.completion.invoke(.{
+                .status = grpc.Status.init(.failed_precondition, "request_id was reused with different fields"),
+            }),
+            .CREATE_VOLUME_APPLY_CODE_REQUEST_LIMIT => self.completion.invoke(.{
+                .status = grpc.Status.init(.resource_exhausted, "request history limit reached"),
+            }),
+            .CREATE_VOLUME_APPLY_CODE_VOLUME_LIMIT => self.completion.invoke(.{
+                .status = grpc.Status.init(.resource_exhausted, "Volume limit reached"),
+            }),
+            else => self.completion.invoke(internalError()),
+        }
+    }
+};
+
+const GetVolumePending = struct {
+    owner: *PoolService,
+    completion: Completion,
+    volume_id: []u8,
+
+    fn callback(self: *GetVolumePending) raft.ReadIndexCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+
+    fn destroy(self: *GetVolumePending) void {
+        const allocator = self.owner.allocator;
+        allocator.free(self.volume_id);
+        allocator.destroy(self);
+    }
+
+    fn complete(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *GetVolumePending = @ptrCast(@alignCast(ctx));
+        defer self.destroy();
+        switch (result) {
+            .ok => self.completeRead(),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+
+    fn completeRead(self: *GetVolumePending) void {
+        var volume = self.owner.machine.getVolumeById(self.owner.allocator, self.volume_id) catch {
+            self.completion.invoke(internalError());
+            return;
+        } orelse {
+            self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Volume not found") });
+            return;
+        };
+        defer volume.deinit(self.owner.allocator);
+        const encoded = encodeMessage(self.owner.allocator, pb.GetVolumeResponse{ .volume = volume }) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        defer self.owner.allocator.free(encoded);
+        self.completion.invoke(.{ .status = .ok, .payload = encoded });
+    }
+};
+
+const DeleteVolumePending = struct {
+    owner: *PoolService,
+    completion: Completion,
+
+    fn callback(self: *DeleteVolumePending) raft.ProposalCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+
+    fn complete(ctx: *anyopaque, result: raft.ProposalResult) void {
+        const self: *DeleteVolumePending = @ptrCast(@alignCast(ctx));
+        defer self.owner.allocator.destroy(self);
+        switch (result) {
+            .ok => |payload| self.completeApplied(payload),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+
+    fn completeApplied(self: *DeleteVolumePending, payload: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(self.owner.allocator);
+        defer arena.deinit();
+        var response = state_machine.decodeDeleteVolumeApplyResponse(arena.allocator(), payload) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        defer response.deinit(arena.allocator());
+        switch (response.code) {
+            .DELETE_VOLUME_APPLY_CODE_DELETED => {
+                const encoded = encodeMessage(self.owner.allocator, pb.DeleteVolumeResponse{
+                    .volume_id = response.volume_id,
+                    .deleted_at_unix_ms = response.deleted_at_unix_ms,
+                    .deleted_revision = response.deleted_revision,
+                }) catch {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                defer self.owner.allocator.free(encoded);
+                self.completion.invoke(.{ .status = .ok, .payload = encoded });
+            },
+            .DELETE_VOLUME_APPLY_CODE_NOT_FOUND => self.completion.invoke(.{
+                .status = grpc.Status.init(.not_found, "Volume not found"),
+            }),
+            .DELETE_VOLUME_APPLY_CODE_VERSION_CONFLICT => self.completion.invoke(.{
+                .status = grpc.Status.init(.failed_precondition, "Volume resource version does not match"),
+            }),
+            .DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES => self.completion.invoke(.{
+                .status = grpc.Status.init(.failed_precondition, "Volume has dependencies"),
+            }),
+            .DELETE_VOLUME_APPLY_CODE_REQUEST_CONFLICT => self.completion.invoke(.{
+                .status = grpc.Status.init(.failed_precondition, "request_id was reused with different fields"),
+            }),
+            .DELETE_VOLUME_APPLY_CODE_REQUEST_LIMIT => self.completion.invoke(.{
+                .status = grpc.Status.init(.resource_exhausted, "request history limit reached"),
+            }),
+            .DELETE_VOLUME_APPLY_CODE_TOMBSTONE_LIMIT => self.completion.invoke(.{
+                .status = grpc.Status.init(.resource_exhausted, "Volume tombstone limit reached"),
+            }),
+            else => self.completion.invoke(internalError()),
+        }
+    }
+};
+
 const RegisterNodePending = struct {
     owner: *PoolService,
     completion: Completion,
@@ -1156,6 +1446,9 @@ pub const PoolRpc = struct {
         try server.registerStream("/zettide.control.v1.MemberService/ListMembers", handler(self, .list_members));
         try server.registerStream("/zettide.control.v1.HeartbeatService/ReportHeartbeat", handler(self, .report_heartbeat));
         try server.registerStream("/zettide.control.v1.HeartbeatService/GetHeartbeat", handler(self, .get_heartbeat));
+        try server.registerStream("/zettide.control.v1.VolumeService/CreateVolume", handler(self, .create_volume));
+        try server.registerStream("/zettide.control.v1.VolumeService/GetVolume", handler(self, .get_volume));
+        try server.registerStream("/zettide.control.v1.VolumeService/DeleteVolume", handler(self, .delete_volume));
     }
 
     pub fn pendingCallCount(self: *const PoolRpc) usize {
@@ -1197,6 +1490,9 @@ pub const PoolRpc = struct {
         list_members,
         report_heartbeat,
         get_heartbeat,
+        create_volume,
+        get_volume,
+        delete_volume,
     };
 
     fn handler(self: *PoolRpc, comptime method: Method) grpc.ServerStreamHandler {
@@ -1216,6 +1512,9 @@ pub const PoolRpc = struct {
                 .list_members => onListMembers,
                 .report_heartbeat => onReportHeartbeat,
                 .get_heartbeat => onGetHeartbeat,
+                .create_volume => onCreateVolume,
+                .get_volume => onGetVolume,
+                .delete_volume => onDeleteVolume,
             },
             .on_remote_end = onRemoteEnd,
             .on_cancel = onCancel,
@@ -1311,6 +1610,21 @@ pub const PoolRpc = struct {
         return receive(ctx, .get_heartbeat, stream, payload);
     }
 
+    fn onCreateVolume(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .create_volume, stream, payload);
+    }
+
+    fn onGetVolume(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .get_volume, stream, payload);
+    }
+
+    fn onDeleteVolume(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .delete_volume, stream, payload);
+    }
+
     fn receive(
         ctx: ?*anyopaque,
         method: Method,
@@ -1375,6 +1689,9 @@ pub const PoolRpc = struct {
             .list_members => self.service.listMembers(payload, pending.completion()),
             .report_heartbeat => self.service.reportHeartbeat(payload, pending.completion()),
             .get_heartbeat => self.service.getHeartbeat(payload, pending.completion()),
+            .create_volume => self.service.createVolume(payload, pending.completion()),
+            .get_volume => self.service.getVolume(payload, pending.completion()),
+            .delete_volume => self.service.deleteVolume(payload, pending.completion()),
         }
     }
 
@@ -1511,6 +1828,78 @@ fn preflightListPoolsRequest(payload: []const u8) wire.Error!void {
             },
             else => unreachable,
         }
+    }
+}
+
+fn preflightCreateVolumeRequest(payload: []const u8) wire.Error!void {
+    if (payload.len > max_request_wire_bytes) return error.InvalidWire;
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen = [_]bool{false} ** 6;
+    while (try cursor.next()) |field| {
+        if (field.number > 5) {
+            try cursor.skip(field, max_request_wire_bytes);
+            continue;
+        }
+        if (seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_request_id_bytes), state_machine.max_request_id_bytes, false)) return error.InvalidWire,
+            2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_name_bytes), state_machine.max_name_bytes, false)) return error.InvalidWire,
+            4 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_description_bytes), state_machine.max_description_bytes, true)) return error.InvalidWire,
+            5 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const size_bytes = try cursor.readVarint();
+                if (size_bytes < state_machine.min_volume_size_bytes or
+                    size_bytes > state_machine.max_volume_size_bytes or
+                    size_bytes % state_machine.volume_block_size_bytes != 0)
+                {
+                    return error.InvalidWire;
+                }
+            },
+            else => unreachable,
+        }
+    }
+    for ([_]usize{ 1, 2, 3, 5 }) |field| {
+        if (!seen[field]) return error.InvalidWire;
+    }
+}
+
+fn preflightGetVolumeRequest(payload: []const u8) wire.Error!void {
+    if (payload.len > max_request_wire_bytes) return error.InvalidWire;
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen_volume_id = false;
+    while (try cursor.next()) |field| {
+        if (field.number != 1) {
+            try cursor.skip(field, max_request_wire_bytes);
+            continue;
+        }
+        if (seen_volume_id or field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire;
+        seen_volume_id = true;
+    }
+    if (!seen_volume_id) return error.InvalidWire;
+}
+
+fn preflightDeleteVolumeRequest(payload: []const u8) wire.Error!void {
+    if (payload.len > max_request_wire_bytes) return error.InvalidWire;
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen = [_]bool{false} ** 4;
+    while (try cursor.next()) |field| {
+        if (field.number > 3) {
+            try cursor.skip(field, max_request_wire_bytes);
+            continue;
+        }
+        if (seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_request_id_bytes), state_machine.max_request_id_bytes, false)) return error.InvalidWire,
+            2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            else => unreachable,
+        }
+    }
+    for (1..4) |field| {
+        if (!seen[field]) return error.InvalidWire;
     }
 }
 
@@ -1926,6 +2315,15 @@ fn testRegisterMemberRequest(
     };
 }
 
+fn testCreateVolumeRequest(request_id: []const u8, pool_id: []const u8, name: []const u8) pb.CreateVolumeRequest {
+    return .{
+        .request_id = request_id,
+        .pool_id = pool_id,
+        .name = name,
+        .size_bytes = state_machine.min_volume_size_bytes,
+    };
+}
+
 fn awaitCompletion(raftor: *raft.Raftor, probe: *const CompletionProbe) !void {
     for (0..32) |_| {
         if (probe.completed) return;
@@ -1946,6 +2344,38 @@ fn expectRegisterMemberStatus(
     var probe = CompletionProbe{ .allocator = allocator };
     defer probe.deinit();
     service.registerMember(payload, probe.completion());
+    if (!probe.completed) try awaitCompletion(raftor, &probe);
+    try std.testing.expectEqual(expected, probe.code);
+}
+
+fn expectCreateVolumeStatus(
+    allocator: std.mem.Allocator,
+    service: *PoolService,
+    raftor: *raft.Raftor,
+    request: pb.CreateVolumeRequest,
+    expected: grpc.StatusCode,
+) !void {
+    const payload = try encodeMessage(allocator, request);
+    defer allocator.free(payload);
+    var probe = CompletionProbe{ .allocator = allocator };
+    defer probe.deinit();
+    service.createVolume(payload, probe.completion());
+    if (!probe.completed) try awaitCompletion(raftor, &probe);
+    try std.testing.expectEqual(expected, probe.code);
+}
+
+fn expectDeleteVolumeStatus(
+    allocator: std.mem.Allocator,
+    service: *PoolService,
+    raftor: *raft.Raftor,
+    request: pb.DeleteVolumeRequest,
+    expected: grpc.StatusCode,
+) !void {
+    const payload = try encodeMessage(allocator, request);
+    defer allocator.free(payload);
+    var probe = CompletionProbe{ .allocator = allocator };
+    defer probe.deinit();
+    service.deleteVolume(payload, probe.completion());
     if (!probe.completed) try awaitCompletion(raftor, &probe);
     try std.testing.expectEqual(expected, probe.code);
 }
@@ -2151,6 +2581,273 @@ test "Pool service gates followers and completes linearizable CRUD reads" {
     try std.testing.expectEqual(@as(usize, 1), second_page_response.pools.items.len);
     try std.testing.expectEqualStrings("secondary", second_page_response.pools.items[0].name);
     try std.testing.expectEqual(@as(usize, 0), second_page_response.next_page_token.len);
+}
+
+test "Volume service validates requests before follower gates" {
+    const allocator = std.testing.allocator;
+    const pool_id = "0198f54d-5c2a-7000-8000-000000000101";
+    const volume_id = "0198f54d-5c2a-7000-8000-000000000102";
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+    defer heartbeat_store.deinit();
+    machine.setHeartbeatStore(&heartbeat_store);
+    var config: raft.RaftorConfig = .{};
+    config.raft.id = 1;
+    config.raft.check_quorum = true;
+    config.raft.disable_proposal_forwarding = true;
+    config.proposal_timeout_ticks = 32;
+    config.read_index_timeout_ticks = 32;
+    const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
+    defer raftor.destroy();
+    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, &heartbeat_store, test_cluster_id);
+
+    const create_payload = try encodeMessage(allocator, testCreateVolumeRequest("volume-follower", pool_id, "primary"));
+    defer allocator.free(create_payload);
+    var create_follower = CompletionProbe{ .allocator = allocator };
+    defer create_follower.deinit();
+    service.createVolume(create_payload, create_follower.completion());
+    try std.testing.expectEqual(grpc.StatusCode.unavailable, create_follower.code);
+
+    const duplicate_create = try std.mem.concat(allocator, u8, &.{ create_payload, "\x0a\x03dup" });
+    defer allocator.free(duplicate_create);
+    var malformed_create = CompletionProbe{ .allocator = allocator };
+    defer malformed_create.deinit();
+    service.createVolume(duplicate_create, malformed_create.completion());
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, malformed_create.code);
+
+    var invalid_size = testCreateVolumeRequest("volume-size", pool_id, "invalid-size");
+    invalid_size.size_bytes = state_machine.min_volume_size_bytes + 1;
+    const invalid_size_payload = try encodeMessage(allocator, invalid_size);
+    defer allocator.free(invalid_size_payload);
+    try std.testing.expectError(error.InvalidWire, preflightCreateVolumeRequest(invalid_size_payload));
+
+    const get_payload = try encodeMessage(allocator, pb.GetVolumeRequest{ .volume_id = volume_id });
+    defer allocator.free(get_payload);
+    var get_follower = CompletionProbe{ .allocator = allocator };
+    defer get_follower.deinit();
+    service.getVolume(get_payload, get_follower.completion());
+    try std.testing.expectEqual(grpc.StatusCode.unavailable, get_follower.code);
+    const duplicate_get = try std.mem.concat(allocator, u8, &.{ get_payload, get_payload });
+    defer allocator.free(duplicate_get);
+    var malformed_get = CompletionProbe{ .allocator = allocator };
+    defer malformed_get.deinit();
+    service.getVolume(duplicate_get, malformed_get.completion());
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, malformed_get.code);
+
+    const delete_payload = try encodeMessage(allocator, pb.DeleteVolumeRequest{
+        .request_id = "delete-follower",
+        .volume_id = volume_id,
+        .expected_resource_version = 1,
+    });
+    defer allocator.free(delete_payload);
+    var delete_follower = CompletionProbe{ .allocator = allocator };
+    defer delete_follower.deinit();
+    service.deleteVolume(delete_payload, delete_follower.completion());
+    try std.testing.expectEqual(grpc.StatusCode.unavailable, delete_follower.code);
+    const invalid_delete_payload = try encodeMessage(allocator, pb.DeleteVolumeRequest{
+        .request_id = "delete-invalid",
+        .volume_id = volume_id,
+    });
+    defer allocator.free(invalid_delete_payload);
+    var malformed_delete = CompletionProbe{ .allocator = allocator };
+    defer malformed_delete.deinit();
+    service.deleteVolume(invalid_delete_payload, malformed_delete.completion());
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, malformed_delete.code);
+
+    const unknown_field = "\xa0\x06\x01";
+    const create_with_unknown = try std.mem.concat(allocator, u8, &.{ create_payload, unknown_field });
+    defer allocator.free(create_with_unknown);
+    try preflightCreateVolumeRequest(create_with_unknown);
+    const get_with_unknown = try std.mem.concat(allocator, u8, &.{ get_payload, unknown_field });
+    defer allocator.free(get_with_unknown);
+    try preflightGetVolumeRequest(get_with_unknown);
+    const delete_with_unknown = try std.mem.concat(allocator, u8, &.{ delete_payload, unknown_field });
+    defer allocator.free(delete_with_unknown);
+    try preflightDeleteVolumeRequest(delete_with_unknown);
+
+    const oversized = [_]u8{0} ** (max_request_wire_bytes + 1);
+    try std.testing.expectError(error.InvalidWire, preflightCreateVolumeRequest(&oversized));
+}
+
+test "Volume service completes asynchronous create get delete replay and status mapping" {
+    const allocator = std.testing.allocator;
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+    defer heartbeat_store.deinit();
+    machine.setHeartbeatStore(&heartbeat_store);
+    var config: raft.RaftorConfig = .{};
+    config.raft.id = 1;
+    config.raft.election_timeout_seed = 42;
+    config.raft.check_quorum = true;
+    config.raft.disable_proposal_forwarding = true;
+    config.proposal_timeout_ticks = 32;
+    config.read_index_timeout_ticks = 32;
+    const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
+    defer raftor.destroy();
+    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, &heartbeat_store, test_cluster_id);
+    try raftor.campaign();
+
+    try expectCreateVolumeStatus(
+        allocator,
+        &service,
+        raftor,
+        testCreateVolumeRequest("volume-missing-pool", "0198f54d-5c2a-7000-8000-000000000103", "missing"),
+        .not_found,
+    );
+
+    const pool_payload = try encodeMessage(allocator, pb.CreatePoolRequest{ .request_id = "volume-pool-request", .name = "volume-pool" });
+    defer allocator.free(pool_payload);
+    var pool_probe = CompletionProbe{ .allocator = allocator };
+    defer pool_probe.deinit();
+    service.createPool(pool_payload, pool_probe.completion());
+    try awaitCompletion(raftor, &pool_probe);
+    var pool_reader: std.Io.Reader = .fixed(pool_probe.payload);
+    var pool_response = try pb.CreatePoolResponse.decode(&pool_reader, allocator);
+    defer pool_response.deinit(allocator);
+    const pool_id = pool_response.pool.?.id;
+
+    const create_request = testCreateVolumeRequest("volume-create-request", pool_id, "primary");
+    const create_payload = try encodeMessage(allocator, create_request);
+    defer allocator.free(create_payload);
+    var create_probe = CompletionProbe{ .allocator = allocator };
+    defer create_probe.deinit();
+    service.createVolume(create_payload, create_probe.completion());
+    try std.testing.expect(!create_probe.completed);
+    try awaitCompletion(raftor, &create_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, create_probe.code);
+    var create_reader: std.Io.Reader = .fixed(create_probe.payload);
+    var create_response = try pb.CreateVolumeResponse.decode(&create_reader, allocator);
+    defer create_response.deinit(allocator);
+    const volume = create_response.volume.?;
+    try std.testing.expectEqualStrings("primary", volume.name);
+    try std.testing.expectEqual(state_machine.min_volume_size_bytes, volume.size_bytes);
+
+    var replay_probe = CompletionProbe{ .allocator = allocator };
+    defer replay_probe.deinit();
+    service.createVolume(create_payload, replay_probe.completion());
+    try std.testing.expect(!replay_probe.completed);
+    try awaitCompletion(raftor, &replay_probe);
+    var replay_reader: std.Io.Reader = .fixed(replay_probe.payload);
+    var replay_response = try pb.CreateVolumeResponse.decode(&replay_reader, allocator);
+    defer replay_response.deinit(allocator);
+    try std.testing.expectEqualStrings(volume.id, replay_response.volume.?.id);
+    try std.testing.expectEqual(volume.created_revision, replay_response.volume.?.created_revision);
+
+    var conflict_request = create_request;
+    conflict_request.name = "changed";
+    try expectCreateVolumeStatus(allocator, &service, raftor, conflict_request, .failed_precondition);
+    try expectCreateVolumeStatus(
+        allocator,
+        &service,
+        raftor,
+        testCreateVolumeRequest("volume-name-conflict", pool_id, "primary"),
+        .already_exists,
+    );
+
+    const get_payload = try encodeMessage(allocator, pb.GetVolumeRequest{ .volume_id = volume.id });
+    defer allocator.free(get_payload);
+    var get_probe = CompletionProbe{ .allocator = allocator };
+    defer get_probe.deinit();
+    service.getVolume(get_payload, get_probe.completion());
+    try std.testing.expect(!get_probe.completed);
+    @memset(get_payload, 0);
+    try awaitCompletion(raftor, &get_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, get_probe.code);
+    var get_reader: std.Io.Reader = .fixed(get_probe.payload);
+    var get_response = try pb.GetVolumeResponse.decode(&get_reader, allocator);
+    defer get_response.deinit(allocator);
+    try std.testing.expectEqualStrings(volume.id, get_response.volume.?.id);
+
+    const missing_get_payload = try encodeMessage(allocator, pb.GetVolumeRequest{
+        .volume_id = "0198f54d-5c2a-7000-8000-000000000104",
+    });
+    defer allocator.free(missing_get_payload);
+    var missing_get_probe = CompletionProbe{ .allocator = allocator };
+    defer missing_get_probe.deinit();
+    service.getVolume(missing_get_payload, missing_get_probe.completion());
+    try awaitCompletion(raftor, &missing_get_probe);
+    try std.testing.expectEqual(grpc.StatusCode.not_found, missing_get_probe.code);
+
+    try expectDeleteVolumeStatus(allocator, &service, raftor, .{
+        .request_id = "volume-delete-version",
+        .volume_id = volume.id,
+        .expected_resource_version = volume.resource_version + 1,
+    }, .failed_precondition);
+
+    const delete_request = pb.DeleteVolumeRequest{
+        .request_id = "volume-delete-request",
+        .volume_id = volume.id,
+        .expected_resource_version = volume.resource_version,
+    };
+    const delete_payload = try encodeMessage(allocator, delete_request);
+    defer allocator.free(delete_payload);
+    var delete_probe = CompletionProbe{ .allocator = allocator };
+    defer delete_probe.deinit();
+    service.deleteVolume(delete_payload, delete_probe.completion());
+    try std.testing.expect(!delete_probe.completed);
+    try awaitCompletion(raftor, &delete_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, delete_probe.code);
+    var delete_reader: std.Io.Reader = .fixed(delete_probe.payload);
+    var delete_response = try pb.DeleteVolumeResponse.decode(&delete_reader, allocator);
+    defer delete_response.deinit(allocator);
+    try std.testing.expectEqualStrings(volume.id, delete_response.volume_id);
+    try std.testing.expect(delete_response.deleted_revision > volume.resource_version);
+
+    var delete_replay_probe = CompletionProbe{ .allocator = allocator };
+    defer delete_replay_probe.deinit();
+    service.deleteVolume(delete_payload, delete_replay_probe.completion());
+    try awaitCompletion(raftor, &delete_replay_probe);
+    var delete_replay_reader: std.Io.Reader = .fixed(delete_replay_probe.payload);
+    var delete_replay_response = try pb.DeleteVolumeResponse.decode(&delete_replay_reader, allocator);
+    defer delete_replay_response.deinit(allocator);
+    try std.testing.expectEqual(delete_response.deleted_revision, delete_replay_response.deleted_revision);
+    try std.testing.expectEqual(delete_response.deleted_at_unix_ms, delete_replay_response.deleted_at_unix_ms);
+
+    try expectDeleteVolumeStatus(allocator, &service, raftor, .{
+        .request_id = "volume-delete-missing",
+        .volume_id = volume.id,
+        .expected_resource_version = volume.resource_version,
+    }, .not_found);
+
+    const create_mappings = [_]struct { code: pb.CreateVolumeApplyCode, expected: grpc.StatusCode }{
+        .{ .code = .CREATE_VOLUME_APPLY_CODE_POOL_NOT_FOUND, .expected = .not_found },
+        .{ .code = .CREATE_VOLUME_APPLY_CODE_ID_EXISTS, .expected = .already_exists },
+        .{ .code = .CREATE_VOLUME_APPLY_CODE_NAME_EXISTS, .expected = .already_exists },
+        .{ .code = .CREATE_VOLUME_APPLY_CODE_REQUEST_CONFLICT, .expected = .failed_precondition },
+        .{ .code = .CREATE_VOLUME_APPLY_CODE_REQUEST_LIMIT, .expected = .resource_exhausted },
+        .{ .code = .CREATE_VOLUME_APPLY_CODE_VOLUME_LIMIT, .expected = .resource_exhausted },
+        .{ .code = .CREATE_VOLUME_APPLY_CODE_UNSPECIFIED, .expected = .internal },
+    };
+    for (create_mappings) |mapping| {
+        const encoded = try encodeMessage(allocator, pb.CreateVolumeApplyResponse{ .code = mapping.code });
+        defer allocator.free(encoded);
+        var probe = CompletionProbe{ .allocator = allocator };
+        defer probe.deinit();
+        var pending = CreateVolumePending{ .owner = &service, .completion = probe.completion() };
+        pending.completeApplied(encoded);
+        try std.testing.expectEqual(mapping.expected, probe.code);
+    }
+
+    const delete_mappings = [_]struct { code: pb.DeleteVolumeApplyCode, expected: grpc.StatusCode }{
+        .{ .code = .DELETE_VOLUME_APPLY_CODE_NOT_FOUND, .expected = .not_found },
+        .{ .code = .DELETE_VOLUME_APPLY_CODE_VERSION_CONFLICT, .expected = .failed_precondition },
+        .{ .code = .DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES, .expected = .failed_precondition },
+        .{ .code = .DELETE_VOLUME_APPLY_CODE_REQUEST_CONFLICT, .expected = .failed_precondition },
+        .{ .code = .DELETE_VOLUME_APPLY_CODE_REQUEST_LIMIT, .expected = .resource_exhausted },
+        .{ .code = .DELETE_VOLUME_APPLY_CODE_TOMBSTONE_LIMIT, .expected = .resource_exhausted },
+        .{ .code = .DELETE_VOLUME_APPLY_CODE_UNSPECIFIED, .expected = .internal },
+    };
+    for (delete_mappings) |mapping| {
+        const encoded = try encodeMessage(allocator, pb.DeleteVolumeApplyResponse{ .code = mapping.code });
+        defer allocator.free(encoded);
+        var probe = CompletionProbe{ .allocator = allocator };
+        defer probe.deinit();
+        var pending = DeleteVolumePending{ .owner = &service, .completion = probe.completion() };
+        pending.completeApplied(encoded);
+        try std.testing.expectEqual(mapping.expected, probe.code);
+    }
 }
 
 test "Node service validates registration and completes linearizable reads" {
@@ -2790,7 +3487,7 @@ const StreamProbe = struct {
     }
 };
 
-test "raw unary client reaches asynchronous Pool Node and Member RPCs" {
+test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     const allocator = std.heap.smp_allocator;
     var machine = state_machine.PoolStateMachine.init(allocator);
     defer machine.deinit();
@@ -2847,6 +3544,61 @@ test "raw unary client reaches asynchronous Pool Node and Member RPCs" {
     var response = try pb.CreatePoolResponse.decode(&response_reader, allocator);
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings("grpc-primary", response.pool.?.name);
+
+    const create_volume_request = try encodeMessage(allocator, testCreateVolumeRequest(
+        "grpc-volume-request-1",
+        response.pool.?.id,
+        "grpc-volume",
+    ));
+    defer allocator.free(create_volume_request);
+    var create_volume_result = try channel.callUnary(
+        allocator,
+        "/zettide.control.v1.VolumeService/CreateVolume",
+        create_volume_request,
+        .{ .timeout_ns = 5 * std.time.ns_per_s },
+    );
+    defer create_volume_result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, create_volume_result.status.code);
+    var create_volume_reader: std.Io.Reader = .fixed(create_volume_result.payload);
+    var create_volume_response = try pb.CreateVolumeResponse.decode(&create_volume_reader, allocator);
+    defer create_volume_response.deinit(allocator);
+    try std.testing.expectEqualStrings("grpc-volume", create_volume_response.volume.?.name);
+
+    const get_volume_request = try encodeMessage(allocator, pb.GetVolumeRequest{
+        .volume_id = create_volume_response.volume.?.id,
+    });
+    defer allocator.free(get_volume_request);
+    var get_volume_result = try channel.callUnary(
+        allocator,
+        "/zettide.control.v1.VolumeService/GetVolume",
+        get_volume_request,
+        .{ .timeout_ns = 5 * std.time.ns_per_s },
+    );
+    defer get_volume_result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, get_volume_result.status.code);
+    var get_volume_reader: std.Io.Reader = .fixed(get_volume_result.payload);
+    var get_volume_response = try pb.GetVolumeResponse.decode(&get_volume_reader, allocator);
+    defer get_volume_response.deinit(allocator);
+    try std.testing.expectEqualStrings(create_volume_response.volume.?.id, get_volume_response.volume.?.id);
+
+    const delete_volume_request = try encodeMessage(allocator, pb.DeleteVolumeRequest{
+        .request_id = "grpc-volume-delete-1",
+        .volume_id = create_volume_response.volume.?.id,
+        .expected_resource_version = create_volume_response.volume.?.resource_version,
+    });
+    defer allocator.free(delete_volume_request);
+    var delete_volume_result = try channel.callUnary(
+        allocator,
+        "/zettide.control.v1.VolumeService/DeleteVolume",
+        delete_volume_request,
+        .{ .timeout_ns = 5 * std.time.ns_per_s },
+    );
+    defer delete_volume_result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, delete_volume_result.status.code);
+    var delete_volume_reader: std.Io.Reader = .fixed(delete_volume_result.payload);
+    var delete_volume_response = try pb.DeleteVolumeResponse.decode(&delete_volume_reader, allocator);
+    defer delete_volume_response.deinit(allocator);
+    try std.testing.expectEqualStrings(create_volume_response.volume.?.id, delete_volume_response.volume_id);
 
     const node_id = "0198f54d-5c2a-7000-8000-000000000044";
     const register_node_request = try encodeMessage(allocator, testRegisterNodeRequest(
