@@ -14,6 +14,12 @@ service NodeService {
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
 }
 
+service MemberService {
+  rpc RegisterMember(RegisterMemberRequest) returns (RegisterMemberResponse);
+  rpc GetMember(GetMemberRequest) returns (GetMemberResponse);
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+}
+
 message Pool {
   string id = 1;
   string name = 2;
@@ -98,11 +104,62 @@ message ListNodesResponse {
   bytes next_page_token = 2;
 }
 
+message Member {
+  bytes id = 1;
+  string pool_id = 2;
+  string node_id = 3;
+  bytes local_set_id = 4;
+  uint32 member_slot = 5;
+  bytes birth_topology_digest = 6;
+  uint64 metadata_capacity_bytes = 7;
+  uint64 data_capacity_bytes = 8;
+  uint32 extent_size_bytes = 9;
+  int64 registered_at_unix_ms = 10;
+  uint64 registered_revision = 11;
+}
+
+message RegisterMemberRequest {
+  string request_id = 1;
+  bytes cluster_id = 2;
+  bytes member_id = 3;
+  string pool_id = 4;
+  string node_id = 5;
+  bytes local_set_id = 6;
+  uint32 member_slot = 7;
+  bytes birth_topology_digest = 8;
+  uint64 metadata_capacity_bytes = 9;
+  uint64 data_capacity_bytes = 10;
+  uint32 extent_size_bytes = 11;
+}
+
+message RegisterMemberResponse {
+  Member member = 1;
+}
+
+message GetMemberRequest {
+  bytes member_id = 1;
+}
+
+message GetMemberResponse {
+  Member member = 1;
+}
+
+message ListMembersRequest {
+  uint32 page_size = 1;
+  bytes page_token = 2;
+}
+
+message ListMembersResponse {
+  repeated Member members = 1;
+  bytes next_page_token = 2;
+}
+
 message CommandEnvelope {
   uint32 format_version = 1;
   oneof command {
     CreatePoolCommand create_pool = 2;
     RegisterNodeCommand register_node = 3;
+    RegisterMemberCommand register_member = 4;
   }
 }
 
@@ -124,6 +181,21 @@ message RegisterNodeCommand {
   uint64 capability_bits = 7;
   uint32 protocol_version = 8;
   int64 proposed_registered_at_unix_ms = 9;
+}
+
+message RegisterMemberCommand {
+  string request_id = 1;
+  bytes cluster_id = 2;
+  bytes member_id = 3;
+  string pool_id = 4;
+  string node_id = 5;
+  bytes local_set_id = 6;
+  uint32 member_slot = 7;
+  bytes birth_topology_digest = 8;
+  uint64 metadata_capacity_bytes = 9;
+  uint64 data_capacity_bytes = 10;
+  uint32 extent_size_bytes = 11;
+  int64 proposed_registered_at_unix_ms = 12;
 }
 
 enum ApplyCode {
@@ -156,6 +228,25 @@ message RegisterNodeApplyResponse {
   Node node = 2;
 }
 
+enum RegisterMemberApplyCode {
+  REGISTER_MEMBER_APPLY_CODE_UNSPECIFIED = 0;
+  REGISTER_MEMBER_APPLY_CODE_REGISTERED = 1;
+  REGISTER_MEMBER_APPLY_CODE_REQUEST_CONFLICT = 2;
+  REGISTER_MEMBER_APPLY_CODE_ID_EXISTS = 3;
+  REGISTER_MEMBER_APPLY_CODE_REQUEST_LIMIT = 4;
+  REGISTER_MEMBER_APPLY_CODE_MEMBER_LIMIT = 5;
+  REGISTER_MEMBER_APPLY_CODE_POOL_NOT_FOUND = 6;
+  REGISTER_MEMBER_APPLY_CODE_NODE_NOT_FOUND = 7;
+  REGISTER_MEMBER_APPLY_CODE_LOCAL_SET_CONFLICT = 8;
+  REGISTER_MEMBER_APPLY_CODE_SLOT_EXISTS = 9;
+  REGISTER_MEMBER_APPLY_CODE_CLUSTER_MISMATCH = 10;
+}
+
+message RegisterMemberApplyResponse {
+  RegisterMemberApplyCode code = 1;
+  Member member = 2;
+}
+
 message RequestRecord {
   string request_id = 1;
   bytes request_fingerprint = 2;
@@ -169,4 +260,5 @@ message StateSnapshot {
   repeated Pool pools = 2;
   repeated RequestRecord requests = 3;
   repeated Node nodes = 4;
+  repeated Member members = 5;
 }

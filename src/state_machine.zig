@@ -6,7 +6,7 @@ const uuid = @import("uuid");
 const wire = @import("protobuf_wire.zig");
 
 pub const command_format_version: u32 = 1;
-pub const snapshot_format_version: u32 = 3;
+pub const snapshot_format_version: u32 = 4;
 pub const max_name_bytes: usize = 127;
 pub const max_description_bytes: usize = 1024;
 pub const max_request_id_bytes: usize = 127;
@@ -14,11 +14,13 @@ pub const max_node_endpoint_bytes: usize = 1024;
 pub const max_failure_domain_bytes: usize = 255;
 pub const max_pools: usize = 25_000;
 pub const max_nodes: usize = 10_000;
+pub const max_members: usize = 10_000;
 pub const max_requests: usize = 50_000;
 pub const max_snapshot_bytes: usize = 256 * 1024 * 1024;
 
 const max_pool_wire_bytes: usize = 2048;
 const max_node_wire_bytes: usize = 4096;
+const max_member_wire_bytes: usize = 4096;
 const max_command_wire_bytes: usize = 8192;
 const max_response_wire_bytes: usize = 8192;
 const max_request_wire_bytes: usize = max_request_id_bytes + @sizeOf(Fingerprint) + max_response_wire_bytes + max_command_wire_bytes + 40;
@@ -123,9 +125,79 @@ const Node = struct {
     }
 };
 
+const Member = struct {
+    id: []u8,
+    pool_id: []u8,
+    node_id: []u8,
+    local_set_id: []u8,
+    member_slot: u32,
+    birth_topology_digest: []u8,
+    metadata_capacity_bytes: u64,
+    data_capacity_bytes: u64,
+    extent_size_bytes: u32,
+    registered_at_unix_ms: i64,
+    registered_revision: u64,
+
+    fn init(allocator: std.mem.Allocator, source: pb.Member) !Member {
+        const id = try allocator.dupe(u8, source.id);
+        errdefer allocator.free(id);
+        const pool_id = try allocator.dupe(u8, source.pool_id);
+        errdefer allocator.free(pool_id);
+        const node_id = try allocator.dupe(u8, source.node_id);
+        errdefer allocator.free(node_id);
+        const local_set_id = try allocator.dupe(u8, source.local_set_id);
+        errdefer allocator.free(local_set_id);
+        const birth_topology_digest = try allocator.dupe(u8, source.birth_topology_digest);
+        return .{
+            .id = id,
+            .pool_id = pool_id,
+            .node_id = node_id,
+            .local_set_id = local_set_id,
+            .member_slot = source.member_slot,
+            .birth_topology_digest = birth_topology_digest,
+            .metadata_capacity_bytes = source.metadata_capacity_bytes,
+            .data_capacity_bytes = source.data_capacity_bytes,
+            .extent_size_bytes = source.extent_size_bytes,
+            .registered_at_unix_ms = source.registered_at_unix_ms,
+            .registered_revision = source.registered_revision,
+        };
+    }
+
+    fn deinit(self: *Member, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.pool_id);
+        allocator.free(self.node_id);
+        allocator.free(self.local_set_id);
+        allocator.free(self.birth_topology_digest);
+        self.* = undefined;
+    }
+
+    fn proto(self: Member) pb.Member {
+        return .{
+            .id = self.id,
+            .pool_id = self.pool_id,
+            .node_id = self.node_id,
+            .local_set_id = self.local_set_id,
+            .member_slot = self.member_slot,
+            .birth_topology_digest = self.birth_topology_digest,
+            .metadata_capacity_bytes = self.metadata_capacity_bytes,
+            .data_capacity_bytes = self.data_capacity_bytes,
+            .extent_size_bytes = self.extent_size_bytes,
+            .registered_at_unix_ms = self.registered_at_unix_ms,
+            .registered_revision = self.registered_revision,
+        };
+    }
+};
+
+const MemberSlotKey = struct {
+    local_set_id: [16]u8,
+    member_slot: u16,
+};
+
 const RequestKind = enum {
     create_pool,
     register_node,
+    register_member,
 };
 
 const Request = struct {
@@ -150,14 +222,26 @@ const State = struct {
     pool_ids_by_revision: std.ArrayList([]const u8) = .empty,
     nodes_by_id: std.StringHashMapUnmanaged(Node) = .empty,
     node_ids_by_revision: std.ArrayList([]const u8) = .empty,
+    members_by_id: std.StringHashMapUnmanaged(Member) = .empty,
+    member_ids_by_revision: std.ArrayList([]const u8) = .empty,
+    pool_ids_by_local_set: std.StringHashMapUnmanaged([]const u8) = .empty,
+    member_ids_by_slot: std.AutoHashMapUnmanaged(MemberSlotKey, []const u8) = .empty,
     requests: std.StringHashMapUnmanaged(Request) = .empty,
     max_pool_created_revision: u64 = 0,
     max_node_registered_revision: u64 = 0,
+    max_member_registered_revision: u64 = 0,
 
     fn deinit(self: *State, allocator: std.mem.Allocator) void {
         var request_iterator = self.requests.valueIterator();
         while (request_iterator.next()) |request| request.deinit(allocator);
         self.requests.deinit(allocator);
+
+        self.member_ids_by_slot.deinit(allocator);
+        self.pool_ids_by_local_set.deinit(allocator);
+        self.member_ids_by_revision.deinit(allocator);
+        var member_iterator = self.members_by_id.valueIterator();
+        while (member_iterator.next()) |member| member.deinit(allocator);
+        self.members_by_id.deinit(allocator);
 
         self.node_ids_by_revision.deinit(allocator);
         var node_iterator = self.nodes_by_id.valueIterator();
@@ -200,6 +284,10 @@ pub const PoolStateMachine = struct {
 
     pub fn nodeCount(self: *const PoolStateMachine) usize {
         return self.state.nodes_by_id.count();
+    }
+
+    pub fn memberCount(self: *const PoolStateMachine) usize {
+        return self.state.members_by_id.count();
     }
 
     pub fn getPoolById(self: *const PoolStateMachine, allocator: std.mem.Allocator, id: []const u8) !?pb.Pool {
@@ -310,6 +398,51 @@ pub const PoolStateMachine = struct {
         };
     }
 
+    pub fn getMemberById(self: *const PoolStateMachine, allocator: std.mem.Allocator, id: []const u8) !?pb.Member {
+        const member = self.state.members_by_id.get(id) orelse return null;
+        return try dupeMember(allocator, member.proto());
+    }
+
+    pub const MemberPage = struct {
+        members: []pb.Member,
+        has_more: bool,
+
+        pub fn deinit(self: *MemberPage, allocator: std.mem.Allocator) void {
+            deinitMemberList(allocator, self.members);
+            self.* = undefined;
+        }
+    };
+
+    pub fn listMembersPage(
+        self: *const PoolStateMachine,
+        allocator: std.mem.Allocator,
+        after_id: ?[]const u8,
+        limit: usize,
+    ) !MemberPage {
+        var start: usize = 0;
+        if (after_id) |target| {
+            while (start < self.state.member_ids_by_revision.items.len and
+                !std.mem.eql(u8, self.state.member_ids_by_revision.items[start], target)) : (start += 1)
+            {}
+            if (start == self.state.member_ids_by_revision.items.len) return error.InvalidPageToken;
+            start += 1;
+        }
+        const end = @min(start +| limit, self.state.member_ids_by_revision.items.len);
+        var members: std.ArrayList(pb.Member) = .empty;
+        errdefer {
+            for (members.items) |*member| member.deinit(allocator);
+            members.deinit(allocator);
+        }
+        try members.ensureTotalCapacity(allocator, end - start);
+        for (self.state.member_ids_by_revision.items[start..end]) |id| {
+            members.appendAssumeCapacity(try dupeMember(allocator, self.state.members_by_id.get(id).?.proto()));
+        }
+        return .{
+            .members = try members.toOwnedSlice(allocator),
+            .has_more = end < self.state.member_ids_by_revision.items.len,
+        };
+    }
+
     fn apply(ctx: *anyopaque, entry: raft.Entry) raft.Error!raft.ApplyResult {
         const self: *PoolStateMachine = @ptrCast(@alignCast(ctx));
         if (entry.data.len == 0) return .{};
@@ -324,6 +457,7 @@ pub const PoolStateMachine = struct {
         return switch (envelope.command orelse return error.PayloadParseFailed) {
             .create_pool => |command| self.applyCreatePool(entry.index, command),
             .register_node => |command| self.applyRegisterNode(entry.index, command),
+            .register_member => |command| self.applyRegisterMember(entry.index, command),
         };
     }
 
@@ -527,6 +661,149 @@ pub const PoolStateMachine = struct {
         return .{ .response = returned_response };
     }
 
+    fn applyRegisterMember(self: *PoolStateMachine, revision: u64, command: pb.RegisterMemberCommand) raft.Error!raft.ApplyResult {
+        try validateRegisterMemberCommand(command);
+        if (revision == 0) return error.PayloadParseFailed;
+
+        const fingerprint = registerMemberFingerprint(command);
+        if (self.state.requests.get(command.request_id)) |request| {
+            if (request.kind != .register_member or !std.mem.eql(u8, &fingerprint, &request.fingerprint)) {
+                return .{ .response = try encodeRegisterMemberApplyResponse(self.allocator, .REGISTER_MEMBER_APPLY_CODE_REQUEST_CONFLICT, null) };
+            }
+            return .{ .response = try self.allocator.dupe(u8, request.encoded_response) };
+        }
+        if (self.state.requests.count() >= max_requests) {
+            return .{ .response = try encodeRegisterMemberApplyResponse(self.allocator, .REGISTER_MEMBER_APPLY_CODE_REQUEST_LIMIT, null) };
+        }
+
+        if (!self.state.pools_by_id.contains(command.pool_id)) {
+            return self.recordMemberResponse(command, fingerprint, try encodeRegisterMemberApplyResponse(
+                self.allocator,
+                .REGISTER_MEMBER_APPLY_CODE_POOL_NOT_FOUND,
+                null,
+            ), revision);
+        }
+        const node = self.state.nodes_by_id.get(command.node_id) orelse {
+            return self.recordMemberResponse(command, fingerprint, try encodeRegisterMemberApplyResponse(
+                self.allocator,
+                .REGISTER_MEMBER_APPLY_CODE_NODE_NOT_FOUND,
+                null,
+            ), revision);
+        };
+        if (!std.mem.eql(u8, command.cluster_id, node.cluster_id)) {
+            return self.recordMemberResponse(command, fingerprint, try encodeRegisterMemberApplyResponse(
+                self.allocator,
+                .REGISTER_MEMBER_APPLY_CODE_CLUSTER_MISMATCH,
+                null,
+            ), revision);
+        }
+        if (self.state.members_by_id.get(command.member_id)) |existing| {
+            return self.recordMemberResponse(command, fingerprint, try encodeRegisterMemberApplyResponse(
+                self.allocator,
+                .REGISTER_MEMBER_APPLY_CODE_ID_EXISTS,
+                existing.proto(),
+            ), revision);
+        }
+        if (self.state.pool_ids_by_local_set.get(command.local_set_id)) |pool_id| {
+            if (!std.mem.eql(u8, command.pool_id, pool_id)) {
+                return self.recordMemberResponse(command, fingerprint, try encodeRegisterMemberApplyResponse(
+                    self.allocator,
+                    .REGISTER_MEMBER_APPLY_CODE_LOCAL_SET_CONFLICT,
+                    null,
+                ), revision);
+            }
+        }
+        const slot_key = memberSlotKey(command.local_set_id, command.member_slot);
+        if (self.state.member_ids_by_slot.get(slot_key)) |member_id| {
+            return self.recordMemberResponse(command, fingerprint, try encodeRegisterMemberApplyResponse(
+                self.allocator,
+                .REGISTER_MEMBER_APPLY_CODE_SLOT_EXISTS,
+                self.state.members_by_id.get(member_id).?.proto(),
+            ), revision);
+        }
+        if (self.state.members_by_id.count() >= max_members) {
+            return self.recordMemberResponse(command, fingerprint, try encodeRegisterMemberApplyResponse(
+                self.allocator,
+                .REGISTER_MEMBER_APPLY_CODE_MEMBER_LIMIT,
+                null,
+            ), revision);
+        }
+
+        const member_proto: pb.Member = .{
+            .id = command.member_id,
+            .pool_id = command.pool_id,
+            .node_id = command.node_id,
+            .local_set_id = command.local_set_id,
+            .member_slot = command.member_slot,
+            .birth_topology_digest = command.birth_topology_digest,
+            .metadata_capacity_bytes = command.metadata_capacity_bytes,
+            .data_capacity_bytes = command.data_capacity_bytes,
+            .extent_size_bytes = command.extent_size_bytes,
+            .registered_at_unix_ms = command.proposed_registered_at_unix_ms,
+            .registered_revision = revision,
+        };
+        const encoded_response = try encodeRegisterMemberApplyResponse(self.allocator, .REGISTER_MEMBER_APPLY_CODE_REGISTERED, member_proto);
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodeRegisterMemberCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        var member = try Member.init(self.allocator, member_proto);
+        errdefer member.deinit(self.allocator);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+
+        try self.state.members_by_id.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.member_ids_by_revision.ensureUnusedCapacity(self.allocator, 1);
+        if (!self.state.pool_ids_by_local_set.contains(command.local_set_id)) {
+            try self.state.pool_ids_by_local_set.ensureUnusedCapacity(self.allocator, 1);
+        }
+        try self.state.member_ids_by_slot.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        self.state.members_by_id.putAssumeCapacity(member.id, member);
+        self.state.member_ids_by_revision.appendAssumeCapacity(member.id);
+        if (!self.state.pool_ids_by_local_set.contains(member.local_set_id)) {
+            self.state.pool_ids_by_local_set.putAssumeCapacity(member.local_set_id, member.pool_id);
+        }
+        self.state.member_ids_by_slot.putAssumeCapacity(slot_key, member.id);
+        self.state.max_member_registered_revision = @max(self.state.max_member_registered_revision, member.registered_revision);
+        self.state.requests.putAssumeCapacity(request_id, .{
+            .request_id = request_id,
+            .kind = .register_member,
+            .fingerprint = fingerprint,
+            .encoded_response = encoded_response,
+            .encoded_command = encoded_command,
+            .applied_revision = revision,
+        });
+        return .{ .response = returned_response };
+    }
+
+    fn recordMemberResponse(
+        self: *PoolStateMachine,
+        command: pb.RegisterMemberCommand,
+        fingerprint: Fingerprint,
+        encoded_response: []u8,
+        applied_revision: u64,
+    ) raft.Error!raft.ApplyResult {
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodeRegisterMemberCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        self.state.requests.putAssumeCapacity(request_id, .{
+            .request_id = request_id,
+            .kind = .register_member,
+            .fingerprint = fingerprint,
+            .encoded_response = encoded_response,
+            .encoded_command = encoded_command,
+            .applied_revision = applied_revision,
+        });
+        return .{ .response = returned_response };
+    }
+
     fn takeSnapshot(
         ctx: *anyopaque,
         allocator: std.mem.Allocator,
@@ -549,6 +826,13 @@ pub const PoolStateMachine = struct {
         while (node_iterator.next()) |node| nodes.appendAssumeCapacity(node.proto());
         std.mem.sort(pb.Node, nodes.items, {}, nodeIdLessThan);
 
+        var members: std.ArrayList(pb.Member) = .empty;
+        defer members.deinit(allocator);
+        try members.ensureTotalCapacity(allocator, self.state.members_by_id.count());
+        var member_iterator = self.state.members_by_id.valueIterator();
+        while (member_iterator.next()) |member| members.appendAssumeCapacity(member.proto());
+        std.mem.sort(pb.Member, members.items, {}, memberIdLessThan);
+
         var requests: std.ArrayList(pb.RequestRecord) = .empty;
         defer requests.deinit(allocator);
         try requests.ensureTotalCapacity(allocator, self.state.requests.count());
@@ -569,6 +853,7 @@ pub const PoolStateMachine = struct {
             .pools = pools,
             .requests = requests,
             .nodes = nodes,
+            .members = members,
         });
         errdefer allocator.free(data);
         if (data.len > max_snapshot_bytes) return error.MessageTooLarge;
@@ -600,11 +885,13 @@ pub const PoolStateMachine = struct {
         var wire_reader: std.Io.Reader = .fixed(bytes.items);
         var snapshot = pb.StateSnapshot.decode(&wire_reader, arena.allocator()) catch |err| return mapDecodeError(err);
         defer snapshot.deinit(arena.allocator());
-        if (snapshot.format_version != 2 and snapshot.format_version != snapshot_format_version) return error.PayloadParseFailed;
+        if (snapshot.format_version != 2 and snapshot.format_version != 3 and snapshot.format_version != snapshot_format_version) return error.PayloadParseFailed;
         if (snapshot.pools.items.len > max_pools or
             snapshot.nodes.items.len > max_nodes or
+            snapshot.members.items.len > max_members or
             snapshot.requests.items.len > max_requests or
-            (snapshot.format_version == 2 and snapshot.nodes.items.len != 0))
+            (snapshot.format_version == 2 and snapshot.nodes.items.len != 0) or
+            (snapshot.format_version < 4 and snapshot.members.items.len != 0))
         {
             return error.PayloadParseFailed;
         }
@@ -625,11 +912,19 @@ pub const PoolStateMachine = struct {
             try restoreNode(self.allocator, &restored, source);
         }
         std.mem.sort([]const u8, restored.node_ids_by_revision.items, &restored, nodeRevisionIdLessThan);
+        for (snapshot.members.items) |source| {
+            if (source.registered_revision > metadata.index or revisions.contains(source.registered_revision)) return error.PayloadParseFailed;
+            try revisions.put(self.allocator, source.registered_revision, {});
+            try restoreMember(self.allocator, &restored, source);
+        }
+        std.mem.sort([]const u8, restored.member_ids_by_revision.items, &restored, memberRevisionIdLessThan);
 
         var created_pool_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer created_pool_ids.deinit(self.allocator);
         var registered_node_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer registered_node_ids.deinit(self.allocator);
+        var registered_member_ids: std.StringHashMapUnmanaged(void) = .empty;
+        defer registered_member_ids.deinit(self.allocator);
         var request_revisions: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer request_revisions.deinit(self.allocator);
         for (snapshot.requests.items) |source| {
@@ -650,11 +945,16 @@ pub const PoolStateMachine = struct {
                         if (registered_node_ids.contains(id)) return error.PayloadParseFailed;
                         try registered_node_ids.put(self.allocator, id, {});
                     },
+                    .member => |id| {
+                        if (registered_member_ids.contains(id)) return error.PayloadParseFailed;
+                        try registered_member_ids.put(self.allocator, id, {});
+                    },
                 }
             }
         }
         if (created_pool_ids.count() != restored.pools_by_id.count() or
-            registered_node_ids.count() != restored.nodes_by_id.count())
+            registered_node_ids.count() != restored.nodes_by_id.count() or
+            registered_member_ids.count() != restored.members_by_id.count())
         {
             return error.PayloadParseFailed;
         }
@@ -685,6 +985,14 @@ pub fn encodeRegisterNodeCommand(allocator: std.mem.Allocator, command: pb.Regis
     });
 }
 
+pub fn encodeRegisterMemberCommand(allocator: std.mem.Allocator, command: pb.RegisterMemberCommand) ![]u8 {
+    try validateRegisterMemberCommand(command);
+    return encodeMessage(allocator, pb.CommandEnvelope{
+        .format_version = command_format_version,
+        .command = .{ .register_member = command },
+    });
+}
+
 pub fn decodeApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.ApplyResponse {
     var reader: std.Io.Reader = .fixed(bytes);
     return pb.ApplyResponse.decode(&reader, allocator);
@@ -695,6 +1003,11 @@ pub fn decodeRegisterNodeApplyResponse(allocator: std.mem.Allocator, bytes: []co
     return pb.RegisterNodeApplyResponse.decode(&reader, allocator);
 }
 
+pub fn decodeRegisterMemberApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.RegisterMemberApplyResponse {
+    var reader: std.Io.Reader = .fixed(bytes);
+    return pb.RegisterMemberApplyResponse.decode(&reader, allocator);
+}
+
 pub fn deinitPoolList(allocator: std.mem.Allocator, pools: []pb.Pool) void {
     for (pools) |*pool| pool.deinit(allocator);
     allocator.free(pools);
@@ -703,6 +1016,11 @@ pub fn deinitPoolList(allocator: std.mem.Allocator, pools: []pb.Pool) void {
 pub fn deinitNodeList(allocator: std.mem.Allocator, nodes: []pb.Node) void {
     for (nodes) |*node| node.deinit(allocator);
     allocator.free(nodes);
+}
+
+pub fn deinitMemberList(allocator: std.mem.Allocator, members: []pb.Member) void {
+    for (members) |*member| member.deinit(allocator);
+    allocator.free(members);
 }
 
 fn validateCommand(command: pb.CreatePoolCommand) raft.Error!void {
@@ -739,8 +1057,34 @@ fn validateNode(node: pb.Node) raft.Error!void {
     if (node.protocol_version == 0 or node.registered_at_unix_ms <= 0 or node.registered_revision == 0) return error.PayloadParseFailed;
 }
 
+fn validateRegisterMemberCommand(command: pb.RegisterMemberCommand) raft.Error!void {
+    if (!validText(command.request_id, max_request_id_bytes, false)) return error.PayloadParseFailed;
+    if (!validClusterId(command.cluster_id)) return error.PayloadParseFailed;
+    if (!validFixedNonzero(command.member_id, 16)) return error.PayloadParseFailed;
+    if (!validUuidV7(command.pool_id) or !validUuidV7(command.node_id)) return error.PayloadParseFailed;
+    if (!validFixedNonzero(command.local_set_id, 16) or std.mem.eql(u8, command.member_id, command.local_set_id)) return error.PayloadParseFailed;
+    if (command.member_slot > std.math.maxInt(u16)) return error.PayloadParseFailed;
+    if (!validFixedNonzero(command.birth_topology_digest, 32)) return error.PayloadParseFailed;
+    if (command.metadata_capacity_bytes == 0 or command.data_capacity_bytes == 0 or command.extent_size_bytes == 0) return error.PayloadParseFailed;
+    if (command.proposed_registered_at_unix_ms <= 0) return error.PayloadParseFailed;
+}
+
+fn validateMember(member: pb.Member) raft.Error!void {
+    if (!validFixedNonzero(member.id, 16)) return error.PayloadParseFailed;
+    if (!validUuidV7(member.pool_id) or !validUuidV7(member.node_id)) return error.PayloadParseFailed;
+    if (!validFixedNonzero(member.local_set_id, 16) or std.mem.eql(u8, member.id, member.local_set_id)) return error.PayloadParseFailed;
+    if (member.member_slot > std.math.maxInt(u16)) return error.PayloadParseFailed;
+    if (!validFixedNonzero(member.birth_topology_digest, 32)) return error.PayloadParseFailed;
+    if (member.metadata_capacity_bytes == 0 or member.data_capacity_bytes == 0 or member.extent_size_bytes == 0) return error.PayloadParseFailed;
+    if (member.registered_at_unix_ms <= 0 or member.registered_revision == 0) return error.PayloadParseFailed;
+}
+
 fn validClusterId(value: []const u8) bool {
-    if (value.len != 16) return false;
+    return validFixedNonzero(value, 16);
+}
+
+fn validFixedNonzero(value: []const u8, expected_len: usize) bool {
+    if (value.len != expected_len) return false;
     for (value) |byte| if (byte != 0) return true;
     return false;
 }
@@ -768,6 +1112,23 @@ fn registerNodeFingerprint(command: pb.RegisterNodeCommand) Fingerprint {
     hashField(&hasher, command.failure_domain);
     hashInt(&hasher, u64, command.capability_bits);
     hashInt(&hasher, u32, command.protocol_version);
+    var result: Fingerprint = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+fn registerMemberFingerprint(command: pb.RegisterMemberCommand) Fingerprint {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hasher, command.cluster_id);
+    hashField(&hasher, command.member_id);
+    hashField(&hasher, command.pool_id);
+    hashField(&hasher, command.node_id);
+    hashField(&hasher, command.local_set_id);
+    hashInt(&hasher, u32, command.member_slot);
+    hashField(&hasher, command.birth_topology_digest);
+    hashInt(&hasher, u64, command.metadata_capacity_bytes);
+    hashInt(&hasher, u64, command.data_capacity_bytes);
+    hashInt(&hasher, u32, command.extent_size_bytes);
     var result: Fingerprint = undefined;
     hasher.final(&result);
     return result;
@@ -807,6 +1168,14 @@ fn encodeRegisterNodeApplyResponse(
     return encodeMessage(allocator, pb.RegisterNodeApplyResponse{ .code = code, .node = node });
 }
 
+fn encodeRegisterMemberApplyResponse(
+    allocator: std.mem.Allocator,
+    code: pb.RegisterMemberApplyCode,
+    member: ?pb.Member,
+) raft.Error![]u8 {
+    return encodeMessage(allocator, pb.RegisterMemberApplyResponse{ .code = code, .member = member });
+}
+
 fn encodeMessage(allocator: std.mem.Allocator, message: anytype) raft.Error![]u8 {
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
@@ -844,9 +1213,36 @@ fn restoreNode(allocator: std.mem.Allocator, state: *State, source: pb.Node) raf
     state.max_node_registered_revision = @max(state.max_node_registered_revision, node.registered_revision);
 }
 
+fn restoreMember(allocator: std.mem.Allocator, state: *State, source: pb.Member) raft.Error!void {
+    try validateMember(source);
+    if (!state.pools_by_id.contains(source.pool_id) or !state.nodes_by_id.contains(source.node_id)) return error.PayloadParseFailed;
+    if (state.members_by_id.contains(source.id)) return error.PayloadParseFailed;
+    if (state.pool_ids_by_local_set.get(source.local_set_id)) |pool_id| {
+        if (!std.mem.eql(u8, pool_id, source.pool_id)) return error.PayloadParseFailed;
+    }
+    const slot_key = memberSlotKey(source.local_set_id, source.member_slot);
+    if (state.member_ids_by_slot.contains(slot_key)) return error.PayloadParseFailed;
+    var member = try Member.init(allocator, source);
+    errdefer member.deinit(allocator);
+    try state.members_by_id.ensureUnusedCapacity(allocator, 1);
+    try state.member_ids_by_revision.ensureUnusedCapacity(allocator, 1);
+    if (!state.pool_ids_by_local_set.contains(source.local_set_id)) {
+        try state.pool_ids_by_local_set.ensureUnusedCapacity(allocator, 1);
+    }
+    try state.member_ids_by_slot.ensureUnusedCapacity(allocator, 1);
+    state.members_by_id.putAssumeCapacity(member.id, member);
+    state.member_ids_by_revision.appendAssumeCapacity(member.id);
+    if (!state.pool_ids_by_local_set.contains(member.local_set_id)) {
+        state.pool_ids_by_local_set.putAssumeCapacity(member.local_set_id, member.pool_id);
+    }
+    state.member_ids_by_slot.putAssumeCapacity(slot_key, member.id);
+    state.max_member_registered_revision = @max(state.max_member_registered_revision, member.registered_revision);
+}
+
 const RestoredCreation = union(enum) {
     pool: []const u8,
     node: []const u8,
+    member: []const u8,
 };
 
 fn restoreRequest(
@@ -899,6 +1295,24 @@ fn restoreRequest(
             errdefer allocator.free(encoded_command);
             try insertRestoredRequest(allocator, state, source, .register_node, encoded_response, encoded_command);
             return if (registered_node_id) |id| RestoredCreation{ .node = id } else null;
+        },
+        .register_member => |command| {
+            if (snapshot_version < 4) return error.PayloadParseFailed;
+            try validateRegisterMemberCommand(command);
+            if (!std.mem.eql(u8, source.request_id, command.request_id)) return error.PayloadParseFailed;
+            const expected_fingerprint = registerMemberFingerprint(command);
+            if (!std.mem.eql(u8, source.request_fingerprint, &expected_fingerprint)) return error.PayloadParseFailed;
+
+            var response_reader: std.Io.Reader = .fixed(source.encoded_response);
+            var response = pb.RegisterMemberApplyResponse.decode(&response_reader, decode_allocator) catch |err| return mapDecodeError(err);
+            defer response.deinit(decode_allocator);
+            const registered_member_id = try validateStoredMemberResponse(state, command, response, source.applied_revision);
+            const encoded_response = try encodeRegisterMemberApplyResponse(allocator, response.code, response.member);
+            errdefer allocator.free(encoded_response);
+            const encoded_command = try encodeRegisterMemberCommand(allocator, command);
+            errdefer allocator.free(encoded_command);
+            try insertRestoredRequest(allocator, state, source, .register_member, encoded_response, encoded_command);
+            return if (registered_member_id) |id| RestoredCreation{ .member = id } else null;
         },
     }
 }
@@ -1051,6 +1465,107 @@ fn validateStoredNodeResponse(
     }
 }
 
+fn validateStoredMemberResponse(
+    state: *const State,
+    command: pb.RegisterMemberCommand,
+    response: pb.RegisterMemberApplyResponse,
+    applied_revision: u64,
+) raft.Error!?[]const u8 {
+    const pool = state.pools_by_id.get(command.pool_id);
+    const node = state.nodes_by_id.get(command.node_id);
+    const pool_existed = if (pool) |value| value.created_revision < applied_revision else false;
+    const node_existed = if (node) |value| value.registered_revision < applied_revision else false;
+    const node_matches_cluster = if (node) |value| std.mem.eql(u8, value.cluster_id, command.cluster_id) else false;
+    const existing_id = state.members_by_id.get(command.member_id);
+    const id_existed = if (existing_id) |value| value.registered_revision < applied_revision else false;
+    const local_set_pool = memberLocalSetPoolBefore(state, command.local_set_id, applied_revision);
+    const slot_member = state.member_ids_by_slot.get(memberSlotKey(command.local_set_id, command.member_slot));
+    const stored_slot_member = if (slot_member) |id| state.members_by_id.get(id) else null;
+    const slot_existed = if (stored_slot_member) |value| value.registered_revision < applied_revision else false;
+
+    switch (response.code) {
+        .REGISTER_MEMBER_APPLY_CODE_REGISTERED => {
+            const response_member = response.member orelse return error.PayloadParseFailed;
+            const stored_member = state.members_by_id.get(response_member.id) orelse return error.PayloadParseFailed;
+            if (!membersEqual(stored_member.proto(), response_member) or
+                !std.mem.eql(u8, command.member_id, response_member.id) or
+                !std.mem.eql(u8, command.pool_id, response_member.pool_id) or
+                !std.mem.eql(u8, command.node_id, response_member.node_id) or
+                !std.mem.eql(u8, command.local_set_id, response_member.local_set_id) or
+                command.member_slot != response_member.member_slot or
+                !std.mem.eql(u8, command.birth_topology_digest, response_member.birth_topology_digest) or
+                command.metadata_capacity_bytes != response_member.metadata_capacity_bytes or
+                command.data_capacity_bytes != response_member.data_capacity_bytes or
+                command.extent_size_bytes != response_member.extent_size_bytes or
+                command.proposed_registered_at_unix_ms != response_member.registered_at_unix_ms or
+                applied_revision != response_member.registered_revision or
+                !pool_existed or !node_existed or !node_matches_cluster)
+            {
+                return error.PayloadParseFailed;
+            }
+            return stored_member.id;
+        },
+        .REGISTER_MEMBER_APPLY_CODE_POOL_NOT_FOUND => {
+            if (response.member != null or pool_existed) return error.PayloadParseFailed;
+            return null;
+        },
+        .REGISTER_MEMBER_APPLY_CODE_NODE_NOT_FOUND => {
+            if (response.member != null or !pool_existed or node_existed) return error.PayloadParseFailed;
+            return null;
+        },
+        .REGISTER_MEMBER_APPLY_CODE_CLUSTER_MISMATCH => {
+            if (response.member != null or !pool_existed or !node_existed or node_matches_cluster) return error.PayloadParseFailed;
+            return null;
+        },
+        .REGISTER_MEMBER_APPLY_CODE_ID_EXISTS => {
+            const response_member = response.member orelse return error.PayloadParseFailed;
+            if (!pool_existed or !node_existed or !node_matches_cluster or !id_existed or
+                !membersEqual(existing_id.?.proto(), response_member))
+            {
+                return error.PayloadParseFailed;
+            }
+            return null;
+        },
+        .REGISTER_MEMBER_APPLY_CODE_LOCAL_SET_CONFLICT => {
+            if (response.member != null or !pool_existed or !node_existed or !node_matches_cluster or id_existed or
+                local_set_pool == null or std.mem.eql(u8, local_set_pool.?, command.pool_id))
+            {
+                return error.PayloadParseFailed;
+            }
+            return null;
+        },
+        .REGISTER_MEMBER_APPLY_CODE_SLOT_EXISTS => {
+            const response_member = response.member orelse return error.PayloadParseFailed;
+            if (!pool_existed or !node_existed or !node_matches_cluster or id_existed or
+                (local_set_pool != null and !std.mem.eql(u8, local_set_pool.?, command.pool_id)) or
+                !slot_existed or !membersEqual(stored_slot_member.?.proto(), response_member))
+            {
+                return error.PayloadParseFailed;
+            }
+            return null;
+        },
+        .REGISTER_MEMBER_APPLY_CODE_MEMBER_LIMIT => {
+            if (response.member != null or !pool_existed or !node_existed or !node_matches_cluster or id_existed or
+                (local_set_pool != null and !std.mem.eql(u8, local_set_pool.?, command.pool_id)) or slot_existed or
+                state.members_by_id.count() != max_members or state.max_member_registered_revision >= applied_revision)
+            {
+                return error.PayloadParseFailed;
+            }
+            return null;
+        },
+        else => return error.PayloadParseFailed,
+    }
+}
+
+fn memberLocalSetPoolBefore(state: *const State, local_set_id: []const u8, revision: u64) ?[]const u8 {
+    for (state.member_ids_by_revision.items) |id| {
+        const member = state.members_by_id.get(id).?;
+        if (member.registered_revision >= revision) break;
+        if (std.mem.eql(u8, member.local_set_id, local_set_id)) return member.pool_id;
+    }
+    return null;
+}
+
 fn poolsEqual(lhs: pb.Pool, rhs: pb.Pool) bool {
     return std.mem.eql(u8, lhs.id, rhs.id) and
         std.mem.eql(u8, lhs.name, rhs.name) and
@@ -1071,6 +1586,20 @@ fn nodesEqual(lhs: pb.Node, rhs: pb.Node) bool {
         lhs.registered_revision == rhs.registered_revision;
 }
 
+fn membersEqual(lhs: pb.Member, rhs: pb.Member) bool {
+    return std.mem.eql(u8, lhs.id, rhs.id) and
+        std.mem.eql(u8, lhs.pool_id, rhs.pool_id) and
+        std.mem.eql(u8, lhs.node_id, rhs.node_id) and
+        std.mem.eql(u8, lhs.local_set_id, rhs.local_set_id) and
+        lhs.member_slot == rhs.member_slot and
+        std.mem.eql(u8, lhs.birth_topology_digest, rhs.birth_topology_digest) and
+        lhs.metadata_capacity_bytes == rhs.metadata_capacity_bytes and
+        lhs.data_capacity_bytes == rhs.data_capacity_bytes and
+        lhs.extent_size_bytes == rhs.extent_size_bytes and
+        lhs.registered_at_unix_ms == rhs.registered_at_unix_ms and
+        lhs.registered_revision == rhs.registered_revision;
+}
+
 fn dupePool(allocator: std.mem.Allocator, source: pb.Pool) !pb.Pool {
     const owned = try Pool.init(allocator, source);
     return owned.proto();
@@ -1079,6 +1608,18 @@ fn dupePool(allocator: std.mem.Allocator, source: pb.Pool) !pb.Pool {
 fn dupeNode(allocator: std.mem.Allocator, source: pb.Node) !pb.Node {
     const owned = try Node.init(allocator, source);
     return owned.proto();
+}
+
+fn dupeMember(allocator: std.mem.Allocator, source: pb.Member) !pb.Member {
+    const owned = try Member.init(allocator, source);
+    return owned.proto();
+}
+
+fn memberSlotKey(local_set_id: []const u8, member_slot: u32) MemberSlotKey {
+    var key: MemberSlotKey = undefined;
+    @memcpy(&key.local_set_id, local_set_id);
+    key.member_slot = @intCast(member_slot);
+    return key;
 }
 
 const WireError = wire.Error;
@@ -1108,6 +1649,11 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
             if (field.wire_type != 2 or kind != null) return error.InvalidWire;
             kind = .register_node;
             try preflightRegisterNode(try cursor.readBytes(max_node_wire_bytes));
+        },
+        4 => {
+            if (field.wire_type != 2 or kind != null) return error.InvalidWire;
+            kind = .register_member;
+            try preflightRegisterMember(try cursor.readBytes(max_member_wire_bytes));
         },
         else => return error.InvalidWire,
     };
@@ -1177,6 +1723,49 @@ fn preflightRegisterNode(bytes: []const u8) WireError!void {
     if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5] or !seen[6] or !seen[8] or !seen[9]) return error.InvalidWire;
 }
 
+fn preflightRegisterMember(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 13;
+    var member_id: ?[]const u8 = null;
+    var local_set_id: ?[]const u8 = null;
+    while (try cursor.next()) |field| {
+        if (field.number > 12 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_request_id_bytes), max_request_id_bytes, false)) return error.InvalidWire,
+            2 => if (field.wire_type != 2 or !validClusterId(try cursor.readBytes(16))) return error.InvalidWire,
+            3 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                member_id = try cursor.readBytes(16);
+                if (!validFixedNonzero(member_id.?, 16)) return error.InvalidWire;
+            },
+            4, 5 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            6 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                local_set_id = try cursor.readBytes(16);
+                if (!validFixedNonzero(local_set_id.?, 16)) return error.InvalidWire;
+            },
+            7 => if (field.wire_type != 0 or try cursor.readVarint() > std.math.maxInt(u16)) return error.InvalidWire,
+            8 => if (field.wire_type != 2 or !validFixedNonzero(try cursor.readBytes(32), 32)) return error.InvalidWire,
+            9, 10 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            11 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const extent_size = try cursor.readVarint();
+                if (extent_size == 0 or extent_size > std.math.maxInt(u32)) return error.InvalidWire;
+            },
+            12 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5] or !seen[6] or
+        !seen[8] or !seen[9] or !seen[10] or !seen[11] or !seen[12] or
+        std.mem.eql(u8, member_id.?, local_set_id.?)) return error.InvalidWire;
+}
+
 fn preflightSnapshot(bytes: []const u8) WireError!void {
     if (bytes.len > max_snapshot_bytes) return error.InvalidWire;
     var cursor = WireCursor{ .bytes = bytes };
@@ -1185,12 +1774,13 @@ fn preflightSnapshot(bytes: []const u8) WireError!void {
     var pool_count: usize = 0;
     var request_count: usize = 0;
     var node_count: usize = 0;
+    var member_count: usize = 0;
     while (try cursor.next()) |field| switch (field.number) {
         1 => {
             if (field.wire_type != 0 or seen_format) return error.InvalidWire;
             seen_format = true;
             const version = try cursor.readVarint();
-            if (version != 2 and version != snapshot_format_version) return error.InvalidWire;
+            if (version != 2 and version != 3 and version != snapshot_format_version) return error.InvalidWire;
             snapshot_version = @intCast(version);
         },
         2 => {
@@ -1208,9 +1798,15 @@ fn preflightSnapshot(bytes: []const u8) WireError!void {
             node_count += 1;
             _ = try cursor.readBytes(max_node_wire_bytes);
         },
+        5 => {
+            if (field.wire_type != 2 or member_count == max_members) return error.InvalidWire;
+            member_count += 1;
+            _ = try cursor.readBytes(max_member_wire_bytes);
+        },
         else => return error.InvalidWire,
     };
-    if (!seen_format or (snapshot_version == 2 and node_count != 0)) return error.InvalidWire;
+    if (!seen_format or (snapshot_version == 2 and node_count != 0) or
+        (snapshot_version < 4 and member_count != 0)) return error.InvalidWire;
 
     cursor = .{ .bytes = bytes };
     while (try cursor.next()) |field| switch (field.number) {
@@ -1218,6 +1814,7 @@ fn preflightSnapshot(bytes: []const u8) WireError!void {
         2 => try preflightPool(try cursor.readBytes(max_pool_wire_bytes)),
         3 => try preflightRequest(try cursor.readBytes(max_request_wire_bytes), snapshot_version),
         4 => try preflightNode(try cursor.readBytes(max_node_wire_bytes)),
+        5 => try preflightMember(try cursor.readBytes(max_member_wire_bytes)),
         else => unreachable,
     };
 }
@@ -1284,6 +1881,48 @@ fn preflightNode(bytes: []const u8) WireError!void {
     if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5] or !seen[7] or !seen[8] or !seen[9]) return error.InvalidWire;
 }
 
+fn preflightMember(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen = [_]bool{false} ** 12;
+    var member_id: ?[]const u8 = null;
+    var local_set_id: ?[]const u8 = null;
+    while (try cursor.next()) |field| {
+        if (field.number > 11 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                member_id = try cursor.readBytes(16);
+                if (!validFixedNonzero(member_id.?, 16)) return error.InvalidWire;
+            },
+            2, 3 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            4 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                local_set_id = try cursor.readBytes(16);
+                if (!validFixedNonzero(local_set_id.?, 16)) return error.InvalidWire;
+            },
+            5 => if (field.wire_type != 0 or try cursor.readVarint() > std.math.maxInt(u16)) return error.InvalidWire,
+            6 => if (field.wire_type != 2 or !validFixedNonzero(try cursor.readBytes(32), 32)) return error.InvalidWire,
+            7, 8 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            9 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const extent_size = try cursor.readVarint();
+                if (extent_size == 0 or extent_size > std.math.maxInt(u32)) return error.InvalidWire;
+            },
+            10 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const timestamp = try cursor.readVarint();
+                if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
+            },
+            11 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[6] or !seen[7] or
+        !seen[8] or !seen[9] or !seen[10] or !seen[11] or
+        std.mem.eql(u8, member_id.?, local_set_id.?)) return error.InvalidWire;
+}
+
 fn preflightRequest(bytes: []const u8, snapshot_version: u32) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
     var seen = [_]bool{false} ** 6;
@@ -1315,10 +1954,12 @@ fn preflightRequest(bytes: []const u8, snapshot_version: u32) WireError!void {
     }
     if (!seen[1] or !seen[2] or !seen[3] or !seen[4] or !seen[5]) return error.InvalidWire;
     const kind = try preflightCommandKind(command_bytes.?);
-    if (snapshot_version == 2 and kind != .create_pool) return error.InvalidWire;
+    if ((snapshot_version == 2 and kind != .create_pool) or
+        (snapshot_version < 4 and kind == .register_member)) return error.InvalidWire;
     switch (kind) {
         .create_pool => try preflightApplyResponse(response_bytes.?),
         .register_node => try preflightRegisterNodeApplyResponse(response_bytes.?),
+        .register_member => try preflightRegisterMemberApplyResponse(response_bytes.?),
     }
 }
 
@@ -1364,6 +2005,27 @@ fn preflightRegisterNodeApplyResponse(bytes: []const u8) WireError!void {
     if (!seen_code) return error.InvalidWire;
 }
 
+fn preflightRegisterMemberApplyResponse(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen_code = false;
+    var seen_member = false;
+    while (try cursor.next()) |field| switch (field.number) {
+        1 => {
+            if (field.wire_type != 0 or seen_code) return error.InvalidWire;
+            seen_code = true;
+            const code = try cursor.readVarint();
+            if (code == 0 or code > 10) return error.InvalidWire;
+        },
+        2 => {
+            if (field.wire_type != 2 or seen_member) return error.InvalidWire;
+            seen_member = true;
+            try preflightMember(try cursor.readBytes(max_member_wire_bytes));
+        },
+        else => return error.InvalidWire,
+    };
+    if (!seen_code) return error.InvalidWire;
+}
+
 fn poolRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8) bool {
     const lhs = state.pools_by_id.get(lhs_id).?;
     const rhs = state.pools_by_id.get(rhs_id).?;
@@ -1378,11 +2040,22 @@ fn nodeRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8)
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }
 
+fn memberRevisionIdLessThan(state: *State, lhs_id: []const u8, rhs_id: []const u8) bool {
+    const lhs = state.members_by_id.get(lhs_id).?;
+    const rhs = state.members_by_id.get(rhs_id).?;
+    if (lhs.registered_revision != rhs.registered_revision) return lhs.registered_revision < rhs.registered_revision;
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
 fn poolIdLessThan(_: void, lhs: pb.Pool, rhs: pb.Pool) bool {
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }
 
 fn nodeIdLessThan(_: void, lhs: pb.Node, rhs: pb.Node) bool {
+    return std.mem.order(u8, lhs.id, rhs.id) == .lt;
+}
+
+fn memberIdLessThan(_: void, lhs: pb.Member, rhs: pb.Member) bool {
     return std.mem.order(u8, lhs.id, rhs.id) == .lt;
 }
 
@@ -1407,6 +2080,14 @@ fn applyTestCommand(allocator: std.mem.Allocator, machine: *PoolStateMachine, in
 }
 
 const test_cluster_id = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+const test_pool_id = "0198f54d-5c2a-7000-8000-000000000001";
+const test_second_pool_id = "0198f54d-5c2a-7000-8000-000000000002";
+const test_node_id = "0198f54d-5c2a-7000-8000-000000000011";
+const test_member_id_a = [_]u8{ 0x10, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+const test_member_id_b = [_]u8{ 0x20, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+const test_member_id_c = [_]u8{ 0x30, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+const test_local_set_id = [_]u8{ 0x40, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+const test_birth_topology_digest = [_]u8{0x5a} ** 32;
 
 fn testNodeCommand(request_id: []const u8, node_id: []const u8, control_endpoint: []const u8, timestamp: i64) pb.RegisterNodeCommand {
     return .{
@@ -1426,6 +2107,55 @@ fn applyTestNodeCommand(allocator: std.mem.Allocator, machine: *PoolStateMachine
     const encoded = try encodeRegisterNodeCommand(allocator, command);
     defer allocator.free(encoded);
     return machine.stateMachine().apply(.{ .index = index, .term = 1, .data = encoded });
+}
+
+fn testMemberCommand(
+    request_id: []const u8,
+    member_id: []const u8,
+    pool_id: []const u8,
+    node_id: []const u8,
+    local_set_id: []const u8,
+    member_slot: u32,
+    timestamp: i64,
+) pb.RegisterMemberCommand {
+    return .{
+        .request_id = request_id,
+        .cluster_id = &test_cluster_id,
+        .member_id = member_id,
+        .pool_id = pool_id,
+        .node_id = node_id,
+        .local_set_id = local_set_id,
+        .member_slot = member_slot,
+        .birth_topology_digest = &test_birth_topology_digest,
+        .metadata_capacity_bytes = 1024,
+        .data_capacity_bytes = 8192,
+        .extent_size_bytes = 4096,
+        .proposed_registered_at_unix_ms = timestamp,
+    };
+}
+
+fn applyTestMemberCommand(allocator: std.mem.Allocator, machine: *PoolStateMachine, index: u64, command: pb.RegisterMemberCommand) !raft.ApplyResult {
+    const encoded = try encodeRegisterMemberCommand(allocator, command);
+    defer allocator.free(encoded);
+    return machine.stateMachine().apply(.{ .index = index, .term = 1, .data = encoded });
+}
+
+fn addTestPoolAndNode(allocator: std.mem.Allocator, machine: *PoolStateMachine) !void {
+    var pool = try applyTestCommand(allocator, machine, 1, testCommand(
+        "member-pool-request",
+        test_pool_id,
+        "member-pool",
+        "",
+        1_753_744_000_000,
+    ));
+    defer pool.deinit(allocator);
+    var node = try applyTestNodeCommand(allocator, machine, 2, testNodeCommand(
+        "member-node-request",
+        test_node_id,
+        "node-a:9000",
+        1_753_744_000_001,
+    ));
+    defer node.deinit(allocator);
 }
 
 fn overlongOne(allocator: std.mem.Allocator, canonical: []const u8) ![]u8 {
@@ -1457,6 +2187,327 @@ const TestSnapshotReader = struct {
 
     const vtable: raft.SnapshotReader.VTable = .{ .read = read };
 };
+
+test "register member supports get revision pagination replay and cross-kind conflicts" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+
+    const first_command = testMemberCommand(
+        "member-request-a",
+        &test_member_id_b,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_002,
+    );
+    var first = try applyTestMemberCommand(allocator, &machine, 3, first_command);
+    defer first.deinit(allocator);
+    var first_response = try decodeRegisterMemberApplyResponse(allocator, first.response.?);
+    defer first_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_REGISTERED, first_response.code);
+    try std.testing.expectEqual(@as(u64, 3), first_response.member.?.registered_revision);
+    try std.testing.expectEqual(@as(u32, 0), first_response.member.?.member_slot);
+
+    var second = try applyTestMemberCommand(allocator, &machine, 4, testMemberCommand(
+        "member-request-b",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        1,
+        1_753_744_000_003,
+    ));
+    defer second.deinit(allocator);
+    var fetched = (try machine.getMemberById(allocator, &test_member_id_a)).?;
+    defer fetched.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), fetched.member_slot);
+
+    var first_page = try machine.listMembersPage(allocator, null, 1);
+    defer first_page.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &test_member_id_b, first_page.members[0].id);
+    try std.testing.expect(first_page.has_more);
+    var second_page = try machine.listMembersPage(allocator, &test_member_id_b, 10);
+    defer second_page.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &test_member_id_a, second_page.members[0].id);
+    try std.testing.expect(!second_page.has_more);
+    try std.testing.expectError(error.InvalidPageToken, machine.listMembersPage(allocator, "missing", 1));
+
+    var retry_command = first_command;
+    retry_command.proposed_registered_at_unix_ms += 999;
+    var replay = try applyTestMemberCommand(allocator, &machine, 5, retry_command);
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, first.response.?, replay.response.?);
+
+    var fingerprint_conflict_command = retry_command;
+    var other_cluster = test_cluster_id;
+    other_cluster[0] = 99;
+    fingerprint_conflict_command.cluster_id = &other_cluster;
+    var fingerprint_conflict = try applyTestMemberCommand(allocator, &machine, 6, fingerprint_conflict_command);
+    defer fingerprint_conflict.deinit(allocator);
+    var fingerprint_conflict_response = try decodeRegisterMemberApplyResponse(allocator, fingerprint_conflict.response.?);
+    defer fingerprint_conflict_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_REQUEST_CONFLICT, fingerprint_conflict_response.code);
+
+    var member_conflict = try applyTestMemberCommand(allocator, &machine, 7, testMemberCommand(
+        "member-pool-request",
+        &test_member_id_c,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        2,
+        1_753_744_000_004,
+    ));
+    defer member_conflict.deinit(allocator);
+    var member_conflict_response = try decodeRegisterMemberApplyResponse(allocator, member_conflict.response.?);
+    defer member_conflict_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_REQUEST_CONFLICT, member_conflict_response.code);
+
+    var node_conflict = try applyTestNodeCommand(allocator, &machine, 8, testNodeCommand(
+        "member-request-a",
+        "0198f54d-5c2a-7000-8000-000000000022",
+        "node-b:9000",
+        1_753_744_000_005,
+    ));
+    defer node_conflict.deinit(allocator);
+    var node_conflict_response = try decodeRegisterNodeApplyResponse(allocator, node_conflict.response.?);
+    defer node_conflict_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterNodeApplyCode.REGISTER_NODE_APPLY_CODE_REQUEST_CONFLICT, node_conflict_response.code);
+    try std.testing.expectEqual(@as(usize, 2), machine.memberCount());
+}
+
+test "member registration records missing pool and node outcomes" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+
+    const missing_pool_command = testMemberCommand(
+        "missing-pool-request",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_000,
+    );
+    var missing_pool = try applyTestMemberCommand(allocator, &machine, 1, missing_pool_command);
+    defer missing_pool.deinit(allocator);
+    var missing_pool_response = try decodeRegisterMemberApplyResponse(allocator, missing_pool.response.?);
+    defer missing_pool_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_POOL_NOT_FOUND, missing_pool_response.code);
+
+    var pool = try applyTestCommand(allocator, &machine, 2, testCommand(
+        "pool-after-miss",
+        test_pool_id,
+        "member-pool",
+        "",
+        1_753_744_000_001,
+    ));
+    defer pool.deinit(allocator);
+    const missing_node_command = testMemberCommand(
+        "missing-node-request",
+        &test_member_id_b,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_002,
+    );
+    var missing_node = try applyTestMemberCommand(allocator, &machine, 3, missing_node_command);
+    defer missing_node.deinit(allocator);
+    var missing_node_response = try decodeRegisterMemberApplyResponse(allocator, missing_node.response.?);
+    defer missing_node_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_NODE_NOT_FOUND, missing_node_response.code);
+
+    var node = try applyTestNodeCommand(allocator, &machine, 4, testNodeCommand(
+        "node-after-miss",
+        test_node_id,
+        "node-a:9000",
+        1_753_744_000_003,
+    ));
+    defer node.deinit(allocator);
+    var pool_replay = try applyTestMemberCommand(allocator, &machine, 5, missing_pool_command);
+    defer pool_replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, missing_pool.response.?, pool_replay.response.?);
+    var node_replay = try applyTestMemberCommand(allocator, &machine, 6, missing_node_command);
+    defer node_replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, missing_node.response.?, node_replay.response.?);
+
+    var wrong_cluster_command = testMemberCommand(
+        "wrong-cluster-request",
+        &test_member_id_c,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_004,
+    );
+    var wrong_cluster = test_cluster_id;
+    wrong_cluster[0] = 99;
+    wrong_cluster_command.cluster_id = &wrong_cluster;
+    var wrong_cluster_result = try applyTestMemberCommand(allocator, &machine, 7, wrong_cluster_command);
+    defer wrong_cluster_result.deinit(allocator);
+    var wrong_cluster_response = try decodeRegisterMemberApplyResponse(allocator, wrong_cluster_result.response.?);
+    defer wrong_cluster_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_CLUSTER_MISMATCH, wrong_cluster_response.code);
+    try std.testing.expectEqual(@as(usize, 0), machine.memberCount());
+}
+
+test "member id local set and slot conflicts are deterministic" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    var second_pool = try applyTestCommand(allocator, &machine, 3, testCommand(
+        "second-pool-request",
+        test_second_pool_id,
+        "second-member-pool",
+        "",
+        1_753_744_000_002,
+    ));
+    defer second_pool.deinit(allocator);
+    var registered = try applyTestMemberCommand(allocator, &machine, 4, testMemberCommand(
+        "member-request-a",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_003,
+    ));
+    defer registered.deinit(allocator);
+
+    var duplicate_id = try applyTestMemberCommand(allocator, &machine, 5, testMemberCommand(
+        "duplicate-id-request",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        1,
+        1_753_744_000_004,
+    ));
+    defer duplicate_id.deinit(allocator);
+    var duplicate_id_response = try decodeRegisterMemberApplyResponse(allocator, duplicate_id.response.?);
+    defer duplicate_id_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_ID_EXISTS, duplicate_id_response.code);
+    try std.testing.expectEqualSlices(u8, &test_member_id_a, duplicate_id_response.member.?.id);
+
+    var local_set_conflict = try applyTestMemberCommand(allocator, &machine, 6, testMemberCommand(
+        "local-set-conflict-request",
+        &test_member_id_b,
+        test_second_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        1,
+        1_753_744_000_005,
+    ));
+    defer local_set_conflict.deinit(allocator);
+    var local_set_response = try decodeRegisterMemberApplyResponse(allocator, local_set_conflict.response.?);
+    defer local_set_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_LOCAL_SET_CONFLICT, local_set_response.code);
+
+    var slot_conflict = try applyTestMemberCommand(allocator, &machine, 7, testMemberCommand(
+        "slot-conflict-request",
+        &test_member_id_c,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_006,
+    ));
+    defer slot_conflict.deinit(allocator);
+    var slot_response = try decodeRegisterMemberApplyResponse(allocator, slot_conflict.response.?);
+    defer slot_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterMemberApplyCode.REGISTER_MEMBER_APPLY_CODE_SLOT_EXISTS, slot_response.code);
+    try std.testing.expectEqualSlices(u8, &test_member_id_a, slot_response.member.?.id);
+    try std.testing.expectEqual(@as(usize, 1), machine.memberCount());
+}
+
+test "mixed member snapshots are deterministic and restore request history" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    var member_b = try applyTestMemberCommand(allocator, &machine, 3, testMemberCommand(
+        "member-request-b",
+        &test_member_id_b,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_002,
+    ));
+    defer member_b.deinit(allocator);
+    const member_a_command = testMemberCommand(
+        "member-request-a",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        1,
+        1_753_744_000_003,
+    );
+    var member_a = try applyTestMemberCommand(allocator, &machine, 4, member_a_command);
+    defer member_a.deinit(allocator);
+
+    var first = try machine.stateMachine().takeSnapshot(allocator, 4, 1, .{});
+    defer first.deinit(allocator);
+    var second = try machine.stateMachine().takeSnapshot(allocator, 4, 1, .{});
+    defer second.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, first.data, second.data);
+    var snapshot_reader: std.Io.Reader = .fixed(first.data);
+    var decoded = try pb.StateSnapshot.decode(&snapshot_reader, allocator);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(snapshot_format_version, decoded.format_version);
+    try std.testing.expectEqualSlices(u8, &test_member_id_a, decoded.members.items[0].id);
+    try std.testing.expectEqualSlices(u8, &test_member_id_b, decoded.members.items[1].id);
+
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var reader = TestSnapshotReader{ .data = first.data };
+    try restored.stateMachine().restoreSnapshot(first.metadata, reader.reader());
+    try std.testing.expectEqual(@as(usize, 1), restored.poolCount());
+    try std.testing.expectEqual(@as(usize, 1), restored.nodeCount());
+    try std.testing.expectEqual(@as(usize, 2), restored.memberCount());
+    var page = try restored.listMembersPage(allocator, null, 10);
+    defer page.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &test_member_id_b, page.members[0].id);
+    try std.testing.expectEqualSlices(u8, &test_member_id_a, page.members[1].id);
+
+    var retry_command = member_a_command;
+    retry_command.proposed_registered_at_unix_ms += 999;
+    var replay = try applyTestMemberCommand(allocator, &restored, 5, retry_command);
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, member_a.response.?, replay.response.?);
+    var normalized = try restored.stateMachine().takeSnapshot(allocator, 4, 1, .{});
+    defer normalized.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, first.data, normalized.data);
+}
+
+test "version 3 pool and node snapshot wire restores without members" {
+    const allocator = std.testing.allocator;
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    try addTestPoolAndNode(allocator, &source);
+    var current = try source.stateMachine().takeSnapshot(allocator, 2, 1, .{});
+    defer current.deinit(allocator);
+    var current_reader: std.Io.Reader = .fixed(current.data);
+    var decoded = try pb.StateSnapshot.decode(&current_reader, allocator);
+    defer decoded.deinit(allocator);
+    decoded.format_version = 3;
+    const version_3_wire = try encodeMessage(allocator, decoded);
+    defer allocator.free(version_3_wire);
+
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var reader = TestSnapshotReader{ .data = version_3_wire };
+    try restored.stateMachine().restoreSnapshot(current.metadata, reader.reader());
+    try std.testing.expectEqual(@as(usize, 1), restored.poolCount());
+    try std.testing.expectEqual(@as(usize, 1), restored.nodeCount());
+    try std.testing.expectEqual(@as(usize, 0), restored.memberCount());
+}
 
 test "register node replays matching requests and rejects semantic conflicts" {
     const allocator = std.testing.allocator;
@@ -2020,6 +3071,77 @@ test "create apply is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, ApplyAllocationCheck.run, .{encoded});
 }
 
+const MemberApplyAllocationCheck = struct {
+    fn run(
+        allocator: std.mem.Allocator,
+        pool_command: []const u8,
+        node_command: []const u8,
+        member_command: []const u8,
+    ) !void {
+        var machine = PoolStateMachine.init(allocator);
+        defer machine.deinit();
+        var pool = try machine.stateMachine().apply(.{ .index = 1, .term = 1, .data = pool_command });
+        defer pool.deinit(allocator);
+        var node = try machine.stateMachine().apply(.{ .index = 2, .term = 1, .data = node_command });
+        defer node.deinit(allocator);
+
+        var member = machine.stateMachine().apply(.{ .index = 3, .term = 1, .data = member_command }) catch |err| {
+            try std.testing.expectEqual(@as(usize, 0), machine.memberCount());
+            try std.testing.expectEqual(@as(usize, 0), machine.state.member_ids_by_revision.items.len);
+            try std.testing.expectEqual(@as(usize, 0), machine.state.pool_ids_by_local_set.count());
+            try std.testing.expectEqual(@as(usize, 0), machine.state.member_ids_by_slot.count());
+            try std.testing.expectEqual(@as(u64, 0), machine.state.max_member_registered_revision);
+            try std.testing.expectEqual(@as(usize, 2), machine.requestCount());
+            return err;
+        };
+        defer member.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), machine.memberCount());
+        try std.testing.expectEqual(@as(usize, 1), machine.state.member_ids_by_revision.items.len);
+        try std.testing.expectEqual(@as(usize, 1), machine.state.pool_ids_by_local_set.count());
+        try std.testing.expectEqual(@as(usize, 1), machine.state.member_ids_by_slot.count());
+        try std.testing.expectEqual(@as(u64, 3), machine.state.max_member_registered_revision);
+        try std.testing.expectEqual(@as(usize, 3), machine.requestCount());
+        try std.testing.expect(machine.state.members_by_id.contains(&test_member_id_a));
+        try std.testing.expectEqualStrings(test_pool_id, machine.state.pool_ids_by_local_set.get(&test_local_set_id).?);
+        const member_id = machine.state.member_ids_by_slot.get(memberSlotKey(&test_local_set_id, 0)).?;
+        try std.testing.expectEqualSlices(u8, &test_member_id_a, member_id);
+    }
+};
+
+test "member registration is atomic across allocation failures" {
+    const allocator = std.testing.allocator;
+    const pool_command = try encodeCreatePoolCommand(allocator, testCommand(
+        "member-pool-request",
+        test_pool_id,
+        "member-pool",
+        "",
+        1_753_744_000_000,
+    ));
+    defer allocator.free(pool_command);
+    const node_command = try encodeRegisterNodeCommand(allocator, testNodeCommand(
+        "member-node-request",
+        test_node_id,
+        "node-a:9000",
+        1_753_744_000_001,
+    ));
+    defer allocator.free(node_command);
+    const member_command = try encodeRegisterMemberCommand(allocator, testMemberCommand(
+        "member-request",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_002,
+    ));
+    defer allocator.free(member_command);
+    try std.testing.checkAllAllocationFailures(
+        allocator,
+        MemberApplyAllocationCheck.run,
+        .{ pool_command, node_command, member_command },
+    );
+}
+
 const ConflictAllocationCheck = struct {
     fn run(allocator: std.mem.Allocator, created_command: []const u8, conflict_command: []const u8) !void {
         var machine = PoolStateMachine.init(allocator);
@@ -2119,6 +3241,72 @@ test "snapshot restore is atomic across allocation failures" {
     try std.testing.checkAllAllocationFailures(
         allocator,
         RestoreAllocationCheck.run,
+        .{ existing_command, snapshot.data, snapshot.metadata },
+    );
+}
+
+const MemberRestoreAllocationCheck = struct {
+    fn run(allocator: std.mem.Allocator, existing_command: []const u8, snapshot_data: []const u8, metadata: raft.SnapshotMetadata) !void {
+        var machine = PoolStateMachine.init(allocator);
+        defer machine.deinit();
+        var applied = try machine.stateMachine().apply(.{ .index = 1, .term = 1, .data = existing_command });
+        defer applied.deinit(allocator);
+
+        var reader = TestSnapshotReader{ .data = snapshot_data };
+        machine.stateMachine().restoreSnapshot(metadata, reader.reader()) catch |err| {
+            try std.testing.expectEqual(@as(usize, 1), machine.poolCount());
+            try std.testing.expectEqual(@as(usize, 0), machine.nodeCount());
+            try std.testing.expectEqual(@as(usize, 0), machine.memberCount());
+            try std.testing.expectEqual(@as(usize, 1), machine.requestCount());
+            try std.testing.expect(machine.state.pools_by_id.contains("0198f54d-5c2a-7000-8000-000000000003"));
+            try std.testing.expectEqual(@as(usize, 0), machine.state.member_ids_by_revision.items.len);
+            try std.testing.expectEqual(@as(usize, 0), machine.state.pool_ids_by_local_set.count());
+            try std.testing.expectEqual(@as(usize, 0), machine.state.member_ids_by_slot.count());
+            return err;
+        };
+        try std.testing.expectEqual(@as(usize, 1), machine.poolCount());
+        try std.testing.expectEqual(@as(usize, 1), machine.nodeCount());
+        try std.testing.expectEqual(@as(usize, 1), machine.memberCount());
+        try std.testing.expectEqual(@as(usize, 3), machine.requestCount());
+        try std.testing.expect(!machine.state.pools_by_id.contains("0198f54d-5c2a-7000-8000-000000000003"));
+        try std.testing.expect(machine.state.pools_by_id.contains(test_pool_id));
+        try std.testing.expect(machine.state.nodes_by_id.contains(test_node_id));
+        try std.testing.expect(machine.state.members_by_id.contains(&test_member_id_a));
+        try std.testing.expectEqual(@as(usize, 1), machine.state.member_ids_by_revision.items.len);
+        try std.testing.expectEqual(@as(usize, 1), machine.state.pool_ids_by_local_set.count());
+        try std.testing.expectEqual(@as(usize, 1), machine.state.member_ids_by_slot.count());
+    }
+};
+
+test "version 4 member snapshot restore is atomic across allocation failures" {
+    const allocator = std.testing.allocator;
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    try addTestPoolAndNode(allocator, &source);
+    var member = try applyTestMemberCommand(allocator, &source, 3, testMemberCommand(
+        "member-request",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_002,
+    ));
+    defer member.deinit(allocator);
+    var snapshot = try source.stateMachine().takeSnapshot(allocator, 3, 1, .{});
+    defer snapshot.deinit(allocator);
+
+    const existing_command = try encodeCreatePoolCommand(allocator, testCommand(
+        "existing-request",
+        "0198f54d-5c2a-7000-8000-000000000003",
+        "existing",
+        "",
+        1_753_744_000_003,
+    ));
+    defer allocator.free(existing_command);
+    try std.testing.checkAllAllocationFailures(
+        allocator,
+        MemberRestoreAllocationCheck.run,
         .{ existing_command, snapshot.data, snapshot.metadata },
     );
 }
