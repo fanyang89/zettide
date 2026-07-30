@@ -8,6 +8,8 @@ pub const config = @import("config.zig");
 pub const runtime = @import("runtime.zig");
 pub const Runtime = runtime.Runtime;
 pub const protobuf_wire = @import("protobuf_wire.zig");
+pub const heartbeat = @import("heartbeat.zig");
+pub const HeartbeatStore = heartbeat.HeartbeatStore;
 pub const state_machine = @import("state_machine.zig");
 pub const PoolStateMachine = state_machine.PoolStateMachine;
 pub const service = @import("service.zig");
@@ -47,6 +49,7 @@ test {
     _ = config;
     _ = runtime;
     _ = protobuf_wire;
+    _ = heartbeat;
     _ = state_machine;
     _ = service;
     _ = @import("integration_test.zig");

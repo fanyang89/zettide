@@ -4,6 +4,7 @@ const grpc = @import("grpc_lite");
 const pb = @import("control_proto");
 const raft = @import("raft_zig");
 const uuid = @import("uuid");
+const heartbeat = @import("heartbeat.zig");
 const state_machine = @import("state_machine.zig");
 const wire = @import("protobuf_wire.zig");
 
@@ -12,6 +13,7 @@ pub const max_page_size: usize = 1000;
 pub const max_pending_rpc_calls: usize = 1024;
 
 const max_request_wire_bytes: usize = 4096;
+pub const max_heartbeat_request_wire_bytes: usize = 32768;
 
 pub const RpcResult = struct {
     status: grpc.Status,
@@ -33,6 +35,7 @@ pub const PoolService = struct {
     io: std.Io,
     raftor: *raft.Raftor,
     machine: *state_machine.PoolStateMachine,
+    heartbeat_store: *heartbeat.HeartbeatStore,
     expected_cluster_id: raft.ClusterId,
 
     pub fn init(
@@ -40,14 +43,17 @@ pub const PoolService = struct {
         io: std.Io,
         raftor: *raft.Raftor,
         machine: *state_machine.PoolStateMachine,
+        heartbeat_store: *heartbeat.HeartbeatStore,
         expected_cluster_id: raft.ClusterId,
-    ) error{UnsafeRaftConfiguration}!PoolService {
+    ) error{ UnsafeRaftConfiguration, UnsafeHeartbeatConfiguration }!PoolService {
         if (!raftor.leaderServicePolicy().isSafe()) return error.UnsafeRaftConfiguration;
+        if (!machine.hasHeartbeatStore(heartbeat_store)) return error.UnsafeHeartbeatConfiguration;
         return .{
             .allocator = allocator,
             .io = io,
             .raftor = raftor,
             .machine = machine,
+            .heartbeat_store = heartbeat_store,
             .expected_cluster_id = expected_cluster_id,
         };
     }
@@ -455,6 +461,58 @@ pub const PoolService = struct {
             .after_id = after_id,
         };
         self.raftor.readIndex("list-members", pending.callback()) catch |err| {
+            pending.destroy();
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn reportHeartbeat(self: *PoolService, payload: []const u8, completion: Completion) void {
+        preflightReportHeartbeatRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid ReportHeartbeat request"));
+            return;
+        };
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+        var reader: std.Io.Reader = .fixed(payload);
+        var request = pb.ReportHeartbeatRequest.decode(&reader, self.allocator) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid ReportHeartbeat request"));
+            return;
+        };
+        const pending = self.allocator.create(ReportHeartbeatPending) catch {
+            request.deinit(self.allocator);
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion, .request = request };
+        self.raftor.readIndex("report-heartbeat", pending.callback()) catch |err| {
+            pending.destroy();
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn getHeartbeat(self: *PoolService, payload: []const u8, completion: Completion) void {
+        preflightGetHeartbeatRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid GetHeartbeat request"));
+            return;
+        };
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+        var reader: std.Io.Reader = .fixed(payload);
+        var request = pb.GetHeartbeatRequest.decode(&reader, self.allocator) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid GetHeartbeat request"));
+            return;
+        };
+        const pending = self.allocator.create(GetHeartbeatPending) catch {
+            request.deinit(self.allocator);
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion, .request = request };
+        self.raftor.readIndex("get-heartbeat", pending.callback()) catch |err| {
             pending.destroy();
             completion.invoke(raftFailure(err));
         };
@@ -942,6 +1000,137 @@ const ListMembersPending = struct {
     }
 };
 
+const ReportHeartbeatPending = struct {
+    owner: *PoolService,
+    completion: Completion,
+    request: pb.ReportHeartbeatRequest,
+
+    fn callback(self: *ReportHeartbeatPending) raft.ReadIndexCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+
+    fn destroy(self: *ReportHeartbeatPending) void {
+        const allocator = self.owner.allocator;
+        self.request.deinit(allocator);
+        allocator.destroy(self);
+    }
+
+    fn complete(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *ReportHeartbeatPending = @ptrCast(@alignCast(ctx));
+        defer self.destroy();
+        switch (result) {
+            .ok => self.completeRead(),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+
+    fn completeRead(self: *ReportHeartbeatPending) void {
+        const term = currentHeartbeatTerm(self.owner) orelse {
+            self.completion.invoke(notLeader());
+            return;
+        };
+        switch (self.owner.machine.validateHeartbeatBinding(self.request)) {
+            .node_not_found => {
+                self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Node not found") });
+                return;
+            },
+            .member_not_found => {
+                self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Member not found") });
+                return;
+            },
+            .binding_mismatch => {
+                self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "heartbeat binding does not match registration") });
+                return;
+            },
+            .capacity_mismatch => {
+                self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "heartbeat capacity does not match registration") });
+                return;
+            },
+            .ok => {},
+        }
+        const accepted_at_ms = std.math.cast(u64, std.Io.Timestamp.now(self.owner.io, .awake).toMilliseconds()) orelse {
+            self.completion.invoke(internalError());
+            return;
+        };
+        const accepted_at_unix_ms = std.math.cast(i64, std.Io.Timestamp.now(self.owner.io, .real).toMilliseconds()) orelse {
+            self.completion.invoke(internalError());
+            return;
+        };
+        const result = self.owner.heartbeat_store.report(
+            self.request,
+            term,
+            accepted_at_ms,
+            accepted_at_unix_ms,
+        ) catch |err| {
+            self.completion.invoke(heartbeatFailure(err));
+            return;
+        };
+        const encoded = encodeMessage(self.owner.allocator, pb.ReportHeartbeatResponse{
+            .observation = result.observation,
+            .recommended_interval_ms = result.recommended_interval_ms,
+            .stale_after_ms = result.stale_after_ms,
+        }) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        defer self.owner.allocator.free(encoded);
+        self.completion.invoke(.{ .status = .ok, .payload = encoded });
+    }
+};
+
+const GetHeartbeatPending = struct {
+    owner: *PoolService,
+    completion: Completion,
+    request: pb.GetHeartbeatRequest,
+
+    fn callback(self: *GetHeartbeatPending) raft.ReadIndexCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+
+    fn destroy(self: *GetHeartbeatPending) void {
+        const allocator = self.owner.allocator;
+        self.request.deinit(allocator);
+        allocator.destroy(self);
+    }
+
+    fn complete(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *GetHeartbeatPending = @ptrCast(@alignCast(ctx));
+        defer self.destroy();
+        switch (result) {
+            .ok => self.completeRead(),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+
+    fn completeRead(self: *GetHeartbeatPending) void {
+        const term = currentHeartbeatTerm(self.owner) orelse {
+            self.completion.invoke(notLeader());
+            return;
+        };
+        const now_ms = std.math.cast(u64, std.Io.Timestamp.now(self.owner.io, .awake).toMilliseconds()) orelse {
+            self.completion.invoke(internalError());
+            return;
+        };
+        const result = self.owner.heartbeat_store.get(self.request.node_id, term, now_ms) catch |err| {
+            self.completion.invoke(heartbeatFailure(err));
+            return;
+        } orelse {
+            self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Heartbeat not found") });
+            return;
+        };
+        const encoded = encodeMessage(self.owner.allocator, pb.GetHeartbeatResponse{
+            .observation = result.observation,
+            .freshness = result.freshness,
+            .age_ms = result.age_ms,
+        }) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        defer self.owner.allocator.free(encoded);
+        self.completion.invoke(.{ .status = .ok, .payload = encoded });
+    }
+};
+
 pub const PoolRpc = struct {
     /// Must be thread-safe when the server has multiple reactors.
     allocator: std.mem.Allocator,
@@ -965,6 +1154,8 @@ pub const PoolRpc = struct {
         try server.registerStream("/zettide.control.v1.MemberService/RegisterMember", handler(self, .register_member));
         try server.registerStream("/zettide.control.v1.MemberService/GetMember", handler(self, .get_member));
         try server.registerStream("/zettide.control.v1.MemberService/ListMembers", handler(self, .list_members));
+        try server.registerStream("/zettide.control.v1.HeartbeatService/ReportHeartbeat", handler(self, .report_heartbeat));
+        try server.registerStream("/zettide.control.v1.HeartbeatService/GetHeartbeat", handler(self, .get_heartbeat));
     }
 
     pub fn pendingCallCount(self: *const PoolRpc) usize {
@@ -1004,6 +1195,8 @@ pub const PoolRpc = struct {
         register_member,
         get_member,
         list_members,
+        report_heartbeat,
+        get_heartbeat,
     };
 
     fn handler(self: *PoolRpc, comptime method: Method) grpc.ServerStreamHandler {
@@ -1021,6 +1214,8 @@ pub const PoolRpc = struct {
                 .register_member => onRegisterMember,
                 .get_member => onGetMember,
                 .list_members => onListMembers,
+                .report_heartbeat => onReportHeartbeat,
+                .get_heartbeat => onGetHeartbeat,
             },
             .on_remote_end = onRemoteEnd,
             .on_cancel = onCancel,
@@ -1106,6 +1301,16 @@ pub const PoolRpc = struct {
         return receive(ctx, .list_members, stream, payload);
     }
 
+    fn onReportHeartbeat(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .report_heartbeat, stream, payload);
+    }
+
+    fn onGetHeartbeat(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .get_heartbeat, stream, payload);
+    }
+
     fn receive(
         ctx: ?*anyopaque,
         method: Method,
@@ -1118,7 +1323,7 @@ pub const PoolRpc = struct {
             self.unlockCalls();
             return .pause;
         };
-        if (pending.payload != null or payload.len > max_request_wire_bytes) {
+        if (pending.payload != null or payload.len > requestWireLimit(method)) {
             pending.invalid_cardinality = true;
             self.unlockCalls();
             return .continue_receiving;
@@ -1168,6 +1373,8 @@ pub const PoolRpc = struct {
             .register_member => self.service.registerMember(payload, pending.completion()),
             .get_member => self.service.getMember(payload, pending.completion()),
             .list_members => self.service.listMembers(payload, pending.completion()),
+            .report_heartbeat => self.service.reportHeartbeat(payload, pending.completion()),
+            .get_heartbeat => self.service.getHeartbeat(payload, pending.completion()),
         }
     }
 
@@ -1193,6 +1400,13 @@ pub const PoolRpc = struct {
 
     fn unlockCalls(self: *PoolRpc) void {
         self.calls_lock.unlock();
+    }
+
+    fn requestWireLimit(method: Method) usize {
+        return switch (method) {
+            .report_heartbeat => max_heartbeat_request_wire_bytes,
+            else => max_request_wire_bytes,
+        };
     }
 };
 
@@ -1456,6 +1670,122 @@ fn preflightListMembersRequest(payload: []const u8) wire.Error!void {
     }
 }
 
+fn preflightReportHeartbeatRequest(payload: []const u8) wire.Error!void {
+    if (payload.len > max_heartbeat_request_wire_bytes) return error.InvalidWire;
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen = [_]bool{false} ** 5;
+    var member_ids: [heartbeat.max_members_per_report][]const u8 = undefined;
+    var member_count: usize = 0;
+    while (try cursor.next()) |field| {
+        if (field.number > 5) {
+            try cursor.skip(field, max_heartbeat_request_wire_bytes);
+            continue;
+        }
+        if (field.number != 5) {
+            if (seen[field.number]) return error.InvalidWire;
+            seen[field.number] = true;
+        }
+        switch (field.number) {
+            1 => if (field.wire_type != 2 or !validClusterId(try cursor.readBytes(16))) return error.InvalidWire,
+            2 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
+            3, 4 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            5 => {
+                if (field.wire_type != 2 or member_count == heartbeat.max_members_per_report) return error.InvalidWire;
+                const member_id = try preflightMemberHeartbeat(try cursor.readBytes(max_heartbeat_request_wire_bytes));
+                for (member_ids[0..member_count]) |previous| {
+                    if (std.mem.eql(u8, previous, member_id)) return error.InvalidWire;
+                }
+                member_ids[member_count] = member_id;
+                member_count += 1;
+            },
+            else => unreachable,
+        }
+    }
+    for ([_]usize{ 1, 2, 3, 4 }) |field| {
+        if (!seen[field]) return error.InvalidWire;
+    }
+}
+
+fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen = [_]bool{false} ** 6;
+    var member_id: []const u8 = &.{};
+    var local_set_id: []const u8 = &.{};
+    var state: u64 = 0;
+    while (try cursor.next()) |field| {
+        if (field.number > 5) {
+            try cursor.skip(field, max_heartbeat_request_wire_bytes);
+            continue;
+        }
+        if (seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                member_id = try cursor.readBytes(16);
+                if (!validFixedNonzero(member_id, 16)) return error.InvalidWire;
+            },
+            2 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                local_set_id = try cursor.readBytes(16);
+                if (!validFixedNonzero(local_set_id, 16)) return error.InvalidWire;
+            },
+            3 => if (field.wire_type != 0 or try cursor.readVarint() > std.math.maxInt(u16)) return error.InvalidWire,
+            4 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                state = try cursor.readVarint();
+                if (state != @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_PRESENT) and
+                    state != @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE))
+                {
+                    return error.InvalidWire;
+                }
+            },
+            5 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                try preflightMemberCapacity(try cursor.readBytes(max_heartbeat_request_wire_bytes));
+            },
+            else => unreachable,
+        }
+    }
+    if (!seen[1] or !seen[2] or !seen[4] or
+        std.mem.eql(u8, member_id, local_set_id) or
+        (state == @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE) and seen[5]))
+    {
+        return error.InvalidWire;
+    }
+    return member_id;
+}
+
+fn preflightMemberCapacity(payload: []const u8) wire.Error!void {
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen = [_]bool{false} ** 5;
+    var total: u64 = 0;
+    while (try cursor.next()) |field| {
+        if (field.number > 4) {
+            try cursor.skip(field, max_heartbeat_request_wire_bytes);
+            continue;
+        }
+        if (seen[field.number] or field.wire_type != 0) return error.InvalidWire;
+        seen[field.number] = true;
+        total = std.math.add(u64, total, try cursor.readVarint()) catch return error.InvalidWire;
+    }
+}
+
+fn preflightGetHeartbeatRequest(payload: []const u8) wire.Error!void {
+    if (payload.len > max_request_wire_bytes) return error.InvalidWire;
+    var cursor = wire.Cursor{ .bytes = payload };
+    var seen_node_id = false;
+    while (try cursor.next()) |field| {
+        if (field.number != 1) {
+            try cursor.skip(field, max_request_wire_bytes);
+            continue;
+        }
+        if (seen_node_id or field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire;
+        seen_node_id = true;
+    }
+    if (!seen_node_id) return error.InvalidWire;
+}
+
 fn validText(value: []const u8, max_bytes: usize, allow_empty: bool) bool {
     return (allow_empty or value.len != 0) and value.len <= max_bytes and std.unicode.utf8ValidateSlice(value);
 }
@@ -1502,6 +1832,12 @@ fn notLeader() RpcResult {
     return .{ .status = grpc.Status.init(.unavailable, "node is not the Raft leader") };
 }
 
+fn currentHeartbeatTerm(service: *const PoolService) ?u64 {
+    const status = service.raftor.getStatus();
+    if (status.role != .leader or status.leader_id != status.id) return null;
+    return status.term;
+}
+
 fn internalError() RpcResult {
     return .{ .status = grpc.Status.init(.internal, "control plane operation failed") };
 }
@@ -1513,6 +1849,16 @@ fn raftFailure(err: raft.Error) RpcResult {
         error.ShuttingDown => grpc.Status.init(.unavailable, "control plane is shutting down"),
         error.Timeout => grpc.Status.init(.unavailable, "Raft operation timed out"),
         else => grpc.Status.init(.internal, "Raft operation failed"),
+    } };
+}
+
+fn heartbeatFailure(err: heartbeat.Error) RpcResult {
+    return .{ .status = switch (err) {
+        error.InvalidHeartbeat => grpc.Status.init(.invalid_argument, "invalid heartbeat"),
+        error.OrderingConflict => grpc.Status.init(.failed_precondition, "heartbeat ordering conflict"),
+        error.NodeLimit, error.MemberLimit => grpc.Status.init(.resource_exhausted, "heartbeat observation limit reached"),
+        error.Inactive, error.TermMismatch => grpc.Status.init(.unavailable, "Raft leadership changed"),
+        error.OutOfMemory => grpc.Status.init(.internal, "control plane operation failed"),
     } };
 }
 
@@ -1684,13 +2030,16 @@ test "Pool service rejects unbounded follower-forwarding Raft policy" {
     const allocator = std.testing.allocator;
     var machine = state_machine.PoolStateMachine.init(allocator);
     defer machine.deinit();
+    var heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+    defer heartbeat_store.deinit();
+    machine.setHeartbeatStore(&heartbeat_store);
     var config: raft.RaftorConfig = .{};
     config.raft.id = 1;
     const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
     defer raftor.destroy();
     try std.testing.expectError(
         error.UnsafeRaftConfiguration,
-        PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id),
+        PoolService.init(allocator, std.testing.io, raftor, &machine, &heartbeat_store, test_cluster_id),
     );
 }
 
@@ -1698,6 +2047,9 @@ test "Pool service gates followers and completes linearizable CRUD reads" {
     const allocator = std.testing.allocator;
     var machine = state_machine.PoolStateMachine.init(allocator);
     defer machine.deinit();
+    var heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+    defer heartbeat_store.deinit();
+    machine.setHeartbeatStore(&heartbeat_store);
     var config: raft.RaftorConfig = .{};
     config.raft.id = 1;
     config.raft.election_timeout_seed = 42;
@@ -1707,7 +2059,7 @@ test "Pool service gates followers and completes linearizable CRUD reads" {
     config.read_index_timeout_ticks = 32;
     const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
     defer raftor.destroy();
-    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id);
+    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, &heartbeat_store, test_cluster_id);
 
     const create_payload = try encodeMessage(allocator, pb.CreatePoolRequest{
         .request_id = "request-1",
@@ -1807,6 +2159,9 @@ test "Node service validates registration and completes linearizable reads" {
     const second_id = "0198f54d-5c2a-7000-8000-000000000022";
     var machine = state_machine.PoolStateMachine.init(allocator);
     defer machine.deinit();
+    var heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+    defer heartbeat_store.deinit();
+    machine.setHeartbeatStore(&heartbeat_store);
     var config: raft.RaftorConfig = .{};
     config.raft.id = 1;
     config.raft.election_timeout_seed = 42;
@@ -1816,7 +2171,7 @@ test "Node service validates registration and completes linearizable reads" {
     config.read_index_timeout_ticks = 32;
     const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
     defer raftor.destroy();
-    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id);
+    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, &heartbeat_store, test_cluster_id);
 
     const register_payload = try encodeMessage(allocator, testRegisterNodeRequest(
         "node-request-1",
@@ -1999,6 +2354,9 @@ test "Member service validates registration and completes linearizable reads" {
     const missing_node_id = "0198f54d-5c2a-7000-8000-000000000077";
     var machine = state_machine.PoolStateMachine.init(allocator);
     defer machine.deinit();
+    var heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+    defer heartbeat_store.deinit();
+    machine.setHeartbeatStore(&heartbeat_store);
     var config: raft.RaftorConfig = .{};
     config.raft.id = 1;
     config.raft.election_timeout_seed = 42;
@@ -2008,7 +2366,7 @@ test "Member service validates registration and completes linearizable reads" {
     config.read_index_timeout_ticks = 32;
     const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
     defer raftor.destroy();
-    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id);
+    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, &heartbeat_store, test_cluster_id);
 
     const follower_register_payload = try encodeMessage(allocator, testRegisterMemberRequest(
         "member-follower",
@@ -2244,6 +2602,163 @@ test "Member service validates registration and completes linearizable reads" {
     try std.testing.expectEqual(@as(usize, 0), second_page.next_page_token.len);
 }
 
+test "heartbeat preflight enforces report bounds and canonical wire" {
+    const allocator = std.testing.allocator;
+    const node_id = "0198f54d-5c2a-7000-8000-000000000088";
+    var ids: [heartbeat.max_members_per_report][16]u8 = @splat(@splat(0));
+    var members: [heartbeat.max_members_per_report]pb.MemberHeartbeat = undefined;
+    const quarter = std.math.maxInt(u64) / 4;
+    for (&members, &ids, 0..) |*member, *id, index| {
+        std.mem.writeInt(u16, id[14..16], @intCast(index + 1), .big);
+        member.* = .{
+            .member_id = id,
+            .local_set_id = &test_local_set_id,
+            .member_slot = @intCast(index),
+            .state = .MEMBER_HEARTBEAT_STATE_PRESENT,
+            .capacity = .{
+                .free_extent_count = quarter,
+                .allocated_extent_count = quarter,
+                .reserved_extent_count = quarter,
+                .retired_extent_count = quarter,
+            },
+        };
+    }
+    const request = pb.ReportHeartbeatRequest{
+        .cluster_id = &test_cluster_id,
+        .node_id = node_id,
+        .incarnation = 1,
+        .sequence = 1,
+        .members = .{ .items = &members, .capacity = members.len },
+    };
+    const payload = try encodeMessage(allocator, request);
+    defer allocator.free(payload);
+    try std.testing.expect(payload.len > max_request_wire_bytes);
+    try std.testing.expect(payload.len <= max_heartbeat_request_wire_bytes);
+    try preflightReportHeartbeatRequest(payload);
+
+    const duplicate_sequence = try std.mem.concat(allocator, u8, &.{ payload, "\x20\x01" });
+    defer allocator.free(duplicate_sequence);
+    try std.testing.expectError(error.InvalidWire, preflightReportHeartbeatRequest(duplicate_sequence));
+
+    members[1].member_id = members[0].member_id;
+    const duplicate_member = try encodeMessage(allocator, request);
+    defer allocator.free(duplicate_member);
+    try std.testing.expectError(error.InvalidWire, preflightReportHeartbeatRequest(duplicate_member));
+
+    try std.testing.expectError(error.InvalidWire, preflightMemberCapacity("\x08\x01\x08\x02"));
+    try std.testing.expectError(
+        error.InvalidWire,
+        preflightMemberCapacity("\x08\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01\x10\x01"),
+    );
+
+    var unavailable = members[0];
+    unavailable.state = .MEMBER_HEARTBEAT_STATE_UNAVAILABLE;
+    const unavailable_payload = try encodeMessage(allocator, unavailable);
+    defer allocator.free(unavailable_payload);
+    try std.testing.expectError(error.InvalidWire, preflightMemberHeartbeat(unavailable_payload));
+}
+
+test "Heartbeat service completes report and get on ReadIndex callbacks" {
+    const allocator = std.testing.allocator;
+    const node_id = "0198f54d-5c2a-7000-8000-000000000099";
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+    defer heartbeat_store.deinit();
+    machine.setHeartbeatStore(&heartbeat_store);
+    var config: raft.RaftorConfig = .{};
+    config.raft.id = 1;
+    config.raft.election_timeout_seed = 42;
+    config.raft.check_quorum = true;
+    config.raft.disable_proposal_forwarding = true;
+    config.proposal_timeout_ticks = 32;
+    config.read_index_timeout_ticks = 32;
+    const raftor = try raft.Raftor.create(allocator, config, machine.stateMachine());
+    defer raftor.destroy();
+    var service = try PoolService.init(allocator, std.testing.io, raftor, &machine, &heartbeat_store, test_cluster_id);
+
+    const follower_get_payload = try encodeMessage(allocator, pb.GetHeartbeatRequest{ .node_id = node_id });
+    defer allocator.free(follower_get_payload);
+    var follower_probe = CompletionProbe{ .allocator = allocator };
+    defer follower_probe.deinit();
+    service.getHeartbeat(follower_get_payload, follower_probe.completion());
+    try std.testing.expect(follower_probe.completed);
+    try std.testing.expectEqual(grpc.StatusCode.unavailable, follower_probe.code);
+
+    try raftor.campaign();
+
+    const register_payload = try encodeMessage(allocator, testRegisterNodeRequest(
+        "heartbeat-node-request",
+        node_id,
+        &test_cluster_id,
+        "127.0.0.1:9200",
+    ));
+    defer allocator.free(register_payload);
+    var register_probe = CompletionProbe{ .allocator = allocator };
+    defer register_probe.deinit();
+    service.registerNode(register_payload, register_probe.completion());
+    try awaitCompletion(raftor, &register_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, register_probe.code);
+
+    const report_payload = try encodeMessage(allocator, pb.ReportHeartbeatRequest{
+        .cluster_id = &test_cluster_id,
+        .node_id = node_id,
+        .incarnation = 1,
+        .sequence = 1,
+    });
+    defer allocator.free(report_payload);
+    var report_probe = CompletionProbe{ .allocator = allocator };
+    defer report_probe.deinit();
+    service.reportHeartbeat(report_payload, report_probe.completion());
+    try std.testing.expect(!report_probe.completed);
+    try std.testing.expectEqual(@as(usize, 0), heartbeat_store.observationCount());
+    try awaitCompletion(raftor, &report_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, report_probe.code);
+    var report_reader: std.Io.Reader = .fixed(report_probe.payload);
+    var report_response = try pb.ReportHeartbeatResponse.decode(&report_reader, allocator);
+    defer report_response.deinit(allocator);
+    try std.testing.expectEqualStrings(node_id, report_response.observation.?.node_id);
+    try std.testing.expectEqual(raftor.getStatus().term, report_response.observation.?.leader_term);
+    try std.testing.expectEqual(heartbeat.recommended_interval_ms, report_response.recommended_interval_ms);
+    const accepted_at_unix_ms = report_response.observation.?.accepted_at_unix_ms;
+
+    var replay_probe = CompletionProbe{ .allocator = allocator };
+    defer replay_probe.deinit();
+    service.reportHeartbeat(report_payload, replay_probe.completion());
+    try awaitCompletion(raftor, &replay_probe);
+    var replay_reader: std.Io.Reader = .fixed(replay_probe.payload);
+    var replay_response = try pb.ReportHeartbeatResponse.decode(&replay_reader, allocator);
+    defer replay_response.deinit(allocator);
+    try std.testing.expectEqual(accepted_at_unix_ms, replay_response.observation.?.accepted_at_unix_ms);
+
+    const get_payload = try encodeMessage(allocator, pb.GetHeartbeatRequest{ .node_id = node_id });
+    defer allocator.free(get_payload);
+    var get_probe = CompletionProbe{ .allocator = allocator };
+    defer get_probe.deinit();
+    service.getHeartbeat(get_payload, get_probe.completion());
+    try std.testing.expect(!get_probe.completed);
+    try awaitCompletion(raftor, &get_probe);
+    try std.testing.expectEqual(grpc.StatusCode.ok, get_probe.code);
+    var get_reader: std.Io.Reader = .fixed(get_probe.payload);
+    var get_response = try pb.GetHeartbeatResponse.decode(&get_reader, allocator);
+    defer get_response.deinit(allocator);
+    try std.testing.expectEqualStrings(node_id, get_response.observation.?.node_id);
+
+    const missing_payload = try encodeMessage(allocator, pb.ReportHeartbeatRequest{
+        .cluster_id = &test_cluster_id,
+        .node_id = "0198f54d-5c2a-7000-8000-0000000000aa",
+        .incarnation = 1,
+        .sequence = 1,
+    });
+    defer allocator.free(missing_payload);
+    var missing_probe = CompletionProbe{ .allocator = allocator };
+    defer missing_probe.deinit();
+    service.reportHeartbeat(missing_payload, missing_probe.completion());
+    try std.testing.expect(!missing_probe.completed);
+    try awaitCompletion(raftor, &missing_probe);
+    try std.testing.expectEqual(grpc.StatusCode.not_found, missing_probe.code);
+}
+
 const RaftDriver = struct {
     raftor: *raft.Raftor,
     failed: std.atomic.Value(bool) = .init(false),
@@ -2279,6 +2794,9 @@ test "raw unary client reaches asynchronous Pool Node and Member RPCs" {
     const allocator = std.heap.smp_allocator;
     var machine = state_machine.PoolStateMachine.init(allocator);
     defer machine.deinit();
+    var heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+    defer heartbeat_store.deinit();
+    machine.setHeartbeatStore(&heartbeat_store);
     var config: raft.RaftorConfig = .{};
     config.raft.id = 1;
     config.raft.election_timeout_seed = 42;
@@ -2290,7 +2808,7 @@ test "raw unary client reaches asynchronous Pool Node and Member RPCs" {
     defer raftor.destroy();
     try raftor.campaign();
 
-    var pool_service = try PoolService.init(allocator, std.testing.io, raftor, &machine, test_cluster_id);
+    var pool_service = try PoolService.init(allocator, std.testing.io, raftor, &machine, &heartbeat_store, test_cluster_id);
     var pool_rpc = PoolRpc.init(allocator, &pool_service);
     var server = try grpc.Server.init(allocator, .{});
     try pool_rpc.register(&server);

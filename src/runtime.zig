@@ -3,6 +3,7 @@ const std = @import("std");
 const grpc = @import("grpc_lite");
 const raft = @import("raft_zig");
 const config_mod = @import("config.zig");
+const heartbeat = @import("heartbeat.zig");
 const service_mod = @import("service.zig");
 const state_machine = @import("state_machine.zig");
 
@@ -25,6 +26,7 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     options: Options,
     machine: state_machine.PoolStateMachine,
+    heartbeat_store: heartbeat.HeartbeatStore,
     transport: *raft.GrpcLiteTransport,
     raftor: *raft.Raftor,
     pool_service: service_mod.PoolService,
@@ -53,6 +55,9 @@ pub const Runtime = struct {
 
         self.machine = state_machine.PoolStateMachine.init(allocator);
         errdefer self.machine.deinit();
+        self.heartbeat_store = heartbeat.HeartbeatStore.init(allocator);
+        errdefer self.heartbeat_store.deinit();
+        self.machine.setHeartbeatStore(&self.heartbeat_store);
         self.transport = try raft.GrpcLiteTransport.create(allocator, .{
             .identity = .{
                 .cluster_id = config.cluster_id,
@@ -89,7 +94,14 @@ pub const Runtime = struct {
         );
         errdefer self.raftor.destroy();
 
-        self.pool_service = try service_mod.PoolService.init(allocator, io, self.raftor, &self.machine, config.cluster_id);
+        self.pool_service = try service_mod.PoolService.init(
+            allocator,
+            io,
+            self.raftor,
+            &self.machine,
+            &self.heartbeat_store,
+            config.cluster_id,
+        );
         self.pool_rpc = service_mod.PoolRpc.init(allocator, &self.pool_service);
         errdefer {
             self.pool_rpc.stopAccepting();
@@ -98,7 +110,12 @@ pub const Runtime = struct {
         self.management_server = try grpc.Server.init(allocator, .{
             .host = config.management_host,
             .port = config.management_port,
-            .max_request_size = 4096,
+            .max_request_size = service_mod.max_heartbeat_request_wire_bytes,
+            .stream_limits = .{
+                .max_message_size = service_mod.max_heartbeat_request_wire_bytes,
+                .max_inbound_buffer_size = 64 * 1024,
+                .max_outbound_buffer_size = 64 * 1024,
+            },
         });
         errdefer self.management_server.deinit();
         try self.pool_rpc.register(&self.management_server);
@@ -131,6 +148,8 @@ pub const Runtime = struct {
         self.management_server.deinit();
         self.raftor.destroy();
         self.transport.destroy();
+        self.machine.setHeartbeatStore(null);
+        self.heartbeat_store.deinit();
         self.machine.deinit();
         const allocator = self.allocator;
         allocator.destroy(self);

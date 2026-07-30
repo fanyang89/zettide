@@ -288,6 +288,10 @@ pub const PoolStateMachine = struct {
         self.heartbeat_store = store;
     }
 
+    pub fn hasHeartbeatStore(self: *const PoolStateMachine, store: *const heartbeat.HeartbeatStore) bool {
+        return if (self.heartbeat_store) |configured| configured == store else false;
+    }
+
     pub fn poolCount(self: *const PoolStateMachine) usize {
         return self.state.pools_by_id.count();
     }
