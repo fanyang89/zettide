@@ -414,12 +414,13 @@ lease is also required before an existing mapped span can move or change state w
 authoritative contents. Member removal remains rejected until an authority-bound catalog drain proof
 shows that no mapping or allocator interval references its slot.
 
-## Joining Catalog Install
+## Non-Voter Catalog Install
 
-A bootstrapped `joining` non-voter whose control tail exactly equals current authority may install the
-current catalog from an active voter. The source is held under a catalog claim while its complete graph
-is loaded and validated. The target root slots are checked for zero, exact retry, or a recognized
-partial candidate before metadata is changed. Conflicting roots or pages are never overwritten.
+A bootstrapped `joining` non-voter or genesis-born `active` non-voter whose control tail exactly equals
+current authority may install the current catalog from an active voter. The source is held under a
+catalog claim while its complete graph is loaded and validated. The target root slots are checked for
+zero, exact retry, or a recognized partial candidate before metadata is changed. Conflicting roots or
+pages are never overwritten.
 
 Install writes all missing or partial pages with one durable barrier, then writes and synchronizes root
 A and root B separately. It finally reloads the target graph and requires both roots to match current
@@ -431,11 +432,19 @@ requires redundant roots, validates the graph under both current and proposed to
 claim through membership prepare and commit. This binds the target's durable metadata to its new-voter
 attestation.
 
-The first install API is intentionally limited to `joining` members with a healthy bootstrap history.
-The same transaction must activate it as a voter. Activating a joining member as an active non-voter is
-rejected because non-voters do not receive the membership commit. The API does not replay control
-history for an existing active non-voter. If authority advances before promotion, the target becomes
-stale and remains ineligible until a separate control-history catch-up protocol exists.
+Genesis-born active non-voters may replay a continuous authority-history suffix from an active voter.
+Replay preflights the complete suffix and retains three free control slots, then uses the ordinary
+exact-append path so member-local sequence, identity, and raw predecessor digests remain local while
+the shared history digest matches the source. Follower copies never count as voter witnesses. A target
+failure marks only that non-voter stale and does not freeze the voter coordinator.
+
+The initial replay protocol rejects checkpoint records, anchored targets, source histories with a
+reclaimed ancestry gap, and any suffix during which the target is a voter. The voter-role restriction
+prevents a post-hoc follower copy from becoming a quorum witness for historical authority. Catalog
+install must be followed by promotion before catalog authority advances:
+the initial install path does not overwrite a complete older catalog root. Activating a bootstrapped
+joining member as an active non-voter remains rejected because non-voters do not receive that membership
+commit.
 
 ## Mirrored Root Selection
 

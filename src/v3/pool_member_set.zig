@@ -307,6 +307,31 @@ pub const PoolMemberSet = struct {
         if (self.statuses[index] == .catalog_failed) self.statuses[index] = .authority;
     }
 
+    pub fn noteControlCatchupFailure(self: *PoolMemberSet, index: usize) void {
+        self.statuses[index] = .stale;
+        self.recomputeDataAccess(self.authority_state.?.topology);
+    }
+
+    pub fn noteControlCaughtUp(
+        self: *PoolMemberSet,
+        index: usize,
+        replacement: journal.HistoryScan,
+    ) !void {
+        if (index >= self.supplied_count) return error.InvalidMemberIndex;
+        const member = if (self.members[index]) |*value| value else return error.MemberUnavailable;
+        const tail = replacement.scan_result.tail orelse return error.MissingGenesis;
+        if (!std.mem.eql(u8, &replacement.member_id, &member.header().member_id))
+            return error.HistoryMemberMismatch;
+        if (!std.mem.eql(u8, &tail.history_digest, &self.authority_state.?.history_digest) or
+            replacement.scan_result.unresolved_tail_damage or
+            journal.availableSlotCount(replacement.scan_result) < 3)
+            return error.MemberNotCaughtUp;
+        if (self.histories[index]) |*history| history.deinit();
+        self.histories[index] = replacement;
+        self.statuses[index] = .authority;
+        self.recomputeDataAccess(self.authority_state.?.topology);
+    }
+
     pub fn validateCatalogTargetGeometry(
         self: *PoolMemberSet,
         source_index: usize,
@@ -343,6 +368,7 @@ pub const PoolMemberSet = struct {
             .reclaim_required = false,
         };
         self.updateVoterStatuses(previous.topology, active_members);
+        self.recomputeDataAccess(previous.topology);
         self.fenceCatalogDataWrites();
     }
 
@@ -423,6 +449,7 @@ pub const PoolMemberSet = struct {
             .reclaim_required = false,
         };
         self.updateVoterStatuses(previous.topology, active_members);
+        self.recomputeDataAccess(previous.topology);
         return index;
     }
 
@@ -452,6 +479,7 @@ pub const PoolMemberSet = struct {
             .reclaim_required = false,
         };
         self.updateVoterStatuses(previous.topology, active_members);
+        self.recomputeDataAccess(previous.topology);
     }
 
     pub fn noteControlReclaimed(
@@ -467,6 +495,7 @@ pub const PoolMemberSet = struct {
             .reclaim_required = false,
         };
         self.updateVoterStatuses(selected.topology, active_members);
+        self.recomputeDataAccess(selected.topology);
     }
 
     pub fn close(self: *PoolMemberSet) !void {
@@ -662,7 +691,15 @@ pub const PoolMemberSet = struct {
             }
             const member = if (self.members[index]) |*value| value else continue;
             const descriptor = pool_topology.findMember(&topology, member.header().member_id) orelse continue;
-            if (descriptor.control_role == pool_topology.voter_role) self.statuses[index] = .stale;
+            const history_has_authority = if (self.histories[index]) |*history|
+                history.findHistoryDigest(self.authority_state.?.history_digest) != null
+            else
+                false;
+            if (history_has_authority) {
+                self.statuses[index] = .authority;
+            } else if (descriptor.control_role == pool_topology.voter_role or descriptor.state != .joining) {
+                self.statuses[index] = .stale;
+            }
         }
     }
 

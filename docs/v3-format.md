@@ -526,6 +526,16 @@ until its retained history starts with its target bootstrap record and its tail 
 current selected authority. Promotion to voter additionally requires that caught-up member to join
 the transaction's new-voter quorum.
 
+A genesis-born active non-voter may catch up by replaying a continuous retained suffix from its local
+tail to current authority. The coordinator preflights the complete suffix plus three reserved control
+slots and exact-appends each semantic record, preserving shared history digests while regenerating
+member-local identity, sequence, and raw predecessor fields. Generation and membership follower copies
+written while the member is a non-voter are ignored as authority candidates and never count toward a
+quorum. Catch-up rejects checkpoints, reclaimed ancestry gaps, and suffixes that cross a topology in
+which the target is a voter; target I/O failure marks only the non-voter stale. Demoted participants
+release their journal claim so the same protocol can catch them up after a later authority advance that
+does not cross another voter-role interval.
+
 Bootstrap is a separate replicated transaction after the joining topology commits. The coordinator
 first exact-prepares the shared event on current voters, durably creates the target member with that
 event as local sequence one, verifies the target by a full history scan, then appends to every

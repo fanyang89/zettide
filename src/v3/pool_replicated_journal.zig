@@ -38,6 +38,12 @@ pub const CatalogCommitResult = struct {
     repair_failed_members: [pool_member_set.max_member_count]bool,
 };
 
+pub const ControlCatchupResult = struct {
+    target_index: usize,
+    appended_count: usize,
+    history_digest: codec.Digest,
+};
+
 pub const BootstrapResult = struct {
     record: control_record.Record,
     target_index: usize,
@@ -404,7 +410,8 @@ pub const ReplicatedJournal = struct {
         const descriptor = pool_topology.findMember(&authority.topology, target_member_id) orelse
             return error.CatalogTargetNotInTopology;
         if (descriptor.control_role == pool_topology.voter_role) return error.CatalogTargetAlreadyVoter;
-        if (descriptor.state != .joining) return error.CatalogTargetMustBeJoining;
+        if (descriptor.state != .joining and descriptor.state != .active)
+            return error.CatalogTargetMustBeNonVoter;
 
         var target_index: ?usize = null;
         for (0..self.set.suppliedCount()) |index| {
@@ -419,14 +426,24 @@ pub const ReplicatedJournal = struct {
         const target_tail = target_history.scan_result.tail orelse return error.CatalogTargetNotCaughtUp;
         if (!std.mem.eql(u8, &target_tail.history_digest, &authority.history_digest) or
             target_history.findHistoryDigest(authority.history_digest) == null or
-            target_history.scan_result.unresolved_tail_damage or target_history.scan_result.journal_full)
+            target_history.scan_result.unresolved_tail_damage or
+            journal_api.availableSlotCount(target_history.scan_result) < 3)
             return error.CatalogTargetNotCaughtUp;
         const target_entries = target_history.entries();
-        if (target_entries.len == 0 or target_entries[0].record.kind != control_record.member_bootstrap_kind)
-            return error.MemberBootstrapRequired;
-        const bootstrap = try member_bootstrap.validateRecord(target_entries[0].record);
-        if (!std.mem.eql(u8, &bootstrap.target_member_id, &target_member_id))
-            return error.MemberBootstrapRequired;
+        if (target_entries.len == 0) return error.MemberBootstrapRequired;
+        if (descriptor.state == .joining) {
+            if (target_entries[0].record.kind != control_record.member_bootstrap_kind)
+                return error.MemberBootstrapRequired;
+            const bootstrap = try member_bootstrap.validateRecord(target_entries[0].record);
+            if (!std.mem.eql(u8, &bootstrap.target_member_id, &target_member_id))
+                return error.MemberBootstrapRequired;
+        } else {
+            if (target_entries[0].record.kind != control_record.genesis_kind)
+                return error.PoolGenesisRequired;
+            const genesis = try pool_genesis.validateRecord(target_entries[0].record);
+            if (pool_topology.findMember(&genesis.topology, target_member_id) == null)
+                return error.PoolGenesisRequired;
+        }
 
         var voter_buffer: [pool_member_set.max_member_count]pool_member_set.CatalogVoter = undefined;
         const voters = try self.set.collectCatalogVoters(&voter_buffer);
@@ -473,6 +490,186 @@ pub const ReplicatedJournal = struct {
             return err;
         };
         self.set.noteCatalogInstalled(resolved_target_index);
+    }
+
+    pub fn catchUpControlForMember(
+        self: *ReplicatedJournal,
+        allocator: std.mem.Allocator,
+        target_member_id: [16]u8,
+    ) !ControlCatchupResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.CoordinatorClosed;
+        if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.recovery_only) return error.RecoveryOnlyCoordinator;
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        const descriptor = pool_topology.findMember(&authority.topology, target_member_id) orelse
+            return error.ControlCatchupTargetNotInTopology;
+        if (descriptor.state != .active or descriptor.control_role == pool_topology.voter_role)
+            return error.ControlCatchupTargetMustBeActiveNonVoter;
+
+        var target_index: ?usize = null;
+        for (0..self.set.suppliedCount()) |index| {
+            const member = (try self.set.memberAt(index)) orelse continue;
+            if (std.mem.eql(u8, &member.header().member_id, &target_member_id)) {
+                target_index = index;
+                break;
+            }
+        }
+        const resolved_target_index = target_index orelse return error.ControlCatchupTargetUnavailable;
+        const target_member = (try self.set.memberAt(resolved_target_index)) orelse
+            return error.ControlCatchupTargetUnavailable;
+        if (target_member.mode() != .writable or target_member.isFrozen() or target_member.isClosed())
+            return error.ControlCatchupTargetUnavailable;
+
+        var target_history = journal_api.scanHistory(allocator, target_member) catch |err| {
+            self.set.noteControlCatchupFailure(resolved_target_index);
+            return err;
+        };
+        defer target_history.deinit();
+        const target_entries = target_history.entries();
+        if (target_entries.len == 0 or target_entries[0].record.kind != control_record.genesis_kind)
+            return error.ControlCatchupTargetIsNotGenesisMember;
+        const genesis = try pool_genesis.validateRecord(target_entries[0].record);
+        if (pool_topology.findMember(&genesis.topology, target_member_id) == null)
+            return error.ControlCatchupTargetIsNotGenesisMember;
+        if (target_history.scan_result.unresolved_tail_damage or target_history.scan_result.anchored)
+            return error.ControlCatchupTargetDamaged;
+        const target_tail = target_history.scan_result.tail orelse return error.MissingGenesis;
+
+        var source_history: ?journal_api.HistoryScan = null;
+        defer if (source_history) |*history| history.deinit();
+        var replay_start: usize = 0;
+        if (!std.mem.eql(u8, &target_tail.history_digest, &authority.history_digest)) {
+            var crossed_checkpoint = false;
+            var crossed_voter_role = false;
+            for (self.participants[0..self.participant_count]) |*maybe_participant| {
+                const participant = &(maybe_participant.* orelse continue);
+                if (!participant.active) continue;
+                var candidate = journal_api.scanHistory(allocator, participant.journal.member) catch continue;
+                var keep = false;
+                defer if (!keep) candidate.deinit();
+                const source_tail = candidate.scan_result.tail orelse continue;
+                if (!std.mem.eql(u8, &source_tail.history_digest, &authority.history_digest)) continue;
+                const entries = candidate.entries();
+                var target_position: ?usize = null;
+                for (entries, 0..) |entry, index| {
+                    if (std.mem.eql(u8, &entry.record.history_digest, &target_tail.history_digest)) {
+                        target_position = index;
+                        break;
+                    }
+                }
+                const position = target_position orelse continue;
+                var replay_topology = switch (entries[0].record.kind) {
+                    control_record.genesis_kind => (pool_genesis.validateRecord(entries[0].record) catch continue).topology,
+                    control_record.member_bootstrap_kind => (member_bootstrap.validateRecord(entries[0].record) catch continue).topology,
+                    else => continue,
+                };
+                var valid_topology_history = true;
+                for (entries[1 .. position + 1]) |entry| {
+                    if (entry.record.kind != control_record.membership_commit_kind) continue;
+                    const proposal = membership.validateRecordProposal(entry.record) catch {
+                        valid_topology_history = false;
+                        break;
+                    };
+                    replay_topology = proposal.topology;
+                }
+                if (!valid_topology_history) continue;
+                if (isVoter(replay_topology, target_member_id)) {
+                    crossed_voter_role = true;
+                    continue;
+                }
+                var expected_digest = target_tail.history_digest;
+                var continuous = true;
+                for (entries[position + 1 ..]) |entry| {
+                    if (!std.mem.eql(u8, &entry.record.previous_history_digest, &expected_digest)) {
+                        continuous = false;
+                        break;
+                    }
+                    if (entry.record.kind == control_record.checkpoint_kind) {
+                        crossed_checkpoint = true;
+                        continuous = false;
+                        break;
+                    }
+                    if (entry.record.kind == control_record.membership_commit_kind) {
+                        const proposal = membership.validateRecordProposal(entry.record) catch {
+                            continuous = false;
+                            break;
+                        };
+                        if (isVoter(replay_topology, target_member_id) or
+                            isVoter(proposal.topology, target_member_id))
+                        {
+                            crossed_voter_role = true;
+                            continuous = false;
+                            break;
+                        }
+                        replay_topology = proposal.topology;
+                    }
+                    expected_digest = entry.record.history_digest;
+                }
+                if (!continuous or !std.mem.eql(u8, &expected_digest, &authority.history_digest)) continue;
+                replay_start = position + 1;
+                source_history = candidate;
+                keep = true;
+                break;
+            }
+            if (source_history == null) {
+                if (crossed_voter_role) return error.ControlCatchupCrossesVoterRole;
+                if (crossed_checkpoint) return error.ControlCatchupCrossesCheckpoint;
+                return error.ControlCatchupHistoryUnavailable;
+            }
+        }
+
+        const replay_entries = if (source_history) |*history| history.entries()[replay_start..] else &.{};
+        const required_slots = std.math.add(u64, @intCast(replay_entries.len), 3) catch
+            return error.ControlCatchupCapacityOverflow;
+        if (journal_api.availableSlotCount(target_history.scan_result) < required_slots)
+            return error.InsufficientJournalCapacity;
+        _ = std.math.add(u64, target_tail.local_sequence, @as(u64, @intCast(replay_entries.len))) catch
+            return error.RecordSequenceOverflow;
+
+        if (replay_entries.len != 0) {
+            var target_journal = journal_api.Journal.open(target_member) catch {
+                self.set.noteControlCatchupFailure(resolved_target_index);
+                return error.ControlCatchupTargetUnavailable;
+            };
+            defer target_journal.deinit();
+            for (replay_entries) |entry| {
+                const prepared = target_journal.prepareExact(
+                    try target_journal.tailToken(),
+                    entry.record,
+                ) catch |err| {
+                    self.set.noteControlCatchupFailure(resolved_target_index);
+                    return err;
+                };
+                if (!std.mem.eql(u8, &prepared.record.history_digest, &entry.record.history_digest))
+                    return error.ControlCatchupHistoryDiverged;
+                const appended = target_journal.appendPrepared(&prepared) catch {
+                    self.set.noteControlCatchupFailure(resolved_target_index);
+                    return error.ControlCatchupOutcomeUnknown;
+                };
+                if (!std.mem.eql(u8, &appended.record.history_digest, &entry.record.history_digest))
+                    return error.ControlCatchupHistoryDiverged;
+            }
+            target_journal.close();
+        }
+
+        var replacement = journal_api.scanHistory(allocator, target_member) catch |err| {
+            self.set.noteControlCatchupFailure(resolved_target_index);
+            return err;
+        };
+        var transferred = false;
+        defer if (!transferred) replacement.deinit();
+        self.set.noteControlCaughtUp(resolved_target_index, replacement) catch |err| {
+            self.set.noteControlCatchupFailure(resolved_target_index);
+            return err;
+        };
+        transferred = true;
+        return .{
+            .target_index = resolved_target_index,
+            .appended_count = replay_entries.len,
+            .history_digest = authority.history_digest,
+        };
     }
 
     fn validateGenerationProposal(
@@ -745,6 +942,7 @@ pub const ReplicatedJournal = struct {
         }
         const committed = firstCommitted(commit_results).record;
         self.quorum = proposal.topology.quorum;
+        const committed_count = countTrue(commit_successes[0..self.participant_count]);
         self.set.noteCommittedMembership(
             committed,
             proposal.topology,
@@ -753,10 +951,11 @@ pub const ReplicatedJournal = struct {
             active_count,
             proposal.mode == .administrative_recovery,
         );
+        self.dropInactiveParticipants();
         return .{
             .record = committed,
             .committed_members = committed_members,
-            .committed_count = countTrue(commit_successes[0..self.participant_count]),
+            .committed_count = committed_count,
             .degraded = active_count < voterCount(proposal.topology),
         };
     }
@@ -1231,6 +1430,24 @@ pub const ReplicatedJournal = struct {
         }
     }
 
+    fn dropInactiveParticipants(self: *ReplicatedJournal) void {
+        var retained_count: usize = 0;
+        for (0..self.participant_count) |index| {
+            var participant = self.participants[index].?;
+            if (!participant.active) {
+                participant.journal.close();
+                self.participants[index] = null;
+                continue;
+            }
+            if (retained_count != index) {
+                self.participants[retained_count] = participant;
+                self.participants[index] = null;
+            }
+            retained_count += 1;
+        }
+        self.participant_count = retained_count;
+    }
+
     fn activeParticipantCount(self: *const ReplicatedJournal) u16 {
         var count: u16 = 0;
         for (self.participants[0..self.participant_count]) |participant| {
@@ -1556,6 +1773,7 @@ fn checkpointProposalForAuthority(authority: pool_authority.Authority, transacti
 }
 
 const three_voter_names = [_][]const u8{ "member0", "member1", "member2" };
+const four_member_names = [_][]const u8{ "member0", "member1", "member2", "member3" };
 
 fn threeVoterTestLocations(dir: std.Io.Dir) [three_voter_names.len]pool_member_set.Location {
     const supplied_order = [_]usize{ 2, 0, 1 };
@@ -1584,6 +1802,42 @@ fn createThreeVoterTestSet(dir: std.Io.Dir) !pool_member_set.PoolMemberSet {
     return pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
 }
 
+fn fourMemberTestLocations(dir: std.Io.Dir) [four_member_names.len]pool_member_set.Location {
+    var locations: [four_member_names.len]pool_member_set.Location = undefined;
+    for (four_member_names, 0..) |name, index|
+        locations[index] = .{ .parent = dir, .basename = name };
+    return locations;
+}
+
+fn createFourMemberTestSet(
+    dir: std.Io.Dir,
+    options: pool_provision.Options,
+) !pool_member_set.PoolMemberSet {
+    var storages: [four_member_names.len]storage_api.Storage = undefined;
+    for (four_member_names, 0..) |name, index| {
+        storages[index] = storage_api.Storage.createFile(std.testing.io, dir, name, 8 * 1024 * 1024) catch |err| {
+            storage_api.closeAll(storages[0..index], std.testing.io) catch {};
+            return err;
+        };
+    }
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, options);
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    try provisioned.close();
+    const locations = fourMemberTestLocations(dir);
+    return pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+}
+
+fn activeNonVoter(authority: pool_authority.Authority) !struct { pool_topology.Member, usize } {
+    for (authority.topology.memberSlice(), 0..) |descriptor, index| {
+        if (descriptor.control_role == pool_topology.non_voter_role) return .{ descriptor, index };
+    }
+    return error.MissingActiveNonVoter;
+}
+
 const GenesisCatalog = struct {
     physical_bytes: [pool_catalog.page_size]u8,
     metadata_bytes: [pool_catalog.page_size]u8,
@@ -1594,7 +1848,7 @@ const GenesisCatalog = struct {
 
     fn init(set: *pool_member_set.PoolMemberSet) !GenesisCatalog {
         const authority = set.authority() orelse return error.MissingAuthority;
-        var physical: [three_voter_names.len]pool_catalog_page.PhysicalInterval = undefined;
+        var physical: [pool_member_set.max_member_count]pool_catalog_page.PhysicalInterval = undefined;
         for (authority.topology.memberSlice(), 0..) |descriptor, index| {
             const member = try set.memberById(descriptor.member_id);
             physical[index] = .{
@@ -1603,7 +1857,11 @@ const GenesisCatalog = struct {
                 .extent_count = member.header().data.length / authority.layout.chunk_size,
             };
         }
-        const physical_bytes = try pool_catalog_page.encodePhysicalIntervals(.physical_allocator, 1, &physical);
+        const physical_bytes = try pool_catalog_page.encodePhysicalIntervals(
+            .physical_allocator,
+            1,
+            physical[0..authority.topology.member_count],
+        );
         const metadata_page_count = ((try set.memberAt(0)).?).header().metadata.length / pool_catalog.page_size;
         const metadata_bytes = try pool_catalog_page.encodeMetadataAllocator(1, &.{.{
             .page_start = 4,
@@ -1825,6 +2083,164 @@ test "three-voter catalog publication fault matrix" {
                 try claim.release();
             }
         }
+    }
+}
+
+test "genesis active non-voter catches up installs catalog and promotes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const locations = fourMemberTestLocations(tmp.dir);
+    var set = try createFourMemberTestSet(tmp.dir, .{});
+    defer set.deinit();
+    var coordinator = try open(std.testing.io, &set);
+    defer coordinator.deinit();
+    const genesis_authority = set.authority().?;
+    var demoted_index: ?usize = null;
+    for (genesis_authority.topology.memberSlice(), 0..) |descriptor, index| {
+        if (demoted_index == null and descriptor.control_role == pool_topology.voter_role) demoted_index = index;
+    }
+    const target_input = try activeNonVoter(genesis_authority);
+    const target = target_input[0];
+    const target_index = target_input[1];
+
+    _ = try commitTestGenesisCatalog(&coordinator, &set);
+    try std.testing.expectError(error.CatalogTargetNotCaughtUp, coordinator.installCatalogForMember(target.member_id));
+    const catchup = try coordinator.catchUpControlForMember(std.testing.allocator, target.member_id);
+    try std.testing.expectEqual(@as(usize, 2), catchup.appended_count);
+    try std.testing.expectEqualSlices(u8, &set.authority().?.history_digest, &catchup.history_digest);
+    const repeated = try coordinator.catchUpControlForMember(std.testing.allocator, target.member_id);
+    try std.testing.expectEqual(@as(usize, 0), repeated.appended_count);
+    try coordinator.installCatalogForMember(target.member_id);
+
+    const current = set.authority().?;
+    var next_members: [four_member_names.len]pool_topology.Member = undefined;
+    @memcpy(&next_members, current.topology.memberSlice());
+    const demoted_member_id = next_members[demoted_index.?].member_id;
+    next_members[demoted_index.?].control_role = pool_topology.non_voter_role;
+    next_members[demoted_index.?].role_flags = member_format.data_role;
+    next_members[target_index].control_role = pool_topology.voter_role;
+    next_members[target_index].role_flags = member_format.known_role_flags;
+    const proposal: membership.Proposal = .{
+        .mode = .normal,
+        .topology = try pool_topology.Topology.init(
+            current.topology.set_id,
+            current.topology.epoch + 1,
+            try pool_topology.digest(current.topology),
+            &next_members,
+        ),
+    };
+    var prepare: control_record.Record = .{
+        .kind = control_record.membership_prepare_kind,
+        .local_sequence = 99,
+        .membership_epoch = proposal.topology.epoch,
+        .writer_term = current.writer_term,
+        .generation = current.generation,
+        .set_id = current.topology.set_id,
+        .member_id = id(8),
+        .mount_session_id = id(6),
+        .transaction_id = id(7),
+        .previous_record_digest = @splat(0x11),
+        .previous_history_digest = @splat(0x22),
+        .data_root_digest = current.data_root_digest,
+        .topology_digest = try pool_topology.digest(proposal.topology),
+        .layout_digest = try pool_layout.digest(current.layout),
+        .payload = try membership.makePreparePayload(proposal),
+    };
+    prepare.history_digest = try control_record.historyDigest(prepare);
+    const promoted = try coordinator.commitMembership(prepare);
+    try std.testing.expectEqual(control_record.membership_commit_kind, promoted.record.kind);
+    try std.testing.expectEqual(
+        pool_topology.voter_role,
+        pool_topology.findMember(&set.authority().?.topology, target.member_id).?.control_role,
+    );
+    const demoted_catchup = try coordinator.catchUpControlForMember(std.testing.allocator, demoted_member_id);
+    try std.testing.expectEqual(@as(usize, 0), demoted_catchup.appended_count);
+    _ = try coordinator.commitAuthorityCheckpoint(
+        try checkpointProposalForAuthority(set.authority().?, id(15)),
+    );
+    var demoted_set_index: ?usize = null;
+    for (0..set.suppliedCount()) |index| {
+        const member = (try set.memberAt(index)) orelse continue;
+        if (std.mem.eql(u8, &member.header().member_id, &demoted_member_id)) demoted_set_index = index;
+    }
+    switch (try set.statusAt(demoted_set_index.?)) {
+        .stale => {},
+        else => return error.ExpectedStaleTarget,
+    }
+
+    coordinator.close();
+    try set.close();
+    var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+    defer reopened.deinit();
+    try std.testing.expectEqual(
+        pool_topology.voter_role,
+        pool_topology.findMember(&reopened.authority().?.topology, target.member_id).?.control_role,
+    );
+}
+
+test "active non-voter catchup preflights capacity and checkpoint ancestry" {
+    inline for (.{ false, true }) |cross_checkpoint| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const options: pool_provision.Options = if (cross_checkpoint)
+            .{}
+        else
+            .{ .control_bytes = 5 * control_record.encoded_size };
+        var set = try createFourMemberTestSet(tmp.dir, options);
+        defer set.deinit();
+        var coordinator = try open(std.testing.io, &set);
+        defer coordinator.deinit();
+        const target = (try activeNonVoter(set.authority().?))[0];
+        _ = try commitTestGenesisCatalog(&coordinator, &set);
+        if (cross_checkpoint) {
+            _ = try coordinator.commitAuthorityCheckpoint(
+                try checkpointProposalForAuthority(set.authority().?, id(14)),
+            );
+        }
+        const member = try set.memberById(target.member_id);
+        var fault: member_api.FaultController = .{};
+        member.setFaultController(&fault);
+
+        if (cross_checkpoint) {
+            try std.testing.expectError(
+                error.ControlCatchupCrossesCheckpoint,
+                coordinator.catchUpControlForMember(std.testing.allocator, target.member_id),
+            );
+        } else {
+            try std.testing.expectError(
+                error.InsufficientJournalCapacity,
+                coordinator.catchUpControlForMember(std.testing.allocator, target.member_id),
+            );
+        }
+        try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+        try std.testing.expect(!coordinator.isFrozen());
+        try std.testing.expect(set.controlWriteReady() != null);
+    }
+}
+
+test "active non-voter catchup failure only isolates target" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var set = try createFourMemberTestSet(tmp.dir, .{});
+    defer set.deinit();
+    var coordinator = try open(std.testing.io, &set);
+    defer coordinator.deinit();
+    const target = (try activeNonVoter(set.authority().?))[0];
+    _ = try commitTestGenesisCatalog(&coordinator, &set);
+    const member = try set.memberById(target.member_id);
+    var fault: member_api.FaultController = .{ .fail_write_at = 0 };
+    member.setFaultController(&fault);
+
+    try std.testing.expectError(
+        error.ControlCatchupOutcomeUnknown,
+        coordinator.catchUpControlForMember(std.testing.allocator, target.member_id),
+    );
+    try std.testing.expectEqual(@as(u64, 1), fault.write_count);
+    try std.testing.expect(!coordinator.isFrozen());
+    try std.testing.expect(set.controlWriteReady() != null);
+    switch (try set.statusAt((try activeNonVoter(set.authority().?))[1])) {
+        .stale => {},
+        else => return error.ExpectedStaleTarget,
     }
 }
 

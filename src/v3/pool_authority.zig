@@ -475,8 +475,17 @@ fn validateCandidate(
     entry: journal.HistoryEntry,
 ) !?Authority {
     return switch (entry.record.kind) {
-        control_record.generation_commit_kind => try validateGenerationCandidate(histories, current, history, entry),
-        control_record.membership_commit_kind => try validateMembershipCandidate(histories, current, history, entry),
+        control_record.generation_commit_kind => if (isVoter(current.topology, history.member_id))
+            try validateGenerationCandidate(histories, current, history, entry)
+        else
+            null,
+        control_record.membership_commit_kind => membership: {
+            if (!isVoter(current.topology, history.member_id)) {
+                const proposal = membership.validateRecordProposal(entry.record) catch break :membership null;
+                if (!isVoter(proposal.topology, history.member_id)) break :membership null;
+            }
+            break :membership try validateMembershipCandidate(histories, current, history, entry);
+        },
         control_record.member_bootstrap_kind => try validateBootstrapCandidate(histories, current, entry),
         control_record.checkpoint_kind => if (pool_authority_checkpoint.isSnapshotRecord(entry.record))
             try validateCheckpointCandidate(histories, current, history, entry)
