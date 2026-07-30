@@ -241,6 +241,56 @@ pub const PoolMemberSet = struct {
         return output[0..count];
     }
 
+    pub fn loadCatalog(self: *PoolMemberSet) !pool_catalog_graph.ValidatedCatalog {
+        const selected = self.authority_state orelse return error.MissingAuthority;
+        if (selected.generation == 0) return error.GenesisHasNoCatalogRoot;
+        if (self.data_access_state == .unavailable) return error.DataReadUnavailable;
+
+        var geometry_buffer: [max_member_count]pool_catalog_graph.MemberGeometry = undefined;
+        const geometry = try self.collectCatalogGeometry(&geometry_buffer);
+        var scratch: pool_catalog_store.LoadScratch = .{};
+        var first_error: ?anyerror = null;
+        for (selected.topology.memberSlice()) |descriptor| {
+            if (descriptor.control_role != pool_topology.voter_role) continue;
+            const set_index = self.findSuppliedMember(descriptor.member_id) orelse continue;
+            const member = if (self.members[set_index]) |*value| value else continue;
+            switch (self.statuses[set_index]) {
+                .authority, .active_voter => {},
+                else => continue,
+            }
+            const loaded = pool_catalog_store.loadAuthorityCatalog(
+                member,
+                selected,
+                geometry,
+                &scratch,
+            ) catch |err| {
+                if (first_error == null) first_error = err;
+                continue;
+            };
+            return loaded.validated;
+        }
+        if (first_error) |err| return err;
+        return error.CatalogReadQuorumUnavailable;
+    }
+
+    pub fn dataMemberForRead(self: *PoolMemberSet, slot: u16) !DataMember {
+        const selected = self.authority_state orelse return error.MissingAuthority;
+        if (self.data_access_state == .unavailable) return error.DataReadUnavailable;
+        const descriptor = pool_topology.findSlot(&selected.topology, slot) orelse
+            return error.DataMemberNotInTopology;
+        if (descriptor.state == .joining) return error.DataMemberStillJoining;
+        const set_index = self.findSuppliedMember(descriptor.member_id) orelse
+            return error.DataMemberUnavailable;
+        const member = if (self.members[set_index]) |*value| value else return error.DataMemberUnavailable;
+        switch (self.statuses[set_index]) {
+            .authority, .active_voter, .catalog_failed => {},
+            else => return error.DataMemberUnavailable,
+        }
+        if (member.header().member_slot != slot) return error.MemberGeometryIdentityMismatch;
+        if (member.isClosed()) return error.DataMemberUnavailable;
+        return .{ .set_index = set_index, .member = member };
+    }
+
     pub fn dataMemberForWrite(self: *PoolMemberSet, slot: u16) !DataMember {
         const selected = self.authority_state orelse return error.MissingAuthority;
         if (self.data_access_state != .read_write) return error.DataWriteUnavailable;
@@ -912,6 +962,9 @@ test "one-member pool opens with one control voter" {
     try std.testing.expectEqual(pool_authority.Kind.genesis, set.authority().?.kind);
     try std.testing.expectEqual(@as(u16, 1), set.controlWriteReady().?.active_count);
     try std.testing.expectEqual(pool_policy.DataAccess.read_write, set.dataAccess());
+    const data_member = try set.dataMemberForRead(7);
+    try std.testing.expectEqual(@as(usize, 0), data_member.set_index);
+    try std.testing.expectEqual(@as(u16, 7), data_member.member.header().member_slot);
 }
 
 test "replicated pool below full width permits maintenance but keeps data read only" {

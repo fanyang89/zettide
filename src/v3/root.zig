@@ -21,6 +21,7 @@ pub const pool_authority = @import("pool_authority.zig");
 pub const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
 pub const pool_block_device = @import("pool_block_device.zig");
 pub const pool_catalog = @import("pool_catalog.zig");
+pub const pool_catalog_volume = @import("pool_catalog_volume.zig");
 pub const pool_catalog_graph = @import("pool_catalog_graph.zig");
 pub const pool_catalog_page = @import("pool_catalog_page.zig");
 pub const pool_genesis_payload = @import("pool_genesis_payload.zig");
@@ -54,6 +55,7 @@ test {
     _ = pool_authority_checkpoint;
     _ = pool_block_device;
     _ = pool_catalog;
+    _ = pool_catalog_volume;
     _ = pool_catalog_graph;
     _ = pool_catalog_page;
     _ = pool_genesis_payload;

@@ -10,6 +10,7 @@ const pool_catalog = @import("pool_catalog.zig");
 const pool_catalog_graph = @import("pool_catalog_graph.zig");
 const pool_catalog_page = @import("pool_catalog_page.zig");
 const pool_catalog_store = @import("pool_catalog_store.zig");
+const pool_catalog_volume = @import("pool_catalog_volume.zig");
 const pool_certificate = @import("pool_certificate.zig");
 const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
@@ -2284,6 +2285,7 @@ test "mapped extents are durable before catalog publication" {
 
         var volume_header = try container.Header.init(std.testing.io, extent_size, "mapped");
         volume_header.chunk_size = extent_size;
+        volume_header.state = .ready;
         const volume_header_bytes = volume_header.encode();
         const volume_header_reference = try pool_catalog_page.pageReference(6 * pool_catalog.page_size, &volume_header_bytes);
         const run: pool_catalog.ExtentRun = .{
@@ -2298,7 +2300,7 @@ test "mapped extents are durable before catalog publication" {
         const extent_reference = try pool_catalog_page.pageReference(7 * pool_catalog.page_size, &extent_bytes);
         const descriptor: pool_catalog.VolumeDescriptor = .{
             .volume_id = volume_header.uuid,
-            .state = .creating,
+            .state = .ready,
             .provisioning = .thin,
             .created_ns = volume_header.created_ns,
             .logical_size = volume_header.logical_size,
@@ -2396,6 +2398,18 @@ test "mapped extents are durable before catalog publication" {
             var actual: [64]u8 = undefined;
             try member.read(.data, 0, &actual);
             try std.testing.expect(std.mem.allEqual(u8, &actual, 0x5a));
+            var backend = try pool_catalog_volume.CatalogVolumeBackend.open(
+                std.testing.allocator,
+                &set,
+                descriptor.volume_id,
+            );
+            @memset(&actual, 0);
+            try backend.read(0, &actual);
+            try std.testing.expect(std.mem.allEqual(u8, &actual, 0x5a));
+            _ = try coordinator.commitAuthorityCheckpoint(
+                try checkpointProposalForAuthority(set.authority().?, id(14)),
+            );
+            try std.testing.expectError(error.PoolAuthorityChanged, backend.read(0, &actual));
             try std.testing.expectError(
                 error.DataGenerationLeaseRequired,
                 member.asReplicaEndpoint().writeData(0, "stale"),
