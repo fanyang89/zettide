@@ -242,13 +242,20 @@ pub const PoolMemberSet = struct {
     }
 
     pub fn loadCatalog(self: *PoolMemberSet) !pool_catalog_graph.ValidatedCatalog {
+        var scratch: pool_catalog_store.LoadScratch = .{};
+        return self.loadCatalogInto(&scratch);
+    }
+
+    pub fn loadCatalogInto(
+        self: *PoolMemberSet,
+        scratch: *pool_catalog_store.LoadScratch,
+    ) !pool_catalog_graph.ValidatedCatalog {
         const selected = self.authority_state orelse return error.MissingAuthority;
         if (selected.generation == 0) return error.GenesisHasNoCatalogRoot;
         if (self.data_access_state == .unavailable) return error.DataReadUnavailable;
 
         var geometry_buffer: [max_member_count]pool_catalog_graph.MemberGeometry = undefined;
         const geometry = try self.collectCatalogGeometry(&geometry_buffer);
-        var scratch: pool_catalog_store.LoadScratch = .{};
         var first_error: ?anyerror = null;
         for (selected.topology.memberSlice()) |descriptor| {
             if (descriptor.control_role != pool_topology.voter_role) continue;
@@ -262,7 +269,7 @@ pub const PoolMemberSet = struct {
                 member,
                 selected,
                 geometry,
-                &scratch,
+                scratch,
             ) catch |err| {
                 if (first_error == null) first_error = err;
                 continue;

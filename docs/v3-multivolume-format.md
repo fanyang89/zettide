@@ -347,8 +347,9 @@ The transition validator permits physical or metadata `retired -> free`, and can
 `retired -> mapped/used`, only when the preserved retirement generation is no greater than the
 previous authority-bound root generation. The previous binding is validated against selected control
 authority, its digest must be the new root's `previous_root_digest`, and generation must advance by
-exactly one. This is the reclaim barrier; the public commit API accepts neither a caller-supplied
-generation nor a caller-supplied page list.
+exactly one. This is the reclaim barrier. The low-level commit API accepts a candidate generation and
+page list, but derives no authority from them: it validates every page, transition, generation number,
+and reclaim decision against the selected previous authority before staging.
 
 Known normal control commit establishes the new authority and makes earlier generations unreachable
 to normal data access. An unknown outcome freezes the coordinator, performs no root repair, and
@@ -361,13 +362,16 @@ publish a catalog transition or expose reclaimed data.
 
 ## Durable Staging
 
-`commitCatalogGeneration` is the only public dynamic-Pool generation commit path. It holds the
-coordinator mutex and an owner-token catalog claim on every current voter through graph validation,
-staging, control commit, and root repair. A generation that introduces mapped extents also holds an
-owner-token data claim on every member referenced by the previous or proposed extent maps. Ordinary
-Member writes to a claimed region, data sync, and close are rejected while the corresponding claim is
-held. Once catalog data staging starts, each claimed member permanently rejects unleased data writes;
-reopen applies the same fence whenever it selects a nonzero catalog authority.
+`commitCatalogGeneration` publishes a caller-built dynamic-Pool generation.
+`commitCatalogExtentMapping` is the constrained first-write path for one thin hole or thick
+`reserved_zero` extent. It loads the authority graph, allocates fresh COW metadata pages and any thin
+physical placement, and supplies the resulting full-extent initialization to the same publication
+protocol. Both paths hold the coordinator mutex and an owner-token catalog claim on every current voter
+through graph validation, staging, control commit, and root repair. A generation that introduces mapped
+extents also holds an owner-token data claim on every member referenced by the previous or proposed
+extent maps. Ordinary Member writes to a claimed region, data sync, and close are rejected while the
+corresponding claim is held. Once catalog data staging starts, each claimed member permanently rejects
+unleased data writes; reopen applies the same fence whenever it selects a nonzero catalog authority.
 
 Publication uses the complete current voter set, not only control quorum:
 
@@ -413,8 +417,10 @@ extents read as zero, while replicated mapped reads require two matching copies.
 `CatalogDataLease` claims every member referenced by the current catalog and permits writes only to
 existing mapped extents. The lease is permanently invalid when authority advances; write or sync
 failure also revokes Pool control-write and data access until reopen. Hole and `reserved_zero` writes
-remain rejected until an allocator can initialize and publish their mapping. The same lease is required
-before an existing mapped span can move or change state without racing its authoritative contents.
+remain rejected by the backend. The caller releases its lease, publishes the complete first-write extent
+with `commitCatalogExtentMapping`, then reacquires a lease and backend bound to the new authority. The
+same lease is required before an existing mapped span can move or change state without racing its
+authoritative contents.
 Member removal remains rejected until an authority-bound catalog drain proof shows that no mapping or
 allocator interval references its slot.
 

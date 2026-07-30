@@ -8,6 +8,7 @@ const pool_authority = @import("pool_authority.zig");
 const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
 const pool_catalog = @import("pool_catalog.zig");
 const pool_catalog_graph = @import("pool_catalog_graph.zig");
+const pool_catalog_mutation = @import("pool_catalog_mutation.zig");
 const pool_catalog_page = @import("pool_catalog_page.zig");
 const pool_catalog_store = @import("pool_catalog_store.zig");
 const pool_catalog_volume = @import("pool_catalog_volume.zig");
@@ -37,6 +38,14 @@ pub const CatalogCommitResult = struct {
     staged_members: [pool_member_set.max_member_count]bool,
     repaired_members: [pool_member_set.max_member_count]bool,
     repair_failed_members: [pool_member_set.max_member_count]bool,
+};
+
+pub const CatalogExtentMappingRequest = struct {
+    volume_id: [16]u8,
+    logical_extent: u64,
+    mount_session_id: [16]u8,
+    transaction_id: [16]u8,
+    contents: pool_catalog_mutation.InitializationContents,
 };
 
 pub const ControlCatchupResult = struct {
@@ -246,6 +255,75 @@ pub const ReplicatedJournal = struct {
     ) !CatalogCommitResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        return self.commitCatalogGenerationLocked(request);
+    }
+
+    pub fn commitCatalogExtentMapping(
+        self: *ReplicatedJournal,
+        request: CatalogExtentMappingRequest,
+    ) !CatalogCommitResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.CoordinatorClosed;
+        if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        if (self.reclaim_required) return error.ReclaimBarrierRequired;
+        if (self.recovery_only) return error.RecoveryOnlyCoordinator;
+        try self.requireSetWriteReady();
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        if (codec.isZero(&request.mount_session_id) or codec.isZero(&request.transaction_id))
+            return error.InvalidGenerationIdentity;
+
+        var load_scratch: pool_catalog_store.LoadScratch = .{};
+        _ = try self.set.loadCatalogInto(&load_scratch);
+        var geometry_buffer: [pool_member_set.max_member_count]pool_catalog_graph.MemberGeometry = undefined;
+        const geometry = try self.set.collectCatalogGeometry(&geometry_buffer);
+        const previous_binding: pool_catalog_graph.AuthorityBinding = .{
+            .generation = authority.generation,
+            .data_root_digest = authority.data_root_digest,
+            .topology = authority.topology,
+            .layout = authority.layout,
+        };
+        var candidate = try pool_catalog_mutation.mapExtent(
+            previous_binding,
+            load_scratch.graph(),
+            geometry,
+            request.volume_id,
+            request.logical_extent,
+        );
+        const current_binding = try candidate.authorityBinding(previous_binding);
+        const initialization = candidate.initialization.withContents(request.contents);
+        var graph_scratch: pool_catalog_mutation.GraphScratch = .{};
+        const current_graph = candidate.graph(&graph_scratch);
+        var proposal: control_record.Record = .{
+            .kind = control_record.generation_prepare_kind,
+            .local_sequence = 1,
+            .membership_epoch = authority.membership_epoch,
+            .writer_term = @max(authority.writer_term, 1),
+            .generation = current_binding.generation,
+            .set_id = authority.topology.set_id,
+            .member_id = authority.topology.members[0].member_id,
+            .mount_session_id = request.mount_session_id,
+            .transaction_id = request.transaction_id,
+            .previous_record_digest = @splat(1),
+            .previous_history_digest = authority.history_digest,
+            .data_root_digest = current_binding.data_root_digest,
+            .topology_digest = try pool_topology.digest(authority.topology),
+            .layout_digest = try pool_layout.digest(authority.layout),
+            .payload = try control_record.Payload.init("map catalog extent"),
+        };
+        proposal.history_digest = try control_record.historyDigest(proposal);
+        return self.commitCatalogGenerationLocked(.{
+            .prepare_proposal = proposal,
+            .previous_graph = load_scratch.graph(),
+            .current_graph = current_graph,
+            .data_initializations = &.{initialization},
+        });
+    }
+
+    fn commitCatalogGenerationLocked(
+        self: *ReplicatedJournal,
+        request: CatalogGenerationRequest,
+    ) !CatalogCommitResult {
         const authority = try self.validateGenerationProposal(request.prepare_proposal);
 
         var voter_buffer: [pool_member_set.max_member_count]pool_member_set.CatalogVoter = undefined;
@@ -2298,7 +2376,7 @@ test "mapped extents are durable before catalog publication" {
         const extent_size = authority.layout.chunk_size;
         const extent_count = member.header().data.length / extent_size;
 
-        var volume_header = try container.Header.init(std.testing.io, extent_size, "mapped");
+        var volume_header = try container.Header.init(std.testing.io, 2 * extent_size, "mapped");
         volume_header.chunk_size = extent_size;
         volume_header.state = .ready;
         const volume_header_bytes = volume_header.encode();
@@ -2476,6 +2554,62 @@ test "mapped extents are durable before catalog publication" {
                     error.DataGenerationLeaseRequired,
                     member.asReplicaEndpoint().writeData(0, "stale"),
                 );
+
+                const mapped_contents = try std.testing.allocator.alloc(u8, extent_size);
+                defer std.testing.allocator.free(mapped_contents);
+                try std.testing.expectError(error.DataClaimUnavailable, coordinator.commitCatalogExtentMapping(.{
+                    .volume_id = descriptor.volume_id,
+                    .logical_extent = 1,
+                    .mount_session_id = id(3),
+                    .transaction_id = id(15),
+                    .contents = .{ .bytes = mapped_contents },
+                }));
+                try std.testing.expectEqual(@as(u64, 1), set.authority().?.generation);
+                try std.testing.expect(!coordinator.isFrozen());
+
+                refreshed_lease.release();
+                @memset(mapped_contents, 0x7c);
+                _ = try coordinator.commitCatalogExtentMapping(.{
+                    .volume_id = descriptor.volume_id,
+                    .logical_extent = 1,
+                    .mount_session_id = id(3),
+                    .transaction_id = id(15),
+                    .contents = .{ .bytes = mapped_contents },
+                });
+                try std.testing.expectEqual(@as(u64, 2), set.authority().?.generation);
+                try std.testing.expectError(error.PoolAuthorityChanged, refreshed_backend.read(0, &actual));
+
+                var mapped_lease = try pool_catalog_volume.CatalogDataLease.acquire(&set);
+                defer mapped_lease.deinit();
+                var mapped_backend = try pool_catalog_volume.CatalogVolumeBackend.openWritable(
+                    std.testing.allocator,
+                    &mapped_lease,
+                    descriptor.volume_id,
+                );
+                @memset(&actual, 0);
+                try mapped_backend.read(extent_size, &actual);
+                try std.testing.expect(std.mem.allEqual(u8, &actual, 0x7c));
+                mapped_lease.release();
+
+                coordinator.close();
+                try std.testing.expectError(error.CoordinatorClosed, coordinator.commitCatalogExtentMapping(.{
+                    .volume_id = descriptor.volume_id,
+                    .logical_extent = 1,
+                    .mount_session_id = id(3),
+                    .transaction_id = id(16),
+                    .contents = .zero,
+                }));
+                try set.close();
+                var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .read_only);
+                defer reopened.deinit();
+                var reopened_backend = try pool_catalog_volume.CatalogVolumeBackend.open(
+                    std.testing.allocator,
+                    &reopened,
+                    descriptor.volume_id,
+                );
+                @memset(&actual, 0);
+                try reopened_backend.read(extent_size, &actual);
+                try std.testing.expect(std.mem.allEqual(u8, &actual, 0x7c));
             }
             if (case == .leased_write_failure or case == .leased_sync_failure) {
                 try std.testing.expectError(
