@@ -14,6 +14,14 @@ const node_nvmf_endpoint = "127.0.0.1:4420";
 const node_failure_domain = "rack-a";
 const node_capability_bits: u64 = 5;
 const node_protocol_version: u32 = 1;
+const snapshot_member_id = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f };
+const suffix_member_id = [_]u8{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f };
+const failover_member_id = [_]u8{ 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f };
+const member_local_set_id = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf };
+const member_birth_topology_digest = [_]u8{0x5a} ** 32;
+const member_metadata_capacity_bytes: u64 = 1024;
+const member_data_capacity_bytes: u64 = 8192;
+const member_extent_size_bytes: u32 = 4096;
 
 const test_options: runtime_mod.Options = .{
     .tick_interval_ms = 5,
@@ -48,7 +56,24 @@ const RegisteredNode = struct {
     }
 };
 
-test "runtime restores Pool snapshot and WAL suffix through RPC" {
+const RegisteredMember = struct {
+    id: []u8,
+    revision: u64,
+
+    fn deinit(self: *RegisteredMember) void {
+        config_allocator.free(self.id);
+        self.* = undefined;
+    }
+};
+
+const ExpectedMember = struct {
+    registered: RegisteredMember,
+    pool_id: []const u8,
+    node_id: []const u8,
+    slot: u32,
+};
+
+test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RPC" {
     var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
     const root_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
@@ -66,6 +91,8 @@ test "runtime restores Pool snapshot and WAL suffix through RPC" {
     var secondary: CreatedPool = undefined;
     var snapshot_node: RegisteredNode = undefined;
     var suffix_node: RegisteredNode = undefined;
+    var snapshot_member: RegisteredMember = undefined;
+    var suffix_member: RegisteredMember = undefined;
     {
         const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
         defer destroyRuntime(runtime);
@@ -88,18 +115,49 @@ test "runtime restores Pool snapshot and WAL suffix through RPC" {
             "0198f54d-5c2a-7000-8000-000000000102",
         );
         errdefer suffix_node.deinit();
+        snapshot_member = try registerMember(
+            runtime,
+            &config,
+            "request-snapshot-member",
+            &snapshot_member_id,
+            primary.id,
+            snapshot_node.id,
+            0,
+        );
+        errdefer snapshot_member.deinit();
+        suffix_member = try registerMember(
+            runtime,
+            &config,
+            "request-suffix-member",
+            &suffix_member_id,
+            primary.id,
+            suffix_node.id,
+            1,
+        );
+        errdefer suffix_member.deinit();
         try std.testing.expectEqual(@as(u64, 2), primary.revision);
         try std.testing.expectEqual(@as(u64, 3), secondary.revision);
         try std.testing.expectEqual(@as(u64, 4), snapshot_node.revision);
         try std.testing.expectEqual(@as(u64, 5), suffix_node.revision);
+        try std.testing.expectEqual(@as(u64, 6), snapshot_member.revision);
+        try std.testing.expectEqual(@as(u64, 7), suffix_member.revision);
         try expectList(runtime, 2);
         try expectNodeList(runtime, &.{ snapshot_node, suffix_node });
+        const expected_members = [_]ExpectedMember{
+            .{ .registered = snapshot_member, .pool_id = primary.id, .node_id = snapshot_node.id, .slot = 0 },
+            .{ .registered = suffix_member, .pool_id = primary.id, .node_id = suffix_node.id, .slot = 1 },
+        };
+        try expectMember(runtime, expected_members[0]);
+        try expectMember(runtime, expected_members[1]);
+        try expectMemberList(runtime, &expected_members);
         try runtime.shutdown();
     }
     defer primary.deinit();
     defer secondary.deinit();
     defer snapshot_node.deinit();
     defer suffix_node.deinit();
+    defer snapshot_member.deinit();
+    defer suffix_member.deinit();
 
     {
         const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
@@ -111,6 +169,13 @@ test "runtime restores Pool snapshot and WAL suffix through RPC" {
         try expectNode(runtime, &config, snapshot_node);
         try expectNode(runtime, &config, suffix_node);
         try expectNodeList(runtime, &.{ snapshot_node, suffix_node });
+        const expected_members = [_]ExpectedMember{
+            .{ .registered = snapshot_member, .pool_id = primary.id, .node_id = snapshot_node.id, .slot = 0 },
+            .{ .registered = suffix_member, .pool_id = primary.id, .node_id = suffix_node.id, .slot = 1 },
+        };
+        try expectMember(runtime, expected_members[0]);
+        try expectMember(runtime, expected_members[1]);
+        try expectMemberList(runtime, &expected_members);
         var replayed = try createPool(runtime, "request-primary", "primary");
         defer replayed.deinit();
         try std.testing.expectEqualStrings(primary.id, replayed.id);
@@ -124,6 +189,18 @@ test "runtime restores Pool snapshot and WAL suffix through RPC" {
         defer replayed_snapshot_node.deinit();
         try std.testing.expectEqualStrings(snapshot_node.id, replayed_snapshot_node.id);
         try std.testing.expectEqual(snapshot_node.revision, replayed_snapshot_node.revision);
+        var replayed_snapshot_member = try registerMember(
+            runtime,
+            &config,
+            "request-snapshot-member",
+            &snapshot_member_id,
+            primary.id,
+            snapshot_node.id,
+            0,
+        );
+        defer replayed_snapshot_member.deinit();
+        try std.testing.expectEqualSlices(u8, snapshot_member.id, replayed_snapshot_member.id);
+        try std.testing.expectEqual(snapshot_member.revision, replayed_snapshot_member.revision);
     }
 }
 
@@ -179,6 +256,17 @@ test "three-voter runtime survives leader failover and restart" {
     );
     defer registered.deinit();
     try waitForApplied(&runtimes, registered.revision);
+    var registered_member = try registerMember(
+        runtimes[initial_leader].?,
+        &configs[initial_leader],
+        "request-member-failover",
+        &failover_member_id,
+        created.id,
+        registered.id,
+        0,
+    );
+    defer registered_member.deinit();
+    try waitForApplied(&runtimes, registered_member.revision);
 
     try runtimes[initial_leader].?.shutdown();
     runtimes[initial_leader].?.deinit();
@@ -189,6 +277,14 @@ test "three-voter runtime survives leader failover and restart" {
     try expectList(runtimes[replacement_leader].?, 1);
     try expectNode(runtimes[replacement_leader].?, &configs[replacement_leader], registered);
     try expectNodeList(runtimes[replacement_leader].?, &.{registered});
+    const expected_member: ExpectedMember = .{
+        .registered = registered_member,
+        .pool_id = created.id,
+        .node_id = registered.id,
+        .slot = 0,
+    };
+    try expectMember(runtimes[replacement_leader].?, expected_member);
+    try expectMemberList(runtimes[replacement_leader].?, &.{expected_member});
     var replayed = try createPool(runtimes[replacement_leader].?, "request-failover", "failover");
     defer replayed.deinit();
     try std.testing.expectEqualStrings(created.id, replayed.id);
@@ -202,6 +298,19 @@ test "three-voter runtime survives leader failover and restart" {
     defer replayed_node.deinit();
     try std.testing.expectEqualStrings(registered.id, replayed_node.id);
     try std.testing.expectEqual(registered.revision, replayed_node.revision);
+    var replayed_member = try registerMember(
+        runtimes[replacement_leader].?,
+        &configs[replacement_leader],
+        "request-member-failover",
+        &failover_member_id,
+        created.id,
+        registered.id,
+        0,
+    );
+    defer replayed_member.deinit();
+    try std.testing.expectEqualSlices(u8, registered_member.id, replayed_member.id);
+    try std.testing.expectEqual(registered_member.revision, replayed_member.revision);
+    const catch_up_revision = runtimes[replacement_leader].?.status().applied_index;
 
     runtimes[initial_leader] = try runtime_mod.Runtime.create(
         runtime_allocator,
@@ -210,8 +319,7 @@ test "three-voter runtime survives leader failover and restart" {
         test_options,
     );
     _ = try waitForStableLeader(&runtimes);
-    try waitForApplied(&runtimes, replayed.revision);
-    try waitForApplied(&runtimes, registered.revision);
+    try waitForApplied(&runtimes, catch_up_revision);
 }
 
 fn makeConfig(
@@ -357,6 +465,42 @@ fn registerNode(
     };
 }
 
+fn registerMember(
+    runtime: *runtime_mod.Runtime,
+    config: *const config_mod.Config,
+    request_id: []const u8,
+    member_id: []const u8,
+    pool_id: []const u8,
+    node_id: []const u8,
+    member_slot: u32,
+) !RegisteredMember {
+    const request = try encodeMessage(pb.RegisterMemberRequest{
+        .request_id = request_id,
+        .cluster_id = &config.cluster_id,
+        .member_id = member_id,
+        .pool_id = pool_id,
+        .node_id = node_id,
+        .local_set_id = &member_local_set_id,
+        .member_slot = member_slot,
+        .birth_topology_digest = &member_birth_topology_digest,
+        .metadata_capacity_bytes = member_metadata_capacity_bytes,
+        .data_capacity_bytes = member_data_capacity_bytes,
+        .extent_size_bytes = member_extent_size_bytes,
+    });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.MemberService/RegisterMember", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.RegisterMemberResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    const member = response.member orelse return error.MissingMember;
+    return .{
+        .id = try config_allocator.dupe(u8, member.id),
+        .revision = member.registered_revision,
+    };
+}
+
 fn expectPool(runtime: *runtime_mod.Runtime, name: []const u8, expected_id: []const u8) !void {
     const request = try encodeMessage(pb.GetPoolRequest{ .selector = .{ .name = name } });
     defer runtime_allocator.free(request);
@@ -427,6 +571,55 @@ fn expectNodeList(runtime: *runtime_mod.Runtime, expected_nodes: []const Registe
         }
         try std.testing.expect(found);
     }
+}
+
+fn expectMember(runtime: *runtime_mod.Runtime, expected: ExpectedMember) !void {
+    const request = try encodeMessage(pb.GetMemberRequest{ .member_id = expected.registered.id });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.MemberService/GetMember", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.GetMemberResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    const member = response.member orelse return error.MissingMember;
+    try expectMemberFields(member, expected);
+}
+
+fn expectMemberList(runtime: *runtime_mod.Runtime, expected_members: []const ExpectedMember) !void {
+    const request = try encodeMessage(pb.ListMembersRequest{});
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.MemberService/ListMembers", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.ListMembersResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    try std.testing.expectEqual(expected_members.len, response.members.items.len);
+    for (expected_members) |expected| {
+        var found = false;
+        for (response.members.items) |member| {
+            if (!std.mem.eql(u8, expected.registered.id, member.id)) continue;
+            try expectMemberFields(member, expected);
+            found = true;
+            break;
+        }
+        try std.testing.expect(found);
+    }
+}
+
+fn expectMemberFields(member: pb.Member, expected: ExpectedMember) !void {
+    try std.testing.expectEqualSlices(u8, expected.registered.id, member.id);
+    try std.testing.expectEqualStrings(expected.pool_id, member.pool_id);
+    try std.testing.expectEqualStrings(expected.node_id, member.node_id);
+    try std.testing.expectEqualSlices(u8, &member_local_set_id, member.local_set_id);
+    try std.testing.expectEqual(expected.slot, member.member_slot);
+    try std.testing.expectEqualSlices(u8, &member_birth_topology_digest, member.birth_topology_digest);
+    try std.testing.expectEqual(member_metadata_capacity_bytes, member.metadata_capacity_bytes);
+    try std.testing.expectEqual(member_data_capacity_bytes, member.data_capacity_bytes);
+    try std.testing.expectEqual(member_extent_size_bytes, member.extent_size_bytes);
+    try std.testing.expect(member.registered_at_unix_ms > 0);
+    try std.testing.expectEqual(expected.registered.revision, member.registered_revision);
 }
 
 fn call(runtime: *runtime_mod.Runtime, method: []const u8, request: []const u8) !grpc.CallResult {
