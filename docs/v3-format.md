@@ -194,7 +194,10 @@ current-mount-namespace mounts, swaps, and sysfs holders. Writable acquisition u
 an explicitly read-only mount uses `O_RDONLY|O_EXCL` and accepts a kernel read-only whole device while
 retaining the other safety checks. Both modes repeat instance identity and geometry checks on the
 acquired fd. This coordinates with other exclusive block-device users but cannot prevent an
-uncooperative process from issuing raw writes.
+uncooperative process from issuing raw writes. Each acquired block-device fd owns an io_uring used
+for positional reads, positional writes, and fsync. The storage interface waits for each completion
+to preserve littlefs ordering and durability semantics. These fds do not use `O_DIRECT`, and failure
+to create an io_uring is reported rather than silently falling back to synchronous syscalls.
 
 The Linux raw-pool CLI requires every device path explicitly. The initial mountable implementation
 accepts exactly one device for `unprotected` and exactly three devices for `replicated`.

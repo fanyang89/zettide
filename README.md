@@ -13,6 +13,7 @@ boundary.
 
 - Zig 0.16.0
 - Linux: libfuse3 development files for mounting support
+- Linux raw-disk Pools: io_uring enabled by the kernel and execution sandbox
 - Windows: WinFsp developer package and runtime for mounting support
 
 ## Build

@@ -1,4 +1,5 @@
 const std = @import("std");
+const linux_uring_storage = @import("linux_uring_storage.zig");
 const storage_api = @import("storage.zig");
 
 const Io = std.Io;
@@ -113,14 +114,19 @@ pub fn openStorageOptions(
     if ((writable and !opened.preflightEligible()) or
         (!writable and exclusive and !opened.preflightReadable())) return error.DeviceNotEligible;
 
+    const storage = try linux_uring_storage.initOwned(
+        allocator,
+        file,
+        opened.capacity_bytes,
+        opened.logical_sector_size,
+        .{
+            .major = opened.id.major,
+            .minor = opened.id.minor,
+            .disk_sequence = opened.disk_sequence,
+        },
+    );
     return .{
-        .storage = storage_api.Storage.initOwned(
-            file,
-            opened.capacity_bytes,
-            .linux_block_device,
-            opened.logical_sector_size,
-            false,
-        ),
+        .storage = storage,
         .info = opened,
     };
 }
@@ -337,4 +343,8 @@ test "inspection rejects non-block devices" {
         error.NotBlockDevice,
         inspect(std.testing.io, std.testing.allocator, "/dev/null"),
     );
+}
+
+test {
+    _ = linux_uring_storage;
 }
