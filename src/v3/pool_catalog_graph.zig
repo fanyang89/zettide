@@ -15,6 +15,16 @@ pub const PageImage = struct {
     bytes: *const [pool_catalog.page_size]u8,
 };
 
+pub const DataInitialization = struct {
+    volume_id: [16]u8,
+    logical_start: u64,
+    extent_count: u32,
+    contents: union(enum) {
+        zero,
+        bytes: []const u8,
+    },
+};
+
 pub const Graph = struct {
     root_bytes: *const [pool_catalog.root_encoded_size]u8,
     pages: []const PageImage,
@@ -324,24 +334,71 @@ pub fn validateNoNewDataMappings(
     previous: ?*const ValidatedCatalog,
     current: *const ValidatedCatalog,
 ) !void {
+    return validateDataInitializations(previous, current, &.{});
+}
+
+pub fn validateDataInitializations(
+    previous: ?*const ValidatedCatalog,
+    current: *const ValidatedCatalog,
+    initializations: []const DataInitialization,
+) !void {
+    var initialization_index: usize = 0;
     for (current.descriptorSlice(), 0..) |descriptor, volume_index| {
         for (current.extentSlice(volume_index)) |run| {
-            const previous_catalog = previous orelse return error.DataMappingRequiresDurabilityWitness;
-            const previous_index = findVolumeIndex(previous_catalog, descriptor.volume_id) orelse
-                return error.DataMappingRequiresDurabilityWitness;
+            const previous_runs = previous_runs: {
+                const previous_catalog = previous orelse break :previous_runs &.{};
+                const previous_index = findVolumeIndex(previous_catalog, descriptor.volume_id) orelse
+                    break :previous_runs &.{};
+                break :previous_runs previous_catalog.extentSlice(previous_index);
+            };
+            if (run.state != .mapped) {
+                const logical_end = try std.math.add(u64, run.logical_start, run.extent_count);
+                if (hasMappedLogicalOverlap(previous_runs, run.logical_start, logical_end))
+                    return error.MappedDataRewriteRequiresGenerationLease;
+                continue;
+            }
             var logical_cursor = run.logical_start;
             const logical_end = try std.math.add(u64, run.logical_start, run.extent_count);
             while (logical_cursor < logical_end) {
                 const previous_run = findMatchingRun(
-                    previous_catalog.extentSlice(previous_index),
+                    previous_runs,
                     run,
                     logical_cursor,
-                ) orelse return error.DataMappingRequiresDurabilityWitness;
-                const previous_end = try std.math.add(u64, previous_run.logical_start, previous_run.extent_count);
-                logical_cursor = @min(logical_end, previous_end);
+                );
+                if (previous_run) |matching| {
+                    const previous_end = try std.math.add(u64, matching.logical_start, matching.extent_count);
+                    logical_cursor = @min(logical_end, previous_end);
+                    continue;
+                }
+
+                const initialization_end = nextMatchingStart(previous_runs, run, logical_cursor) orelse logical_end;
+                if (hasMappedLogicalOverlap(previous_runs, logical_cursor, initialization_end))
+                    return error.MappedDataRewriteRequiresGenerationLease;
+                const extent_count: u32 = @intCast(initialization_end - logical_cursor);
+                const initialization = if (initialization_index < initializations.len)
+                    initializations[initialization_index]
+                else
+                    return error.DataMappingRequiresDurabilityWitness;
+                if (!std.mem.eql(u8, &initialization.volume_id, &descriptor.volume_id) or
+                    initialization.logical_start != logical_cursor or
+                    initialization.extent_count != extent_count)
+                    return error.DataInitializationMismatch;
+                const byte_count = std.math.mul(
+                    u64,
+                    initialization.extent_count,
+                    current.root.extent_size,
+                ) catch return error.DataInitializationOverflow;
+                switch (initialization.contents) {
+                    .zero => {},
+                    .bytes => |bytes| if (bytes.len != byte_count)
+                        return error.DataInitializationLengthMismatch,
+                }
+                initialization_index += 1;
+                logical_cursor = initialization_end;
             }
         }
     }
+    if (initialization_index != initializations.len) return error.UnexpectedDataInitialization;
 }
 
 fn validateSnapshots(
@@ -632,6 +689,41 @@ fn findMatchingRun(
         return candidate;
     }
     return null;
+}
+
+fn nextMatchingStart(
+    runs: []const pool_catalog.ExtentRun,
+    current: pool_catalog.ExtentRun,
+    logical_extent: u64,
+) ?u64 {
+    const current_end = current.logical_start + current.extent_count;
+    var result: ?u64 = null;
+    for (runs) |candidate| {
+        if (candidate.state != current.state or candidate.member_count != current.member_count or
+            !std.mem.eql(u16, candidate.memberSlice(), current.memberSlice())) continue;
+        const candidate_end = candidate.logical_start + candidate.extent_count;
+        const overlap_start = @max(logical_extent, candidate.logical_start);
+        const overlap_end = @min(current_end, candidate_end);
+        if (overlap_start >= overlap_end) continue;
+        const current_physical = current.physical_start + (overlap_start - current.logical_start);
+        const candidate_physical = candidate.physical_start + (overlap_start - candidate.logical_start);
+        if (current_physical != candidate_physical) continue;
+        if (result == null or overlap_start < result.?) result = overlap_start;
+    }
+    return result;
+}
+
+fn hasMappedLogicalOverlap(
+    runs: []const pool_catalog.ExtentRun,
+    logical_start: u64,
+    logical_end: u64,
+) bool {
+    for (runs) |run| {
+        if (run.state != .mapped) continue;
+        const run_end = run.logical_start + run.extent_count;
+        if (logical_start < run_end and run.logical_start < logical_end) return true;
+    }
+    return false;
 }
 
 fn findMemberGeometry(members: []const MemberGeometry, slot: u16) ?MemberGeometry {
@@ -1037,6 +1129,77 @@ test "catalog transition quarantines removed physical and metadata pages" {
     try std.testing.expectError(
         error.PhysicalExtentReclaimRequiresAuthorityBarrier,
         validateSnapshots(&premature, &reclaimed),
+    );
+}
+
+test "data initializations exactly cover changed mapped spans" {
+    const previous_root = testTransitionRoot(1, @splat(0));
+    var previous = testTransitionCatalog(previous_root);
+    previous.extent_counts[0] = 1;
+    previous.extent_runs[0][0] = .{
+        .logical_start = 0,
+        .physical_start = 4,
+        .extent_count = 1,
+        .state = .mapped,
+        .member_count = 1,
+        .member_slots = .{ 1, 0, 0 },
+    };
+
+    var current = previous;
+    current.root = testTransitionRoot(2, try pool_catalog.rootDigest(previous_root));
+    current.extent_runs[0][0].extent_count = 2;
+    const initialization: DataInitialization = .{
+        .volume_id = current.descriptors[0].volume_id,
+        .logical_start = 1,
+        .extent_count = 1,
+        .contents = .zero,
+    };
+    try validateDataInitializations(&previous, &current, &.{initialization});
+    try std.testing.expectError(
+        error.DataMappingRequiresDurabilityWitness,
+        validateDataInitializations(&previous, &current, &.{}),
+    );
+
+    var mismatched = initialization;
+    mismatched.logical_start = 0;
+    try std.testing.expectError(
+        error.DataInitializationMismatch,
+        validateDataInitializations(&previous, &current, &.{mismatched}),
+    );
+    var short = initialization;
+    short.contents = .{ .bytes = "short" };
+    try std.testing.expectError(
+        error.DataInitializationLengthMismatch,
+        validateDataInitializations(&previous, &current, &.{short}),
+    );
+    try std.testing.expectError(
+        error.UnexpectedDataInitialization,
+        validateDataInitializations(&current, &current, &.{initialization}),
+    );
+
+    var moved = current;
+    moved.extent_runs[0][0].physical_start = 8;
+    const moved_initialization: DataInitialization = .{
+        .volume_id = moved.descriptors[0].volume_id,
+        .logical_start = 0,
+        .extent_count = 2,
+        .contents = .zero,
+    };
+    try std.testing.expectError(
+        error.MappedDataRewriteRequiresGenerationLease,
+        validateDataInitializations(&previous, &moved, &.{moved_initialization}),
+    );
+
+    var reserved = current;
+    reserved.extent_runs[0][0].state = .reserved_zero;
+    try validateDataInitializations(null, &reserved, &.{});
+    try std.testing.expectError(
+        error.UnexpectedDataInitialization,
+        validateDataInitializations(null, &reserved, &.{initialization}),
+    );
+    try std.testing.expectError(
+        error.MappedDataRewriteRequiresGenerationLease,
+        validateDataInitializations(&previous, &reserved, &.{}),
     );
 }
 

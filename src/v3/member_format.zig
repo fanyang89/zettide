@@ -17,7 +17,8 @@ pub const supported_control_record_format_version: u16 = 1;
 pub const supported_compat_features: u64 = 0;
 pub const supported_ro_compat_features: u64 = 0;
 pub const dynamic_pool_incompat_feature: u64 = 1 << 0;
-pub const supported_incompat_features: u64 = dynamic_pool_incompat_feature;
+pub const catalog_data_incompat_feature: u64 = 1 << 1;
+pub const supported_incompat_features: u64 = dynamic_pool_incompat_feature | catalog_data_incompat_feature;
 pub const max_dynamic_member_count: u16 = 96;
 
 const magic = [8]u8{ 'D', 'D', 'V', 'M', 'E', 'M', '3', 0 };
@@ -81,6 +82,10 @@ pub const OpenMode = enum { read_only, writable };
 
 pub fn isDynamicPool(header: Header) bool {
     return header.incompat_features & dynamic_pool_incompat_feature != 0;
+}
+
+pub fn hasCatalogData(header: Header) bool {
+    return header.incompat_features & catalog_data_incompat_feature != 0;
 }
 
 pub fn checkFeaturePolicy(header: Header, mode: OpenMode) !void {
@@ -213,6 +218,7 @@ pub fn validate(header: Header) !void {
         if (header.role_flags & ~known_role_flags != 0 or header.role_flags & data_role == 0)
             return error.InvalidRoleFlags;
     } else {
+        if (hasCatalogData(header)) return error.CatalogDataRequiresDynamicPool;
         if (header.member_count != initial_member_count or header.member_slot >= initial_member_count)
             return error.InvalidMemberPlacement;
         if (header.role_flags != known_role_flags) return error.InvalidRoleFlags;
@@ -286,6 +292,20 @@ pub fn select(a: Candidate, b: Candidate) !Selection {
 
 fn selectValid(a: Header, b: Header) !Selection {
     if (!staticEqual(a, b)) return error.ConflictingMemberHeaders;
+    const a_catalog = hasCatalogData(a);
+    const b_catalog = hasCatalogData(b);
+    if (a_catalog != b_catalog) {
+        const enabled = if (a_catalog) a else b;
+        const disabled = if (a_catalog) b else a;
+        if (disabled.header_sequence == std.math.maxInt(u64) or
+            enabled.header_sequence != disabled.header_sequence + 1 or
+            !mutableEqual(enabled, disabled)) return error.ConflictingMemberHeaders;
+        return .{
+            .header = enabled,
+            .source = if (a_catalog) .a else .b,
+            .redundancy_degraded = true,
+        };
+    }
     if (a.header_sequence > b.header_sequence)
         return .{ .header = a, .source = .a, .redundancy_degraded = false };
     if (b.header_sequence > a.header_sequence)
@@ -305,6 +325,8 @@ fn staticEqual(a: Header, b: Header) bool {
     b_copy.checkpoint_record_sequence = 0;
     a_copy.checkpoint_record_digest = @splat(0);
     b_copy.checkpoint_record_digest = @splat(0);
+    a_copy.incompat_features &= ~catalog_data_incompat_feature;
+    b_copy.incompat_features &= ~catalog_data_incompat_feature;
     return std.meta.eql(a_copy, b_copy);
 }
 
@@ -545,7 +567,7 @@ test "feature policy matrix" {
     header.ro_compat_features = 1;
     try checkFeaturePolicy(header, .read_only);
     try std.testing.expectError(error.UnsupportedReadOnlyFeature, checkFeaturePolicy(header, .writable));
-    header.incompat_features = 2;
+    header.incompat_features = 4;
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .read_only));
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .writable));
     const bytes = try encode(header);
@@ -631,6 +653,35 @@ test "A/B selection preserves structural conflicts" {
     const ambiguous = try encode(b_header);
     try std.testing.expectError(error.AmbiguousMemberHeader, select(decodeCandidate(&a_bytes), decodeCandidate(&ambiguous)));
     try std.testing.expectError(error.NoValidMemberHeader, select(decodeCandidate(&corrupt), decodeCandidate(&corrupt)));
+}
+
+test "A/B selection accepts only interrupted catalog mode activation" {
+    var disabled = testHeader();
+    disabled.incompat_features = dynamic_pool_incompat_feature;
+    const disabled_bytes = try encode(disabled);
+    var enabled = disabled;
+    enabled.header_sequence += 1;
+    enabled.incompat_features |= catalog_data_incompat_feature;
+    const enabled_bytes = try encode(enabled);
+
+    const selected = try select(decodeCandidate(&disabled_bytes), decodeCandidate(&enabled_bytes));
+    try std.testing.expectEqual(SourceSlot.b, selected.source);
+    try std.testing.expect(selected.redundancy_degraded);
+    try std.testing.expect(hasCatalogData(selected.header));
+
+    var invalid = enabled;
+    invalid.header_sequence = disabled.header_sequence + 2;
+    const invalid_bytes = try encode(invalid);
+    try std.testing.expectError(
+        error.ConflictingMemberHeaders,
+        select(decodeCandidate(&disabled_bytes), decodeCandidate(&invalid_bytes)),
+    );
+    disabled.header_sequence = enabled.header_sequence + 1;
+    const newer_disabled_bytes = try encode(disabled);
+    try std.testing.expectError(
+        error.ConflictingMemberHeaders,
+        select(decodeCandidate(&newer_disabled_bytes), decodeCandidate(&enabled_bytes)),
+    );
 }
 
 test "all deterministic single byte mutations are detected without panic" {

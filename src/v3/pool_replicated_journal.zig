@@ -28,6 +28,7 @@ pub const CatalogGenerationRequest = struct {
     prepare_proposal: control_record.Record,
     previous_graph: ?pool_catalog_graph.Graph,
     current_graph: pool_catalog_graph.Graph,
+    data_initializations: []const pool_catalog_graph.DataInitialization = &.{},
 };
 
 pub const CatalogCommitResult = struct {
@@ -258,6 +259,10 @@ pub const ReplicatedJournal = struct {
         defer for (catalog_claims[0..claimed_voter_count]) |*maybe_claim| {
             if (maybe_claim.*) |*claim| claim.release() catch unreachable;
         };
+        var data_claims: [pool_member_set.max_member_count]?member_api.DataClaim = @splat(null);
+        defer for (&data_claims) |*maybe_claim| {
+            if (maybe_claim.*) |*claim| claim.release() catch unreachable;
+        };
 
         var geometry_buffer: [pool_member_set.max_member_count]pool_catalog_graph.MemberGeometry = undefined;
         const geometry = try self.set.collectCatalogGeometry(&geometry_buffer);
@@ -297,7 +302,25 @@ pub const ReplicatedJournal = struct {
                 geometry,
             );
         };
-        try pool_catalog_graph.validateNoNewDataMappings(if (previous) |*value| value else null, &current);
+        try pool_catalog_graph.validateDataInitializations(
+            if (previous) |*value| value else null,
+            &current,
+            request.data_initializations,
+        );
+        self.claimDataMembers(if (previous) |*value| value else null, &current, &data_claims) catch
+            return error.DataClaimUnavailable;
+        self.activateCatalogData(catalog_claims[0..claimed_voter_count], &data_claims) catch {
+            self.failDataPublication();
+            return error.CatalogDataActivationFailed;
+        };
+        if (request.data_initializations.len != 0) {
+            self.stageDataInitializations(&current, request.data_initializations, &data_claims) catch {
+                self.frozen.store(true, .release);
+                self.set.revokeWriteReady();
+                self.set.revokeDataAccess();
+                return error.DataStagingFailed;
+            };
+        }
 
         var staged_members: [pool_member_set.max_member_count]bool = @splat(false);
         for (voters, 0..) |voter, voter_index| {
@@ -310,6 +333,7 @@ pub const ReplicatedJournal = struct {
                     request.current_graph,
                 ) catch {
                     self.failCatalogMember(voter.set_index);
+                    self.set.revokeDataAccess();
                     return error.CatalogStagingFailed;
                 };
             } else {
@@ -321,17 +345,22 @@ pub const ReplicatedJournal = struct {
                     request.current_graph,
                 ) catch {
                     self.failCatalogMember(voter.set_index);
+                    self.set.revokeDataAccess();
                     return error.CatalogStagingFailed;
                 };
             }
             staged_members[voter.set_index] = true;
         }
 
-        const generation = try self.commitGenerationLocked(request.prepare_proposal);
+        const generation = self.commitGenerationLocked(request.prepare_proposal) catch |err| {
+            self.failDataPublication();
+            return err;
+        };
         for (generation.prepare_witness_members, 0..) |witness, index| {
             if (witness and !staged_members[index]) {
                 self.frozen.store(true, .release);
                 self.set.revokeWriteReady();
+                self.set.revokeDataAccess();
                 return error.UnstagedPrepareWitness;
             }
         }
@@ -347,6 +376,7 @@ pub const ReplicatedJournal = struct {
             ) catch {
                 repair_failed_members[voter.set_index] = true;
                 self.failCatalogMember(voter.set_index);
+                self.set.revokeDataAccess();
                 continue;
             };
             repaired_members[voter.set_index] = true;
@@ -427,6 +457,10 @@ pub const ReplicatedJournal = struct {
             self.set.revokeDataAccess();
             return error.CatalogSourceInvalid;
         };
+        target_claim.activateCatalogData() catch {
+            self.set.noteCatalogFailure(resolved_target_index, error.CatalogDataActivationFailed);
+            return error.CatalogDataActivationFailed;
+        };
         var verify_scratch: pool_catalog_store.LoadScratch = .{};
         pool_catalog_store.installAuthorityCatalog(
             &target_claim,
@@ -468,6 +502,89 @@ pub const ReplicatedJournal = struct {
         self.frozen.store(true, .release);
         self.set.noteControlFailure(set_index);
         self.set.revokeWriteReady();
+    }
+
+    fn failDataPublication(self: *ReplicatedJournal) void {
+        self.frozen.store(true, .release);
+        self.set.revokeWriteReady();
+        self.set.revokeDataAccess();
+    }
+
+    fn claimDataMembers(
+        self: *ReplicatedJournal,
+        previous: ?*const pool_catalog_graph.ValidatedCatalog,
+        current: *const pool_catalog_graph.ValidatedCatalog,
+        claims: *[pool_member_set.max_member_count]?member_api.DataClaim,
+    ) !void {
+        var required_slots: [pool_topology.max_member_count]bool = @splat(false);
+        for ([_]?*const pool_catalog_graph.ValidatedCatalog{ previous, current }) |maybe_catalog| {
+            const catalog = maybe_catalog orelse continue;
+            for (0..catalog.root.volume_count) |volume_index| {
+                for (catalog.extentSlice(volume_index)) |run| {
+                    for (run.memberSlice()) |slot| {
+                        var topology_index: ?usize = null;
+                        for (self.set.authority().?.topology.memberSlice(), 0..) |member, index| {
+                            if (member.slot == slot) topology_index = index;
+                        }
+                        const resolved_index = topology_index orelse return error.DataMemberNotInTopology;
+                        required_slots[resolved_index] = true;
+                    }
+                }
+            }
+        }
+        for (required_slots, 0..) |required, topology_index| {
+            if (!required) continue;
+            const slot = self.set.authority().?.topology.members[topology_index].slot;
+            const data_member = try self.set.dataMemberForWrite(slot);
+            if (claims[data_member.set_index] != null) continue;
+            claims[data_member.set_index] = try data_member.member.claimData();
+        }
+    }
+
+    fn activateCatalogData(
+        self: *ReplicatedJournal,
+        catalog_claims: []const ?member_api.CatalogClaim,
+        data_claims: *[pool_member_set.max_member_count]?member_api.DataClaim,
+    ) !void {
+        _ = self;
+        for (catalog_claims) |maybe_claim| if (maybe_claim) |claim| try claim.activateCatalogData();
+        for (data_claims) |maybe_claim| if (maybe_claim) |claim| try claim.activateCatalogData();
+    }
+
+    fn stageDataInitializations(
+        self: *ReplicatedJournal,
+        current: *const pool_catalog_graph.ValidatedCatalog,
+        initializations: []const pool_catalog_graph.DataInitialization,
+        claims: *[pool_member_set.max_member_count]?member_api.DataClaim,
+    ) !void {
+        const zeroes: [64 * 1024]u8 = @splat(0);
+        var written_members: [pool_member_set.max_member_count]bool = @splat(false);
+        for (initializations) |initialization| {
+            const run = findInitializationRun(current, initialization) orelse
+                return error.DataInitializationMismatch;
+            const run_offset = initialization.logical_start - run.logical_start;
+            const physical_extent = try std.math.add(u64, run.physical_start, run_offset);
+            const physical_offset = try std.math.mul(u64, physical_extent, current.root.extent_size);
+            const byte_count = try std.math.mul(u64, initialization.extent_count, current.root.extent_size);
+            for (run.memberSlice()) |slot| {
+                const data_member = try self.set.dataMemberForWrite(slot);
+                const claim = &(claims[data_member.set_index] orelse return error.DataClaimUnavailable);
+                var byte_offset: u64 = 0;
+                while (byte_offset < byte_count) {
+                    const amount: usize = @intCast(@min(@as(u64, zeroes.len), byte_count - byte_offset));
+                    const bytes = switch (initialization.contents) {
+                        .zero => zeroes[0..amount],
+                        .bytes => |contents| contents[@intCast(byte_offset)..][0..amount],
+                    };
+                    try claim.write(try std.math.add(u64, physical_offset, byte_offset), bytes);
+                    byte_offset += amount;
+                }
+                written_members[data_member.set_index] = true;
+            }
+        }
+        for (written_members, 0..) |written, set_index| {
+            if (written) try claims[set_index].?.sync();
+        }
     }
 
     pub fn commitMembership(
@@ -1227,6 +1344,27 @@ pub const ReplicatedJournal = struct {
     }
 };
 
+fn findInitializationRun(
+    catalog: *const pool_catalog_graph.ValidatedCatalog,
+    initialization: pool_catalog_graph.DataInitialization,
+) ?pool_catalog.ExtentRun {
+    const initialization_end = std.math.add(
+        u64,
+        initialization.logical_start,
+        initialization.extent_count,
+    ) catch return null;
+    for (catalog.descriptorSlice(), 0..) |descriptor, volume_index| {
+        if (!std.mem.eql(u8, &descriptor.volume_id, &initialization.volume_id)) continue;
+        for (catalog.extentSlice(volume_index)) |run| {
+            const run_end = run.logical_start + run.extent_count;
+            if (run.state == .mapped and initialization.logical_start >= run.logical_start and
+                initialization_end <= run_end) return run;
+        }
+        return null;
+    }
+    return null;
+}
+
 fn makeCertificate(
     results: [max_control_participant_count]?journal_api.AppendResult,
     successes: [max_control_participant_count]bool,
@@ -1378,6 +1516,7 @@ pub fn open(io: std.Io, set: *pool_member_set.PoolMemberSet) !ReplicatedJournal 
 
 const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
+const container = @import("../container.zig");
 const pool_genesis = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_provision = @import("pool_provision.zig");
@@ -1561,6 +1700,7 @@ test "member removal requires catalog drain" {
 test "three-voter catalog publication fault matrix" {
     const Case = enum {
         success,
+        activation_failure,
         staging_first_page,
         staging_second_page,
         staging_root,
@@ -1580,37 +1720,45 @@ test "three-voter catalog publication fault matrix" {
         var faults: [three_voter_names.len]member_api.FaultController = @splat(.{});
         switch (case) {
             .success => {},
-            .staging_first_page => faults[2].fail_write_at = 0,
-            .staging_second_page => faults[2].fail_write_at = 1,
-            .staging_root => faults[2].fail_write_at = 2,
-            .single_prepare_failure => faults[0].fail_write_at = 3,
+            .activation_failure => faults[2].fail_write_at = 0,
+            .staging_first_page => faults[2].fail_write_at = 2,
+            .staging_second_page => faults[2].fail_write_at = 3,
+            .staging_root => faults[2].fail_write_at = 4,
+            .single_prepare_failure => faults[0].fail_write_at = 5,
             .prepare_quorum_failure => {
-                faults[1].fail_write_at = 3;
-                faults[2].fail_write_at = 3;
+                faults[1].fail_write_at = 5;
+                faults[2].fail_write_at = 5;
             },
             .unknown_commit_before => {
-                faults[1].fail_write_at = 4;
-                faults[2].fail_write_at = 4;
+                faults[1].fail_write_at = 6;
+                faults[2].fail_write_at = 6;
             },
             .unknown_commit_after => {
-                faults[1].fail_sync_after_at = 3;
-                faults[2].fail_sync_after_at = 3;
+                faults[1].fail_sync_after_at = 5;
+                faults[2].fail_sync_after_at = 5;
             },
-            .repair_failure => faults[2].fail_write_at = 5,
+            .repair_failure => faults[2].fail_write_at = 7,
         }
         for (&faults, 0..) |*fault, index|
             ((try set.memberAt(index)) orelse return error.MemberUnavailable).setFaultController(fault);
 
         switch (case) {
+            .activation_failure => {
+                try std.testing.expectError(error.CatalogDataActivationFailed, commitTestGenesisCatalog(&coordinator, &set));
+                try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
+                try std.testing.expectEqual(@as(u64, 0), faults[0].write_count);
+                try std.testing.expectEqual(@as(u64, 2), faults[1].write_count);
+                try std.testing.expectEqual(@as(u64, 1), faults[2].write_count);
+            },
             .staging_first_page, .staging_second_page, .staging_root => {
                 try std.testing.expectError(error.CatalogStagingFailed, commitTestGenesisCatalog(&coordinator, &set));
                 try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
-                try std.testing.expectEqual(@as(u64, 0), faults[0].write_count);
-                try std.testing.expectEqual(@as(u64, 3), faults[1].write_count);
+                try std.testing.expectEqual(@as(u64, 2), faults[0].write_count);
+                try std.testing.expectEqual(@as(u64, 5), faults[1].write_count);
                 const failed_writes: u64 = switch (case) {
-                    .staging_first_page => 1,
-                    .staging_second_page => 2,
-                    .staging_root => 3,
+                    .staging_first_page => 3,
+                    .staging_second_page => 4,
+                    .staging_root => 5,
                     else => unreachable,
                 };
                 try std.testing.expectEqual(failed_writes, faults[2].write_count);
@@ -1618,12 +1766,12 @@ test "three-voter catalog publication fault matrix" {
             .prepare_quorum_failure => {
                 try std.testing.expectError(error.PrepareQuorumFailed, commitTestGenesisCatalog(&coordinator, &set));
                 try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
-                for (faults) |fault| try std.testing.expectEqual(@as(u64, 4), fault.write_count);
+                for (faults) |fault| try std.testing.expectEqual(@as(u64, 6), fault.write_count);
             },
             .unknown_commit_before, .unknown_commit_after => {
                 try std.testing.expectError(error.CommitOutcomeUnknown, commitTestGenesisCatalog(&coordinator, &set));
                 try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
-                for (faults) |fault| try std.testing.expectEqual(@as(u64, 5), fault.write_count);
+                for (faults) |fault| try std.testing.expectEqual(@as(u64, 7), fault.write_count);
             },
             .success, .single_prepare_failure, .repair_failure => {
                 const result = try commitTestGenesisCatalog(&coordinator, &set);
@@ -1680,6 +1828,264 @@ test "three-voter catalog publication fault matrix" {
     }
 }
 
+test "mapped extents are durable before catalog publication" {
+    const Case = enum {
+        success,
+        data_write_failure,
+        data_sync_failure,
+        catalog_staging_failure,
+        unknown_commit_before,
+        unknown_commit_after,
+    };
+    inline for (std.enums.values(Case)) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storages = [_]storage_api.Storage{
+            try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 8 * 1024 * 1024),
+        };
+        const outcome = try pool_provision.create(
+            std.testing.io,
+            std.testing.allocator,
+            &storages,
+            .{ .protection = .unprotected },
+        );
+        var provisioned = switch (outcome) {
+            .complete => |value| value,
+            .partial => return error.UnexpectedPartialCreation,
+        };
+        defer provisioned.deinit();
+        try provisioned.close();
+
+        const locations = [_]pool_member_set.Location{.{ .parent = tmp.dir, .basename = "member" }};
+        var set = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+        defer set.deinit();
+        var coordinator = try open(std.testing.io, &set);
+        defer coordinator.deinit();
+        const authority = set.authority().?;
+        const member = (try set.memberAt(0)) orelse return error.MemberUnavailable;
+        const extent_size = authority.layout.chunk_size;
+        const extent_count = member.header().data.length / extent_size;
+
+        var volume_header = try container.Header.init(std.testing.io, extent_size, "mapped");
+        volume_header.chunk_size = extent_size;
+        const volume_header_bytes = volume_header.encode();
+        const volume_header_reference = try pool_catalog_page.pageReference(6 * pool_catalog.page_size, &volume_header_bytes);
+        const run: pool_catalog.ExtentRun = .{
+            .logical_start = 0,
+            .physical_start = 0,
+            .extent_count = 1,
+            .state = .mapped,
+            .member_count = 1,
+            .member_slots = .{ authority.topology.members[0].slot, 0, 0 },
+        };
+        const extent_bytes = try pool_catalog_page.encodeExtentMap(1, volume_header.uuid, &.{run});
+        const extent_reference = try pool_catalog_page.pageReference(7 * pool_catalog.page_size, &extent_bytes);
+        const descriptor: pool_catalog.VolumeDescriptor = .{
+            .volume_id = volume_header.uuid,
+            .state = .creating,
+            .provisioning = .thin,
+            .created_ns = volume_header.created_ns,
+            .logical_size = volume_header.logical_size,
+            .header_page = volume_header_reference,
+            .extent_map_root = extent_reference,
+            .allocated_extent_count = 1,
+            .extent_size = extent_size,
+            .name = try pool_catalog.Name.init("mapped"),
+        };
+        const volume_bytes = try pool_catalog_page.encodeVolumeIndex(1, &.{descriptor});
+        const name_bytes = try pool_catalog_page.encodeNameIndex(1, &.{.{
+            .volume_id = descriptor.volume_id,
+            .name = descriptor.name,
+        }});
+        const physical_bytes = try pool_catalog_page.encodePhysicalIntervals(.physical_allocator, 1, &.{.{
+            .member_slot = run.member_slots[0],
+            .physical_start = 1,
+            .extent_count = extent_count - 1,
+        }});
+        const metadata_page_count = member.header().metadata.length / pool_catalog.page_size;
+        const metadata_bytes = try pool_catalog_page.encodeMetadataAllocator(1, &.{.{
+            .page_start = 8,
+            .page_count = @intCast(metadata_page_count - 8),
+        }});
+        const volume_reference = try pool_catalog_page.pageReference(2 * pool_catalog.page_size, &volume_bytes);
+        const name_reference = try pool_catalog_page.pageReference(3 * pool_catalog.page_size, &name_bytes);
+        const physical_reference = try pool_catalog_page.pageReference(4 * pool_catalog.page_size, &physical_bytes);
+        const metadata_reference = try pool_catalog_page.pageReference(5 * pool_catalog.page_size, &metadata_bytes);
+        const root: pool_catalog.Root = .{
+            .set_id = authority.topology.set_id,
+            .generation = 1,
+            .sequence = 1,
+            .previous_root_digest = @splat(0),
+            .volume_tree_root = volume_reference,
+            .name_index_root = name_reference,
+            .allocator_root = physical_reference,
+            .metadata_allocator_root = metadata_reference,
+            .volume_count = 1,
+            .extent_size = extent_size,
+        };
+        const root_bytes = try pool_catalog.encodeRoot(root);
+        const images = [_]pool_catalog_graph.PageImage{
+            .{ .offset = volume_reference.offset, .bytes = &volume_bytes },
+            .{ .offset = name_reference.offset, .bytes = &name_bytes },
+            .{ .offset = physical_reference.offset, .bytes = &physical_bytes },
+            .{ .offset = metadata_reference.offset, .bytes = &metadata_bytes },
+            .{ .offset = volume_header_reference.offset, .bytes = &volume_header_bytes },
+            .{ .offset = extent_reference.offset, .bytes = &extent_bytes },
+        };
+        var proposal: control_record.Record = .{
+            .kind = control_record.generation_prepare_kind,
+            .local_sequence = 99,
+            .membership_epoch = authority.membership_epoch,
+            .writer_term = @max(authority.writer_term, 1),
+            .generation = 1,
+            .set_id = authority.topology.set_id,
+            .member_id = id(8),
+            .mount_session_id = id(3),
+            .transaction_id = id(4),
+            .previous_record_digest = @splat(0x11),
+            .previous_history_digest = @splat(0x22),
+            .data_root_digest = try pool_catalog.rootDigest(root),
+            .topology_digest = try pool_topology.digest(authority.topology),
+            .layout_digest = try pool_layout.digest(authority.layout),
+            .payload = try control_record.Payload.init("generation"),
+        };
+        proposal.history_digest = try control_record.historyDigest(proposal);
+        const contents = try std.testing.allocator.alloc(u8, extent_size);
+        defer std.testing.allocator.free(contents);
+        @memset(contents, 0x5a);
+        var fault: member_api.FaultController = switch (case) {
+            .success => .{},
+            .data_write_failure => .{ .fail_write_at = 2 },
+            .data_sync_failure => .{ .fail_sync_at = 2 },
+            .catalog_staging_failure => .{ .fail_write_at = 18 },
+            .unknown_commit_before => .{ .fail_write_at = 26 },
+            .unknown_commit_after => .{ .fail_sync_after_at = 6 },
+        };
+        member.setFaultController(&fault);
+        const request: CatalogGenerationRequest = .{
+            .prepare_proposal = proposal,
+            .previous_graph = null,
+            .current_graph = .{ .root_bytes = &root_bytes, .pages = &images },
+            .data_initializations = &.{.{
+                .volume_id = descriptor.volume_id,
+                .logical_start = 0,
+                .extent_count = 1,
+                .contents = .{ .bytes = contents },
+            }},
+        };
+
+        if (case == .success) {
+            _ = try coordinator.commitCatalogGeneration(request);
+            try std.testing.expectEqual(@as(u64, 1), set.authority().?.generation);
+            var actual: [64]u8 = undefined;
+            try member.read(.data, 0, &actual);
+            try std.testing.expect(std.mem.allEqual(u8, &actual, 0x5a));
+            try std.testing.expectError(
+                error.DataGenerationLeaseRequired,
+                member.asReplicaEndpoint().writeData(0, "stale"),
+            );
+        } else {
+            const expected_error: anyerror = switch (case) {
+                .data_write_failure, .data_sync_failure => error.DataStagingFailed,
+                .catalog_staging_failure => error.CatalogStagingFailed,
+                .unknown_commit_before, .unknown_commit_after => error.CommitOutcomeUnknown,
+                .success => unreachable,
+            };
+            try std.testing.expectError(expected_error, coordinator.commitCatalogGeneration(request));
+            try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
+            try std.testing.expect(coordinator.isFrozen());
+            try std.testing.expectEqual(pool_policy.DataAccess.unavailable, set.dataAccess());
+            try std.testing.expectError(
+                error.DataGenerationLeaseRequired,
+                member.asReplicaEndpoint().writeData(0, "stale"),
+            );
+            var root_a: [pool_catalog.root_encoded_size]u8 = undefined;
+            var root_b: [pool_catalog.root_encoded_size]u8 = undefined;
+            try member.read(.metadata, 0, &root_a);
+            try member.read(.metadata, pool_catalog.page_size, &root_b);
+            if (case == .data_write_failure or case == .data_sync_failure or case == .catalog_staging_failure) {
+                try std.testing.expect(std.mem.allEqual(u8, &root_a, 0));
+                try std.testing.expect(std.mem.allEqual(u8, &root_b, 0));
+            } else {
+                try std.testing.expect(!std.mem.allEqual(u8, &root_a, 0));
+            }
+            coordinator.close();
+            try std.testing.expectError(error.WriteFrozen, set.close());
+            var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .read_only);
+            defer reopened.deinit();
+            const expected_generation: u64 = if (case == .unknown_commit_after) 1 else 0;
+            try std.testing.expectEqual(expected_generation, reopened.authority().?.generation);
+        }
+    }
+}
+
+test "replicated data staging writes and syncs every placement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var set = try createThreeVoterTestSet(tmp.dir);
+    defer set.deinit();
+    var coordinator = try open(std.testing.io, &set);
+    defer coordinator.deinit();
+    const authority = set.authority().?;
+    var slots: [3]u16 = .{
+        authority.topology.members[0].slot,
+        authority.topology.members[1].slot,
+        authority.topology.members[2].slot,
+    };
+    if (slots[0] > slots[1]) std.mem.swap(u16, &slots[0], &slots[1]);
+    if (slots[1] > slots[2]) std.mem.swap(u16, &slots[1], &slots[2]);
+    if (slots[0] > slots[1]) std.mem.swap(u16, &slots[0], &slots[1]);
+
+    var catalog: pool_catalog_graph.ValidatedCatalog = .{ .root = .{
+        .set_id = authority.topology.set_id,
+        .generation = 1,
+        .sequence = 1,
+        .previous_root_digest = @splat(0),
+        .allocator_root = .{ .offset = 2 * pool_catalog.page_size, .digest = @splat(1) },
+        .metadata_allocator_root = .{ .offset = 3 * pool_catalog.page_size, .digest = @splat(2) },
+        .volume_count = 1,
+        .extent_size = authority.layout.chunk_size,
+    } };
+    catalog.descriptors[0].volume_id = id(9);
+    catalog.extent_counts[0] = 1;
+    catalog.extent_runs[0][0] = .{
+        .logical_start = 0,
+        .physical_start = 0,
+        .extent_count = 1,
+        .state = .mapped,
+        .member_count = 3,
+        .member_slots = slots,
+    };
+    const contents = try std.testing.allocator.alloc(u8, authority.layout.chunk_size);
+    defer std.testing.allocator.free(contents);
+    @memset(contents, 0x6b);
+    const initialization: pool_catalog_graph.DataInitialization = .{
+        .volume_id = id(9),
+        .logical_start = 0,
+        .extent_count = 1,
+        .contents = .{ .bytes = contents },
+    };
+    var faults: [three_voter_names.len]member_api.FaultController = @splat(.{});
+    for (&faults, 0..) |*fault, set_index|
+        ((try set.memberAt(set_index)) orelse return error.MemberUnavailable).setFaultController(fault);
+    var claims: [pool_member_set.max_member_count]?member_api.DataClaim = @splat(null);
+    defer for (&claims) |*maybe_claim| {
+        if (maybe_claim.*) |*claim| claim.release() catch unreachable;
+    };
+    try coordinator.claimDataMembers(null, &catalog, &claims);
+    for (&claims) |*maybe_claim| if (maybe_claim.*) |*claim| try claim.activateCatalogData();
+    try coordinator.stageDataInitializations(&catalog, &.{initialization}, &claims);
+    for (0..set.suppliedCount()) |set_index| {
+        const member = (try set.memberAt(set_index)) orelse return error.MemberUnavailable;
+        var actual: [64]u8 = undefined;
+        try member.read(.data, 0, &actual);
+        try std.testing.expect(std.mem.allEqual(u8, &actual, 0x6b));
+        try std.testing.expectError(error.DataGenerationLeaseRequired, member.write(.data, 0, "stale"));
+        try std.testing.expectEqual(@as(u64, 18), faults[set_index].write_count);
+        try std.testing.expectEqual(@as(u64, 3), faults[set_index].sync_count);
+    }
+}
+
 test "catalog reopen excludes a voter with corrupt leaf pages" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1694,7 +2100,9 @@ test "catalog reopen excludes a voter with corrupt leaf pages" {
     var page: [pool_catalog.page_size]u8 = undefined;
     try member.read(.metadata, 2 * pool_catalog.page_size, &page);
     page[0] ^= 1;
-    try member.writeDurable(.metadata, 2 * pool_catalog.page_size, &page);
+    var claim = try member.claimCatalog();
+    try claim.writeBatchDurable(&.{.{ .offset = 2 * pool_catalog.page_size, .bytes = &page }});
+    try claim.release();
     try set.close();
 
     const locations = threeVoterTestLocations(tmp.dir);

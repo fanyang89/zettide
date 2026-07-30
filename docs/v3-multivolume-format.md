@@ -348,8 +348,7 @@ The transition validator permits physical or metadata `retired -> free`, and can
 previous authority-bound root generation. The previous binding is validated against selected control
 authority, its digest must be the new root's `previous_root_digest`, and generation must advance by
 exactly one. This is the reclaim barrier; the public commit API accepts neither a caller-supplied
-generation nor a caller-supplied page list. The integrated publisher still rejects new physical data
-mappings until it receives a trusted data-durability witness.
+generation nor a caller-supplied page list.
 
 Known normal control commit establishes the new authority and makes earlier generations unreachable
 to normal data access. An unknown outcome freezes the coordinator, performs no root repair, and
@@ -364,19 +363,30 @@ publish a catalog transition or expose reclaimed data.
 
 `commitCatalogGeneration` is the only public dynamic-Pool generation commit path. It holds the
 coordinator mutex and an owner-token catalog claim on every current voter through graph validation,
-staging, control commit, and root repair. Ordinary Member metadata writes and close are rejected while
-the claim is held.
+staging, control commit, and root repair. A generation that introduces mapped extents also holds an
+owner-token data claim on every member referenced by the previous or proposed extent maps. Ordinary
+Member writes to a claimed region, data sync, and close are rejected while the corresponding claim is
+held. Once catalog data staging starts, each claimed member permanently rejects unleased data writes;
+reopen applies the same fence whenever it selects a nonzero catalog authority.
 
 Publication uses the complete current voter set, not only control quorum:
 
 1. Validate the previous authority-bound graph and the proposed next graph.
-2. On every voter, read A/B roots and select authority only by the control `data_root_digest`.
-3. Read-verify unchanged pages. Never rewrite an immutable page referenced by the old root.
-4. Batch-write new COW pages and issue one durable sync barrier.
-5. Write the non-authoritative root slot and issue a second durable sync barrier.
-6. Only after every voter has staged the root, append generation prepare records.
-7. Verify every certificate prepare witness belongs to the staged-member set.
-8. After known commit success, repair the other root slot on every voter.
+2. Derive maximal logical spans whose proposed `mapped` placement or state is not identical to the
+   previous catalog. Require exactly one initialization for each span and reject missing, extra,
+   overlapping, subdivided, merged, or out-of-order entries. A span may previously be absent or
+   `reserved_zero`; changing an existing `mapped` span remains rejected until a generation-leased
+   reader can capture its authoritative contents while the claims are held.
+3. Claim every member referenced by the previous or proposed extent maps. Write complete extent
+   contents to every slot in each new placement, then synchronize every written member. Replicated
+   placement requires all three copies, not only the layout's ordinary durable-write threshold.
+4. On every voter, read A/B roots and select authority only by the control `data_root_digest`.
+5. Read-verify unchanged pages. Never rewrite an immutable page referenced by the old root.
+6. Batch-write new COW pages and issue one durable sync barrier.
+7. Write the non-authoritative root slot and issue a second durable sync barrier.
+8. Only after every voter has staged the root, append generation prepare records.
+9. Verify every certificate prepare witness belongs to the staged-member set.
+10. After known commit success, repair the other root slot on every voter.
 
 Thus normal topologies stage on 1/1 or 3/3 voters, and a transient two-voter topology stages on 2/2,
 even though the control certificate and commit require only the topology quorum. A staging failure
@@ -384,15 +394,25 @@ occurs before prepare, revokes write readiness, and freezes the coordinator. An 
 outcome skips repair and requires full authority reopen. A post-commit repair failure is returned as a
 failure bitmap alongside the successful commit result and also revokes further writes.
 
-Genesis has no old catalog root. Initial publication requires zero A/B slots, writes pages then A,
-commits generation 1, and repairs B after known success. Retrying the same candidate accepts an exact
-staged root or a recognized prefix left by a partial root write; a conflicting nonzero root is never
-overwritten.
+Genesis has no old catalog root. Initial publication requires zero A/B slots, durably initializes all
+mapped extents, writes pages then A, commits generation 1, and repairs B after known success. Retrying
+the same candidate accepts an exact staged root or a recognized prefix left by a partial root write; a
+conflicting nonzero root is never overwritten.
 
-The integrated path currently supports metadata-only transitions. Any new, moved, or state-changed
-data mapping is rejected until data initialization/write durability can be represented by a trusted
-witness. Member removal is rejected until an authority-bound catalog drain proof shows that no mapping
-or allocator interval references its slot. These are deliberate fail-closed functional limits.
+Initialization coordinates are volume ID, logical extent start, and extent count. Byte content must
+cover the complete span exactly; a zero source writes the same complete range without requiring a
+caller-sized zero buffer. New `reserved_zero` runs reserve capacity without touching media and require
+no initialization. Their first transition to `mapped` does require complete durable initialization.
+A write or sync failure occurs before catalog staging, freezes mutation, and leaves the initialized
+space unreachable from current authority.
+
+After the one-way catalog fence is set, ordinary Member and ReplicaEndpoint data writes return
+`DataGenerationLeaseRequired`; only an owner-token coordinator claim can initialize a new mapping.
+Catalog-backed data I/O is not yet exposed. Before multi-volume mount is enabled, every data writer
+must carry a catalog-generation lease that is permanently revoked when authority advances. Such a
+lease is also required before an existing mapped span can move or change state without racing its
+authoritative contents. Member removal remains rejected until an authority-bound catalog drain proof
+shows that no mapping or allocator interval references its slot.
 
 ## Joining Catalog Install
 

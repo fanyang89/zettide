@@ -45,6 +45,11 @@ pub const CatalogVoter = struct {
     member: *member_api.Member,
 };
 
+pub const DataMember = struct {
+    set_index: usize,
+    member: *member_api.Member,
+};
+
 pub const PoolMemberSet = struct {
     members: [max_member_count]?member_api.Member = @splat(null),
     histories: [max_member_count]?journal.HistoryScan = @splat(null),
@@ -131,7 +136,10 @@ pub const PoolMemberSet = struct {
         };
         set.control_write_state.?.active_members[0] = true;
         set.statuses[0] = .active_voter;
-        if (selected_authority.generation != 0) set.data_access_state = .unavailable;
+        if (selected_authority.generation != 0) {
+            member.fenceUnleasedCatalogWrites();
+            set.data_access_state = .unavailable;
+        }
         set.recovery_only = true;
         return set;
     }
@@ -233,6 +241,25 @@ pub const PoolMemberSet = struct {
         return output[0..count];
     }
 
+    pub fn dataMemberForWrite(self: *PoolMemberSet, slot: u16) !DataMember {
+        const selected = self.authority_state orelse return error.MissingAuthority;
+        if (self.data_access_state != .read_write) return error.DataWriteUnavailable;
+        const descriptor = pool_topology.findSlot(&selected.topology, slot) orelse
+            return error.DataMemberNotInTopology;
+        if (descriptor.state == .joining) return error.DataMemberStillJoining;
+        const set_index = self.findSuppliedMember(descriptor.member_id) orelse
+            return error.DataMemberUnavailable;
+        const member = if (self.members[set_index]) |*value| value else return error.DataMemberUnavailable;
+        switch (self.statuses[set_index]) {
+            .authority, .active_voter, .catalog_failed => {},
+            else => return error.DataMemberUnavailable,
+        }
+        if (member.header().member_slot != slot) return error.MemberGeometryIdentityMismatch;
+        if (member.mode() != .writable or member.isFrozen() or member.isClosed())
+            return error.DataMemberUnavailable;
+        return .{ .set_index = set_index, .member = member };
+    }
+
     pub fn revokeWriteReady(self: *PoolMemberSet) void {
         self.control_write_state = null;
     }
@@ -276,6 +303,7 @@ pub const PoolMemberSet = struct {
     }
 
     pub fn noteCatalogInstalled(self: *PoolMemberSet, index: usize) void {
+        if (self.members[index]) |*member| member.fenceUnleasedCatalogWrites();
         if (self.statuses[index] == .catalog_failed) self.statuses[index] = .authority;
     }
 
@@ -315,6 +343,7 @@ pub const PoolMemberSet = struct {
             .reclaim_required = false,
         };
         self.updateVoterStatuses(previous.topology, active_members);
+        self.fenceCatalogDataWrites();
     }
 
     pub fn noteCommittedMembership(
@@ -524,6 +553,7 @@ pub const PoolMemberSet = struct {
     fn reopenCatalog(self: *PoolMemberSet, intent: OpenIntent) !void {
         const selected = self.authority_state orelse return error.MissingAuthority;
         if (selected.generation == 0) return;
+        self.fenceCatalogDataWrites();
 
         var geometry_buffer: [max_member_count]pool_catalog_graph.MemberGeometry = undefined;
         const geometry = try self.collectCatalogGeometry(&geometry_buffer);
@@ -590,6 +620,15 @@ pub const PoolMemberSet = struct {
             }
             if (ready.active_count < self.authority_state.?.topology.quorum)
                 self.control_write_state = null;
+        }
+    }
+
+    fn fenceCatalogDataWrites(self: *PoolMemberSet) void {
+        const selected = self.authority_state orelse return;
+        for (self.members[0..self.supplied_count]) |*maybe_member| {
+            const member = if (maybe_member.*) |*value| value else continue;
+            if (pool_topology.findMember(&selected.topology, member.header().member_id) != null)
+                member.fenceUnleasedCatalogWrites();
         }
     }
 

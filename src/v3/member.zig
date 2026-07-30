@@ -90,9 +90,37 @@ pub const CatalogClaim = struct {
         return self.member.writeCatalogRootDurable(self.id, offset, bytes);
     }
 
+    pub fn activateCatalogData(self: *const CatalogClaim) !void {
+        return self.member.activateCatalogDataWithCatalogClaim(self.id);
+    }
+
     pub fn release(self: *CatalogClaim) !void {
         if (self.released) return;
         try self.member.releaseCatalogClaim(self.id);
+        self.released = true;
+    }
+};
+
+pub const DataClaim = struct {
+    member: *Member,
+    id: u64,
+    released: bool = false,
+
+    pub fn write(self: *const DataClaim, offset: u64, bytes: []const u8) !void {
+        return self.member.writeDataClaimed(self.id, offset, bytes);
+    }
+
+    pub fn sync(self: *const DataClaim) !void {
+        return self.member.syncDataClaimed(self.id);
+    }
+
+    pub fn activateCatalogData(self: *const DataClaim) !void {
+        return self.member.activateCatalogDataWithDataClaim(self.id);
+    }
+
+    pub fn release(self: *DataClaim) !void {
+        if (self.released) return;
+        try self.member.releaseDataClaim(self.id);
         self.released = true;
     }
 };
@@ -169,6 +197,9 @@ pub const Member = struct {
     journal_claimed: std.atomic.Value(bool) = .init(false),
     catalog_claim_id: std.atomic.Value(u64) = .init(0),
     catalog_claim_sequence: std.atomic.Value(u64) = .init(1),
+    data_claim_id: std.atomic.Value(u64) = .init(0),
+    data_claim_sequence: std.atomic.Value(u64) = .init(1),
+    catalog_mode_active: std.atomic.Value(bool) = .init(false),
 
     pub fn createAt(
         io: Io,
@@ -291,6 +322,7 @@ pub const Member = struct {
             .degraded = false,
             .checkpoint_reclaim_ready = false,
             .open_mode = .writable,
+            .catalog_mode_active = .init(member_format.hasCatalogData(initial_header)),
         };
     }
 
@@ -334,6 +366,7 @@ pub const Member = struct {
             .degraded = selection.redundancy_degraded,
             .checkpoint_reclaim_ready = false,
             .open_mode = open_mode,
+            .catalog_mode_active = .init(member_format.hasCatalogData(selection.header)),
         };
     }
 
@@ -367,6 +400,10 @@ pub const Member = struct {
 
     pub fn setFaultController(self: *Member, fault: ?*FaultController) void {
         self.fault = fault;
+    }
+
+    pub fn fenceUnleasedCatalogWrites(self: *Member) void {
+        self.catalog_mode_active.store(true, .release);
     }
 
     pub fn asReplicaEndpoint(self: *Member) ReplicaEndpoint {
@@ -433,7 +470,14 @@ pub const Member = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (kind == .metadata and self.catalog_claim_id.load(.acquire) != 0) return error.CatalogClaimed;
+        if (kind == .metadata) {
+            if (self.catalog_mode_active.load(.acquire)) return error.CatalogClaimRequired;
+            if (self.catalog_claim_id.load(.acquire) != 0) return error.CatalogClaimed;
+        }
+        if (kind == .data) {
+            if (self.catalog_mode_active.load(.acquire)) return error.DataGenerationLeaseRequired;
+            if (self.data_claim_id.load(.acquire) != 0) return error.DataClaimed;
+        }
         try self.writeLocked(kind, offset, bytes);
     }
 
@@ -441,7 +485,14 @@ pub const Member = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
 
-        if (kind == .metadata and self.catalog_claim_id.load(.acquire) != 0) return error.CatalogClaimed;
+        if (kind == .metadata) {
+            if (self.catalog_mode_active.load(.acquire)) return error.CatalogClaimRequired;
+            if (self.catalog_claim_id.load(.acquire) != 0) return error.CatalogClaimed;
+        }
+        if (kind == .data) {
+            if (self.catalog_mode_active.load(.acquire)) return error.DataGenerationLeaseRequired;
+            if (self.data_claim_id.load(.acquire) != 0) return error.DataClaimed;
+        }
         try self.writeLocked(kind, offset, bytes);
         try self.syncLocked();
     }
@@ -466,6 +517,14 @@ pub const Member = struct {
         try self.syncLocked();
     }
 
+    fn activateCatalogDataWithCatalogClaim(self: *Member, claim_id: u64) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.validateCatalogWriteClaim(claim_id);
+        try self.activateCatalogDataLocked();
+    }
+
     fn validateCatalogWriteClaim(self: *Member, claim_id: u64) !void {
         if (self.isClosed()) return error.MemberClosed;
         if (self.open_mode != .writable) return error.ReadOnlyMember;
@@ -477,6 +536,95 @@ pub const Member = struct {
     fn validateCatalogClaim(self: *Member, claim_id: u64) !void {
         if (claim_id == 0 or self.catalog_claim_id.load(.acquire) != claim_id)
             return error.InvalidCatalogClaim;
+    }
+
+    pub fn claimData(self: *Member) !DataClaim {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.isClosed()) return error.MemberClosed;
+        if (self.open_mode != .writable) return error.ReadOnlyMember;
+        if (self.isFrozen()) return error.WriteFrozen;
+        var id = self.data_claim_sequence.load(.acquire);
+        while (true) {
+            if (id == 0 or id == std.math.maxInt(u64)) return error.DataClaimSequenceExhausted;
+            if (self.data_claim_sequence.cmpxchgWeak(id, id + 1, .acq_rel, .acquire)) |observed| {
+                id = observed;
+                continue;
+            }
+            break;
+        }
+        if (self.data_claim_id.cmpxchgStrong(0, id, .acq_rel, .acquire) != null)
+            return error.DataAlreadyClaimed;
+        return .{ .member = self, .id = id };
+    }
+
+    fn releaseDataClaim(self: *Member, claim_id: u64) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.data_claim_id.cmpxchgStrong(claim_id, 0, .acq_rel, .acquire) != null)
+            return error.InvalidDataClaim;
+    }
+
+    fn writeDataClaimed(self: *Member, claim_id: u64, offset: u64, bytes: []const u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.validateDataClaim(claim_id);
+        try self.writeLocked(.data, offset, bytes);
+    }
+
+    fn syncDataClaimed(self: *Member, claim_id: u64) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.validateDataClaim(claim_id);
+        try self.syncLocked();
+    }
+
+    fn activateCatalogDataWithDataClaim(self: *Member, claim_id: u64) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        if (self.isClosed()) return error.MemberClosed;
+        if (self.open_mode != .writable) return error.ReadOnlyMember;
+        if (self.isFrozen()) return error.WriteFrozen;
+        try self.validateDataClaim(claim_id);
+        try self.activateCatalogDataLocked();
+    }
+
+    fn validateDataClaim(self: *Member, claim_id: u64) !void {
+        if (claim_id == 0 or self.data_claim_id.load(.acquire) != claim_id)
+            return error.InvalidDataClaim;
+    }
+
+    fn activateCatalogDataLocked(self: *Member) !void {
+        self.catalog_mode_active.store(true, .release);
+        if (member_format.hasCatalogData(self.selected_header)) {
+            if (!self.degraded) return;
+            const encoded = try member_format.encode(self.selected_header);
+            const mirror_offset: u64 = if (self.selected_source == .a) member_format.encoded_size else 0;
+            try self.writeHeaderLocked(mirror_offset, &encoded);
+            try self.syncLocked();
+            self.degraded = false;
+            return;
+        }
+
+        var next_header = self.selected_header;
+        next_header.header_sequence = std.math.add(u64, next_header.header_sequence, 1) catch
+            return error.HeaderSequenceOverflow;
+        next_header.incompat_features |= member_format.catalog_data_incompat_feature;
+        const encoded = try member_format.encode(next_header);
+        const first_offset: u64 = if (self.selected_source == .a) member_format.encoded_size else 0;
+        const second_offset: u64 = if (self.selected_source == .a) 0 else member_format.encoded_size;
+        try self.writeHeaderLocked(first_offset, &encoded);
+        try self.syncLocked();
+        try self.writeHeaderLocked(second_offset, &encoded);
+        try self.syncLocked();
+        self.selected_header = next_header;
+        self.selected_source = .a;
+        self.degraded = false;
     }
 
     pub fn publishCheckpoint(
@@ -593,6 +741,8 @@ pub const Member = struct {
     pub fn sync(self: *Member) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.catalog_mode_active.load(.acquire)) return error.DataGenerationLeaseRequired;
+        if (self.data_claim_id.load(.acquire) != 0) return error.DataClaimed;
         try self.syncLocked();
     }
 
@@ -601,6 +751,7 @@ pub const Member = struct {
         defer self.mutex.unlock(self.io);
         if (self.isClosed()) return;
         if (self.catalog_claim_id.load(.acquire) != 0) return error.CatalogClaimed;
+        if (self.data_claim_id.load(.acquire) != 0) return error.DataClaimed;
         self.checkpoint_reclaim_ready = false;
 
         var first_error: ?anyerror = null;
@@ -1278,7 +1429,7 @@ test "open selects independent headers and enforces policy and exact length" {
     try createRawMember(tmp.dir, "member", unsupported, unsupported, unsupported.member_bytes);
     try std.testing.expectError(error.UnsupportedMetadataFormat, openAt(std.testing.io, tmp.dir, "member", .read_only));
     unsupported = header;
-    unsupported.incompat_features = 2;
+    unsupported.incompat_features = 4;
     try createRawMember(tmp.dir, "member", unsupported, unsupported, unsupported.member_bytes);
     try std.testing.expectError(error.UnsupportedIncompatFeature, openAt(std.testing.io, tmp.dir, "member", .read_only));
     unsupported = header;
@@ -1498,6 +1649,108 @@ test "durable write batches prevalidate ranges and use one sync" {
     try std.testing.expectError(error.CatalogClaimSequenceExhausted, member.claimCatalog());
     try std.testing.expectEqual(@as(u64, 3), fault.write_count);
     try std.testing.expectEqual(@as(u64, 2), fault.sync_count);
+}
+
+test "data claims fence ordinary writers and reject stale owners" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = testHeader();
+    try createRawMember(tmp.dir, "member", header, header, header.member_bytes);
+    var member = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer member.deinit();
+
+    var catalog_claim = try member.claimCatalog();
+    var data_claim = try member.claimData();
+    try std.testing.expectError(error.DataAlreadyClaimed, member.claimData());
+    try std.testing.expectError(error.DataClaimed, member.write(.data, 0, "ordinary"));
+    try std.testing.expectError(error.DataClaimed, member.writeDurable(.data, 0, "ordinary"));
+    try std.testing.expectError(error.DataClaimed, member.sync());
+    try catalog_claim.writeBatchDurable(&.{.{ .offset = 0, .bytes = "metadata" }});
+    try catalog_claim.release();
+    try std.testing.expectError(error.DataClaimed, member.close());
+
+    try data_claim.write(0, "claimed");
+    try data_claim.sync();
+    const stale_claim = data_claim;
+    try data_claim.release();
+    var next_claim = try member.claimData();
+    try std.testing.expectError(error.InvalidDataClaim, stale_claim.write(8, "stale"));
+    try next_claim.release();
+    var actual: [7]u8 = undefined;
+    try member.read(.data, 0, &actual);
+    try std.testing.expectEqualStrings("claimed", &actual);
+
+    member.fenceUnleasedCatalogWrites();
+    try std.testing.expectError(error.DataGenerationLeaseRequired, member.write(.data, 0, "unleased"));
+    try std.testing.expectError(error.DataGenerationLeaseRequired, member.sync());
+    var leased_claim = try member.claimData();
+    try leased_claim.write(0, "leased");
+    try leased_claim.sync();
+    try leased_claim.release();
+
+    member.data_claim_sequence.store(std.math.maxInt(u64), .release);
+    try std.testing.expectError(error.DataClaimSequenceExhausted, member.claimData());
+    try std.testing.expectError(error.DataClaimSequenceExhausted, member.claimData());
+}
+
+test "catalog mode persists across standalone reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input = try testPoolCreate();
+    var member = try createPoolAt(std.testing.io, tmp.dir, "member", input[0], input[1], .{});
+
+    var catalog_claim = try member.claimCatalog();
+    try catalog_claim.activateCatalogData();
+    try catalog_claim.release();
+    try std.testing.expect(member_format.hasCatalogData(member.header()));
+    try std.testing.expectError(error.CatalogClaimRequired, member.write(.metadata, 0, "stale"));
+    try std.testing.expectError(error.DataGenerationLeaseRequired, member.write(.data, 0, "stale"));
+    try member.close();
+
+    var reopened = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer reopened.deinit();
+    try std.testing.expect(member_format.hasCatalogData(reopened.header()));
+    try std.testing.expectError(error.CatalogClaimRequired, reopened.writeDurable(.metadata, 0, "stale"));
+    try std.testing.expectError(error.DataGenerationLeaseRequired, reopened.writeDurable(.data, 0, "stale"));
+
+    var reopened_catalog_claim = try reopened.claimCatalog();
+    try reopened_catalog_claim.writeBatchDurable(&.{.{ .offset = 0, .bytes = "catalog" }});
+    try reopened_catalog_claim.release();
+    var reopened_data_claim = try reopened.claimData();
+    try reopened_data_claim.write(0, "leased");
+    try reopened_data_claim.sync();
+    try reopened_data_claim.release();
+}
+
+test "catalog mode survives interruption after the first header sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input = try testPoolCreate();
+    var member = try createPoolAt(std.testing.io, tmp.dir, "member", input[0], input[1], .{});
+    var fault: FaultController = .{ .fail_sync_after_at = 0 };
+    member.setFaultController(&fault);
+    var claim = try member.claimCatalog();
+    try std.testing.expectError(error.InjectedFault, claim.activateCatalogData());
+    try claim.release();
+    member.deinit();
+
+    var reopened = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    try std.testing.expect(reopened.redundancyDegraded());
+    try std.testing.expect(member_format.hasCatalogData(reopened.header()));
+    try std.testing.expectError(error.CatalogClaimRequired, reopened.write(.metadata, 0, "stale"));
+    try std.testing.expectError(error.DataGenerationLeaseRequired, reopened.write(.data, 0, "stale"));
+    var repair_claim = try reopened.claimCatalog();
+    try repair_claim.activateCatalogData();
+    try repair_claim.release();
+    try std.testing.expect(!reopened.redundancyDegraded());
+    try reopened.close();
+
+    try corruptByte(tmp.dir, "member", member_format.encoded_size);
+    var recovered = try openAt(std.testing.io, tmp.dir, "member", .writable);
+    defer recovered.deinit();
+    try std.testing.expect(member_format.hasCatalogData(recovered.header()));
+    try std.testing.expectError(error.CatalogClaimRequired, recovered.write(.metadata, 0, "stale"));
+    try std.testing.expectError(error.DataGenerationLeaseRequired, recovered.write(.data, 0, "stale"));
 }
 
 test "region reads report truncation exactly" {
