@@ -73,6 +73,18 @@ const ExpectedMember = struct {
     slot: u32,
 };
 
+const HeartbeatObservation = struct {
+    incarnation: u64,
+    sequence: u64,
+    accepted_at_unix_ms: i64,
+    leader_term: u64,
+};
+
+const HeartbeatRead = struct {
+    observation: HeartbeatObservation,
+    freshness: pb.HeartbeatFreshness,
+};
+
 test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RPC" {
     var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
@@ -150,6 +162,9 @@ test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RP
         try expectMember(runtime, expected_members[0]);
         try expectMember(runtime, expected_members[1]);
         try expectMemberList(runtime, &expected_members);
+        const reported = try reportHeartbeat(runtime, &config, snapshot_node, snapshot_member, 0, 11, 17);
+        const heartbeat = (try getHeartbeat(runtime, snapshot_node.id)) orelse return error.MissingHeartbeat;
+        try expectFreshHeartbeat(reported, heartbeat);
         try runtime.shutdown();
     }
     defer primary.deinit();
@@ -176,6 +191,10 @@ test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RP
         try expectMember(runtime, expected_members[0]);
         try expectMember(runtime, expected_members[1]);
         try expectMemberList(runtime, &expected_members);
+        try std.testing.expect((try getHeartbeat(runtime, snapshot_node.id)) == null);
+        const reported = try reportHeartbeat(runtime, &config, snapshot_node, snapshot_member, 0, 11, 17);
+        const heartbeat = (try getHeartbeat(runtime, snapshot_node.id)) orelse return error.MissingHeartbeat;
+        try expectFreshHeartbeat(reported, heartbeat);
         var replayed = try createPool(runtime, "request-primary", "primary");
         defer replayed.deinit();
         try std.testing.expectEqualStrings(primary.id, replayed.id);
@@ -267,12 +286,37 @@ test "three-voter runtime survives leader failover and restart" {
     );
     defer registered_member.deinit();
     try waitForApplied(&runtimes, registered_member.revision);
+    const initial_report = try reportHeartbeat(
+        runtimes[initial_leader].?,
+        &configs[initial_leader],
+        registered,
+        registered_member,
+        0,
+        19,
+        23,
+    );
+    const initial_heartbeat = (try getHeartbeat(runtimes[initial_leader].?, registered.id)) orelse return error.MissingHeartbeat;
+    try expectFreshHeartbeat(initial_report, initial_heartbeat);
 
     try runtimes[initial_leader].?.shutdown();
     runtimes[initial_leader].?.deinit();
     runtimes[initial_leader] = null;
     const replacement_leader = try waitForStableLeader(&runtimes);
     try std.testing.expect(replacement_leader != initial_leader);
+    try std.testing.expect((try getHeartbeat(runtimes[replacement_leader].?, registered.id)) == null);
+    const replacement_report = try reportHeartbeat(
+        runtimes[replacement_leader].?,
+        &configs[replacement_leader],
+        registered,
+        registered_member,
+        0,
+        initial_report.incarnation,
+        initial_report.sequence,
+    );
+    try std.testing.expect(replacement_report.leader_term > initial_report.leader_term);
+    try std.testing.expectEqual(runtimes[replacement_leader].?.status().term, replacement_report.leader_term);
+    const replacement_heartbeat = (try getHeartbeat(runtimes[replacement_leader].?, registered.id)) orelse return error.MissingHeartbeat;
+    try expectFreshHeartbeat(replacement_report, replacement_heartbeat);
     try expectPool(runtimes[replacement_leader].?, "failover", created.id);
     try expectList(runtimes[replacement_leader].?, 1);
     try expectNode(runtimes[replacement_leader].?, &configs[replacement_leader], registered);
@@ -499,6 +543,94 @@ fn registerMember(
         .id = try config_allocator.dupe(u8, member.id),
         .revision = member.registered_revision,
     };
+}
+
+fn reportHeartbeat(
+    runtime: *runtime_mod.Runtime,
+    config: *const config_mod.Config,
+    node: RegisteredNode,
+    member: RegisteredMember,
+    member_slot: u32,
+    incarnation: u64,
+    sequence: u64,
+) !HeartbeatObservation {
+    var members = [_]pb.MemberHeartbeat{.{
+        .member_id = member.id,
+        .local_set_id = &member_local_set_id,
+        .member_slot = member_slot,
+        .state = .MEMBER_HEARTBEAT_STATE_PRESENT,
+        .capacity = .{
+            .free_extent_count = 1,
+            .allocated_extent_count = 1,
+        },
+    }};
+    const request = try encodeMessage(pb.ReportHeartbeatRequest{
+        .cluster_id = &config.cluster_id,
+        .node_id = node.id,
+        .incarnation = incarnation,
+        .sequence = sequence,
+        .members = .{ .items = &members, .capacity = members.len },
+    });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.HeartbeatService/ReportHeartbeat", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.ReportHeartbeatResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    const observation = response.observation orelse return error.MissingHeartbeat;
+    try std.testing.expectEqualStrings(node.id, observation.node_id);
+    try std.testing.expectEqual(incarnation, observation.incarnation);
+    try std.testing.expectEqual(sequence, observation.sequence);
+    try std.testing.expect(observation.accepted_at_unix_ms > 0);
+    try std.testing.expect(observation.leader_term > 0);
+    try std.testing.expectEqual(@as(usize, 1), observation.members.items.len);
+    const observed_member = observation.members.items[0];
+    try std.testing.expectEqualSlices(u8, member.id, observed_member.member_id);
+    try std.testing.expectEqualSlices(u8, &member_local_set_id, observed_member.local_set_id);
+    try std.testing.expectEqual(member_slot, observed_member.member_slot);
+    try std.testing.expectEqual(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_PRESENT, observed_member.state);
+    const capacity = observed_member.capacity orelse return error.MissingHeartbeatCapacity;
+    const total_extents = capacity.free_extent_count + capacity.allocated_extent_count +
+        capacity.reserved_extent_count + capacity.retired_extent_count;
+    try std.testing.expectEqual(member_data_capacity_bytes / @as(u64, member_extent_size_bytes), total_extents);
+    return .{
+        .incarnation = observation.incarnation,
+        .sequence = observation.sequence,
+        .accepted_at_unix_ms = observation.accepted_at_unix_ms,
+        .leader_term = observation.leader_term,
+    };
+}
+
+fn getHeartbeat(runtime: *runtime_mod.Runtime, node_id: []const u8) !?HeartbeatRead {
+    const request = try encodeMessage(pb.GetHeartbeatRequest{ .node_id = node_id });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.HeartbeatService/GetHeartbeat", request);
+    defer result.deinit();
+    if (result.status.code == .not_found) return null;
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.GetHeartbeatResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    const observation = response.observation orelse return error.MissingHeartbeat;
+    try std.testing.expectEqualStrings(node_id, observation.node_id);
+    return .{
+        .observation = .{
+            .incarnation = observation.incarnation,
+            .sequence = observation.sequence,
+            .accepted_at_unix_ms = observation.accepted_at_unix_ms,
+            .leader_term = observation.leader_term,
+        },
+        .freshness = response.freshness,
+    };
+}
+
+fn expectFreshHeartbeat(reported: HeartbeatObservation, heartbeat: HeartbeatRead) !void {
+    try std.testing.expectEqual(reported.incarnation, heartbeat.observation.incarnation);
+    try std.testing.expectEqual(reported.sequence, heartbeat.observation.sequence);
+    try std.testing.expectEqual(reported.accepted_at_unix_ms, heartbeat.observation.accepted_at_unix_ms);
+    try std.testing.expectEqual(reported.leader_term, heartbeat.observation.leader_term);
+    try std.testing.expectEqual(pb.HeartbeatFreshness.HEARTBEAT_FRESHNESS_FRESH, heartbeat.freshness);
 }
 
 fn expectPool(runtime: *runtime_mod.Runtime, name: []const u8, expected_id: []const u8) !void {
