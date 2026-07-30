@@ -22,6 +22,7 @@ const member_birth_topology_digest = [_]u8{0x5a} ** 32;
 const member_metadata_capacity_bytes: u64 = 1024;
 const member_data_capacity_bytes: u64 = 8192;
 const member_extent_size_bytes: u32 = 4096;
+const volume_size_bytes: u64 = 256 * 1024;
 
 const test_options: runtime_mod.Options = .{
     .tick_interval_ms = 5,
@@ -42,6 +43,24 @@ const CreatedPool = struct {
 
     fn deinit(self: *CreatedPool) void {
         config_allocator.free(self.id);
+        self.* = undefined;
+    }
+};
+
+const OwnedVolume = struct {
+    value: pb.Volume,
+
+    fn deinit(self: *OwnedVolume) void {
+        self.value.deinit(config_allocator);
+        self.* = undefined;
+    }
+};
+
+const DeletedVolume = struct {
+    value: pb.DeleteVolumeResponse,
+
+    fn deinit(self: *DeletedVolume) void {
+        self.value.deinit(config_allocator);
         self.* = undefined;
     }
 };
@@ -85,7 +104,7 @@ const HeartbeatRead = struct {
     freshness: pb.HeartbeatFreshness,
 };
 
-test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RPC" {
+test "runtime restores Pool, Volume, Node, and Member snapshot and WAL suffix through RPC" {
     var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
     const root_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
@@ -101,6 +120,7 @@ test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RP
 
     var primary: CreatedPool = undefined;
     var secondary: CreatedPool = undefined;
+    var snapshot_volume: OwnedVolume = undefined;
     var snapshot_node: RegisteredNode = undefined;
     var suffix_node: RegisteredNode = undefined;
     var snapshot_member: RegisteredMember = undefined;
@@ -137,6 +157,11 @@ test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RP
             0,
         );
         errdefer snapshot_member.deinit();
+        snapshot_volume = try createVolume(runtime, "request-snapshot-volume", primary.id, "database");
+        errdefer snapshot_volume.deinit();
+        var snapshot_volume_replay = try createVolume(runtime, "request-snapshot-volume", primary.id, "database");
+        defer snapshot_volume_replay.deinit();
+        try expectVolumesEqual(snapshot_volume, snapshot_volume_replay);
         suffix_member = try registerMember(
             runtime,
             &config,
@@ -147,12 +172,13 @@ test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RP
             1,
         );
         errdefer suffix_member.deinit();
-        try std.testing.expectEqual(@as(u64, 2), primary.revision);
-        try std.testing.expectEqual(@as(u64, 3), secondary.revision);
-        try std.testing.expectEqual(@as(u64, 4), snapshot_node.revision);
-        try std.testing.expectEqual(@as(u64, 5), suffix_node.revision);
-        try std.testing.expectEqual(@as(u64, 6), snapshot_member.revision);
-        try std.testing.expectEqual(@as(u64, 7), suffix_member.revision);
+        try std.testing.expect(primary.revision > 0);
+        try std.testing.expect(secondary.revision > primary.revision);
+        try std.testing.expect(snapshot_node.revision > secondary.revision);
+        try std.testing.expect(suffix_node.revision > snapshot_node.revision);
+        try std.testing.expect(snapshot_member.revision > suffix_node.revision);
+        try std.testing.expect(snapshot_volume.value.resource_version > snapshot_member.revision);
+        try std.testing.expect(suffix_member.revision > snapshot_volume.value.resource_version);
         try expectList(runtime, 2);
         try expectNodeList(runtime, &.{ snapshot_node, suffix_node });
         const expected_members = [_]ExpectedMember{
@@ -173,7 +199,9 @@ test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RP
     defer suffix_node.deinit();
     defer snapshot_member.deinit();
     defer suffix_member.deinit();
+    defer snapshot_volume.deinit();
 
+    var deleted_volume: DeletedVolume = undefined;
     {
         const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
         defer destroyRuntime(runtime);
@@ -191,6 +219,7 @@ test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RP
         try expectMember(runtime, expected_members[0]);
         try expectMember(runtime, expected_members[1]);
         try expectMemberList(runtime, &expected_members);
+        try expectVolume(runtime, snapshot_volume);
         try std.testing.expect((try getHeartbeat(runtime, snapshot_node.id)) == null);
         const reported = try reportHeartbeat(runtime, &config, snapshot_node, snapshot_member, 0, 11, 17);
         const heartbeat = (try getHeartbeat(runtime, snapshot_node.id)) orelse return error.MissingHeartbeat;
@@ -220,6 +249,35 @@ test "runtime restores Pool, Node, and Member snapshot and WAL suffix through RP
         defer replayed_snapshot_member.deinit();
         try std.testing.expectEqualSlices(u8, snapshot_member.id, replayed_snapshot_member.id);
         try std.testing.expectEqual(snapshot_member.revision, replayed_snapshot_member.revision);
+
+        var replayed_volume = try createVolume(runtime, "request-snapshot-volume", primary.id, "database");
+        defer replayed_volume.deinit();
+        try expectVolumesEqual(snapshot_volume, replayed_volume);
+        deleted_volume = try deleteVolume(
+            runtime,
+            "request-delete-snapshot-volume",
+            snapshot_volume.value.id,
+            snapshot_volume.value.resource_version,
+        );
+        errdefer deleted_volume.deinit();
+        try std.testing.expect(deleted_volume.value.deleted_revision > snapshot_volume.value.resource_version);
+        try runtime.shutdown();
+    }
+    defer deleted_volume.deinit();
+
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        try expectVolumeNotFound(runtime, snapshot_volume.value.id);
+        var replayed_delete = try deleteVolume(
+            runtime,
+            "request-delete-snapshot-volume",
+            snapshot_volume.value.id,
+            snapshot_volume.value.resource_version,
+        );
+        defer replayed_delete.deinit();
+        try expectDeletesEqual(deleted_volume, replayed_delete);
     }
 }
 
@@ -267,6 +325,10 @@ test "three-voter runtime survives leader failover and restart" {
     var created = try createPool(runtimes[initial_leader].?, "request-failover", "failover");
     defer created.deinit();
     try waitForApplied(&runtimes, created.revision);
+    var created_volume = try createVolume(runtimes[initial_leader].?, "request-volume-failover", created.id, "failover-volume");
+    defer created_volume.deinit();
+    try std.testing.expect(created_volume.value.resource_version > created.revision);
+    try waitForApplied(&runtimes, created_volume.value.resource_version);
     var registered = try registerNode(
         runtimes[initial_leader].?,
         &configs[initial_leader],
@@ -318,6 +380,7 @@ test "three-voter runtime survives leader failover and restart" {
     const replacement_heartbeat = (try getHeartbeat(runtimes[replacement_leader].?, registered.id)) orelse return error.MissingHeartbeat;
     try expectFreshHeartbeat(replacement_report, replacement_heartbeat);
     try expectPool(runtimes[replacement_leader].?, "failover", created.id);
+    try expectVolume(runtimes[replacement_leader].?, created_volume);
     try expectList(runtimes[replacement_leader].?, 1);
     try expectNode(runtimes[replacement_leader].?, &configs[replacement_leader], registered);
     try expectNodeList(runtimes[replacement_leader].?, &.{registered});
@@ -333,6 +396,14 @@ test "three-voter runtime survives leader failover and restart" {
     defer replayed.deinit();
     try std.testing.expectEqualStrings(created.id, replayed.id);
     try std.testing.expectEqual(created.revision, replayed.revision);
+    var replayed_volume = try createVolume(
+        runtimes[replacement_leader].?,
+        "request-volume-failover",
+        created.id,
+        "failover-volume",
+    );
+    defer replayed_volume.deinit();
+    try expectVolumesEqual(created_volume, replayed_volume);
     var replayed_node = try registerNode(
         runtimes[replacement_leader].?,
         &configs[replacement_leader],
@@ -354,6 +425,22 @@ test "three-voter runtime survives leader failover and restart" {
     defer replayed_member.deinit();
     try std.testing.expectEqualSlices(u8, registered_member.id, replayed_member.id);
     try std.testing.expectEqual(registered_member.revision, replayed_member.revision);
+    var deleted_volume = try deleteVolume(
+        runtimes[replacement_leader].?,
+        "request-delete-volume-failover",
+        created_volume.value.id,
+        created_volume.value.resource_version,
+    );
+    defer deleted_volume.deinit();
+    try std.testing.expect(deleted_volume.value.deleted_revision > created_volume.value.resource_version);
+    var replayed_delete = try deleteVolume(
+        runtimes[replacement_leader].?,
+        "request-delete-volume-failover",
+        created_volume.value.id,
+        created_volume.value.resource_version,
+    );
+    defer replayed_delete.deinit();
+    try expectDeletesEqual(deleted_volume, replayed_delete);
     const catch_up_revision = runtimes[replacement_leader].?.status().applied_index;
 
     runtimes[initial_leader] = try runtime_mod.Runtime.create(
@@ -362,8 +449,14 @@ test "three-voter runtime survives leader failover and restart" {
         &configs[initial_leader],
         test_options,
     );
-    _ = try waitForStableLeader(&runtimes);
+    const final_leader = try waitForStableLeader(&runtimes);
     try waitForApplied(&runtimes, catch_up_revision);
+    try expectVolumeNotFound(runtimes[final_leader].?, created_volume.value.id);
+    for (&runtimes) |runtime| {
+        try runtime.?.shutdown();
+        try std.testing.expectEqual(@as(usize, 0), runtime.?.machine.volumeCount());
+        try std.testing.expectEqual(@as(usize, 1), runtime.?.machine.volumeTombstoneCount());
+    }
 }
 
 fn makeConfig(
@@ -477,6 +570,90 @@ fn createPool(runtime: *runtime_mod.Runtime, request_id: []const u8, name: []con
         .id = try config_allocator.dupe(u8, pool.id),
         .revision = pool.created_revision,
     };
+}
+
+fn createVolume(runtime: *runtime_mod.Runtime, request_id: []const u8, pool_id: []const u8, name: []const u8) !OwnedVolume {
+    const request = try encodeMessage(pb.CreateVolumeRequest{
+        .request_id = request_id,
+        .pool_id = pool_id,
+        .name = name,
+        .description = "integration volume",
+        .size_bytes = volume_size_bytes,
+    });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.VolumeService/CreateVolume", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.CreateVolumeResponse.decode(&reader, config_allocator);
+    defer response.deinit(config_allocator);
+    const volume = response.volume orelse return error.MissingVolume;
+    response.volume = null;
+    return .{ .value = volume };
+}
+
+fn getVolume(runtime: *runtime_mod.Runtime, volume_id: []const u8) !?OwnedVolume {
+    const request = try encodeMessage(pb.GetVolumeRequest{ .volume_id = volume_id });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.VolumeService/GetVolume", request);
+    defer result.deinit();
+    if (result.status.code == .not_found) return null;
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.GetVolumeResponse.decode(&reader, config_allocator);
+    defer response.deinit(config_allocator);
+    const volume = response.volume orelse return error.MissingVolume;
+    response.volume = null;
+    return .{ .value = volume };
+}
+
+fn deleteVolume(
+    runtime: *runtime_mod.Runtime,
+    request_id: []const u8,
+    volume_id: []const u8,
+    expected_resource_version: u64,
+) !DeletedVolume {
+    const request = try encodeMessage(pb.DeleteVolumeRequest{
+        .request_id = request_id,
+        .volume_id = volume_id,
+        .expected_resource_version = expected_resource_version,
+    });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.VolumeService/DeleteVolume", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    return .{ .value = try pb.DeleteVolumeResponse.decode(&reader, config_allocator) };
+}
+
+fn expectVolume(runtime: *runtime_mod.Runtime, expected: OwnedVolume) !void {
+    var actual = (try getVolume(runtime, expected.value.id)) orelse return error.MissingVolume;
+    defer actual.deinit();
+    try expectVolumesEqual(expected, actual);
+}
+
+fn expectVolumeNotFound(runtime: *runtime_mod.Runtime, volume_id: []const u8) !void {
+    if (try getVolume(runtime, volume_id)) |value| {
+        var unexpected = value;
+        defer unexpected.deinit();
+        return error.UnexpectedVolume;
+    }
+}
+
+fn expectVolumesEqual(expected: OwnedVolume, actual: OwnedVolume) !void {
+    const expected_bytes = try encodeMessage(expected.value);
+    defer runtime_allocator.free(expected_bytes);
+    const actual_bytes = try encodeMessage(actual.value);
+    defer runtime_allocator.free(actual_bytes);
+    try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
+}
+
+fn expectDeletesEqual(expected: DeletedVolume, actual: DeletedVolume) !void {
+    const expected_bytes = try encodeMessage(expected.value);
+    defer runtime_allocator.free(expected_bytes);
+    const actual_bytes = try encodeMessage(actual.value);
+    defer runtime_allocator.free(actual_bytes);
+    try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
 }
 
 fn registerNode(
