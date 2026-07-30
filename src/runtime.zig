@@ -136,9 +136,10 @@ pub const Runtime = struct {
         self.pool_rpc.stopAccepting();
         self.management_server.shutdownGracefully(self.options.management_graceful_timeout_ns);
         self.management_server.wait();
-        try self.pool_rpc.shutdown();
+        self.raftor.stop();
         self.driver_thread.join();
         self.running = false;
+        try self.pool_rpc.shutdown();
         if (self.driver_failed.load(.acquire)) return error.RaftDriverFailed;
     }
 
