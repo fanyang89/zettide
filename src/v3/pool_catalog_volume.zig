@@ -5,6 +5,7 @@ const pool_catalog = @import("pool_catalog.zig");
 const pool_catalog_graph = @import("pool_catalog_graph.zig");
 const pool_catalog_page = @import("pool_catalog_page.zig");
 const pool_member_set = @import("pool_member_set.zig");
+const pool_topology = @import("pool_topology.zig");
 
 pub const VolumeMap = struct {
     descriptor: pool_catalog.VolumeDescriptor,
@@ -90,22 +91,30 @@ pub const CatalogVolumeBackend = struct {
         set: *pool_member_set.PoolMemberSet,
         volume_id: [16]u8,
     ) !CatalogVolumeBackend {
-        const initial_authority = set.authority() orelse return error.MissingAuthority;
-        if (initial_authority.generation == 0 or codec.isZero(&initial_authority.data_root_digest))
-            return error.GenesisHasNoCatalogRoot;
-        const catalog = try set.loadCatalog();
-        const authority = set.authority() orelse return error.MissingAuthority;
-        if (!std.mem.eql(u8, &initial_authority.history_digest, &authority.history_digest) or
-            authority.generation != catalog.root.generation or
-            !std.mem.eql(u8, &authority.data_root_digest, &(try pool_catalog.rootDigest(catalog.root))))
-            return error.PoolAuthorityChanged;
+        const bound = try loadBoundCatalog(set);
         return .{
             .allocator = allocator,
             .set = set,
-            .generation = authority.generation,
-            .authority_history_digest = authority.history_digest,
-            .root_digest = authority.data_root_digest,
-            .map = try VolumeMap.init(&catalog, volume_id),
+            .generation = bound.generation,
+            .authority_history_digest = bound.authority_history_digest,
+            .root_digest = bound.root_digest,
+            .map = try VolumeMap.init(&bound.catalog, volume_id),
+        };
+    }
+
+    pub fn openWritable(
+        allocator: std.mem.Allocator,
+        lease: *CatalogDataLease,
+        volume_id: [16]u8,
+    ) !CatalogVolumeBackend {
+        try lease.validate();
+        return .{
+            .allocator = allocator,
+            .set = lease.set,
+            .generation = lease.generation,
+            .authority_history_digest = lease.authority_history_digest,
+            .root_digest = lease.root_digest,
+            .map = try VolumeMap.init(&lease.catalog, volume_id),
         };
     }
 
@@ -114,10 +123,10 @@ pub const CatalogVolumeBackend = struct {
     }
 
     pub fn read(self: *CatalogVolumeBackend, offset: u64, buffer: []u8) !void {
-        if (buffer.len == 0) return;
         const end = std.math.add(u64, offset, buffer.len) catch return error.OutOfBounds;
         if (end > self.logicalSize()) return error.OutOfBounds;
         try self.validateAuthority();
+        if (buffer.len == 0) return;
 
         var position = offset;
         var completed: usize = 0;
@@ -137,6 +146,47 @@ pub const CatalogVolumeBackend = struct {
             position += length;
         }
         try self.validateAuthority();
+    }
+
+    pub fn write(
+        self: *CatalogVolumeBackend,
+        lease: *CatalogDataLease,
+        offset: u64,
+        bytes: []const u8,
+    ) !void {
+        const end = std.math.add(u64, offset, bytes.len) catch return error.OutOfBounds;
+        if (end > self.logicalSize()) return error.OutOfBounds;
+        try lease.validateFor(self);
+        if (bytes.len == 0) return;
+
+        var position = offset;
+        var checked: usize = 0;
+        while (checked < bytes.len) {
+            const span = try self.map.nextSpan(position, bytes.len - checked);
+            const mapped = switch (span) {
+                .zero => return error.ExtentNotMapped,
+                .mapped => |value| value,
+            };
+            try lease.validateClaims(mapped.member_slots[0..mapped.member_count]);
+            checked += mapped.length;
+            position += mapped.length;
+        }
+
+        position = offset;
+        var completed: usize = 0;
+        while (completed < bytes.len) {
+            const mapped = (try self.map.nextSpan(position, bytes.len - completed)).mapped;
+            try lease.writeMapped(mapped, bytes[completed..][0..mapped.length]);
+            completed += mapped.length;
+            position += mapped.length;
+        }
+        try lease.validateFor(self);
+    }
+
+    pub fn flush(self: *CatalogVolumeBackend, lease: *CatalogDataLease) !void {
+        try lease.validateFor(self);
+        try lease.flush();
+        try lease.validateFor(self);
     }
 
     fn validateAuthority(self: *const CatalogVolumeBackend) !void {
@@ -165,6 +215,180 @@ pub const CatalogVolumeBackend = struct {
         );
     }
 };
+
+pub const CatalogDataLease = struct {
+    set: *pool_member_set.PoolMemberSet,
+    generation: u64,
+    authority_history_digest: codec.Digest,
+    root_digest: codec.Digest,
+    catalog: pool_catalog_graph.ValidatedCatalog,
+    claims: [pool_topology.max_member_count]?ClaimedMember = @splat(null),
+    claim_count: usize = 0,
+    frozen: bool = false,
+    released: bool = false,
+
+    const ClaimedMember = struct {
+        slot: u16,
+        claim: member_api.DataClaim,
+    };
+
+    /// The caller owns `set` and must serialize authority changes with this lease.
+    pub fn acquire(set: *pool_member_set.PoolMemberSet) !CatalogDataLease {
+        if (set.controlWriteReady() == null or set.dataAccess() != .read_write)
+            return error.DataWriteUnavailable;
+        const bound = try loadBoundCatalog(set);
+        var result: CatalogDataLease = .{
+            .set = set,
+            .generation = bound.generation,
+            .authority_history_digest = bound.authority_history_digest,
+            .root_digest = bound.root_digest,
+            .catalog = bound.catalog,
+        };
+        errdefer result.releaseClaims();
+
+        var slots: [pool_topology.max_member_count]u16 = undefined;
+        var slot_count: usize = 0;
+        for (result.catalog.descriptorSlice(), 0..) |_, volume_index| {
+            for (result.catalog.extentSlice(volume_index)) |run| {
+                if (run.state != .mapped) continue;
+                for (run.memberSlice()) |slot| try insertSlot(&slots, &slot_count, slot);
+            }
+        }
+        for (slots[0..slot_count]) |slot| {
+            const data_member = try set.dataMemberForWrite(slot);
+            result.claims[result.claim_count] = .{
+                .slot = slot,
+                .claim = try data_member.member.claimData(),
+            };
+            result.claim_count += 1;
+        }
+        try result.validate();
+        return result;
+    }
+
+    pub fn release(self: *CatalogDataLease) void {
+        if (self.released) return;
+        self.releaseClaims();
+        self.released = true;
+    }
+
+    pub fn deinit(self: *CatalogDataLease) void {
+        self.release();
+    }
+
+    fn releaseClaims(self: *CatalogDataLease) void {
+        for (self.claims[0..self.claim_count]) |*maybe_claim| {
+            if (maybe_claim.*) |*claimed| claimed.claim.release() catch unreachable;
+            maybe_claim.* = null;
+        }
+        self.claim_count = 0;
+    }
+
+    fn validate(self: *const CatalogDataLease) !void {
+        if (self.released) return error.DataLeaseReleased;
+        if (self.frozen) return error.WriteFrozen;
+        const authority = self.set.authority() orelse return error.MissingAuthority;
+        if (!std.mem.eql(u8, &authority.history_digest, &self.authority_history_digest) or
+            authority.generation != self.generation or
+            !std.mem.eql(u8, &authority.data_root_digest, &self.root_digest))
+            return error.PoolAuthorityChanged;
+        if (self.set.controlWriteReady() == null or self.set.dataAccess() != .read_write)
+            return error.DataWriteUnavailable;
+    }
+
+    fn validateFor(self: *const CatalogDataLease, backend: *const CatalogVolumeBackend) !void {
+        try self.validate();
+        if (self.set != backend.set or self.generation != backend.generation or
+            !std.mem.eql(u8, &self.authority_history_digest, &backend.authority_history_digest) or
+            !std.mem.eql(u8, &self.root_digest, &backend.root_digest))
+            return error.DataLeaseMismatch;
+    }
+
+    fn validateClaims(self: *CatalogDataLease, slots: []const u16) !void {
+        for (slots) |slot| _ = try self.claimForSlot(slot);
+    }
+
+    fn claimForSlot(self: *CatalogDataLease, slot: u16) !*member_api.DataClaim {
+        for (self.claims[0..self.claim_count]) |*maybe_claim| {
+            const claimed = if (maybe_claim.*) |*value| value else continue;
+            if (claimed.slot == slot) return &claimed.claim;
+        }
+        return error.DataClaimUnavailable;
+    }
+
+    fn writeMapped(self: *CatalogDataLease, span: VolumeMap.MappedSpan, bytes: []const u8) !void {
+        var first_error: ?anyerror = null;
+        for (span.member_slots[0..span.member_count]) |slot| {
+            const claim = self.claimForSlot(slot) catch |err| {
+                if (first_error == null) first_error = err;
+                continue;
+            };
+            claim.write(span.physical_offset, bytes) catch |err| {
+                if (first_error == null) first_error = err;
+            };
+        }
+        if (first_error) |err| {
+            self.freeze();
+            return err;
+        }
+    }
+
+    fn flush(self: *CatalogDataLease) !void {
+        var first_error: ?anyerror = null;
+        for (self.claims[0..self.claim_count]) |*maybe_claim| {
+            const claimed = if (maybe_claim.*) |*value| value else continue;
+            claimed.claim.sync() catch |err| {
+                if (first_error == null) first_error = err;
+            };
+        }
+        if (first_error) |err| {
+            self.freeze();
+            return err;
+        }
+    }
+
+    fn freeze(self: *CatalogDataLease) void {
+        self.frozen = true;
+        self.set.revokeWriteReady();
+        self.set.revokeDataAccess();
+    }
+};
+
+const BoundCatalog = struct {
+    generation: u64,
+    authority_history_digest: codec.Digest,
+    root_digest: codec.Digest,
+    catalog: pool_catalog_graph.ValidatedCatalog,
+};
+
+fn loadBoundCatalog(set: *pool_member_set.PoolMemberSet) !BoundCatalog {
+    const initial_authority = set.authority() orelse return error.MissingAuthority;
+    if (initial_authority.generation == 0 or codec.isZero(&initial_authority.data_root_digest))
+        return error.GenesisHasNoCatalogRoot;
+    const catalog = try set.loadCatalog();
+    const authority = set.authority() orelse return error.MissingAuthority;
+    if (!std.mem.eql(u8, &initial_authority.history_digest, &authority.history_digest) or
+        authority.generation != catalog.root.generation or
+        !std.mem.eql(u8, &authority.data_root_digest, &(try pool_catalog.rootDigest(catalog.root))))
+        return error.PoolAuthorityChanged;
+    return .{
+        .generation = authority.generation,
+        .authority_history_digest = authority.history_digest,
+        .root_digest = authority.data_root_digest,
+        .catalog = catalog,
+    };
+}
+
+fn insertSlot(slots: *[pool_topology.max_member_count]u16, count: *usize, slot: u16) !void {
+    var index: usize = 0;
+    while (index < count.* and slots[index] < slot) : (index += 1) {}
+    if (index < count.* and slots[index] == slot) return;
+    if (count.* == slots.len) return error.TooManyDataMembers;
+    var move = count.*;
+    while (move > index) : (move -= 1) slots[move] = slots[move - 1];
+    slots[index] = slot;
+    count.* += 1;
+}
 
 const DataReader = struct {
     context: *anyopaque,

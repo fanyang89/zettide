@@ -408,11 +408,15 @@ space unreachable from current authority.
 
 After the one-way catalog fence is set, ordinary Member and ReplicaEndpoint data writes return
 `DataGenerationLeaseRequired`; only an owner-token coordinator claim can initialize a new mapping.
-Catalog-backed data I/O is not yet exposed. Before multi-volume mount is enabled, every data writer
-must carry a catalog-generation lease that is permanently revoked when authority advances. Such a
-lease is also required before an existing mapped span can move or change state without racing its
-authoritative contents. Member removal remains rejected until an authority-bound catalog drain proof
-shows that no mapping or allocator interval references its slot.
+`CatalogVolumeBackend` exposes authority-bound reads for ready volumes. Holes and `reserved_zero`
+extents read as zero, while replicated mapped reads require two matching copies. A pool-wide
+`CatalogDataLease` claims every member referenced by the current catalog and permits writes only to
+existing mapped extents. The lease is permanently invalid when authority advances; write or sync
+failure also revokes Pool control-write and data access until reopen. Hole and `reserved_zero` writes
+remain rejected until an allocator can initialize and publish their mapping. The same lease is required
+before an existing mapped span can move or change state without racing its authoritative contents.
+Member removal remains rejected until an authority-bound catalog drain proof shows that no mapping or
+allocator interval references its slot.
 
 ## Non-Voter Catalog Install
 

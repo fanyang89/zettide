@@ -404,6 +404,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        try self.requireSetWriteReady();
         if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         const authority = self.set.authority() orelse return error.MissingAuthority;
         if (authority.generation == 0 or codec.isZero(&authority.data_root_digest))
@@ -502,6 +503,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        try self.requireSetWriteReady();
         if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         const authority = self.set.authority() orelse return error.MissingAuthority;
         const descriptor = pool_topology.findMember(&authority.topology, target_member_id) orelse
@@ -679,6 +681,7 @@ pub const ReplicatedJournal = struct {
     ) !pool_authority.Authority {
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        try self.requireSetWriteReady();
         if (self.reclaim_required) return error.ReclaimBarrierRequired;
         if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         if (prepare_proposal.kind != control_record.generation_prepare_kind)
@@ -793,6 +796,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        try self.requireSetWriteReady();
         if (self.reclaim_required) return error.ReclaimBarrierRequired;
         if (prepare_proposal.kind != control_record.membership_prepare_kind)
             return error.NotMembershipPrepare;
@@ -1006,6 +1010,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        try self.requireSetWriteReady();
         return self.resumeRolloverLocked();
     }
 
@@ -1218,6 +1223,7 @@ pub const ReplicatedJournal = struct {
     ) !void {
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        try self.requireSetWriteReady();
         const authority = self.set.authority() orelse return error.MissingAuthority;
         const voter_count = voterCount(authority.topology);
         if (validate_rollover_topology and voter_count != 1 and voter_count != 3)
@@ -1320,6 +1326,7 @@ pub const ReplicatedJournal = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.CoordinatorClosed;
         if (self.frozen.load(.acquire)) return error.CoordinatorFrozen;
+        try self.requireSetWriteReady();
         if (self.reclaim_required) return error.ReclaimBarrierRequired;
         if (self.recovery_only) return error.RecoveryOnlyCoordinator;
         if (self.set.supplied_count == pool_member_set.max_member_count)
@@ -1405,6 +1412,12 @@ pub const ReplicatedJournal = struct {
             .target_index = target_index,
             .voter_ack_count = voter_ack_count,
         };
+    }
+
+    fn requireSetWriteReady(self: *ReplicatedJournal) !void {
+        if (self.set.controlWriteReady() != null) return;
+        self.frozen.store(true, .release);
+        return error.CoordinatorFrozen;
     }
 
     pub fn isFrozen(self: *const ReplicatedJournal) bool {
@@ -2248,6 +2261,8 @@ test "active non-voter catchup failure only isolates target" {
 test "mapped extents are durable before catalog publication" {
     const Case = enum {
         success,
+        leased_write_failure,
+        leased_sync_failure,
         data_write_failure,
         data_sync_failure,
         catalog_staging_failure,
@@ -2372,7 +2387,7 @@ test "mapped extents are durable before catalog publication" {
         defer std.testing.allocator.free(contents);
         @memset(contents, 0x5a);
         var fault: member_api.FaultController = switch (case) {
-            .success => .{},
+            .success, .leased_write_failure, .leased_sync_failure => .{},
             .data_write_failure => .{ .fail_write_at = 2 },
             .data_sync_failure => .{ .fail_sync_at = 2 },
             .catalog_staging_failure => .{ .fail_write_at = 18 },
@@ -2392,34 +2407,91 @@ test "mapped extents are durable before catalog publication" {
             }},
         };
 
-        if (case == .success) {
+        if (case == .success or case == .leased_write_failure or case == .leased_sync_failure) {
             _ = try coordinator.commitCatalogGeneration(request);
             try std.testing.expectEqual(@as(u64, 1), set.authority().?.generation);
             var actual: [64]u8 = undefined;
             try member.read(.data, 0, &actual);
             try std.testing.expect(std.mem.allEqual(u8, &actual, 0x5a));
-            var backend = try pool_catalog_volume.CatalogVolumeBackend.open(
+            var lease = try pool_catalog_volume.CatalogDataLease.acquire(&set);
+            defer lease.deinit();
+            var backend = try pool_catalog_volume.CatalogVolumeBackend.openWritable(
                 std.testing.allocator,
-                &set,
+                &lease,
                 descriptor.volume_id,
             );
             @memset(&actual, 0);
             try backend.read(0, &actual);
             try std.testing.expect(std.mem.allEqual(u8, &actual, 0x5a));
-            _ = try coordinator.commitAuthorityCheckpoint(
-                try checkpointProposalForAuthority(set.authority().?, id(14)),
-            );
-            try std.testing.expectError(error.PoolAuthorityChanged, backend.read(0, &actual));
-            try std.testing.expectError(
-                error.DataGenerationLeaseRequired,
-                member.asReplicaEndpoint().writeData(0, "stale"),
-            );
+            var replacement: [actual.len]u8 = @splat(0x6b);
+            if (case == .leased_write_failure) {
+                fault.fail_write_at = fault.write_count;
+                try std.testing.expectError(error.InjectedFault, backend.write(&lease, 0, &replacement));
+                try std.testing.expectError(error.WriteFrozen, backend.write(&lease, 0, &replacement));
+                try std.testing.expectEqual(pool_policy.DataAccess.unavailable, set.dataAccess());
+                try std.testing.expect(set.controlWriteReady() == null);
+            } else if (case == .leased_sync_failure) {
+                try backend.write(&lease, 0, &replacement);
+                fault.fail_sync_at = fault.sync_count;
+                try std.testing.expectError(error.InjectedFault, backend.flush(&lease));
+                try std.testing.expectError(error.WriteFrozen, backend.flush(&lease));
+                try std.testing.expectEqual(pool_policy.DataAccess.unavailable, set.dataAccess());
+                try std.testing.expect(set.controlWriteReady() == null);
+            } else {
+                try backend.write(&lease, 0, &replacement);
+                const sync_count_before_flush = fault.sync_count;
+                try backend.flush(&lease);
+                try std.testing.expectEqual(sync_count_before_flush + 1, fault.sync_count);
+                @memset(&actual, 0);
+                try backend.read(0, &actual);
+                try std.testing.expectEqualSlices(u8, &replacement, &actual);
+                try std.testing.expectError(error.OutOfBounds, backend.write(&lease, backend.logicalSize() + 1, ""));
+                try std.testing.expectError(error.OutOfBounds, backend.read(backend.logicalSize() + 1, actual[0..0]));
+                try std.testing.expectError(
+                    error.DataGenerationLeaseRequired,
+                    member.asReplicaEndpoint().writeData(0, "stale"),
+                );
+                _ = try coordinator.commitAuthorityCheckpoint(
+                    try checkpointProposalForAuthority(set.authority().?, id(14)),
+                );
+                try std.testing.expectError(error.PoolAuthorityChanged, backend.read(0, &actual));
+                try std.testing.expectError(error.PoolAuthorityChanged, backend.write(&lease, 0, &replacement));
+                try std.testing.expectError(error.PoolAuthorityChanged, backend.write(&lease, 0, ""));
+                try std.testing.expectError(
+                    error.DataAlreadyClaimed,
+                    pool_catalog_volume.CatalogDataLease.acquire(&set),
+                );
+                lease.release();
+                var refreshed_lease = try pool_catalog_volume.CatalogDataLease.acquire(&set);
+                defer refreshed_lease.deinit();
+                var refreshed_backend = try pool_catalog_volume.CatalogVolumeBackend.openWritable(
+                    std.testing.allocator,
+                    &refreshed_lease,
+                    descriptor.volume_id,
+                );
+                @memset(&actual, 0);
+                try refreshed_backend.read(0, &actual);
+                try std.testing.expectEqualSlices(u8, &replacement, &actual);
+                try std.testing.expectError(
+                    error.DataGenerationLeaseRequired,
+                    member.asReplicaEndpoint().writeData(0, "stale"),
+                );
+            }
+            if (case == .leased_write_failure or case == .leased_sync_failure) {
+                try std.testing.expectError(
+                    error.CoordinatorFrozen,
+                    coordinator.commitAuthorityCheckpoint(
+                        try checkpointProposalForAuthority(set.authority().?, id(14)),
+                    ),
+                );
+                try std.testing.expect(coordinator.isFrozen());
+            }
         } else {
             const expected_error: anyerror = switch (case) {
                 .data_write_failure, .data_sync_failure => error.DataStagingFailed,
                 .catalog_staging_failure => error.CatalogStagingFailed,
                 .unknown_commit_before, .unknown_commit_after => error.CommitOutcomeUnknown,
-                .success => unreachable,
+                .success, .leased_write_failure, .leased_sync_failure => unreachable,
             };
             try std.testing.expectError(expected_error, coordinator.commitCatalogGeneration(request));
             try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
