@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const pb = @import("control_proto");
+const heartbeat = @import("heartbeat.zig");
 const raft = @import("raft_zig");
 const uuid = @import("uuid");
 const wire = @import("protobuf_wire.zig");
@@ -260,6 +261,15 @@ const State = struct {
 pub const PoolStateMachine = struct {
     allocator: std.mem.Allocator,
     state: State = .{},
+    heartbeat_store: ?*heartbeat.HeartbeatStore = null,
+
+    pub const HeartbeatBindingResult = enum {
+        node_not_found,
+        member_not_found,
+        binding_mismatch,
+        capacity_mismatch,
+        ok,
+    };
 
     pub fn init(allocator: std.mem.Allocator) PoolStateMachine {
         return .{ .allocator = allocator };
@@ -272,6 +282,10 @@ pub const PoolStateMachine = struct {
 
     pub fn stateMachine(self: *PoolStateMachine) raft.StateMachine {
         return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    pub fn setHeartbeatStore(self: *PoolStateMachine, store: ?*heartbeat.HeartbeatStore) void {
+        self.heartbeat_store = store;
     }
 
     pub fn poolCount(self: *const PoolStateMachine) usize {
@@ -288,6 +302,36 @@ pub const PoolStateMachine = struct {
 
     pub fn memberCount(self: *const PoolStateMachine) usize {
         return self.state.members_by_id.count();
+    }
+
+    pub fn validateHeartbeatBinding(self: *const PoolStateMachine, request: pb.ReportHeartbeatRequest) HeartbeatBindingResult {
+        if (request.node_id.len == 0 or request.cluster_id.len != 16 or request.incarnation == 0 or request.sequence == 0) {
+            return .binding_mismatch;
+        }
+        const node = self.state.nodes_by_id.get(request.node_id) orelse return .node_not_found;
+        if (!std.mem.eql(u8, node.cluster_id, request.cluster_id)) return .binding_mismatch;
+        for (request.members.items) |reported| {
+            if (reported.member_id.len != 16 or reported.local_set_id.len != 16 or reported.member_slot > std.math.maxInt(u16)) {
+                return .binding_mismatch;
+            }
+            const registered = self.state.members_by_id.get(reported.member_id) orelse return .member_not_found;
+            if (!std.mem.eql(u8, registered.node_id, request.node_id) or
+                !std.mem.eql(u8, registered.local_set_id, reported.local_set_id) or
+                registered.member_slot != reported.member_slot)
+            {
+                return .binding_mismatch;
+            }
+            if (reported.capacity) |capacity| {
+                if (registered.extent_size_bytes == 0 or registered.data_capacity_bytes % registered.extent_size_bytes != 0) {
+                    return .capacity_mismatch;
+                }
+                var total = std.math.add(u64, capacity.free_extent_count, capacity.allocated_extent_count) catch return .capacity_mismatch;
+                total = std.math.add(u64, total, capacity.reserved_extent_count) catch return .capacity_mismatch;
+                total = std.math.add(u64, total, capacity.retired_extent_count) catch return .capacity_mismatch;
+                if (total != registered.data_capacity_bytes / registered.extent_size_bytes) return .capacity_mismatch;
+            }
+        }
+        return .ok;
     }
 
     pub fn getPoolById(self: *const PoolStateMachine, allocator: std.mem.Allocator, id: []const u8) !?pb.Pool {
@@ -960,12 +1004,19 @@ pub const PoolStateMachine = struct {
         }
         self.state.deinit(self.allocator);
         self.state = restored;
+        if (self.heartbeat_store) |store| store.clearObservations();
+    }
+
+    fn onLeadershipChange(ctx: *anyopaque, is_leader: bool, term: u64, _: u64) void {
+        const self: *PoolStateMachine = @ptrCast(@alignCast(ctx));
+        if (self.heartbeat_store) |store| store.onLeadershipChange(is_leader, term);
     }
 
     const vtable: raft.StateMachine.VTable = .{
         .apply = apply,
         .take_snapshot = takeSnapshot,
         .restore_snapshot = restoreSnapshot,
+        .on_leadership_change = onLeadershipChange,
     };
 };
 
@@ -2156,6 +2207,154 @@ fn addTestPoolAndNode(allocator: std.mem.Allocator, machine: *PoolStateMachine) 
         1_753_744_000_001,
     ));
     defer node.deinit(allocator);
+}
+
+fn testHeartbeatRequest(
+    cluster_id: []const u8,
+    node_id: []const u8,
+    members: []pb.MemberHeartbeat,
+) pb.ReportHeartbeatRequest {
+    return .{
+        .cluster_id = cluster_id,
+        .node_id = node_id,
+        .incarnation = 1,
+        .sequence = 1,
+        .members = .{ .items = members, .capacity = members.len },
+    };
+}
+
+test "heartbeat binding validation covers registration and capacity outcomes" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var no_members: [0]pb.MemberHeartbeat = .{};
+    try std.testing.expectEqual(
+        PoolStateMachine.HeartbeatBindingResult.node_not_found,
+        machine.validateHeartbeatBinding(testHeartbeatRequest(&test_cluster_id, test_node_id, &no_members)),
+    );
+
+    try addTestPoolAndNode(allocator, &machine);
+    var reported = [_]pb.MemberHeartbeat{.{
+        .member_id = &test_member_id_a,
+        .local_set_id = &test_local_set_id,
+        .member_slot = 0,
+        .state = .MEMBER_HEARTBEAT_STATE_PRESENT,
+        .capacity = .{ .free_extent_count = 2 },
+    }};
+    try std.testing.expectEqual(
+        PoolStateMachine.HeartbeatBindingResult.member_not_found,
+        machine.validateHeartbeatBinding(testHeartbeatRequest(&test_cluster_id, test_node_id, &reported)),
+    );
+
+    var registered = try applyTestMemberCommand(allocator, &machine, 3, testMemberCommand(
+        "heartbeat-member-request",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_002,
+    ));
+    defer registered.deinit(allocator);
+    try std.testing.expectEqual(
+        PoolStateMachine.HeartbeatBindingResult.ok,
+        machine.validateHeartbeatBinding(testHeartbeatRequest(&test_cluster_id, test_node_id, &reported)),
+    );
+
+    var other_cluster = test_cluster_id;
+    other_cluster[0] = 99;
+    try std.testing.expectEqual(
+        PoolStateMachine.HeartbeatBindingResult.binding_mismatch,
+        machine.validateHeartbeatBinding(testHeartbeatRequest(&other_cluster, test_node_id, &reported)),
+    );
+    reported[0].member_slot = 1;
+    try std.testing.expectEqual(
+        PoolStateMachine.HeartbeatBindingResult.binding_mismatch,
+        machine.validateHeartbeatBinding(testHeartbeatRequest(&test_cluster_id, test_node_id, &reported)),
+    );
+    reported[0].member_slot = 0;
+    reported[0].capacity.?.free_extent_count = 1;
+    try std.testing.expectEqual(
+        PoolStateMachine.HeartbeatBindingResult.capacity_mismatch,
+        machine.validateHeartbeatBinding(testHeartbeatRequest(&test_cluster_id, test_node_id, &reported)),
+    );
+}
+
+test "heartbeat capacity validation rejects indivisible registered capacity" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    var command = testMemberCommand(
+        "indivisible-member-request",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_002,
+    );
+    command.data_capacity_bytes += 1;
+    var registered = try applyTestMemberCommand(allocator, &machine, 3, command);
+    defer registered.deinit(allocator);
+    var reported = [_]pb.MemberHeartbeat{.{
+        .member_id = &test_member_id_a,
+        .local_set_id = &test_local_set_id,
+        .state = .MEMBER_HEARTBEAT_STATE_PRESENT,
+        .capacity = .{ .free_extent_count = 2 },
+    }};
+    try std.testing.expectEqual(
+        PoolStateMachine.HeartbeatBindingResult.capacity_mismatch,
+        machine.validateHeartbeatBinding(testHeartbeatRequest(&test_cluster_id, test_node_id, &reported)),
+    );
+}
+
+test "heartbeat observations stay outside snapshots and restore" {
+    const allocator = std.testing.allocator;
+    var store = heartbeat.HeartbeatStore.init(allocator);
+    defer store.deinit();
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    machine.setHeartbeatStore(&store);
+    try addTestPoolAndNode(allocator, &machine);
+    var registered = try applyTestMemberCommand(allocator, &machine, 3, testMemberCommand(
+        "snapshot-heartbeat-member",
+        &test_member_id_a,
+        test_pool_id,
+        test_node_id,
+        &test_local_set_id,
+        0,
+        1_753_744_000_002,
+    ));
+    defer registered.deinit(allocator);
+
+    var before = try machine.stateMachine().takeSnapshot(allocator, 3, 1, .{});
+    defer before.deinit(allocator);
+    machine.stateMachine().onLeadershipChange(true, 9, 1);
+    var reported = [_]pb.MemberHeartbeat{.{
+        .member_id = &test_member_id_a,
+        .local_set_id = &test_local_set_id,
+        .state = .MEMBER_HEARTBEAT_STATE_PRESENT,
+        .capacity = .{ .free_extent_count = 2 },
+    }};
+    _ = try store.report(testHeartbeatRequest(&test_cluster_id, test_node_id, &reported), 9, 100, 1_000);
+    var after = try machine.stateMachine().takeSnapshot(allocator, 3, 1, .{});
+    defer after.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, before.data, after.data);
+
+    var in_place_reader = TestSnapshotReader{ .data = after.data };
+    try machine.stateMachine().restoreSnapshot(after.metadata, in_place_reader.reader());
+    try std.testing.expectEqual(@as(?heartbeat.GetResult, null), try store.get(test_node_id, 9, 200));
+
+    var restored_store = heartbeat.HeartbeatStore.init(allocator);
+    defer restored_store.deinit();
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    restored.setHeartbeatStore(&restored_store);
+    restored.stateMachine().onLeadershipChange(true, 10, 1);
+    var reader = TestSnapshotReader{ .data = after.data };
+    try restored.stateMachine().restoreSnapshot(after.metadata, reader.reader());
+    try std.testing.expectEqual(@as(?heartbeat.GetResult, null), try restored_store.get(test_node_id, 10, 200));
 }
 
 fn overlongOne(allocator: std.mem.Allocator, canonical: []const u8) ![]u8 {

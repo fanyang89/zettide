@@ -20,6 +20,11 @@ service MemberService {
   rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
 }
 
+service HeartbeatService {
+  rpc ReportHeartbeat(ReportHeartbeatRequest) returns (ReportHeartbeatResponse);
+  rpc GetHeartbeat(GetHeartbeatRequest) returns (GetHeartbeatResponse);
+}
+
 message Pool {
   string id = 1;
   string name = 2;
@@ -152,6 +157,66 @@ message ListMembersRequest {
 message ListMembersResponse {
   repeated Member members = 1;
   bytes next_page_token = 2;
+}
+
+enum MemberHeartbeatState {
+  MEMBER_HEARTBEAT_STATE_UNSPECIFIED = 0;
+  MEMBER_HEARTBEAT_STATE_PRESENT = 1;
+  MEMBER_HEARTBEAT_STATE_UNAVAILABLE = 2;
+}
+
+enum HeartbeatFreshness {
+  HEARTBEAT_FRESHNESS_UNSPECIFIED = 0;
+  HEARTBEAT_FRESHNESS_FRESH = 1;
+  HEARTBEAT_FRESHNESS_STALE = 2;
+}
+
+message MemberCapacity {
+  uint64 free_extent_count = 1;
+  uint64 allocated_extent_count = 2;
+  uint64 reserved_extent_count = 3;
+  uint64 retired_extent_count = 4;
+}
+
+message MemberHeartbeat {
+  bytes member_id = 1;
+  bytes local_set_id = 2;
+  uint32 member_slot = 3;
+  MemberHeartbeatState state = 4;
+  MemberCapacity capacity = 5;
+}
+
+message ReportHeartbeatRequest {
+  bytes cluster_id = 1;
+  string node_id = 2;
+  uint64 incarnation = 3;
+  uint64 sequence = 4;
+  repeated MemberHeartbeat members = 5;
+}
+
+message NodeHeartbeat {
+  string node_id = 1;
+  uint64 incarnation = 2;
+  uint64 sequence = 3;
+  int64 accepted_at_unix_ms = 4;
+  uint64 leader_term = 5;
+  repeated MemberHeartbeat members = 6;
+}
+
+message ReportHeartbeatResponse {
+  NodeHeartbeat observation = 1;
+  uint32 recommended_interval_ms = 2;
+  uint32 stale_after_ms = 3;
+}
+
+message GetHeartbeatRequest {
+  string node_id = 1;
+}
+
+message GetHeartbeatResponse {
+  NodeHeartbeat observation = 1;
+  HeartbeatFreshness freshness = 2;
+  uint64 age_ms = 3;
 }
 
 message CommandEnvelope {
