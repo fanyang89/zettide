@@ -85,6 +85,10 @@ pub fn build(b: *std.Build) void {
     const spdk_dispatcher_step = b.step("test-spdk-dispatcher", "Run the Linux SPDK dispatcher test");
     spdk_dispatcher_step.dependOn(&spdk_dispatcher_cmd.step);
 
+    const spdk_provider_cmd = b.addSystemCommand(&.{ "bash", "test/spdk-provider.sh" });
+    const spdk_provider_step = b.step("test-spdk-provider", "Run the asynchronous SPDK bdev provider test");
+    spdk_provider_step.dependOn(&spdk_provider_cmd.step);
+
     const spdk_storage_test = createSpdkStorageTest(b, target, optimize, portable_core);
     const spdk_storage_cmd = b.addSystemCommand(&.{ "bash", "test/spdk-storage.sh" });
     spdk_storage_cmd.addArtifactArg(spdk_storage_test);
