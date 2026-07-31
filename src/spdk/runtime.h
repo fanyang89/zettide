@@ -27,6 +27,7 @@ struct zettide_spdk_runtime_opts {
 	bool no_huge;
 	bool disable_signal_handlers;
 	bool disable_cpumask_locks;
+	const char *vhost_socket_path;
 };
 
 void zettide_spdk_runtime_opts_init(struct zettide_spdk_runtime_opts *opts,
@@ -40,6 +41,8 @@ int zettide_spdk_runtime_destroy(struct zettide_spdk_runtime *runtime);
 int zettide_spdk_runtime_acquire(struct zettide_spdk_runtime *runtime,
 		struct spdk_thread **owner_out);
 void zettide_spdk_runtime_release(struct zettide_spdk_runtime *runtime);
+const char *zettide_spdk_runtime_get_vhost_socket_path(
+		const struct zettide_spdk_runtime *runtime);
 
 #ifdef __cplusplus
 }

@@ -28,6 +28,7 @@ trap cleanup EXIT
 packages=(
 	spdk_event
 	spdk_event_bdev
+	spdk_vhost
 	spdk_event_nvmf
 	spdk_bdev_modules
 	spdk_env_dpdk

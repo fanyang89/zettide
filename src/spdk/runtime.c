@@ -2,6 +2,7 @@
 
 #include "spdk/event.h"
 #include "spdk/thread.h"
+#include "spdk/vhost.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -29,6 +30,7 @@ struct zettide_spdk_runtime {
 	int app_status;
 	char *name;
 	char *reactor_mask;
+	char *vhost_socket_path;
 	void *json_data;
 	size_t json_data_size;
 	int mem_size_mb;
@@ -88,6 +90,20 @@ run_runtime(void *context)
 	options.no_huge = runtime->no_huge;
 	options.disable_signal_handlers = true;
 	options.disable_cpumask_locks = runtime->disable_cpumask_locks;
+	if (runtime->vhost_socket_path != NULL) {
+		status = spdk_vhost_set_socket_path(runtime->vhost_socket_path);
+		if (status != 0) {
+			rc = pthread_mutex_lock(&runtime->mutex);
+			assert(rc == 0);
+			runtime->app_status = status;
+			runtime->state = RUNTIME_FAILED;
+			rc = pthread_cond_broadcast(&runtime->condition);
+			assert(rc == 0);
+			rc = pthread_mutex_unlock(&runtime->mutex);
+			assert(rc == 0);
+			return NULL;
+		}
+	}
 	status = spdk_app_start(&options, runtime_started, runtime);
 	rc = pthread_mutex_lock(&runtime->mutex);
 	assert(rc == 0);
@@ -120,6 +136,7 @@ static void
 free_runtime_fields(struct zettide_spdk_runtime *runtime)
 {
 	free(runtime->json_data);
+	free(runtime->vhost_socket_path);
 	free(runtime->reactor_mask);
 	free(runtime->name);
 }
@@ -163,6 +180,7 @@ zettide_spdk_runtime_start(const struct zettide_spdk_runtime_opts *opts,
 
 	if (opts == NULL || runtime_out == NULL || opts->opts_size != sizeof(*opts) ||
 		opts->name == NULL || !opts->disable_signal_handlers ||
+		(opts->vhost_socket_path != NULL && opts->vhost_socket_path[0] == '\0') ||
 		(opts->json_data == NULL && opts->json_data_size != 0)) {
 		return -EINVAL;
 	}
@@ -186,6 +204,8 @@ zettide_spdk_runtime_start(const struct zettide_spdk_runtime_opts *opts,
 	}
 	runtime->name = strdup(opts->name);
 	runtime->reactor_mask = opts->reactor_mask == NULL ? NULL : strdup(opts->reactor_mask);
+	runtime->vhost_socket_path = opts->vhost_socket_path == NULL ? NULL :
+			strdup(opts->vhost_socket_path);
 	if (opts->json_data_size != 0) {
 		runtime->json_data = malloc(opts->json_data_size);
 		if (runtime->json_data != NULL) {
@@ -194,6 +214,7 @@ zettide_spdk_runtime_start(const struct zettide_spdk_runtime_opts *opts,
 	}
 	if (runtime->name == NULL ||
 		(opts->reactor_mask != NULL && runtime->reactor_mask == NULL) ||
+		(opts->vhost_socket_path != NULL && runtime->vhost_socket_path == NULL) ||
 		(opts->json_data_size != 0 && runtime->json_data == NULL)) {
 		free_runtime_fields(runtime);
 		free(runtime);
@@ -389,4 +410,10 @@ zettide_spdk_runtime_release(struct zettide_spdk_runtime *runtime)
 	runtime->active_leases--;
 	rc = pthread_mutex_unlock(&runtime->mutex);
 	assert(rc == 0);
+}
+
+const char *
+zettide_spdk_runtime_get_vhost_socket_path(const struct zettide_spdk_runtime *runtime)
+{
+	return runtime == NULL ? NULL : runtime->vhost_socket_path;
 }

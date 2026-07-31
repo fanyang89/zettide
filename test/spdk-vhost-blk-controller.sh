@@ -12,11 +12,13 @@ fi
 
 build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
+socket_dir="$build_dir/sockets"
+mkdir "$socket_dir"
 
 packages=(
 	spdk_event
 	spdk_event_bdev
-	spdk_vhost
+	spdk_event_vhost_blk
 	spdk_bdev_modules
 	spdk_env_dpdk
 	spdk_sock_modules
@@ -33,10 +35,10 @@ done
 # SPDK modules register through constructors and must not be dropped as unused.
 # shellcheck disable=SC2046
 "${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
-	src/spdk/runtime.c src/spdk/bdev_endpoint.c src/spdk/bdev_dispatcher.c test/spdk_dispatcher.c \
-	-o "$build_dir/zettide-spdk-dispatcher-test" -pthread \
+	src/spdk/runtime.c src/spdk/vhost_blk_controller.c test/spdk_vhost_blk_controller.c \
+	-o "$build_dir/zettide-spdk-vhost-blk-controller-test" -pthread \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \
 	-Wl,--as-needed
 LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-	timeout 30 "$build_dir/zettide-spdk-dispatcher-test"
+	timeout 30 "$build_dir/zettide-spdk-vhost-blk-controller-test" "$socket_dir"

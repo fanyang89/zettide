@@ -16,6 +16,7 @@ trap 'rm -rf "$build_dir"' EXIT
 packages=(
 	spdk_event
 	spdk_event_bdev
+	spdk_vhost
 	spdk_bdev_modules
 	spdk_env_dpdk
 	spdk_sock_modules

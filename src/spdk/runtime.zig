@@ -18,6 +18,7 @@ pub const Runtime = struct {
         no_pci: bool = false,
         no_huge: bool = false,
         disable_cpumask_locks: bool = false,
+        vhost_socket_path: ?[]const u8 = null,
     };
 
     pub fn start(allocator: std.mem.Allocator, options: Options) !Runtime {
@@ -25,6 +26,8 @@ pub const Runtime = struct {
         defer allocator.free(name_z);
         const reactor_mask_z = if (options.reactor_mask) |value| try allocator.dupeZ(u8, value) else null;
         defer if (reactor_mask_z) |value| allocator.free(value);
+        const vhost_socket_path_z = if (options.vhost_socket_path) |value| try allocator.dupeZ(u8, value) else null;
+        defer if (vhost_socket_path_z) |value| allocator.free(value);
 
         var c_options: c.struct_zettide_spdk_runtime_opts = undefined;
         c.zettide_spdk_runtime_opts_init(&c_options, @sizeOf(@TypeOf(c_options)));
@@ -36,6 +39,7 @@ pub const Runtime = struct {
         c_options.no_pci = options.no_pci;
         c_options.no_huge = options.no_huge;
         c_options.disable_cpumask_locks = options.disable_cpumask_locks;
+        c_options.vhost_socket_path = if (vhost_socket_path_z) |value| value.ptr else null;
         var handle: ?*c.struct_zettide_spdk_runtime = null;
         try statusError(c.zettide_spdk_runtime_start(&c_options, &handle));
         return .{ .handle = handle orelse return error.UnexpectedRuntimeStatus };
