@@ -15,8 +15,26 @@ const pool_catalog_volume = @import("pool_catalog_volume.zig");
 const pool_certificate = @import("pool_certificate.zig");
 const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
+const spdk_catalog_volume_backend = @import("../spdk/catalog_volume_backend.zig");
 
 const max_control_participant_count: usize = 6;
+
+const ProviderCompletion = struct {
+    io: std.Io,
+    semaphore: std.Io.Semaphore = .{},
+    status: c_int = 0,
+
+    fn callback(context_raw: ?*anyopaque, status: c_int) callconv(.c) void {
+        const context: *ProviderCompletion = @ptrCast(@alignCast(context_raw.?));
+        context.status = status;
+        context.semaphore.post(context.io);
+    }
+
+    fn wait(self: *ProviderCompletion) c_int {
+        self.semaphore.waitUncancelable(self.io);
+        return self.status;
+    }
+};
 
 pub const CommitResult = struct {
     record: control_record.Record,
@@ -2525,6 +2543,65 @@ test "mapped extents are durable before catalog publication" {
                 try std.testing.expectEqualSlices(u8, &replacement, &actual);
                 try std.testing.expectError(error.OutOfBounds, backend.write(&lease, backend.logicalSize() + 1, ""));
                 try std.testing.expectError(error.OutOfBounds, backend.read(backend.logicalSize() + 1, actual[0..0]));
+                lease.release();
+                {
+                    const Worker = spdk_catalog_volume_backend.Worker;
+                    const provider = spdk_catalog_volume_backend.c;
+                    const worker = try Worker.create(
+                        std.testing.allocator,
+                        std.testing.io,
+                        &set,
+                        descriptor.volume_id,
+                    );
+                    defer worker.close();
+                    try std.testing.expectEqual(volume_header.logical_size, worker.logicalSize());
+
+                    @memset(&replacement, 0x6c);
+                    var completion: ProviderCompletion = .{ .io = std.testing.io };
+                    try std.testing.expectEqual(@as(c_int, 0), Worker.submit(
+                        worker,
+                        provider.ZETTIDE_SPDK_BDEV_PROVIDER_WRITE,
+                        0,
+                        @ptrCast(&replacement),
+                        replacement.len,
+                        ProviderCompletion.callback,
+                        &completion,
+                    ));
+                    try std.testing.expectEqual(@as(c_int, 0), completion.wait());
+                    try std.testing.expectEqual(@as(c_int, 0), Worker.submit(
+                        worker,
+                        provider.ZETTIDE_SPDK_BDEV_PROVIDER_FLUSH,
+                        0,
+                        null,
+                        0,
+                        ProviderCompletion.callback,
+                        &completion,
+                    ));
+                    try std.testing.expectEqual(@as(c_int, 0), completion.wait());
+                    var worker_actual: [replacement.len]u8 = @splat(0);
+                    try std.testing.expectEqual(@as(c_int, 0), Worker.submit(
+                        worker,
+                        provider.ZETTIDE_SPDK_BDEV_PROVIDER_READ,
+                        0,
+                        @ptrCast(&worker_actual),
+                        worker_actual.len,
+                        ProviderCompletion.callback,
+                        &completion,
+                    ));
+                    try std.testing.expectEqual(@as(c_int, 0), completion.wait());
+                    try std.testing.expectEqualSlices(u8, &replacement, &worker_actual);
+                    try std.testing.expectEqual(@as(c_int, 0), Worker.submit(
+                        worker,
+                        provider.ZETTIDE_SPDK_BDEV_PROVIDER_WRITE,
+                        extent_size,
+                        @ptrCast(&replacement),
+                        replacement.len,
+                        ProviderCompletion.callback,
+                        &completion,
+                    ));
+                    try std.testing.expectEqual(-provider.ENOSPC, completion.wait());
+                }
+                lease = try pool_catalog_volume.CatalogDataLease.acquire(&set);
                 try std.testing.expectError(
                     error.DataGenerationLeaseRequired,
                     member.asReplicaEndpoint().writeData(0, "stale"),
