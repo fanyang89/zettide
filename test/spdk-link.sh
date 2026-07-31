@@ -17,6 +17,7 @@ packages=(
 	spdk_event
 	spdk_event_bdev
 	spdk_event_nvmf
+	spdk_event_vhost_blk
 	spdk_bdev_modules
 	spdk_env_dpdk
 	spdk_sock_modules
