@@ -162,7 +162,7 @@ fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runti
 
 fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime) !void {
     const names = [_][]const u8{ "ZettideStorage0", "ZettideStorage1", "ZettideStorage2" };
-    var duplicate_storages: [2]zettide.v3.storage.Storage = undefined;
+    var duplicate_storages: [3]zettide.v3.storage.Storage = undefined;
     var duplicate_count: usize = 0;
     errdefer zettide.v3.storage.closeAll(duplicate_storages[0..duplicate_count], context.io) catch {};
     for (&duplicate_storages) |*storage| {
