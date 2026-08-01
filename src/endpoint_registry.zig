@@ -3,34 +3,30 @@ const std = @import("std");
 pub const EndpointId = [16]u8;
 pub const PoolId = [16]u8;
 pub const VolumeId = [16]u8;
-pub const name_length = 36;
 pub const max_endpoint_count = 1024;
+
+pub const Frontend = enum(u8) {
+    vhost_user_blk = 1,
+    iscsi = 2,
+};
 
 pub const Spec = struct {
     endpoint_id: EndpointId,
     pool_id: PoolId,
     volume_id: VolumeId,
+    frontend: Frontend,
 };
 
-pub const Names = struct {
-    bdev: [name_length]u8,
-    controller: [name_length]u8,
-
-    pub fn bdevSlice(self: *const Names) []const u8 {
-        return &self.bdev;
-    }
-
-    pub fn controllerSlice(self: *const Names) []const u8 {
-        return &self.controller;
-    }
+pub const Locator = union(Frontend) {
+    vhost_user_blk: struct {
+        socket_path: []const u8,
+    },
+    iscsi: struct {
+        portal: []const u8,
+        target_name: []const u8,
+        lun: u64,
+    },
 };
-
-pub fn namesFor(endpoint_id: EndpointId) Names {
-    var result: Names = undefined;
-    _ = std.fmt.bufPrint(&result.bdev, "zvb-{x}", .{endpoint_id}) catch unreachable;
-    _ = std.fmt.bufPrint(&result.controller, "zvh-{x}", .{endpoint_id}) catch unreachable;
-    return result;
-}
 
 pub const DesiredStore = struct {
     context: *anyopaque,
@@ -56,19 +52,20 @@ pub const Backend = struct {
 
     pub const Instance = struct {
         handle: *anyopaque,
-        /// This path remains valid until stop succeeds.
-        socket_path: []const u8,
+        /// Borrowed locator strings remain valid until stop succeeds.
+        locator: Locator,
     };
 
     pub const VTable = struct {
         /// Runtime resources are process-owned. On error, start must leave no
-        /// resources behind; a successful instance lives until stop succeeds.
-        start: *const fn (*anyopaque, Spec, Names) anyerror!Instance,
+        /// resources behind. A successful locator tag must match Spec.frontend,
+        /// and the instance lives until stop succeeds.
+        start: *const fn (*anyopaque, Spec) anyerror!Instance,
         stop: *const fn (*anyopaque, *anyopaque) anyerror!void,
     };
 
-    pub fn start(self: Backend, spec: Spec, names: Names) !Instance {
-        return self.vtable.start(self.context, spec, names);
+    pub fn start(self: Backend, spec: Spec) !Instance {
+        return self.vtable.start(self.context, spec);
     }
 
     pub fn stop(self: Backend, handle: *anyopaque) !void {
@@ -82,12 +79,11 @@ pub const State = enum {
     failed,
 };
 
-/// Borrowed registry state. socket_path is valid until the endpoint is stopped.
+/// Borrowed registry state. Locator strings are valid while state is active.
 pub const View = struct {
     spec: Spec,
-    names: Names,
     state: State,
-    socket_path: ?[]const u8,
+    locator: ?Locator,
 };
 
 pub const ReconcileResult = struct {
@@ -268,10 +264,16 @@ pub const Registry = struct {
 
     fn startEntry(self: *Registry, entry: *Entry) !void {
         entry.phase = .pending;
-        const runtime = self.backend.start(entry.spec, namesFor(entry.spec.endpoint_id)) catch |err| {
+        const runtime = self.backend.start(entry.spec) catch |err| {
             entry.phase = .failed;
             return err;
         };
+        if (std.meta.activeTag(runtime.locator) != entry.spec.frontend) {
+            self.backend.stop(runtime.handle) catch |err|
+                std.debug.panic("failed to roll back mismatched endpoint frontend: {s}", .{@errorName(err)});
+            entry.phase = .failed;
+            return error.FrontendMismatch;
+        }
         entry.runtime = runtime;
         entry.phase = .active;
     }
@@ -295,13 +297,12 @@ pub const Registry = struct {
     fn viewOf(entry: *const Entry) View {
         return .{
             .spec = entry.spec,
-            .names = namesFor(entry.spec.endpoint_id),
             .state = switch (entry.phase) {
                 .pending => .pending,
                 .active => .active,
                 .failed, .stopping => .failed,
             },
-            .socket_path = if (entry.phase == .active) entry.runtime.?.socket_path else null,
+            .locator = if (entry.phase == .active) entry.runtime.?.locator else null,
         };
     }
 };
@@ -312,9 +313,10 @@ pub const FileStore = struct {
     basename: []const u8,
 
     const magic = "ZETENDP1".*;
-    const version: u16 = 1;
+    const version: u16 = 2;
     const header_size = 20;
-    const record_size = 48;
+    const legacy_record_size = 48;
+    const record_size = 52;
     const max_state_bytes = header_size + max_endpoint_count * record_size;
 
     pub fn init(io: std.Io, parent: std.Io.Dir, basename: []const u8) FileStore {
@@ -373,6 +375,7 @@ pub const FileStore = struct {
             @memcpy(record[0..16], &spec.endpoint_id);
             @memcpy(record[16..32], &spec.pool_id);
             @memcpy(record[32..48], &spec.volume_id);
+            record[48] = @intFromEnum(spec.frontend);
         }
         std.mem.writeInt(u32, bytes[16..20], std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]), .little);
         return bytes;
@@ -381,22 +384,38 @@ pub const FileStore = struct {
     fn decode(allocator: std.mem.Allocator, bytes: []const u8) ![]Spec {
         if (bytes.len < header_size or !std.mem.eql(u8, bytes[0..8], &magic))
             return error.InvalidDesiredState;
-        if (std.mem.readInt(u16, bytes[8..10], .little) != version or
-            std.mem.readInt(u16, bytes[10..12], .little) != record_size)
-            return error.InvalidDesiredState;
+        const encoded_version = std.mem.readInt(u16, bytes[8..10], .little);
+        const encoded_record_size = std.mem.readInt(u16, bytes[10..12], .little);
+        const actual_record_size: usize = switch (encoded_version) {
+            1 => if (encoded_record_size == legacy_record_size)
+                legacy_record_size
+            else
+                return error.InvalidDesiredState,
+            version => if (encoded_record_size == record_size) record_size else return error.InvalidDesiredState,
+            else => return error.InvalidDesiredState,
+        };
         const count = std.mem.readInt(u32, bytes[12..16], .little);
-        if (count > max_endpoint_count or bytes.len != header_size + @as(usize, count) * record_size)
+        if (count > max_endpoint_count or bytes.len != header_size + @as(usize, count) * actual_record_size)
             return error.InvalidDesiredState;
         if (std.mem.readInt(u32, bytes[16..20], .little) != std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]))
             return error.InvalidDesiredState;
 
         const specs = try allocator.alloc(Spec, count);
+        errdefer allocator.free(specs);
         for (specs, 0..) |*spec, index| {
-            const record = bytes[header_size + index * record_size ..][0..record_size];
+            const record = bytes[header_size + index * actual_record_size ..][0..actual_record_size];
+            const frontend: Frontend = if (encoded_version == 1)
+                .vhost_user_blk
+            else blk: {
+                if (!isZero(record[49..52])) return error.InvalidDesiredState;
+                break :blk std.enums.fromInt(Frontend, record[48]) orelse
+                    return error.InvalidDesiredState;
+            };
             spec.* = .{
                 .endpoint_id = record[0..16].*,
                 .pool_id = record[16..32].*,
                 .volume_id = record[32..48].*,
+                .frontend = frontend,
             };
         }
         return specs;
@@ -452,6 +471,7 @@ const FakeBackend = struct {
     stops: usize = 0,
     fail_start: bool = false,
     fail_stop: bool = false,
+    mismatch_frontend: bool = false,
 
     const Slot = struct {
         active: bool = false,
@@ -463,17 +483,30 @@ const FakeBackend = struct {
         return .{ .context = self, .vtable = &vtable };
     }
 
-    fn start(context: *anyopaque, spec: Spec, names: Names) !Backend.Instance {
+    fn start(context: *anyopaque, spec: Spec) !Backend.Instance {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
         if (self.fail_start) return error.StartFailed;
         for (&self.slots) |*slot| {
             if (slot.active) continue;
             slot.active = true;
-            const path = try std.fmt.bufPrint(&slot.socket_path, "/run/zettide/{s}", .{names.controllerSlice()});
+            const path = try std.fmt.bufPrint(&slot.socket_path, "/run/zettide/{x}", .{spec.endpoint_id});
             slot.socket_path_len = path.len;
             self.starts += 1;
-            _ = spec;
-            return .{ .handle = slot, .socket_path = slot.socket_path[0..slot.socket_path_len] };
+            const locator_frontend: Frontend = if (self.mismatch_frontend) switch (spec.frontend) {
+                .vhost_user_blk => .iscsi,
+                .iscsi => .vhost_user_blk,
+            } else spec.frontend;
+            const locator: Locator = switch (locator_frontend) {
+                .vhost_user_blk => .{ .vhost_user_blk = .{
+                    .socket_path = slot.socket_path[0..slot.socket_path_len],
+                } },
+                .iscsi => .{ .iscsi = .{
+                    .portal = "127.0.0.1:3260",
+                    .target_name = "iqn.2026-08.io.zettide:test",
+                    .lun = 0,
+                } },
+            };
+            return .{ .handle = slot, .locator = locator };
         }
         return error.NoBackendSlots;
     }
@@ -501,13 +534,8 @@ fn testSpec(endpoint: u8, pool: u8, volume: u8) Spec {
         .endpoint_id = testId(endpoint),
         .pool_id = testId(pool),
         .volume_id = testId(volume),
+        .frontend = .vhost_user_blk,
     };
-}
-
-test "stable endpoint names use the endpoint id" {
-    const names = namesFor(testId(0xab));
-    try std.testing.expectEqualStrings("zvb-000000000000000000000000000000ab", names.bdevSlice());
-    try std.testing.expectEqualStrings("zvh-000000000000000000000000000000ab", names.controllerSlice());
 }
 
 test "ensure is durable idempotent and limited to one endpoint per pool" {
@@ -529,7 +557,10 @@ test "ensure is durable idempotent and limited to one endpoint per pool" {
     defer std.testing.allocator.free(listed);
     try std.testing.expectEqual(@as(usize, 1), listed.len);
     try std.testing.expect(std.meta.eql(spec, listed[0].spec));
-    try std.testing.expectEqualStrings(created.socket_path.?, listed[0].socket_path.?);
+    try std.testing.expectEqualStrings(
+        created.locator.?.vhost_user_blk.socket_path,
+        listed[0].locator.?.vhost_user_blk.socket_path,
+    );
 
     _ = try registry.ensure(spec);
     try std.testing.expectEqual(@as(usize, 1), backend.starts);
@@ -553,6 +584,44 @@ test "ensure persists before start and retains failed desired state" {
     try std.testing.expectEqual(State.failed, (try registry.inspect(spec.endpoint_id)).state);
 
     backend.fail_start = false;
+    try std.testing.expectEqual(State.active, (try registry.ensure(spec)).state);
+}
+
+test "registry returns a typed iSCSI locator" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var registry = try Registry.init(std.testing.allocator, store.desiredStore(), backend.backend());
+    defer {
+        registry.shutdown() catch unreachable;
+        registry.deinit();
+    }
+
+    var spec = testSpec(1, 2, 3);
+    spec.frontend = .iscsi;
+    const view = try registry.ensure(spec);
+    try std.testing.expectEqual(Frontend.iscsi, std.meta.activeTag(view.locator.?));
+    try std.testing.expectEqualStrings("127.0.0.1:3260", view.locator.?.iscsi.portal);
+    try std.testing.expectEqual(@as(u64, 0), view.locator.?.iscsi.lun);
+}
+
+test "registry rolls back a mismatched backend locator" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{ .mismatch_frontend = true };
+    var registry = try Registry.init(std.testing.allocator, store.desiredStore(), backend.backend());
+    defer {
+        registry.shutdown() catch unreachable;
+        registry.deinit();
+    }
+
+    const spec = testSpec(1, 2, 3);
+    try std.testing.expectError(error.FrontendMismatch, registry.ensure(spec));
+    try std.testing.expectEqual(@as(usize, 1), backend.starts);
+    try std.testing.expectEqual(@as(usize, 1), backend.stops);
+    try std.testing.expectEqual(State.failed, (try registry.inspect(spec.endpoint_id)).state);
+
+    backend.mismatch_frontend = false;
     try std.testing.expectEqual(State.active, (try registry.ensure(spec)).state);
 }
 
@@ -659,7 +728,9 @@ test "file store atomically replaces and validates desired state" {
     defer tmp.cleanup();
     var file_store = FileStore.init(std.testing.io, tmp.dir, "endpoints.state");
     const desired_store = file_store.desiredStore();
-    const specs = [_]Spec{ testSpec(1, 2, 3), testSpec(4, 5, 6) };
+    var iscsi_spec = testSpec(4, 5, 6);
+    iscsi_spec.frontend = .iscsi;
+    const specs = [_]Spec{ testSpec(1, 2, 3), iscsi_spec };
 
     try desired_store.replace(&specs);
     const loaded = try desired_store.load(std.testing.allocator);
@@ -669,5 +740,43 @@ test "file store atomically replaces and validates desired state" {
     const file = try tmp.dir.openFile(std.testing.io, "endpoints.state", .{ .mode = .read_write });
     defer file.close(std.testing.io);
     try file.writePositionalAll(std.testing.io, "X", FileStore.header_size);
+    try std.testing.expectError(error.InvalidDesiredState, desired_store.load(std.testing.allocator));
+}
+
+test "file store reads v1 state as vhost and rejects unknown frontend" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var file_store = FileStore.init(std.testing.io, tmp.dir, "endpoints.state");
+    const desired_store = file_store.desiredStore();
+    const spec = testSpec(1, 2, 3);
+
+    var v1_bytes: [FileStore.header_size + FileStore.legacy_record_size]u8 = @splat(0);
+    @memcpy(v1_bytes[0..FileStore.magic.len], &FileStore.magic);
+    std.mem.writeInt(u16, v1_bytes[8..10], 1, .little);
+    std.mem.writeInt(u16, v1_bytes[10..12], FileStore.legacy_record_size, .little);
+    std.mem.writeInt(u32, v1_bytes[12..16], 1, .little);
+    @memcpy(v1_bytes[20..36], &spec.endpoint_id);
+    @memcpy(v1_bytes[36..52], &spec.pool_id);
+    @memcpy(v1_bytes[52..68], &spec.volume_id);
+    std.mem.writeInt(u32, v1_bytes[16..20], std.hash.crc.Crc32Iscsi.hash(v1_bytes[20..]), .little);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "endpoints.state", .data = &v1_bytes });
+
+    const migrated = try desired_store.load(std.testing.allocator);
+    defer std.testing.allocator.free(migrated);
+    try std.testing.expectEqual(@as(usize, 1), migrated.len);
+    try std.testing.expectEqual(Frontend.vhost_user_blk, migrated[0].frontend);
+    try desired_store.replace(migrated);
+
+    const bytes = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "endpoints.state",
+        std.testing.allocator,
+        .limited(FileStore.max_state_bytes),
+    );
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(FileStore.version, std.mem.readInt(u16, bytes[8..10], .little));
+    bytes[FileStore.header_size + 48] = 99;
+    std.mem.writeInt(u32, bytes[16..20], std.hash.crc.Crc32Iscsi.hash(bytes[FileStore.header_size..]), .little);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "endpoints.state", .data = bytes });
     try std.testing.expectError(error.InvalidDesiredState, desired_store.load(std.testing.allocator));
 }

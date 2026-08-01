@@ -4,6 +4,28 @@ const endpoint_registry = @import("../endpoint_registry.zig");
 const pool_member_set = @import("../v3/pool_member_set.zig");
 const runtime_api = @import("runtime.zig");
 
+pub const name_length = 36;
+
+pub const Names = struct {
+    bdev: [name_length]u8,
+    controller: [name_length]u8,
+
+    pub fn bdevSlice(self: *const Names) []const u8 {
+        return &self.bdev;
+    }
+
+    pub fn controllerSlice(self: *const Names) []const u8 {
+        return &self.controller;
+    }
+};
+
+pub fn namesFor(endpoint_id: endpoint_registry.EndpointId) Names {
+    var result: Names = undefined;
+    _ = std.fmt.bufPrint(&result.bdev, "zvb-{x}", .{endpoint_id}) catch unreachable;
+    _ = std.fmt.bufPrint(&result.controller, "zvh-{x}", .{endpoint_id}) catch unreachable;
+    return result;
+}
+
 pub const PoolSource = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -184,9 +206,10 @@ pub const CatalogEndpointBackend = struct {
     fn startOpaque(
         context: *anyopaque,
         spec: endpoint_registry.Spec,
-        names: endpoint_registry.Names,
     ) !endpoint_registry.Backend.Instance {
         const self: *CatalogEndpointBackend = @ptrCast(@alignCast(context));
+        if (spec.frontend != .vhost_user_blk) return error.UnsupportedFrontend;
+        const names = namesFor(spec.endpoint_id);
         const instance = try self.allocator.create(Instance);
         errdefer self.allocator.destroy(instance);
 
@@ -219,7 +242,9 @@ pub const CatalogEndpointBackend = struct {
         @memcpy(instance.socket_path[0..instance.socket_path_len], export_instance.socket_path);
         return .{
             .handle = instance,
-            .socket_path = instance.socket_path[0..instance.socket_path_len],
+            .locator = .{ .vhost_user_blk = .{
+                .socket_path = instance.socket_path[0..instance.socket_path_len],
+            } },
         };
     }
 
@@ -372,8 +397,8 @@ const FakeExportDriver = struct {
     closes: usize = 0,
     socket_path: []const u8 = "/run/zettide/zvh-test",
     volume_id: endpoint_registry.VolumeId = @splat(0),
-    bdev_name: [endpoint_registry.name_length]u8 = @splat(0),
-    controller_name: [endpoint_registry.name_length]u8 = @splat(0),
+    bdev_name: [name_length]u8 = @splat(0),
+    controller_name: [name_length]u8 = @splat(0),
 
     fn exportDriver(self: *FakeExportDriver) ExportDriver {
         return .{ .context = self, .vtable = &vtable };
@@ -501,6 +526,12 @@ test "configured pool source opens and releases a real pool" {
     source.abort(reopened.set);
 }
 
+test "stable vhost names use the endpoint id" {
+    const names = namesFor(testId(0xab));
+    try std.testing.expectEqualStrings("zvb-000000000000000000000000000000ab", names.bdevSlice());
+    try std.testing.expectEqualStrings("zvh-000000000000000000000000000000ab", names.controllerSlice());
+}
+
 test "catalog endpoint backend composes pool and export lifetimes" {
     var events: Events = .{};
     var source: FakePoolSource = .{ .events = &events, .actual_pool_id = testId(2) };
@@ -515,15 +546,23 @@ test "catalog endpoint backend composes pool and export lifetimes" {
         driver.exportDriver(),
     );
     const backend = adapter.endpointBackend();
-    const spec: endpoint_registry.Spec = .{
+    var spec: endpoint_registry.Spec = .{
         .endpoint_id = testId(1),
         .pool_id = testId(2),
         .volume_id = testId(3),
+        .frontend = .vhost_user_blk,
     };
-    const names = endpoint_registry.namesFor(spec.endpoint_id);
+    const names = namesFor(spec.endpoint_id);
 
-    const instance = try backend.start(spec, names);
-    try std.testing.expectEqualStrings(driver.socket_path, instance.socket_path);
+    spec.frontend = .iscsi;
+    try std.testing.expectError(error.UnsupportedFrontend, backend.start(spec));
+    try std.testing.expectEqual(@as(usize, 0), source.opens);
+    spec.frontend = .vhost_user_blk;
+    const instance = try backend.start(spec);
+    try std.testing.expectEqualStrings(
+        driver.socket_path,
+        instance.locator.vhost_user_blk.socket_path,
+    );
     try std.testing.expectEqualSlices(u8, &spec.volume_id, &driver.volume_id);
     try std.testing.expectEqualStrings(names.bdevSlice(), &driver.bdev_name);
     try std.testing.expectEqualStrings(names.controllerSlice(), &driver.controller_name);
@@ -553,15 +592,16 @@ test "catalog endpoint backend rejects a mismatched pool and rolls back create f
         .endpoint_id = testId(1),
         .pool_id = testId(2),
         .volume_id = testId(3),
+        .frontend = .vhost_user_blk,
     };
 
-    try std.testing.expectError(error.PoolIdentityMismatch, backend.start(spec, endpoint_registry.namesFor(spec.endpoint_id)));
+    try std.testing.expectError(error.PoolIdentityMismatch, backend.start(spec));
     try std.testing.expectEqual(@as(usize, 1), source.aborts);
     try std.testing.expectEqual(@as(usize, 0), driver.creates);
 
     source.actual_pool_id = spec.pool_id;
     driver.fail_create = true;
-    try std.testing.expectError(error.ExportCreateFailed, backend.start(spec, endpoint_registry.namesFor(spec.endpoint_id)));
+    try std.testing.expectError(error.ExportCreateFailed, backend.start(spec));
     try std.testing.expectEqual(@as(usize, 2), source.aborts);
     try std.testing.expectEqual(@as(usize, 1), driver.creates);
 }
@@ -584,8 +624,9 @@ test "catalog endpoint backend retries export close before releasing the pool" {
         .endpoint_id = testId(1),
         .pool_id = testId(2),
         .volume_id = testId(3),
+        .frontend = .vhost_user_blk,
     };
-    const instance = try backend.start(spec, endpoint_registry.namesFor(spec.endpoint_id));
+    const instance = try backend.start(spec);
 
     driver.fail_close = true;
     try std.testing.expectError(error.ExportCloseFailed, backend.stop(instance.handle));
@@ -618,8 +659,9 @@ test "catalog endpoint backend does not reclose export when pool close retries" 
         .endpoint_id = testId(1),
         .pool_id = testId(2),
         .volume_id = testId(3),
+        .frontend = .vhost_user_blk,
     };
-    const instance = try backend.start(spec, endpoint_registry.namesFor(spec.endpoint_id));
+    const instance = try backend.start(spec);
 
     try std.testing.expectError(error.PoolCloseFailed, backend.stop(instance.handle));
     source.fail_close = false;
