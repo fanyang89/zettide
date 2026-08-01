@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const zettide = @import("zettide");
+const build_options = @import("build_options");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -32,12 +33,22 @@ pub fn main(init: std.process.Init) !void {
         try deviceCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "pool")) {
         try poolCommand(allocator, init.io, args[2..], stdout);
+    } else if (std.mem.eql(u8, command, "endpoint")) {
+        try endpointCommand(init.io, args[2..], stdout);
     } else {
         try stdout.print("Unknown command: {s}\n\n", .{command});
         try usage(stdout);
         return error.InvalidCommand;
     }
     try stdout.flush();
+}
+
+fn endpointCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "serve")) return error.InvalidArguments;
+    if (comptime @import("builtin").os.tag == .linux and build_options.spdk) {
+        return zettide.endpoint_daemon.serve(std.heap.c_allocator, io, args[1..], stdout);
+    }
+    return error.SpdkSupportNotEnabled;
 }
 
 fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -463,6 +474,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other]
         \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>]
         \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] --confirm <token>
+        \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]...
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
         \\

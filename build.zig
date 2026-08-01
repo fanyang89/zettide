@@ -12,10 +12,13 @@ pub fn build(b: *std.Build) void {
     const external_test_mode = b.option(ExternalTestMode, "external-tests", "External tests: off, auto, or required") orelse .auto;
     const privileged_test_mode = b.option(PrivilegedTestMode, "privileged-tests", "Privileged tests: off, auto, or required") orelse .auto;
     const block_test_mode = b.option(BlockTestMode, "block-tests", "Linux block device tests: off, auto, or required") orelse .off;
+    const enable_spdk = b.option(bool, "spdk", "Link the Linux endpoint daemon with SPDK") orelse false;
+    if (enable_spdk and target.result.os.tag != .linux) @panic("SPDK support requires Linux");
 
     const portable_core = createCoreModule(b, target, optimize, false);
     const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux);
-    const exe = createExecutable(b, "zettide", target, optimize, app_core);
+    if (enable_spdk) configureSpdk(app_core);
+    const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -94,6 +97,11 @@ pub fn build(b: *std.Build) void {
     spdk_vhost_cmd.addArtifactArg(spdk_vhost_export_test);
     const spdk_vhost_step = b.step("test-spdk-vhost-blk-controller", "Run the SPDK vhost-blk controller test");
     spdk_vhost_step.dependOn(&spdk_vhost_cmd.step);
+
+    const spdk_daemon_cmd = b.addSystemCommand(&.{ "bash", "test/spdk-daemon.sh" });
+    spdk_daemon_cmd.addArtifactArg(exe);
+    const spdk_daemon_step = b.step("test-spdk-daemon", "Run the SPDK endpoint daemon lifecycle test");
+    spdk_daemon_step.dependOn(&spdk_daemon_cmd.step);
 
     const spdk_storage_test = createSpdkStorageTest(b, target, optimize, portable_core);
     const spdk_storage_cmd = b.addSystemCommand(&.{ "bash", "test/spdk-storage.sh" });
@@ -189,7 +197,7 @@ pub fn build(b: *std.Build) void {
         .abi = .gnu,
     });
     const windows_core = createCoreModule(b, windows_target, optimize, false);
-    const windows_exe = createExecutable(b, "zettide-windows-check", windows_target, optimize, windows_core);
+    const windows_exe = createExecutable(b, "zettide-windows-check", windows_target, optimize, windows_core, false);
     cross_step.dependOn(&windows_exe.step);
 
     const test_step = b.step("test", "Run unit, image, and CLI tests");
@@ -242,17 +250,42 @@ fn createExecutable(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     core: *std.Build.Module,
+    enable_spdk: bool,
 ) *std.Build.Step.Compile {
+    const options = b.addOptions();
+    options.addOption(bool, "spdk", enable_spdk);
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = core }},
+    });
+    module.addOptions("build_options", options);
     return b.addExecutable(.{
         .name = name,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "zettide", .module = core }},
-        }),
+        .root_module = module,
     });
+}
+
+fn configureSpdk(module: *std.Build.Module) void {
+    module.addCSourceFiles(.{
+        .files = &.{
+            "src/spdk/runtime.c",
+            "src/spdk/bdev_provider.c",
+            "src/spdk/vhost_blk_controller.c",
+        },
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
+    });
+    for ([_][]const u8{
+        "spdk_event",
+        "spdk_event_bdev",
+        "spdk_event_vhost_blk",
+        "spdk_bdev_modules",
+        "spdk_env_dpdk",
+        "spdk_sock_modules",
+        "spdk_syslibs",
+    }) |library| module.linkSystemLibrary(library, .{ .needed = true, .use_pkg_config = .force });
 }
 
 fn createLinuxBlockProbe(

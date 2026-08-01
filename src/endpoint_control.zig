@@ -265,7 +265,7 @@ fn handleConnection(server: *Server, fd: i32) void {
     writeAllDeadline(server.io, fd, writer.buffered()) catch {};
 }
 
-fn validateControlDirectory(dir: std.Io.Dir) !void {
+pub fn validateControlDirectory(dir: std.Io.Dir) !void {
     var stat: linux.Statx = undefined;
     const result = linux.statx(dir.handle, "", linux.AT.EMPTY_PATH, linux.STATX.BASIC_STATS, &stat);
     if (linux.errno(result) != .SUCCESS) return error.ControlDirectoryMetadataUnavailable;

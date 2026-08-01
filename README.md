@@ -16,7 +16,7 @@ Zettide is being developed as three cumulative storage tiers:
 | Tier | Product capability | Status |
 | --- | --- | --- |
 | Tier 1 | Mount a local filesystem backed by a container file or raw devices | Current Linux path; full POSIX-profile completion remains in progress |
-| Tier 2 | Serve local catalog Volumes as blocks to qtr, with iSCSI as the first managed protocol | Target; no daemon, iSCSI target, or qtr integration exists yet |
+| Tier 2 | Serve local catalog Volumes as blocks to qtr, with iSCSI as the first managed protocol | Local daemon, control API, and optional vhost-user-blk backend exist; iSCSI and qtr integration remain targets |
 | Tier 3 | Replicate Volumes across storage nodes and republish them after a storage failure | Target; control metadata exists in `zettide-control`, but the distributed data path does not |
 
 The current raw Pool product commands accept exactly one unprotected device or
@@ -25,12 +25,11 @@ membership, a multi-Volume catalog, catalog extent mappings, and protection
 metadata, but online capacity expansion and protection-policy migration are not
 connected to a product lifecycle yet.
 
-Linux SPDK support is also library-level rather than a storage service. The
-repository contains a managed SPDK runtime, SPDK bdev access, an NVMe-oF
-initiator wrapper, an asynchronous custom bdev provider, a catalog Volume
-backend, and vhost-user-blk export lifecycle. These paths have focused tests,
-but there is no long-running Zettide daemon, stable management API, iSCSI
-export lifecycle, or qtr attachment reconciliation.
+Linux SPDK support includes an optional foreground endpoint daemon with a
+versioned owner-only Unix control API and persistent desired state. It composes
+the managed SPDK runtime, catalog Volume backend, custom bdev provider, and
+vhost-user-blk export lifecycle. The iSCSI export lifecycle and qtr attachment
+reconciliation are not implemented yet.
 
 ## Requirements
 
@@ -44,6 +43,12 @@ export lifecycle, or qtr attachment reconciliation.
 ```sh
 zig build
 zig build test
+```
+
+Build the Linux endpoint daemon against an SPDK pkg-config installation with:
+
+```sh
+PKG_CONFIG_PATH=../third_party/spdk/build/lib/pkgconfig zig build -Dspdk=true
 ```
 
 ## Tests
@@ -60,6 +65,7 @@ zig build test-spdk-endpoint
 zig build test-spdk-dispatcher
 zig build test-spdk-provider
 zig build test-spdk-vhost-blk-controller
+zig build test-spdk-daemon -Dspdk=true
 zig build test-spdk-storage
 zig build test-fuse -Dfuse-tests=required
 zig build test-posix-baseline -Dfuse-tests=required
@@ -86,10 +92,10 @@ PKG_CONFIG_PATH=../third_party/spdk/build/lib/pkgconfig \
 zig build test-spdk-link
 ```
 
-`test-spdk-link` validates headers and shared-library loading only. The other
-SPDK gates exercise the managed runtime and focused bdev, provider, storage, or
-vhost controller lifecycles in isolated test configurations. They do not form
-a product daemon or bind an operator's storage devices.
+`test-spdk-link` validates headers and shared-library loading only. The focused
+SPDK gates exercise managed runtime, bdev, provider, storage, and vhost
+lifecycles. `test-spdk-daemon` starts the product daemon without configured
+Pools and verifies graceful signal shutdown; it does not bind storage devices.
 
 The Linux block-device gate uses temporary loop devices and requires `losetup`,
 `blockdev`, `mkfs.ext4`, `fusermount3`, `mountpoint`, a writable `/dev/fuse`,
