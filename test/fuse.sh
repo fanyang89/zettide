@@ -76,6 +76,41 @@ stop_mount() {
     return 1
 }
 
+run_durability_crash() {
+    local mode=$1
+    local path=$2
+    local ready="$tmp/durability-$mode.ready"
+
+    start_mount
+    "$durability_probe" prepare "$mode" "$path" "$ready" &
+    durability_pid=$!
+    for _ in $(seq 1 200); do
+        [[ -e "$ready" ]] && break
+        kill -0 "$durability_pid" 2>/dev/null || { echo "$mode durability probe exited early" >&2; exit 1; }
+        sleep 0.05
+    done
+    [[ -e "$ready" ]] || { echo "$mode durability probe readiness timeout" >&2; exit 1; }
+    kill -KILL "$mount_pid"
+    wait "$mount_pid" 2>/dev/null || true
+    mount_pid=
+    kill -TERM "$durability_pid" 2>/dev/null || true
+    wait "$durability_pid" 2>/dev/null || true
+    durability_pid=
+    fusermount3 -uz "$mount_dir" 2>/dev/null || true
+    for _ in $(seq 1 100); do
+        if ! mountpoint -q "$mount_dir" && stat "$mount_dir" >/dev/null 2>&1; then break; fi
+        sleep 0.05
+    done
+    if mountpoint -q "$mount_dir" || ! stat "$mount_dir" >/dev/null 2>&1; then
+        echo "dead FUSE process left a disconnected mount" >&2
+        exit 1
+    fi
+    "$exe" check "$image" >/dev/null
+    start_mount
+    "$durability_probe" verify "$mode" "$path"
+    stop_mount
+}
+
 mkdir "$mount_dir"
 "$exe" create "$image" --size 8MiB --label "FUSE Test"
 start_mount
@@ -123,43 +158,20 @@ root_mtime_after=$(stat -c %Y "$mount_dir")
 (( root_mtime_after > root_mtime_before )) || { echo "parent directory mtime did not advance" >&2; exit 1; }
 stop_mount
 
-# Successful msync and fsync calls must survive abrupt daemon termination while
-# the mapping and file descriptor remain open.
+# Each synchronization primitive must independently survive abrupt daemon
+# termination while the synchronized object remains open.
+run_durability_crash fsync "$mount_dir/crash-fsync.txt"
+run_durability_crash fdatasync "$mount_dir/crash-fdatasync.txt"
+run_durability_crash directory "$mount_dir/crash-directory"
+
 start_mount
-ready="$tmp/durability.ready"
-"$durability_probe" prepare "$mount_dir/crash.txt" "$ready" &
-durability_pid=$!
-for _ in $(seq 1 200); do
-    [[ -e "$ready" ]] && break
-    kill -0 "$durability_pid" 2>/dev/null || { echo "durability probe exited early" >&2; exit 1; }
-    sleep 0.05
-done
-[[ -e "$ready" ]] || { echo "durability probe readiness timeout" >&2; exit 1; }
-kill -KILL "$mount_pid"
-wait "$mount_pid" 2>/dev/null || true
-mount_pid=
-kill -TERM "$durability_pid" 2>/dev/null || true
-wait "$durability_pid" 2>/dev/null || true
-durability_pid=
-fusermount3 -uz "$mount_dir" 2>/dev/null || true
-for _ in $(seq 1 100); do
-    if ! mountpoint -q "$mount_dir" && stat "$mount_dir" >/dev/null 2>&1; then break; fi
-    sleep 0.05
-done
-if mountpoint -q "$mount_dir" || ! stat "$mount_dir" >/dev/null 2>&1; then
-    echo "dead FUSE process left a disconnected mount" >&2
-    exit 1
-fi
-"$exe" check "$image" >/dev/null
-start_mount
-"$durability_probe" verify "$mount_dir/crash.txt"
 "$probe" "$mount_dir" verify-crash-fallocate
 stop_mount
 
 # Repeated lifecycle checks catch leaked locks, mountpoints, and processes.
 for _ in $(seq 1 16); do
     start_mount
-    "$durability_probe" verify "$mount_dir/crash.txt"
+    "$durability_probe" verify fsync "$mount_dir/crash-fsync.txt"
     stop_mount
 done
 if mountpoint -q "$mount_dir"; then

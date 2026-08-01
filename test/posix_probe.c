@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -97,6 +96,70 @@ static int shared_mmap(void) {
     return 0;
 }
 
+static int mmap_lifetime(void) {
+    char first[4096], second[4096];
+    path(first, sizeof(first), "posix-mmap-private");
+    int fd = open(first, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0 || ftruncate(fd, 4096) != 0 || pwrite(fd, "original", 8, 0) != 8) return -1;
+    char *mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (mapping == MAP_FAILED) return -1;
+    memcpy(mapping, "private!", 8);
+    if (msync(mapping, 4096, MS_SYNC) != 0) return -1;
+    char actual[8];
+    if (pread(fd, actual, sizeof(actual), 0) != sizeof(actual) || memcmp(actual, "original", 8) != 0 ||
+        close(fd) != 0 || memcmp(mapping, "private!", 8) != 0 || munmap(mapping, 4096) != 0) {
+        errno = EPROTO;
+        return -1;
+    }
+
+    path(first, sizeof(first), "posix-mmap-lifetime");
+    path(second, sizeof(second), "posix-mmap-lifetime-renamed");
+    fd = open(first, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0 || ftruncate(fd, 4096) != 0) return -1;
+    mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapping == MAP_FAILED || close(fd) != 0 || rename(first, second) != 0 || unlink(second) != 0) return -1;
+    memcpy(mapping, "unlinked", 8);
+    if (msync(mapping, 4096, MS_SYNC) != 0 || memcmp(mapping, "unlinked", 8) != 0 ||
+        munmap(mapping, 4096) != 0) {
+        errno = EPROTO;
+        return -1;
+    }
+    return 0;
+}
+
+static int open_file_description(void) {
+    char name[4096];
+    path(name, sizeof(name), "posix-open-description");
+    int fd = open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0 || write(fd, "abcd", 4) != 4 || lseek(fd, 0, SEEK_SET) != 0) return -1;
+    int duplicate = dup(fd);
+    char byte;
+    if (duplicate < 0 || read(fd, &byte, 1) != 1 || byte != 'a' ||
+        read(duplicate, &byte, 1) != 1 || byte != 'b') {
+        errno = EPROTO;
+        return -1;
+    }
+    int flags = fcntl(duplicate, F_GETFL);
+    if (flags < 0 || fcntl(duplicate, F_SETFL, flags | O_APPEND) != 0 ||
+        (fcntl(fd, F_GETFL) & O_APPEND) == 0) {
+        errno = EPROTO;
+        return -1;
+    }
+    pid_t child = fork();
+    if (child < 0) return -1;
+    if (child == 0) {
+        char inherited;
+        _exit(read(fd, &inherited, 1) == 1 && inherited == 'c' ? 0 : 2);
+    }
+    int status;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+        read(duplicate, &byte, 1) != 1 || byte != 'd' || close(duplicate) != 0 || close(fd) != 0) {
+        errno = EPROTO;
+        return -1;
+    }
+    return 0;
+}
+
 static int record_locks(void) {
     char name[4096];
     path(name, sizeof(name), "posix-lock");
@@ -157,6 +220,8 @@ int main(int argc, char **argv) {
     failures += run("hard-links", hard_links);
     failures += run("fifo", fifo_nodes);
     failures += run("shared-mmap", shared_mmap);
+    failures += run("mmap-lifetime", mmap_lifetime);
+    failures += run("open-file-description", open_file_description);
     failures += run("record-locks", record_locks);
     failures += run("dynamic-append", dynamic_append);
     return failures == 0 ? 0 : 1;
