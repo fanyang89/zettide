@@ -5,6 +5,7 @@ pub const metadata = @import("metadata.zig");
 pub const object_format = @import("object_format.zig");
 pub const object_store = @import("object_store.zig");
 pub const size = @import("size.zig");
+pub const spdk_catalog_endpoint_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_endpoint_backend.zig") else struct {};
 pub const spdk_catalog_volume_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_volume_backend.zig") else struct {};
 pub const spdk_catalog_vhost_export = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_vhost_export.zig") else struct {};
 pub const spdk_nvme_controller = if (@import("builtin").os.tag == .linux) @import("spdk/nvme_controller.zig") else struct {};
@@ -24,6 +25,7 @@ test {
     _ = object_format;
     _ = object_store;
     _ = size;
+    _ = spdk_catalog_endpoint_backend;
     _ = spdk_catalog_volume_backend;
     _ = spdk_catalog_vhost_export;
     _ = spdk_nvme_controller;
