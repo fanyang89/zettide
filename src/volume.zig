@@ -136,15 +136,33 @@ pub const Volume = struct {
         set_source: *pool_member_set.PoolMemberSet,
         writable: bool,
     ) !Volume {
-        var set = set_source.take();
-        errdefer set.deinit();
+        var result: Volume = undefined;
+        try openPoolInto(&result, io, allocator, set_source, writable);
+        return result;
+    }
+
+    pub fn openPoolInto(
+        result: *Volume,
+        io: Io,
+        allocator: std.mem.Allocator,
+        set_source: *pool_member_set.PoolMemberSet,
+        writable: bool,
+    ) !void {
+        result.* = undefined;
+        result.pool_set = set_source.*;
+        set_source.* = .{};
+        const set = &result.pool_set.?;
+        errdefer {
+            set.deinit();
+            result.pool_set = null;
+        }
         const authority = set.authority() orelse return error.MissingAuthority;
         if (set.dataAccess() == .unavailable or (writable and set.dataAccess() != .read_write))
             return error.PoolDataUnavailable;
         if (writable and set.controlWriteReady() == null) return error.PoolDataUnavailable;
-        const header = try inspectPoolHeader(io, &set);
+        const header = try inspectPoolHeader(io, set);
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
-        const member_count = try collectPoolMembers(&set, &member_pointers);
+        const member_count = try collectPoolMembers(set, &member_pointers);
         var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var verifier = try pool_block_device.PoolBlockDevice.init(
             io,
@@ -154,7 +172,6 @@ pub const Volume = struct {
         );
         if (writable) try verifier.prepareWritableReplicas(allocator);
 
-        var result: Volume = undefined;
         result.io = io;
         result.file = undefined;
         result.header = header;
@@ -172,9 +189,7 @@ pub const Volume = struct {
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
         result.backing = .pool;
-        result.pool_set = set;
         result.pool_device = undefined;
-        return result;
     }
 
     pub fn inspectPoolHeader(io: Io, set: *pool_member_set.PoolMemberSet) !container.Header {
@@ -204,6 +219,12 @@ pub const Volume = struct {
     }
 
     pub fn open(io: Io, path: []const u8, writable: bool) !Volume {
+        var result: Volume = undefined;
+        try openInto(&result, io, path, writable);
+        return result;
+    }
+
+    pub fn openInto(result: *Volume, io: Io, path: []const u8, writable: bool) !void {
         const file = try Io.Dir.cwd().openFile(io, path, .{
             .mode = if (writable) .read_write else .read_only,
             .lock = if (writable) .exclusive else .shared,
@@ -212,7 +233,7 @@ pub const Volume = struct {
         errdefer file.close(io);
         const header = try container.read(file, io);
 
-        var result: Volume = undefined;
+        result.* = undefined;
         result.io = io;
         result.file = file;
         result.header = header;
@@ -232,7 +253,6 @@ pub const Volume = struct {
         result.backing = .file;
         result.pool_set = null;
         result.pool_device = undefined;
-        return result;
     }
 
     pub fn setFallbackOwner(self: *Volume, uid: u32, gid: u32) void {

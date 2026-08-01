@@ -19,14 +19,16 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const command = args[1];
-    if (std.mem.eql(u8, command, "create")) {
+    if (std.mem.eql(u8, command, "format")) {
+        try formatCommand(allocator, init.io, args[2..], stdout);
+    } else if (std.mem.eql(u8, command, "create")) {
         try createCommand(init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "info")) {
-        try infoCommand(init.io, args[2..], stdout);
+        try infoCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "check")) {
-        try checkCommand(init.io, args[2..], stdout);
+        try checkCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "mount")) {
-        try mountCommand(init.io, args[2..], stdout);
+        try mountCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "unmount")) {
         try unmountCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "device")) {
@@ -378,18 +380,20 @@ fn deviceCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
     }
 }
 
-fn mountCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len < 2 or args.len > 3) return error.InvalidArguments;
     const allow_other = args.len == 3 and std.mem.eql(u8, args[2], "--allow-other");
     if (args.len == 3 and !allow_other) return error.UnknownOption;
     if (@import("builtin").os.tag != .linux) return error.MountNotImplemented;
-    var volume = try zettide.volume.Volume.open(io, args[0], true);
+    const volume = try allocator.create(zettide.volume.Volume);
+    defer allocator.destroy(volume);
+    try zettide.target.openVolumeInto(volume, io, allocator, args[0], true);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
     try volume.mount();
     try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
     try stdout.flush();
-    try zettide.linux_fuse.mount(&volume, args[1], allow_other, false);
+    try zettide.linux_fuse.mount(volume, args[1], allow_other, false);
     try volume.close();
 }
 
@@ -427,9 +431,93 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     try stdout.print("Created {s} ({Bi:.2})\n", .{ path, logical_size });
 }
 
-fn infoCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+    if (args.len == 0) return error.MissingTargetPath;
+    const path = args[0];
+    var size: ?u64 = null;
+    var label: []const u8 = "Zettide";
+    var confirmation: ?[]const u8 = null;
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--size")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            size = try zettide.size.parse(args[index]);
+        } else if (std.mem.eql(u8, args[index], "--label")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            label = args[index];
+        } else if (std.mem.eql(u8, args[index], "--confirm")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            confirmation = args[index];
+        } else {
+            return error.UnknownOption;
+        }
+    }
+
+    const plan = zettide.target.inspectFormat(io, allocator, path, label) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (confirmation != null) return error.UnexpectedConfirmation;
+            const target_size = size orelse return error.MissingSize;
+            const result = try zettide.target.formatNewFile(io, allocator, path, target_size, label);
+            try finishFormat(result, path, target_size, stdout);
+            return;
+        },
+        else => return err,
+    };
+    if (size != null) return error.SizeOnlyValidForNewFile;
+    try stdout.print("Target: {s}\n", .{path});
+    try stdout.print("Type: {s}\n", .{@tagName(plan.kind)});
+    try stdout.print("Capacity: {Bi:.2}\n", .{plan.capacity_bytes});
+    try stdout.print("Contains data: {s}\n", .{if (plan.contains_data) "yes" else "no"});
+    try stdout.print("Plan: {s}\n", .{if (plan.eligible) "ready" else "rejected"});
+    var token_buffer: [64]u8 = undefined;
+    if (confirmation) |supplied| {
+        const result = try zettide.target.applyFormat(io, allocator, &plan, supplied);
+        try finishFormat(result, path, null, stdout);
+    } else if (plan.eligible) {
+        try stdout.print("Confirm token: {s}\n", .{plan.tokenText(&token_buffer)});
+    }
+}
+
+fn finishFormat(
+    result: zettide.target.FormatResult,
+    path: []const u8,
+    size: ?u64,
+    stdout: *Io.Writer,
+) !void {
+    switch (result) {
+        .complete => if (size) |value|
+            try stdout.print("Formatted {s} ({Bi:.2})\n", .{ path, value })
+        else
+            try stdout.print("Formatted {s}\n", .{path}),
+        .pool_created => |failure| {
+            try stdout.print("Pool {x} created but volume initialization failed: {s}\n", .{
+                failure.set_id,
+                @errorName(failure.cause),
+            });
+            try stdout.flush();
+            return failure.cause;
+        },
+        .partial => |failure| {
+            try stdout.print("Partial format {x}: member {d} failed after {d} completed ({s})\n", .{
+                failure.set_id,
+                failure.failed_member_index,
+                failure.completed_member_count,
+                @errorName(failure.cause),
+            });
+            try stdout.flush();
+            return error.PartialTargetFormat;
+        },
+    }
+}
+
+fn infoCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len != 1) return error.InvalidArguments;
-    var volume = try zettide.volume.Volume.open(io, args[0], false);
+    const volume = try allocator.create(zettide.volume.Volume);
+    defer allocator.destroy(volume);
+    try zettide.target.openVolumeInto(volume, io, allocator, args[0], false);
     defer volume.deinit();
 
     try stdout.print("Path: {s}\n", .{args[0]});
@@ -447,9 +535,11 @@ fn infoCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     try volume.close();
 }
 
-fn checkCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+fn checkCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len != 1) return error.InvalidArguments;
-    var volume = try zettide.volume.Volume.open(io, args[0], false);
+    const volume = try allocator.create(zettide.volume.Volume);
+    defer allocator.destroy(volume);
+    try zettide.target.openVolumeInto(volume, io, allocator, args[0], false);
     defer volume.deinit();
     try volume.mount();
     const result = try volume.check();
@@ -463,6 +553,7 @@ fn checkCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
 fn usage(writer: *Io.Writer) !void {
     try writer.writeAll(
         \\Usage:
+        \\  zettide format <file|device> [--size <size>] [--label <label>] [--confirm <token>]
         \\  zettide create <container> --size <size> [--label <label>]
         \\  zettide info <container>
         \\  zettide check <container>

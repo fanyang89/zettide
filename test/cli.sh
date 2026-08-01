@@ -30,6 +30,40 @@ if "$exe" create "$tmp/missing.ddv" >/dev/null 2>&1; then
     exit 1
 fi
 
+formatted="$tmp/formatted.ddv"
+"$exe" format "$formatted" --size 8MiB --label "Format Test"
+"$exe" info "$formatted" | grep -q '^Label: Format Test$'
+"$exe" check "$formatted" | grep -q '^Filesystem traversal succeeded:'
+
+existing="$tmp/existing.ddv"
+truncate -s 8MiB "$existing"
+plan=$("$exe" format "$existing" --label "Existing Test")
+[[ "$plan" == *"Type: regular_file"* ]]
+[[ "$plan" == *"Contains data: no"* ]]
+token=$(printf '%s\n' "$plan" | grep '^Confirm token: ' | cut -d' ' -f3)
+"$exe" format "$existing" --label "Existing Test" --confirm "$token"
+"$exe" info "$existing" | grep -q '^Label: Existing Test$'
+
+changed="$tmp/changed.ddv"
+truncate -s 8MiB "$changed"
+printf first | dd of="$changed" conv=notrunc status=none
+changed_plan=$("$exe" format "$changed")
+changed_token=$(printf '%s\n' "$changed_plan" | grep '^Confirm token: ' | cut -d' ' -f3)
+printf second | dd of="$changed" conv=notrunc status=none
+if "$exe" format "$changed" --confirm "$changed_token" >/dev/null 2>&1; then
+    echo "changed target unexpectedly accepted stale confirmation" >&2
+    exit 1
+fi
+
+if "$exe" format "$tmp/unaligned.ddv" --size 7340033 >/dev/null 2>&1; then
+    echo "unaligned format size unexpectedly succeeded" >&2
+    exit 1
+fi
+if "$exe" format "$formatted" --size 8MiB >/dev/null 2>&1; then
+    echo "existing format target unexpectedly accepted --size" >&2
+    exit 1
+fi
+
 if [[ "$(uname -s)" == "Linux" ]]; then
     if "$exe" device inspect /dev/null >/dev/null 2>&1; then
         echo "character device unexpectedly passed inspection" >&2

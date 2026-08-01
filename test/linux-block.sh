@@ -35,6 +35,7 @@ sudo -n true 2>/dev/null || skip_or_fail "passwordless sudo is unavailable"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/zettide-block.XXXXXX")
 loop=""
+format_loop=""
 replica_loops=()
 mounted=false
 pool_mount_pid=""
@@ -52,6 +53,9 @@ cleanup() {
     if [[ -n "$loop" ]]; then
         sudo -n losetup --detach "$loop" || true
     fi
+    if [[ -n "$format_loop" ]]; then
+        sudo -n losetup --detach "$format_loop" || true
+    fi
     for replica_loop in "${replica_loops[@]}"; do
         sudo -n blockdev --setrw "$replica_loop" 2>/dev/null || true
         sudo -n losetup --detach "$replica_loop" || true
@@ -59,6 +63,23 @@ cleanup() {
     rm -rf "$work"
 }
 trap cleanup EXIT
+
+truncate --size 32MiB "$work/format-backing"
+printf 'existing data' | dd of="$work/format-backing" conv=notrunc status=none
+format_loop=$(sudo -n losetup --find --show "$work/format-backing") || skip_or_fail "no format loop device is available"
+format_plan=$(sudo -n "$cli" format "$format_loop" --label format-cli)
+grep -q '^Type: block_device$' <<<"$format_plan"
+grep -q '^Contains data: yes$' <<<"$format_plan"
+format_token=$(grep '^Confirm token: ' <<<"$format_plan")
+format_token=${format_token#Confirm token: }
+if sudo -n "$cli" format "$format_loop" --label format-cli --confirm invalid >/dev/null 2>&1; then
+    echo "invalid format confirmation token was accepted" >&2
+    exit 1
+fi
+sudo -n "$cli" format "$format_loop" --label format-cli --confirm "$format_token" \
+    | grep -q '^Formatted '
+sudo -n "$cli" info "$format_loop" | grep -q '^Label: format-cli$'
+sudo -n "$cli" check "$format_loop" | grep -q '^Filesystem traversal succeeded:'
 
 truncate --size 32MiB "$work/backing"
 loop=$(sudo -n losetup --find --show "$work/backing") || skip_or_fail "no loop device is available"

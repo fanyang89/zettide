@@ -81,7 +81,23 @@ pub const PoolMemberSet = struct {
         return finishOpen(&set, intent);
     }
 
+    pub fn openStoragesInto(
+        result: *PoolMemberSet,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        storages: []member_api.Storage,
+        intent: OpenIntent,
+    ) !void {
+        try scanStoragesInto(result, io, allocator, storages, if (intent == .writable) .writable else .read_only);
+        return finishOpenInPlace(result, intent);
+    }
+
     fn finishOpen(set: *PoolMemberSet, intent: OpenIntent) !PoolMemberSet {
+        try finishOpenInPlace(set, intent);
+        return set.*;
+    }
+
+    fn finishOpenInPlace(set: *PoolMemberSet, intent: OpenIntent) !void {
         errdefer set.deinit();
 
         var history_pointers: [max_member_count]*const journal.HistoryScan = undefined;
@@ -100,7 +116,6 @@ pub const PoolMemberSet = struct {
         try set.reopenCatalog(intent);
         if (intent == .writable and set.control_write_state == null)
             return error.WriteQuorumUnavailable;
-        return set.*;
     }
 
     pub fn openAdministrativeRecovery(
@@ -813,6 +828,18 @@ fn scanStorages(
     storages: []member_api.Storage,
     mode: member_format.OpenMode,
 ) !PoolMemberSet {
+    var set: PoolMemberSet = undefined;
+    try scanStoragesInto(&set, io, allocator, storages, mode);
+    return set;
+}
+
+fn scanStoragesInto(
+    set: *PoolMemberSet,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    storages: []member_api.Storage,
+    mode: member_format.OpenMode,
+) !void {
     if (storages.len == 0 or storages.len > max_member_count) {
         storage_api.closeAll(storages, io) catch {};
         return error.InvalidMemberCount;
@@ -823,7 +850,7 @@ fn scanStorages(
             return error.DuplicateStorage;
         }
     };
-    var set: PoolMemberSet = .{ .supplied_count = storages.len };
+    set.* = .{ .supplied_count = storages.len };
     var consumed_count: usize = 0;
     errdefer {
         set.deinit();
@@ -835,9 +862,8 @@ fn scanStorages(
             set.statuses[index] = .{ .open_failed = err };
             continue;
         };
-        try scanMember(allocator, &set, index, &member);
+        try scanMember(allocator, set, index, &member);
     }
-    return set;
 }
 
 fn scanMember(
