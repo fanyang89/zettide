@@ -1,0 +1,127 @@
+---
+- name: Create result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}"
+    state: directory
+    mode: "0755"
+
+- name: Run portable tests | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - test
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+  failed_when: false
+  register: zettide_portable
+
+- name: Record portable tests | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_portable.rc }}
+      {{ zettide_portable.stdout }}
+      {{ zettide_portable.stderr }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/portable.log"
+    mode: "0644"
+
+- name: Require portable tests | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_portable.rc == 0
+    fail_msg: "{{ zettide_optimize }} portable tests failed."
+
+- name: Run cross-compilation gate | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - test-cross
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+  failed_when: false
+  register: zettide_cross
+
+- name: Record cross-compilation gate | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_cross.rc }}
+      {{ zettide_cross.stdout }}
+      {{ zettide_cross.stderr }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/cross.log"
+    mode: "0644"
+
+- name: Require cross-compilation gate | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_cross.rc == 0
+    fail_msg: "{{ zettide_optimize }} cross-compilation gate failed."
+
+- name: Run raw block gate | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - test-linux-block
+      - -Dblock-tests=required
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+  failed_when: false
+  register: zettide_raw_block
+
+- name: Record raw block gate | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_raw_block.rc }}
+      {{ zettide_raw_block.stdout }}
+      {{ zettide_raw_block.stderr }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/raw-block.log"
+    mode: "0644"
+
+- name: Require raw block gate | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_raw_block.rc == 0
+    fail_msg: "{{ zettide_optimize }} raw block gate failed."
+
+- name: Run POSIX nightly gate | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -j1
+      - test-posix-nightly
+      - -Dfuse-tests=required
+      - -Dexternal-tests=required
+      - -Dprivileged-tests=required
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    ZETTIDE_EXTERNAL_ROOT: "{{ zettide_remote_workspace.path }}/test/external/.prepared"
+    ZETTIDE_KEEP_TEST_ARTIFACTS: "1"
+    ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}"
+  changed_when: false
+  failed_when: false
+  register: zettide_posix_nightly
+
+- name: Record POSIX nightly gate | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_posix_nightly.rc }}
+      {{ zettide_posix_nightly.stdout }}
+      {{ zettide_posix_nightly.stderr }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/nightly.log"
+    mode: "0644"
+
+- name: Require POSIX nightly gate | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_posix_nightly.rc == 0
+    fail_msg: "{{ zettide_optimize }} POSIX nightly gate failed."

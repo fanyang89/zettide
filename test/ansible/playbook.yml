@@ -1,0 +1,259 @@
+---
+- name: Stage the current Zettide working tree
+  hosts: localhost
+  gather_facts: false
+  become: false
+
+  vars:
+    zettide_controller_root: "{{ playbook_dir }}/../.."
+
+  tasks:
+    - name: Create the controller staging directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: zettide-ansible-
+      register: zettide_controller_staging
+
+    - name: Archive the current controller working tree
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --exclude=.git
+          - --exclude=.venv
+          - --exclude=.zig-cache
+          - --exclude=zig-out
+          - --exclude=test/external/.prepared
+          - --exclude=test-results
+          - -C
+          - "{{ zettide_controller_root }}"
+          - -czf
+          - "{{ zettide_controller_staging.path }}/source.tar.gz"
+          - .
+      changed_when: true
+
+- name: Run the Zettide Tier 1 suite on remote Linux hosts
+  hosts: zettide_test
+  gather_facts: true
+  become: true
+
+  vars:
+    zettide_controller_root: "{{ playbook_dir }}/../.."
+    zettide_optimize_modes:
+      - Debug
+      - ReleaseSafe
+    zettide_zig: zig
+    zettide_zig_version: 0.16.0
+    zettide_results_root: "{{ zettide_controller_root }}/test-results/ansible"
+    zettide_keep_remote_workspace: false
+    zettide_packages:
+      RedHat:
+        - acl
+        - attr
+        - autoconf
+        - automake
+        - bc
+        - dbench
+        - dump
+        - e2fsprogs
+        - fio
+        - fuse3
+        - fuse3-devel
+        - gawk
+        - gcc
+        - git
+        - indent
+        - kernel-headers
+        - libacl-devel
+        - libaio-devel
+        - libattr-devel
+        - libcap-devel
+        - libtool
+        - liburing-devel
+        - libuuid-devel
+        - make
+        - openssl
+        - perl
+        - perl-Test-Harness
+        - pkgconf-pkg-config
+        - psmisc
+        - quota
+        - sqlite
+        - sudo
+        - util-linux
+        - xfsprogs
+        - xfsprogs-devel
+      Debian:
+        - acl
+        - attr
+        - autoconf
+        - automake
+        - bc
+        - build-essential
+        - dbench
+        - dump
+        - e2fsprogs
+        - fio
+        - fuse3
+        - gawk
+        - git
+        - indent
+        - libacl1-dev
+        - libaio-dev
+        - libattr1-dev
+        - libcap-dev
+        - libfuse3-dev
+        - libtest-harness-perl
+        - libtool
+        - libtool-bin
+        - liburing-dev
+        - linux-headers-{{ ansible_kernel }}
+        - openssl
+        - perl
+        - psmisc
+        - quota
+        - sqlite3
+        - sudo
+        - uuid-dev
+        - uuid-runtime
+        - xfsprogs
+        - xfslibs-dev
+
+  pre_tasks:
+    - name: Require a supported target family
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family in zettide_packages
+        fail_msg: "Supported target families are RedHat and Debian."
+
+  tasks:
+    - name: Create the remote workspace
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: zettide-test-
+      register: zettide_remote_workspace
+
+    - name: Run the remote test lifecycle
+      block:
+        - name: Install test dependencies
+          ansible.builtin.package:
+            name: "{{ zettide_packages[ansible_facts.os_family] }}"
+            state: present
+
+        - name: Load FUSE and loop device modules
+          ansible.builtin.command:
+            argv:
+              - modprobe
+              - "{{ item }}"
+          loop:
+            - fuse
+            - loop
+          changed_when: false
+
+        - name: Check the FUSE device
+          ansible.builtin.stat:
+            path: /dev/fuse
+          register: zettide_fuse_device
+
+        - name: Require the FUSE device
+          ansible.builtin.assert:
+            that:
+              - zettide_fuse_device.stat.exists
+              - zettide_fuse_device.stat.ischr
+            fail_msg: "/dev/fuse is unavailable on the remote test host."
+
+        - name: Check the remote Zig version
+          ansible.builtin.command:
+            argv:
+              - "{{ zettide_zig }}"
+              - version
+          changed_when: false
+          register: zettide_remote_zig
+
+        - name: Require the pinned Zig version
+          ansible.builtin.assert:
+            that:
+              - zettide_remote_zig.stdout == zettide_zig_version
+            fail_msg: "Remote Zig must be {{ zettide_zig_version }}, found {{ zettide_remote_zig.stdout }}."
+
+        - name: Extract the current working tree
+          ansible.builtin.unarchive:
+            src: "{{ hostvars.localhost.zettide_controller_staging.path }}/source.tar.gz"
+            dest: "{{ zettide_remote_workspace.path }}"
+
+        - name: Create the remote result directory
+          ansible.builtin.file:
+            path: "{{ zettide_remote_workspace.path }}/test-results"
+            state: directory
+            mode: "0755"
+
+        - name: Prepare pinned external suites
+          ansible.builtin.command:
+            argv:
+              - bash
+              - test/external/prepare.sh
+          args:
+            chdir: "{{ zettide_remote_workspace.path }}"
+          environment:
+            ZETTIDE_PREPARE_JOBS: "{{ ansible_facts.processor_vcpus | default(2) }}"
+          changed_when: true
+          failed_when: false
+          register: zettide_prepare
+
+        - name: Record external suite preparation
+          ansible.builtin.copy:
+            content: |-
+              rc={{ zettide_prepare.rc }}
+              {{ zettide_prepare.stdout }}
+              {{ zettide_prepare.stderr }}
+            dest: "{{ zettide_remote_workspace.path }}/test-results/prepare.log"
+            mode: "0644"
+
+        - name: Require prepared external suites
+          ansible.builtin.assert:
+            that:
+              - zettide_prepare.rc == 0
+            fail_msg: "Pinned external suite preparation failed; inspect prepare.log."
+
+        - name: Run each optimization mode
+          ansible.builtin.include_tasks: tasks/run-mode.yml
+          loop: "{{ zettide_optimize_modes }}"
+          loop_control:
+            loop_var: zettide_optimize
+
+      always:
+        - name: Archive remote test results
+          ansible.builtin.command:
+            argv:
+              - tar
+              - -C
+              - "{{ zettide_remote_workspace.path }}"
+              - -czf
+              - "{{ zettide_remote_workspace.path }}/results.tar.gz"
+              - test-results
+          changed_when: true
+          failed_when: false
+          register: zettide_archive_results
+
+        - name: Fetch remote test results
+          ansible.builtin.fetch:
+            src: "{{ zettide_remote_workspace.path }}/results.tar.gz"
+            dest: "{{ zettide_results_root }}/{{ inventory_hostname }}.tar.gz"
+            flat: true
+          when: zettide_archive_results.rc == 0
+
+        - name: Remove the remote workspace
+          ansible.builtin.file:
+            path: "{{ zettide_remote_workspace.path }}"
+            state: absent
+          when: not zettide_keep_remote_workspace | bool
+
+- name: Remove the controller staging directory
+  hosts: localhost
+  gather_facts: false
+  become: false
+
+  tasks:
+    - name: Remove the controller staging directory
+      ansible.builtin.file:
+        path: "{{ hostvars.localhost.zettide_controller_staging.path }}"
+        state: absent

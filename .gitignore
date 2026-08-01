@@ -1,4 +1,6 @@
 .zig-cache/
+.venv/
 zig-out/
 test/external/.prepared/
 test-results/
+test/ansible/inventory.ini
