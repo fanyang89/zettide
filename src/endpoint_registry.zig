@@ -4,6 +4,7 @@ pub const EndpointId = [16]u8;
 pub const PoolId = [16]u8;
 pub const VolumeId = [16]u8;
 pub const max_endpoint_count = 1024;
+pub const max_locator_component_len = 256;
 
 pub const Frontend = enum(u8) {
     vhost_user_blk = 1,
@@ -59,6 +60,7 @@ pub const Backend = struct {
     pub const VTable = struct {
         /// Runtime resources are process-owned. On error, start must leave no
         /// resources behind. A successful locator tag must match Spec.frontend,
+        /// its strings must be non-empty valid UTF-8 within the component limit,
         /// and the instance lives until stop succeeds.
         start: *const fn (*anyopaque, Spec) anyerror!Instance,
         stop: *const fn (*anyopaque, *anyopaque) anyerror!void,
@@ -269,13 +271,22 @@ pub const Registry = struct {
             return err;
         };
         if (std.meta.activeTag(runtime.locator) != entry.spec.frontend) {
-            self.backend.stop(runtime.handle) catch |err|
-                std.debug.panic("failed to roll back mismatched endpoint frontend: {s}", .{@errorName(err)});
+            self.rollbackRuntime(runtime);
             entry.phase = .failed;
             return error.FrontendMismatch;
         }
+        validateLocator(runtime.locator) catch |err| {
+            self.rollbackRuntime(runtime);
+            entry.phase = .failed;
+            return err;
+        };
         entry.runtime = runtime;
         entry.phase = .active;
+    }
+
+    fn rollbackRuntime(self: *Registry, runtime: Backend.Instance) void {
+        self.backend.stop(runtime.handle) catch |err|
+            std.debug.panic("failed to roll back invalid endpoint runtime: {s}", .{@errorName(err)});
     }
 
     fn desiredCount(self: *const Registry) usize {
@@ -427,6 +438,21 @@ fn validateSpec(spec: Spec) !void {
         return error.InvalidEndpointSpec;
 }
 
+fn validateLocator(locator: Locator) !void {
+    switch (locator) {
+        .vhost_user_blk => |vhost| try validateLocatorString(vhost.socket_path),
+        .iscsi => |iscsi| {
+            try validateLocatorString(iscsi.portal);
+            try validateLocatorString(iscsi.target_name);
+        },
+    }
+}
+
+fn validateLocatorString(value: []const u8) !void {
+    if (value.len == 0 or value.len > max_locator_component_len or !std.unicode.utf8ValidateSlice(value))
+        return error.InvalidLocator;
+}
+
 fn isZero(bytes: []const u8) bool {
     for (bytes) |byte| if (byte != 0) return false;
     return true;
@@ -472,6 +498,7 @@ const FakeBackend = struct {
     fail_start: bool = false,
     fail_stop: bool = false,
     mismatch_frontend: bool = false,
+    invalid_locator: bool = false,
 
     const Slot = struct {
         active: bool = false,
@@ -498,7 +525,7 @@ const FakeBackend = struct {
             } else spec.frontend;
             const locator: Locator = switch (locator_frontend) {
                 .vhost_user_blk => .{ .vhost_user_blk = .{
-                    .socket_path = slot.socket_path[0..slot.socket_path_len],
+                    .socket_path = if (self.invalid_locator) "" else slot.socket_path[0..slot.socket_path_len],
                 } },
                 .iscsi => .{ .iscsi = .{
                     .portal = "127.0.0.1:3260",
@@ -622,7 +649,28 @@ test "registry rolls back a mismatched backend locator" {
     try std.testing.expectEqual(State.failed, (try registry.inspect(spec.endpoint_id)).state);
 
     backend.mismatch_frontend = false;
+    backend.invalid_locator = true;
+    try std.testing.expectError(error.InvalidLocator, registry.ensure(spec));
+    try std.testing.expectEqual(@as(usize, 2), backend.stops);
+    backend.invalid_locator = false;
     try std.testing.expectEqual(State.active, (try registry.ensure(spec)).state);
+}
+
+test "registry rejects oversized and invalid UTF-8 locators" {
+    var oversized: [max_locator_component_len + 1]u8 = @splat('a');
+    try std.testing.expectError(
+        error.InvalidLocator,
+        validateLocator(.{ .vhost_user_blk = .{ .socket_path = &oversized } }),
+    );
+    const invalid_utf8 = [_]u8{0xff};
+    try std.testing.expectError(
+        error.InvalidLocator,
+        validateLocator(.{ .iscsi = .{
+            .portal = &invalid_utf8,
+            .target_name = "iqn.2026-08.io.zettide:test",
+            .lun = 0,
+        } }),
+    );
 }
 
 test "store failure prevents start and release persists before stop" {
