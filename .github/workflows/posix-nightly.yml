@@ -16,6 +16,10 @@ jobs:
   conformance:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        optimize: [Debug, ReleaseSafe]
     env:
       ZETTIDE_EXTERNAL_ROOT: ${{ github.workspace }}/test/external/.prepared
       ZETTIDE_TEST_LOG_DIR: ${{ github.workspace }}/test-results
@@ -54,13 +58,14 @@ jobs:
             -Dfuse-tests=required \
             -Dexternal-tests=required \
             -Dprivileged-tests=required \
+            -Doptimize=${{ matrix.optimize }} \
             2>&1 | tee "$ZETTIDE_TEST_LOG_DIR/nightly.log"
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: posix-nightly-${{ github.run_id }}
+          name: posix-nightly-${{ matrix.optimize }}-${{ github.run_id }}
           path: test-results/
           if-no-files-found: warn
           retention-days: 14

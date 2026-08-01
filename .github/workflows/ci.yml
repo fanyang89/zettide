@@ -28,14 +28,19 @@ jobs:
   fuse:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      matrix:
+        optimize: [Debug, ReleaseSafe]
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
       - name: Install FUSE
-        run: sudo apt-get update && sudo apt-get install -y fuse3 libfuse3-dev
+        run: sudo apt-get update && sudo apt-get install -y e2fsprogs fuse3 libfuse3-dev util-linux
       - name: Verify FUSE capability
         run: test -r /dev/fuse && test -w /dev/fuse
       - name: Run POSIX filesystem quick gate
-        run: zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
+        run: zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required -Doptimize=${{ matrix.optimize }}
+      - name: Run raw block device gate
+        run: zig build test-linux-block -Dblock-tests=required -Doptimize=${{ matrix.optimize }}
