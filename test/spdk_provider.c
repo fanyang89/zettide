@@ -464,6 +464,15 @@ main(void)
 		delete_status = delete_waiter_wait(&delete_waiter);
 		status = close_status != 0 ? close_status : delete_status;
 	}
+	if (status == 0) {
+		status = zettide_spdk_bdev_provider_create(runtime, &provider_opts, &provider);
+	}
+	if (status == 0) {
+		status = zettide_spdk_bdev_provider_delete_wait(provider);
+		if (status == 0) {
+			provider = NULL;
+		}
+	}
 
 done:
 	zettide_spdk_dma_free(read_buffer);

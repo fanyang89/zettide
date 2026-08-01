@@ -62,6 +62,10 @@ int zettide_spdk_bdev_provider_delete(
 		zettide_spdk_bdev_provider_delete_complete complete,
 		void *complete_context);
 
+/* Blocks until unregister completes. A zero return consumes provider ownership. */
+int zettide_spdk_bdev_provider_delete_wait(
+		struct zettide_spdk_bdev_provider *provider);
+
 #ifdef __cplusplus
 }
 #endif

@@ -52,6 +52,13 @@ struct provider_delete {
 	void *complete_context;
 };
 
+struct provider_delete_waiter {
+	pthread_mutex_t mutex;
+	pthread_cond_t condition;
+	bool completed;
+	int status;
+};
+
 static int provider_module_init(void);
 static void provider_module_fini(void);
 static int provider_get_ctx_size(void);
@@ -541,6 +548,72 @@ zettide_spdk_bdev_provider_delete(struct zettide_spdk_bdev_provider *provider,
 		return status;
 	}
 	return 0;
+}
+
+static void
+provider_delete_wait_complete(void *context, int status)
+{
+	struct provider_delete_waiter *waiter = context;
+	int rc = pthread_mutex_lock(&waiter->mutex);
+
+	assert(rc == 0);
+	waiter->status = status;
+	waiter->completed = true;
+	rc = pthread_cond_signal(&waiter->condition);
+	assert(rc == 0);
+	rc = pthread_mutex_unlock(&waiter->mutex);
+	assert(rc == 0);
+}
+
+int
+zettide_spdk_bdev_provider_delete_wait(struct zettide_spdk_bdev_provider *provider)
+{
+	struct provider_delete_waiter waiter = {0};
+	int old_cancel_state;
+	int ignored_cancel_state;
+	int status;
+	int rc;
+
+	if (provider == NULL || spdk_get_thread() != NULL) {
+		return provider == NULL ? -EINVAL : -EDEADLK;
+	}
+	rc = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
+	if (rc != 0) {
+		return -rc;
+	}
+	rc = pthread_mutex_init(&waiter.mutex, NULL);
+	if (rc != 0) {
+		status = -rc;
+		goto restore_cancel;
+	}
+	rc = pthread_cond_init(&waiter.condition, NULL);
+	if (rc != 0) {
+		status = -rc;
+		(void)pthread_mutex_destroy(&waiter.mutex);
+		goto restore_cancel;
+	}
+	status = zettide_spdk_bdev_provider_delete(provider,
+			provider_delete_wait_complete, &waiter);
+	if (status == 0) {
+		rc = pthread_mutex_lock(&waiter.mutex);
+		assert(rc == 0);
+		while (!waiter.completed) {
+			rc = pthread_cond_wait(&waiter.condition, &waiter.mutex);
+			assert(rc == 0);
+		}
+		status = waiter.status;
+		rc = pthread_mutex_unlock(&waiter.mutex);
+		assert(rc == 0);
+	}
+	rc = pthread_cond_destroy(&waiter.condition);
+	assert(rc == 0);
+	rc = pthread_mutex_destroy(&waiter.mutex);
+	assert(rc == 0);
+
+restore_cancel:
+	rc = pthread_setcancelstate(old_cancel_state, &ignored_cancel_state);
+	assert(rc == 0);
+	return status;
 }
 
 static void
