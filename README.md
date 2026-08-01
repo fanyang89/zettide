@@ -1,13 +1,36 @@
 # Zettide
 
-Zettide is an experimental cross-platform development volume built on
-[littlefs](https://github.com/littlefs-project/littlefs). Volumes can use a
-single sparse container file or an explicitly selected Linux raw-disk Pool.
+Zettide is an experimental storage engine. Its current user-facing path mounts
+a [littlefs](https://github.com/littlefs-project/littlefs) filesystem from a
+sparse container file or an explicitly selected Linux raw-disk Pool.
 
 The project currently implements the portable container core and a foreground
 Linux FUSE3 mount adapter. The core cross-compiles for Windows; the native
 WinFsp dispatcher remains an explicit, conditionally compiled integration
 boundary.
+
+## Capability Stages
+
+Zettide is being developed as three cumulative storage tiers:
+
+| Tier | Product capability | Status |
+| --- | --- | --- |
+| Tier 1 | Mount a local filesystem backed by a container file or raw devices | Current on Linux through foreground FUSE |
+| Tier 2 | Serve local catalog Volumes as blocks to qtr, with iSCSI as the first managed protocol | Target; no daemon, iSCSI target, or qtr integration exists yet |
+| Tier 3 | Replicate Volumes across storage nodes and republish them after a storage failure | Target; control metadata exists in `zettide-control`, but the distributed data path does not |
+
+The current raw Pool product commands accept exactly one unprotected device or
+three replicated devices. The format and libraries can represent dynamic
+membership, a multi-Volume catalog, catalog extent mappings, and protection
+metadata, but online capacity expansion and protection-policy migration are not
+connected to a product lifecycle yet.
+
+Linux SPDK support is also library-level rather than a storage service. The
+repository contains a managed SPDK runtime, SPDK bdev access, an NVMe-oF
+initiator wrapper, an asynchronous custom bdev provider, a catalog Volume
+backend, and vhost-user-blk export lifecycle. These paths have focused tests,
+but there is no long-running Zettide daemon, stable management API, iSCSI
+export lifecycle, or qtr attachment reconciliation.
 
 ## Requirements
 
@@ -33,6 +56,11 @@ zig build test-fault
 zig build test-cross
 zig build test-linux-block -Dblock-tests=required
 zig build test-spdk-link
+zig build test-spdk-endpoint
+zig build test-spdk-dispatcher
+zig build test-spdk-provider
+zig build test-spdk-vhost-blk-controller
+zig build test-spdk-storage
 zig build test-fuse -Dfuse-tests=required
 zig build test-posix-baseline -Dfuse-tests=required
 zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
@@ -58,8 +86,10 @@ PKG_CONFIG_PATH=../third_party/spdk/build/lib/pkgconfig \
 zig build test-spdk-link
 ```
 
-This check validates headers and shared-library loading only. It does not start
-the SPDK application framework, allocate hugepages, or bind storage devices.
+`test-spdk-link` validates headers and shared-library loading only. The other
+SPDK gates exercise the managed runtime and focused bdev, provider, storage, or
+vhost controller lifecycles in isolated test configurations. They do not form
+a product daemon or bind an operator's storage devices.
 
 The Linux block-device gate uses temporary loop devices and requires `losetup`,
 `blockdev`, `mkfs.ext4`, `fusermount3`, `mountpoint`, a writable `/dev/fuse`,
