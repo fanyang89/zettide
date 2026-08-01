@@ -1,5 +1,6 @@
 pub const block_device = @import("block_device.zig");
 pub const container = @import("container.zig");
+pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("endpoint_control.zig") else struct {};
 pub const endpoint_registry = @import("endpoint_registry.zig");
 pub const metadata = @import("metadata.zig");
 pub const object_format = @import("object_format.zig");
@@ -20,6 +21,7 @@ pub const windows_winfsp = if (@import("builtin").os.tag == .windows) @import("w
 test {
     _ = block_device;
     _ = container;
+    _ = endpoint_control;
     _ = endpoint_registry;
     _ = metadata;
     _ = object_format;
