@@ -9,6 +9,10 @@ if [[ -z ${PKG_CONFIG_PATH:-} ]]; then
 	printf '%s\n' "PKG_CONFIG_PATH must reference an SPDK build" >&2
 	exit 1
 fi
+if [[ $# -ne 1 ]]; then
+	printf '%s\n' "usage: $0 ZIG_TEST_LIBRARY" >&2
+	exit 2
+fi
 
 build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
@@ -42,3 +46,14 @@ done
 	-Wl,--as-needed
 LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 	timeout 30 "$build_dir/zettide-spdk-vhost-blk-controller-test" "$socket_dir"
+
+# shellcheck disable=SC2046
+"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
+	src/spdk/runtime.c src/spdk/bdev_provider.c src/spdk/vhost_blk_controller.c \
+	test/spdk_vhost_export_main.c "$1" \
+	-o "$build_dir/zettide-spdk-vhost-export-test" -pthread -lubsan \
+	-Wl,--no-as-needed \
+	$(pkg-config --cflags --libs "${packages[@]}") \
+	-Wl,--as-needed
+LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+	timeout 30 "$build_dir/zettide-spdk-vhost-export-test" "$socket_dir"

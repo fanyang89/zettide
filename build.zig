@@ -89,7 +89,9 @@ pub fn build(b: *std.Build) void {
     const spdk_provider_step = b.step("test-spdk-provider", "Run the asynchronous SPDK bdev provider test");
     spdk_provider_step.dependOn(&spdk_provider_cmd.step);
 
+    const spdk_vhost_export_test = createSpdkVhostExportTest(b, target, optimize, portable_core);
     const spdk_vhost_cmd = b.addSystemCommand(&.{ "bash", "test/spdk-vhost-blk-controller.sh" });
+    spdk_vhost_cmd.addArtifactArg(spdk_vhost_export_test);
     const spdk_vhost_step = b.step("test-spdk-vhost-blk-controller", "Run the SPDK vhost-blk controller test");
     spdk_vhost_step.dependOn(&spdk_vhost_cmd.step);
 
@@ -287,6 +289,26 @@ fn createSpdkStorageTest(
     module.addIncludePath(b.path("test"));
     return b.addLibrary(.{
         .name = "zettide-spdk-storage-test",
+        .root_module = module,
+    });
+}
+
+fn createSpdkVhostExportTest(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    core: *std.Build.Module,
+) *std.Build.Step.Compile {
+    const module = b.createModule(.{
+        .root_source_file = b.path("test/spdk_vhost_export.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = core }},
+    });
+    module.addIncludePath(b.path("src"));
+    return b.addLibrary(.{
+        .name = "zettide-spdk-vhost-export-test",
         .root_module = module,
     });
 }

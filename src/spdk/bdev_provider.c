@@ -6,11 +6,14 @@
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/uio.h>
+#include <time.h>
 
 struct zettide_spdk_bdev_provider {
 	struct spdk_bdev bdev;
@@ -50,12 +53,11 @@ struct provider_delete {
 	struct zettide_spdk_runtime *runtime;
 	zettide_spdk_bdev_provider_delete_complete complete;
 	void *complete_context;
+	bool free_request;
 };
 
 struct provider_delete_waiter {
-	pthread_mutex_t mutex;
-	pthread_cond_t condition;
-	bool completed;
+	atomic_bool completed;
 	int status;
 };
 
@@ -63,6 +65,7 @@ static int provider_module_init(void);
 static void provider_module_fini(void);
 static int provider_get_ctx_size(void);
 static void provider_start_delete(void *context);
+static int submit_provider_delete(struct provider_delete *request, bool retry_allocation);
 
 static struct spdk_bdev_module provider_module = {
 	.name = "zettide_provider",
@@ -522,7 +525,6 @@ zettide_spdk_bdev_provider_delete(struct zettide_spdk_bdev_provider *provider,
 		void *complete_context)
 {
 	struct provider_delete *request;
-	struct spdk_thread *owner;
 	int status;
 
 	if (provider == NULL || spdk_get_thread() != NULL) {
@@ -536,38 +538,27 @@ zettide_spdk_bdev_provider_delete(struct zettide_spdk_bdev_provider *provider,
 	request->runtime = provider->runtime;
 	request->complete = complete;
 	request->complete_context = complete_context;
-	status = zettide_spdk_runtime_acquire(request->runtime, &owner);
+	request->free_request = true;
+	status = submit_provider_delete(request, false);
 	if (status != 0) {
 		free(request);
-		return status;
 	}
-	status = spdk_thread_send_msg(owner, provider_start_delete, request);
-	if (status != 0) {
-		zettide_spdk_runtime_release(request->runtime);
-		free(request);
-		return status;
-	}
-	return 0;
+	return status;
 }
 
 static void
 provider_delete_wait_complete(void *context, int status)
 {
 	struct provider_delete_waiter *waiter = context;
-	int rc = pthread_mutex_lock(&waiter->mutex);
 
-	assert(rc == 0);
 	waiter->status = status;
-	waiter->completed = true;
-	rc = pthread_cond_signal(&waiter->condition);
-	assert(rc == 0);
-	rc = pthread_mutex_unlock(&waiter->mutex);
-	assert(rc == 0);
+	atomic_store_explicit(&waiter->completed, true, memory_order_release);
 }
 
 int
 zettide_spdk_bdev_provider_delete_wait(struct zettide_spdk_bdev_provider *provider)
 {
+	struct provider_delete request = {0};
 	struct provider_delete_waiter waiter = {0};
 	int old_cancel_state;
 	int ignored_cancel_state;
@@ -578,41 +569,45 @@ zettide_spdk_bdev_provider_delete_wait(struct zettide_spdk_bdev_provider *provid
 		return provider == NULL ? -EINVAL : -EDEADLK;
 	}
 	rc = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
-	if (rc != 0) {
-		return -rc;
-	}
-	rc = pthread_mutex_init(&waiter.mutex, NULL);
-	if (rc != 0) {
-		status = -rc;
-		goto restore_cancel;
-	}
-	rc = pthread_cond_init(&waiter.condition, NULL);
-	if (rc != 0) {
-		status = -rc;
-		(void)pthread_mutex_destroy(&waiter.mutex);
-		goto restore_cancel;
-	}
-	status = zettide_spdk_bdev_provider_delete(provider,
-			provider_delete_wait_complete, &waiter);
+	assert(rc == 0);
+	request.provider = provider;
+	request.runtime = provider->runtime;
+	request.complete = provider_delete_wait_complete;
+	request.complete_context = &waiter;
+	request.free_request = false;
+	status = submit_provider_delete(&request, true);
 	if (status == 0) {
-		rc = pthread_mutex_lock(&waiter.mutex);
-		assert(rc == 0);
-		while (!waiter.completed) {
-			rc = pthread_cond_wait(&waiter.condition, &waiter.mutex);
-			assert(rc == 0);
+		const struct timespec delay = { .tv_sec = 0, .tv_nsec = 1000000 };
+
+		while (!atomic_load_explicit(&waiter.completed, memory_order_acquire)) {
+			(void)nanosleep(&delay, NULL);
 		}
 		status = waiter.status;
-		rc = pthread_mutex_unlock(&waiter.mutex);
-		assert(rc == 0);
 	}
-	rc = pthread_cond_destroy(&waiter.condition);
-	assert(rc == 0);
-	rc = pthread_mutex_destroy(&waiter.mutex);
-	assert(rc == 0);
-
-restore_cancel:
 	rc = pthread_setcancelstate(old_cancel_state, &ignored_cancel_state);
 	assert(rc == 0);
+	return status;
+}
+
+static int
+submit_provider_delete(struct provider_delete *request, bool retry_allocation)
+{
+	struct spdk_thread *owner;
+	int status;
+
+	status = zettide_spdk_runtime_acquire(request->runtime, &owner);
+	if (status != 0) {
+		return status;
+	}
+	do {
+		status = spdk_thread_send_msg(owner, provider_start_delete, request);
+		if (status == -ENOMEM && retry_allocation) {
+			sched_yield();
+		}
+	} while (status == -ENOMEM && retry_allocation);
+	if (status != 0) {
+		zettide_spdk_runtime_release(request->runtime);
+	}
 	return status;
 }
 
@@ -621,13 +616,16 @@ provider_delete_done(void *context, int status)
 {
 	struct provider_delete *request = context;
 	struct zettide_spdk_runtime *runtime = request->runtime;
+	const bool free_request = request->free_request;
 
 	zettide_spdk_runtime_release(runtime);
 	zettide_spdk_runtime_release(runtime);
 	if (request->complete != NULL) {
 		request->complete(request->complete_context, status);
 	}
-	free(request);
+	if (free_request) {
+		free(request);
+	}
 }
 
 static void
