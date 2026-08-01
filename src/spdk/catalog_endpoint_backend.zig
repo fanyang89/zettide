@@ -35,6 +35,93 @@ pub const PoolSource = struct {
     }
 };
 
+/// Opens pools from an immutable table of explicit member locations. The
+/// allocator must be thread-safe, and configs and their locations must remain
+/// valid while this source can be used.
+pub const ConfiguredPoolSource = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    configs: []const Config,
+
+    pub const Config = struct {
+        pool_id: endpoint_registry.PoolId,
+        locations: []const pool_member_set.Location,
+    };
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        configs: []const Config,
+    ) !ConfiguredPoolSource {
+        for (configs, 0..) |config, index| {
+            if (isZero(&config.pool_id)) return error.InvalidPoolId;
+            if (config.locations.len == 0) return error.MissingPoolLocations;
+            if (config.locations.len > pool_member_set.max_member_count)
+                return error.TooManyPoolLocations;
+            for (configs[0..index]) |previous| {
+                if (std.mem.eql(u8, &previous.pool_id, &config.pool_id))
+                    return error.DuplicatePoolConfig;
+            }
+            for (config.locations, 0..) |location, location_index| {
+                if (location.basename.len == 0) return error.InvalidPoolLocation;
+                for (config.locations[0..location_index]) |previous| {
+                    if (sameLocation(previous, location)) return error.DuplicatePoolLocation;
+                }
+                for (configs[0..index]) |previous_config| {
+                    for (previous_config.locations) |previous| {
+                        if (sameLocation(previous, location)) return error.DuplicatePoolLocation;
+                    }
+                }
+            }
+        }
+        return .{ .allocator = allocator, .io = io, .configs = configs };
+    }
+
+    pub fn poolSource(self: *ConfiguredPoolSource) PoolSource {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn openOpaque(context: *anyopaque, pool_id: endpoint_registry.PoolId) !PoolSource.Opened {
+        const self: *ConfiguredPoolSource = @ptrCast(@alignCast(context));
+        const config = for (self.configs) |candidate| {
+            if (std.mem.eql(u8, &candidate.pool_id, &pool_id)) break candidate;
+        } else return error.PoolNotConfigured;
+
+        const set = try self.allocator.create(pool_member_set.PoolMemberSet);
+        errdefer self.allocator.destroy(set);
+        set.* = try pool_member_set.PoolMemberSet.open(
+            self.io,
+            self.allocator,
+            config.locations,
+            .writable,
+        );
+        errdefer set.deinit();
+        const authority = set.authority() orelse return error.MissingPoolAuthority;
+        return .{ .set = set, .pool_id = authority.topology.set_id };
+    }
+
+    fn closeOpaque(context: *anyopaque, set: *pool_member_set.PoolMemberSet) !void {
+        const self: *ConfiguredPoolSource = @ptrCast(@alignCast(context));
+        try set.close();
+        self.allocator.destroy(set);
+    }
+
+    fn abortOpaque(context: *anyopaque, set: *pool_member_set.PoolMemberSet) void {
+        const self: *ConfiguredPoolSource = @ptrCast(@alignCast(context));
+        set.close() catch |err| {
+            if (!set.isClosed())
+                std.debug.panic("failed to abort opened pool: {s}", .{@errorName(err)});
+        };
+        self.allocator.destroy(set);
+    }
+
+    const vtable: PoolSource.VTable = .{
+        .open = openOpaque,
+        .close = closeOpaque,
+        .abort = abortOpaque,
+    };
+};
+
 pub const Options = struct {
     cpumask: ?[]const u8 = null,
     block_size: u32 = 4096,
@@ -327,6 +414,91 @@ fn testId(value: u8) [16]u8 {
     var result: [16]u8 = @splat(0);
     result[15] = value;
     return result;
+}
+
+fn isZero(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte != 0) return false;
+    return true;
+}
+
+fn sameLocation(a: pool_member_set.Location, b: pool_member_set.Location) bool {
+    return a.parent.handle == b.parent.handle and std.mem.eql(u8, a.basename, b.basename);
+}
+
+test "configured pool source validates routing entries" {
+    const location = pool_member_set.Location{ .parent = std.Io.Dir.cwd(), .basename = "member" };
+    const valid = ConfiguredPoolSource.Config{ .pool_id = testId(1), .locations = &.{location} };
+    var configs = [_]ConfiguredPoolSource.Config{ valid, valid };
+
+    try std.testing.expectError(
+        error.DuplicatePoolConfig,
+        ConfiguredPoolSource.init(std.testing.allocator, std.testing.io, &configs),
+    );
+    configs[1].pool_id = @splat(0);
+    try std.testing.expectError(
+        error.InvalidPoolId,
+        ConfiguredPoolSource.init(std.testing.allocator, std.testing.io, &configs),
+    );
+    configs[1] = .{ .pool_id = testId(2), .locations = &.{} };
+    try std.testing.expectError(
+        error.MissingPoolLocations,
+        ConfiguredPoolSource.init(std.testing.allocator, std.testing.io, &configs),
+    );
+
+    configs[1] = .{ .pool_id = testId(2), .locations = &.{location} };
+    try std.testing.expectError(
+        error.DuplicatePoolLocation,
+        ConfiguredPoolSource.init(std.testing.allocator, std.testing.io, &configs),
+    );
+    const empty_location = pool_member_set.Location{ .parent = std.Io.Dir.cwd(), .basename = "" };
+    configs[1] = .{ .pool_id = testId(2), .locations = &.{empty_location} };
+    try std.testing.expectError(
+        error.InvalidPoolLocation,
+        ConfiguredPoolSource.init(std.testing.allocator, std.testing.io, &configs),
+    );
+    const too_many: [pool_member_set.max_member_count + 1]pool_member_set.Location = @splat(location);
+    configs[1] = .{ .pool_id = testId(2), .locations = &too_many };
+    try std.testing.expectError(
+        error.TooManyPoolLocations,
+        ConfiguredPoolSource.init(std.testing.allocator, std.testing.io, &configs),
+    );
+}
+
+test "configured pool source opens and releases a real pool" {
+    const pool_provision = @import("../v3/pool_provision.zig");
+    const storage_api = @import("../v3/storage.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storages = [_]storage_api.Storage{
+        try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 8 * 1024 * 1024),
+    };
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{
+        .protection = .unprotected,
+    });
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    const pool_id = provisioned.genesis.topology.set_id;
+    try provisioned.close();
+
+    const locations = [_]pool_member_set.Location{.{ .parent = tmp.dir, .basename = "member" }};
+    const configs = [_]ConfiguredPoolSource.Config{.{
+        .pool_id = pool_id,
+        .locations = &locations,
+    }};
+    var configured = try ConfiguredPoolSource.init(std.testing.allocator, std.testing.io, &configs);
+    const source = configured.poolSource();
+    try std.testing.expectError(error.PoolNotConfigured, source.open(testId(99)));
+
+    const opened = try source.open(pool_id);
+    try std.testing.expectEqualSlices(u8, &pool_id, &opened.pool_id);
+    try std.testing.expectEqualSlices(u8, &pool_id, &opened.set.authority().?.topology.set_id);
+    try source.close(opened.set);
+
+    const reopened = try source.open(pool_id);
+    source.abort(reopened.set);
 }
 
 test "catalog endpoint backend composes pool and export lifetimes" {
