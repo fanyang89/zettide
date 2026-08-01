@@ -15,7 +15,7 @@ Zettide is being developed as three cumulative storage tiers:
 
 | Tier | Product capability | Status |
 | --- | --- | --- |
-| Tier 1 | Mount a local filesystem backed by a container file or raw devices | Current on Linux through foreground FUSE |
+| Tier 1 | Mount a local filesystem backed by a container file or raw devices | Current Linux path; full POSIX-profile completion remains in progress |
 | Tier 2 | Serve local catalog Volumes as blocks to qtr, with iSCSI as the first managed protocol | Target; no daemon, iSCSI target, or qtr integration exists yet |
 | Tier 3 | Replicate Volumes across storage nodes and republish them after a storage failure | Target; control metadata exists in `zettide-control`, but the distributed data path does not |
 
