@@ -934,11 +934,11 @@ pub const Volume = struct {
     }
 
     fn ensureWriteCapacity(self: *Volume, footprint: object_store.WriteFootprint) !void {
-        if (footprint.chunk_count == 0) return;
+        if (footprint.chunk_count == 0 or footprint.reserved or self.reservation_blocks == 0) return;
         var operation = try inflatedDataBlocks(footprint.payload_bytes, self.header.block_size);
         operation = try addCapacity(operation, try std.math.mul(u64, footprint.chunk_count, 2));
         operation = try addCapacity(operation, accounting_metadata_blocks);
-        if (!footprint.reserved) operation = try addCapacity(operation, self.reservation_blocks);
+        operation = try addCapacity(operation, self.reservation_blocks);
         const free = @as(u64, self.header.block_count) - try self.usedBlocks();
         if (free < operation) return error.NoSpaceLeft;
     }
@@ -1331,4 +1331,17 @@ test "create, write, reopen, and check volume" {
 
     const result = try volume.check();
     try std.testing.expect(result.used_blocks >= 2);
+}
+
+test "ordinary writes rely on littlefs capacity without a full-volume preflight" {
+    var volume: Volume = undefined;
+    volume.reservation_blocks = 0;
+    volume.header.block_count = 0;
+    volume.header.block_size = container.default_block_size;
+
+    try volume.ensureWriteCapacity(.{
+        .payload_bytes = 1,
+        .chunk_count = 1,
+        .reserved = false,
+    });
 }
