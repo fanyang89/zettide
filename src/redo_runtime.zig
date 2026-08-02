@@ -42,8 +42,8 @@ pub const PreparedFlush = struct {
         backend: file_io.BorrowedFileIo,
         durable_sync: DurableSync,
     ) !void {
-        try backend.writeAllManyAt(io, self.writes.items);
-        try backend.writeAllAt(io, &self.anchor_bytes, self.anchor_position);
+        try backend.writeAllManyAt(io, .writeback, self.writes.items);
+        try backend.writeAllAt(io, .writeback, &self.anchor_bytes, self.anchor_position);
         try durable_sync.run();
     }
 
@@ -181,7 +181,7 @@ pub const Runtime = struct {
             @memcpy(buffer, image[offset..][0..buffer.len]);
             return;
         }
-        try self.file_io.readAllAt(self.io, buffer, try self.homePosition(block, offset));
+        try self.file_io.readAllAt(self.io, .foreground, buffer, try self.homePosition(block, offset));
     }
 
     pub fn program(self: *Runtime, block: u32, offset: u32, data: []const u8) !void {
@@ -203,7 +203,7 @@ pub const Runtime = struct {
             else if (self.committed.get(block)) |committed|
                 image.* = committed.*
             else {
-                try self.file_io.readAllAt(self.io, image, try self.homePosition(block, 0));
+                try self.file_io.readAllAt(self.io, .foreground, image, try self.homePosition(block, 0));
             }
             entry.value_ptr.* = image;
         }
@@ -353,6 +353,7 @@ pub const Runtime = struct {
             defer self.allocator.free(ids);
             for (ids) |id| try self.file_io.writeAllAt(
                 self.io,
+                .writeback,
                 self.committed.get(id).?,
                 try self.homePosition(id, 0),
             );
@@ -370,7 +371,12 @@ pub const Runtime = struct {
             };
             const next_slot = self.nextAnchorSlot();
             const anchor_bytes = try redo_journal.encodeAnchor(next_anchor, self.dataCapacity());
-            try self.file_io.writeAllAt(self.io, &anchor_bytes, try self.anchorPosition(next_slot));
+            try self.file_io.writeAllAt(
+                self.io,
+                .writeback,
+                &anchor_bytes,
+                try self.anchorPosition(next_slot),
+            );
             try durable_sync.run();
             self.anchor_slot = next_slot;
             self.anchor_generation = next_generation;
@@ -403,6 +409,7 @@ pub const Runtime = struct {
         for (&encoded_anchors, 0..) |*encoded, index| {
             self.file_io.readAllAt(
                 self.io,
+                .foreground,
                 encoded,
                 try self.anchorPosition(@enumFromInt(index)),
             ) catch |err| switch (err) {
@@ -579,6 +586,7 @@ pub const Runtime = struct {
         const first_length: usize = @intCast(@min(buffer.len, self.dataCapacity() - offset));
         self.file_io.readAllAt(
             self.io,
+            .foreground,
             buffer[0..first_length],
             try self.journalPosition(offset),
         ) catch |err| switch (err) {
@@ -588,6 +596,7 @@ pub const Runtime = struct {
         if (first_length == buffer.len) return;
         self.file_io.readAllAt(
             self.io,
+            .foreground,
             buffer[first_length..],
             try self.journalPosition(0),
         ) catch |err| switch (err) {

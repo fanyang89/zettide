@@ -84,7 +84,7 @@ pub const FileBlockDevice = struct {
             return redo.read(block, offset, buffer);
         }
         const file_offset = try self.position(block, offset, buffer.len);
-        try self.file_io.readAllAt(self.io, buffer, file_offset);
+        try self.file_io.readAllAt(self.io, .foreground, buffer, file_offset);
     }
 
     pub fn program(self: *FileBlockDevice, block: u32, offset: u32, data: []const u8) !void {
@@ -104,7 +104,7 @@ pub const FileBlockDevice = struct {
                 self.freezeWrites();
                 return err;
             };
-        } else self.file_io.writeAllAt(self.io, write_data, file_offset) catch |err| {
+        } else self.file_io.writeAllAt(self.io, .foreground, write_data, file_offset) catch |err| {
             self.freezeWrites();
             return err;
         };
@@ -508,7 +508,7 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return error.InjectedFault;
         }
-        self.file_io.dataSync(self.io) catch |err| {
+        self.file_io.dataSync(self.io, if (self.redo == null) .foreground else .writeback) catch |err| {
             self.freezeWrites();
             return err;
         };

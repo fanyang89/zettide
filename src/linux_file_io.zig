@@ -6,44 +6,46 @@ const File = Io.File;
 const IoUring = std.os.linux.IoUring;
 const linux = std.os.linux;
 
-const queue_entries = 8;
+const foreground_queue_entries = 8;
+const writeback_queue_entries = 32;
 const max_request_len = std.math.maxInt(u32);
 
 const Lane = struct {
     ring: IoUring,
     mutex: Io.Mutex = .init,
     next_token: u64 = 1,
+    queue_entries: usize,
     active: bool = true,
     file_registered: bool = true,
 };
 
 const Context = struct {
     allocator: std.mem.Allocator,
-    data: Lane,
-    sync: Lane,
+    foreground: Lane,
+    writeback: Lane,
 };
 
 pub fn init(allocator: std.mem.Allocator, file: File) !file_io_api.FileIo {
-    var data_ring = try IoUring.init(queue_entries, 0);
-    errdefer data_ring.deinit();
-    const probe = try data_ring.get_probe();
+    var foreground_ring = try IoUring.init(foreground_queue_entries, 0);
+    errdefer foreground_ring.deinit();
+    const probe = try foreground_ring.get_probe();
     if (!probe.is_supported(.READ) or
         !probe.is_supported(.WRITE) or
         !probe.is_supported(.FSYNC))
         return error.UnsupportedIoUringOperations;
 
-    var sync_ring = try IoUring.init(queue_entries, 0);
-    errdefer sync_ring.deinit();
+    var writeback_ring = try IoUring.init(writeback_queue_entries, 0);
+    errdefer writeback_ring.deinit();
     var files = [_]linux.fd_t{file.handle};
-    try data_ring.register_files(&files);
-    errdefer data_ring.unregister_files() catch {};
-    try sync_ring.register_files(&files);
-    errdefer sync_ring.unregister_files() catch {};
+    try foreground_ring.register_files(&files);
+    errdefer foreground_ring.unregister_files() catch {};
+    try writeback_ring.register_files(&files);
+    errdefer writeback_ring.unregister_files() catch {};
     const context = try allocator.create(Context);
     context.* = .{
         .allocator = allocator,
-        .data = .{ .ring = data_ring },
-        .sync = .{ .ring = sync_ring },
+        .foreground = .{ .ring = foreground_ring, .queue_entries = foreground_queue_entries },
+        .writeback = .{ .ring = writeback_ring, .queue_entries = writeback_queue_entries },
     };
     return .{
         .file = file,
@@ -53,150 +55,161 @@ pub fn init(allocator: std.mem.Allocator, file: File) !file_io_api.FileIo {
     };
 }
 
-fn readAllAt(raw: ?*anyopaque, _: File, io: Io, buffer: []u8, offset: u64) !void {
+fn readAllAt(raw: ?*anyopaque, _: File, io: Io, lane_kind: file_io_api.Lane, buffer: []u8, offset: u64) !void {
     const context: *Context = @ptrCast(@alignCast(raw.?));
-    try context.data.mutex.lock(io);
-    defer context.data.mutex.unlock(io);
+    const lane = selectLane(context, lane_kind);
+    try lane.mutex.lock(io);
+    defer lane.mutex.unlock(io);
 
     var index: usize = 0;
     while (index < buffer.len) {
-        try requireActive(&context.data);
+        try requireActive(lane);
         const request_len = @min(buffer.len - index, max_request_len);
-        const token = nextToken(&context.data);
-        const sqe = context.data.ring.read(
+        const token = nextToken(lane);
+        const sqe = lane.ring.read(
             token,
             0,
             .{ .buffer = buffer[index..][0..request_len] },
             offset + index,
         ) catch |err| {
-            failLane(&context.data);
+            failLane(lane);
             return err;
         };
         sqe.flags |= linux.IOSQE_FIXED_FILE;
-        const amount = complete(&context.data, token) catch |err| switch (err) {
+        const amount = complete(lane, token) catch |err| switch (err) {
             error.OperationInterrupted => continue,
             else => return err,
         };
         if (amount == 0) return error.UnexpectedEndOfFile;
-        if (amount > request_len) return invalidCompletion(&context.data);
+        if (amount > request_len) return invalidCompletion(lane);
         index += amount;
     }
 }
 
-fn writeAllAt(raw: ?*anyopaque, _: File, io: Io, bytes: []const u8, offset: u64) !void {
+fn writeAllAt(raw: ?*anyopaque, _: File, io: Io, lane_kind: file_io_api.Lane, bytes: []const u8, offset: u64) !void {
     const context: *Context = @ptrCast(@alignCast(raw.?));
-    try context.data.mutex.lock(io);
-    defer context.data.mutex.unlock(io);
+    const lane = selectLane(context, lane_kind);
+    try lane.mutex.lock(io);
+    defer lane.mutex.unlock(io);
 
     var index: usize = 0;
     while (index < bytes.len) {
-        try requireActive(&context.data);
+        try requireActive(lane);
         const request_len = @min(bytes.len - index, max_request_len);
-        const token = nextToken(&context.data);
-        const sqe = context.data.ring.write(
+        const token = nextToken(lane);
+        const sqe = lane.ring.write(
             token,
             0,
             bytes[index..][0..request_len],
             offset + index,
         ) catch |err| {
-            failLane(&context.data);
+            failLane(lane);
             return err;
         };
         sqe.flags |= linux.IOSQE_FIXED_FILE;
-        const amount = complete(&context.data, token) catch |err| switch (err) {
+        const amount = complete(lane, token) catch |err| switch (err) {
             error.OperationInterrupted => continue,
             else => return err,
         };
-        if (amount == 0 or amount > request_len) return invalidCompletion(&context.data);
+        if (amount == 0 or amount > request_len) return invalidCompletion(lane);
         index += amount;
     }
 }
 
-fn writeAllManyAt(raw: ?*anyopaque, _: File, io: Io, writes: []const file_io_api.Write) !void {
+fn writeAllManyAt(raw: ?*anyopaque, _: File, io: Io, lane_kind: file_io_api.Lane, writes: []const file_io_api.Write) !void {
     const context: *Context = @ptrCast(@alignCast(raw.?));
+    const lane = selectLane(context, lane_kind);
     for (writes) |write| {
         if (write.bytes.len > max_request_len) return error.RequestTooLarge;
         _ = std.math.add(u64, write.offset, write.bytes.len) catch return error.OffsetOverflow;
     }
-    try context.data.mutex.lock(io);
-    defer context.data.mutex.unlock(io);
+    try lane.mutex.lock(io);
+    defer lane.mutex.unlock(io);
 
     var index: usize = 0;
     while (index < writes.len) {
-        var tokens: [queue_entries]u64 = undefined;
-        var lengths: [queue_entries]usize = undefined;
-        var amounts: [queue_entries]usize = @splat(0);
-        var seen: [queue_entries]bool = @splat(false);
+        var tokens: [writeback_queue_entries]u64 = undefined;
+        var lengths: [writeback_queue_entries]usize = undefined;
+        var amounts: [writeback_queue_entries]usize = @splat(0);
+        var seen: [writeback_queue_entries]bool = @splat(false);
         var count: usize = 0;
-        while (index + count < writes.len and count < queue_entries) : (count += 1) {
+        while (index + count < writes.len and count < lane.queue_entries) : (count += 1) {
             const write = writes[index + count];
-            try requireActive(&context.data);
-            const token = nextToken(&context.data);
-            const sqe = context.data.ring.write(token, 0, write.bytes, write.offset) catch |err| {
-                failLane(&context.data);
+            try requireActive(lane);
+            const token = nextToken(lane);
+            const sqe = lane.ring.write(token, 0, write.bytes, write.offset) catch |err| {
+                failLane(lane);
                 return err;
             };
             sqe.flags |= linux.IOSQE_FIXED_FILE;
             tokens[count] = token;
             lengths[count] = write.bytes.len;
         }
-        try submitBatch(&context.data, count);
+        try submitBatch(lane, count);
         var first_error: ?anyerror = null;
         for (0..count) |_| {
-            const completion = copyCompletion(&context.data) catch |err| {
-                failLane(&context.data);
+            const completion = copyCompletion(lane) catch |err| {
+                failLane(lane);
                 return err;
             };
             const completion_index = for (tokens[0..count], 0..) |token, token_index| {
                 if (token == completion.user_data) break token_index;
-            } else return invalidCompletion(&context.data);
-            if (seen[completion_index]) return invalidCompletion(&context.data);
+            } else return invalidCompletion(lane);
+            if (seen[completion_index]) return invalidCompletion(lane);
             seen[completion_index] = true;
             if (completion.res < 0) {
                 if (first_error == null) first_error = completionError(@enumFromInt(-completion.res));
             } else {
                 const amount: usize = @intCast(completion.res);
-                if (amount > lengths[completion_index]) return invalidCompletion(&context.data);
+                if (amount > lengths[completion_index]) return invalidCompletion(lane);
                 amounts[completion_index] = amount;
             }
         }
         if (first_error) |err| return err;
         for (writes[index..][0..count], amounts[0..count]) |write, amount| {
             if (amount < write.bytes.len)
-                try writeAllLocked(&context.data, write.bytes[amount..], write.offset + amount);
+                try writeAllLocked(lane, write.bytes[amount..], write.offset + amount);
         }
         index += count;
     }
 }
 
-fn dataSync(raw: ?*anyopaque, _: File, io: Io) !void {
+fn dataSync(raw: ?*anyopaque, _: File, io: Io, lane_kind: file_io_api.Lane) !void {
     const context: *Context = @ptrCast(@alignCast(raw.?));
-    try context.sync.mutex.lock(io);
-    defer context.sync.mutex.unlock(io);
+    const lane = selectLane(context, lane_kind);
+    try lane.mutex.lock(io);
+    defer lane.mutex.unlock(io);
 
     while (true) {
-        try requireActive(&context.sync);
-        const token = nextToken(&context.sync);
-        const sqe = context.sync.ring.fsync(token, 0, linux.IORING_FSYNC_DATASYNC) catch |err| {
-            failLane(&context.sync);
+        try requireActive(lane);
+        const token = nextToken(lane);
+        const sqe = lane.ring.fsync(token, 0, linux.IORING_FSYNC_DATASYNC) catch |err| {
+            failLane(lane);
             return err;
         };
         sqe.flags |= linux.IOSQE_FIXED_FILE;
-        const result = complete(&context.sync, token) catch |err| switch (err) {
+        const result = complete(lane, token) catch |err| switch (err) {
             error.OperationInterrupted => continue,
             else => return err,
         };
-        if (result != 0) return invalidCompletion(&context.sync);
+        if (result != 0) return invalidCompletion(lane);
         return;
     }
 }
 
 fn deinit(raw: ?*anyopaque) void {
     const context: *Context = @ptrCast(@alignCast(raw.?));
-    failLane(&context.data);
-    failLane(&context.sync);
+    failLane(&context.foreground);
+    failLane(&context.writeback);
     const allocator = context.allocator;
     allocator.destroy(context);
+}
+
+fn selectLane(context: *Context, lane: file_io_api.Lane) *Lane {
+    return switch (lane) {
+        .foreground => &context.foreground,
+        .writeback => &context.writeback,
+    };
 }
 
 fn nextToken(lane: *Lane) u64 {
@@ -319,34 +332,39 @@ test "Linux file IO uses io_uring for borrowed file operations" {
     };
     defer backend.deinit();
     try std.testing.expectEqual(file_io_api.Kind.io_uring, backend.kind);
-    try backend.writeAllAt(std.testing.io, "io_uring", 512);
-    var write_bytes: [10][1]u8 = undefined;
+    try backend.writeAllAt(std.testing.io, .foreground, "io_uring", 512);
+    var write_bytes: [writeback_queue_entries * 2 + 1][1]u8 = undefined;
     var writes: [write_bytes.len]file_io_api.Write = undefined;
     for (&write_bytes, &writes, 0..) |*bytes, *write, index| {
         bytes.* = .{@intCast(index)};
         write.* = .{ .bytes = bytes, .offset = 1024 + index * 16 };
     }
-    try backend.writeAllManyAt(std.testing.io, &writes);
+    try backend.writeAllManyAt(std.testing.io, .writeback, &writes);
     try std.testing.expectError(
         error.OffsetOverflow,
-        backend.writeAllManyAt(std.testing.io, &.{.{
+        backend.writeAllManyAt(std.testing.io, .writeback, &.{.{
             .bytes = "overflow",
             .offset = std.math.maxInt(u64),
         }}),
     );
-    try backend.writeAllAt(std.testing.io, "still-active", 3072);
-    try backend.dataSync(std.testing.io);
+    try backend.writeAllAt(std.testing.io, .foreground, "still-active", 3072);
+    try backend.dataSync(std.testing.io, .writeback);
     var actual: [8]u8 = undefined;
-    try backend.readAllAt(std.testing.io, &actual, 512);
+    try backend.readAllAt(std.testing.io, .foreground, &actual, 512);
     try std.testing.expectEqualStrings("io_uring", &actual);
     var batched: [1]u8 = undefined;
-    try backend.readAllAt(std.testing.io, &batched, 1024 + 9 * 16);
-    try std.testing.expectEqual(@as(u8, 9), batched[0]);
+    try backend.readAllAt(
+        std.testing.io,
+        .foreground,
+        &batched,
+        1024 + (write_bytes.len - 1) * 16,
+    );
+    try std.testing.expectEqual(@as(u8, write_bytes.len - 1), batched[0]);
     var still_active: [12]u8 = undefined;
-    try backend.readAllAt(std.testing.io, &still_active, 3072);
+    try backend.readAllAt(std.testing.io, .foreground, &still_active, 3072);
     try std.testing.expectEqualStrings("still-active", &still_active);
     try std.testing.expectError(
         error.UnexpectedEndOfFile,
-        backend.readAllAt(std.testing.io, &actual, 4095),
+        backend.readAllAt(std.testing.io, .foreground, &actual, 4095),
     );
 }
