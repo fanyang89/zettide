@@ -29,26 +29,39 @@ jobs:
 
   fuse:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       matrix:
         optimize: [Debug, ReleaseSafe]
+    env:
+      ZETTIDE_TEST_LOG_DIR: ${{ github.workspace }}/test-results
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - name: Install FUSE and Samba
-        run: sudo apt-get update && sudo apt-get install -y e2fsprogs fuse3 libfuse3-dev samba smbclient util-linux
+      - name: Install FUSE, fio, and Samba
+        run: sudo apt-get update && sudo apt-get install -y e2fsprogs fio fuse3 libfuse3-dev samba smbclient util-linux
       - name: Install dufs
         run: cargo install dufs --version 0.46.0 --locked
       - name: Verify FUSE capability
         run: test -r /dev/fuse && test -w /dev/fuse
       - name: Run POSIX filesystem quick gate
         run: zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required -Doptimize=${{ matrix.optimize }}
+      - name: Run fio data correctness gate
+        if: github.event_name == 'push'
+        run: zig build test-fio -Dexternal-tests=required -Doptimize=${{ matrix.optimize }}
       - name: Run raw block device gate
         run: zig build test-linux-block -Dblock-tests=required -Doptimize=${{ matrix.optimize }}
       - name: Run dufs integration gate
         run: zig build test-dufs -Dfuse-tests=required -Doptimize=${{ matrix.optimize }}
       - name: Run SMB3 mount-export feasibility gate
         run: zig build test-smb3-linux -Dsmb3-tests=required -Doptimize=${{ matrix.optimize }}
+      - name: Upload filesystem logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-fuse-${{ matrix.optimize }}-${{ github.run_id }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7

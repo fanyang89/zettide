@@ -148,8 +148,9 @@ configuration. Its current scope and exclusions are documented in
 to small files and multi-chunk sequential and random files. It verifies every
 write on the live mount, cleanly unmounts the file-backed image, runs `check`,
 remounts it, and verifies the complete data set from a separate fio process.
-The gate requires the `fio` executable and is part of `test-posix-nightly`, not
-the pull-request quick gate. Set `ZETTIDE_FIO` to select a non-default executable.
+The gate requires the `fio` executable and runs on pushes and as part of
+`test-posix-nightly`, not the pull-request quick gate. Set `ZETTIDE_FIO` to
+select a non-default executable.
 
 The privileged and nightly gates use pinned upstream suites prepared by an
 explicit networked step. Test execution itself never downloads dependencies:

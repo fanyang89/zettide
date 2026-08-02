@@ -51,7 +51,7 @@ jobs:
           bash test/external/prepare.sh "$ZETTIDE_EXTERNAL_ROOT" \
             2>&1 | tee "$ZETTIDE_TEST_LOG_DIR/prepare.log"
 
-      - name: Run nightly gates
+      - name: Run nightly gates including fio verification
         run: |
           set -o pipefail
           zig build -j1 test-posix-nightly \
