@@ -53,6 +53,29 @@ Build the Linux endpoint daemon against an SPDK pkg-config installation with:
 PKG_CONFIG_PATH=../third_party/spdk/build/lib/pkgconfig zig build -Dspdk=true
 ```
 
+## Benchmarks
+
+The filesystem operations benchmark uses zBench on the `Volume` API with
+temporary file-backed containers. It excludes the mounted FUSE/VFS syscall path
+as well as format, mount, setup, and cleanup time; backing-file syscalls remain
+included. Run the representative optimized build with:
+
+```sh
+zig build bench-fs-ops -Doptimize=ReleaseFast -- \
+  --iterations 100 --warmup 5
+```
+
+Use `--operation NAME` to select one workload. The available workloads are
+`create`, `open`, `stat`, `read-readonly`, `read-writable-atime`,
+`write-overwrite`, `rename`, and `remove`. Writes are already durable when the
+internal littlefs files close, so there is no separate sync-write workload. The
+writable read workload includes the current persistent-atime behavior; the
+read-only workload isolates the data read path. Data workloads use a warmed
+fixed file and offset, so they measure steady-state hot-path latency rather than
+cold or streaming I/O. zBench reports average, standard deviation, range, and
+percentiles without a performance pass/fail threshold. Run with `--help` for all
+options.
+
 ## Tests
 
 ```sh

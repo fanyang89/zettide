@@ -34,6 +34,52 @@ pub fn build(b: *std.Build) void {
     const unit_step = b.step("test-unit", "Run deterministic unit tests");
     unit_step.dependOn(&run_core_tests.step);
 
+    const zbench_dependency = b.dependency("zbench", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zbench_module = b.createModule(.{
+        .root_source_file = zbench_dependency.path("src/zbench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const fs_ops_benchmark_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/fs_ops.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zettide", .module = portable_core },
+            .{ .name = "zbench", .module = zbench_module },
+        },
+    });
+    const fs_ops_benchmark = b.addExecutable(.{
+        .name = "zettide-fs-ops-benchmark",
+        .root_module = fs_ops_benchmark_module,
+    });
+    const run_fs_ops_benchmark = b.addRunArtifact(fs_ops_benchmark);
+    if (b.args) |args| run_fs_ops_benchmark.addArgs(args);
+    const fs_ops_benchmark_step = b.step("bench-fs-ops", "Benchmark direct Volume filesystem operations");
+    fs_ops_benchmark_step.dependOn(&run_fs_ops_benchmark.step);
+    const install_fs_ops_benchmark = b.addInstallArtifact(fs_ops_benchmark, .{});
+    const build_fs_ops_benchmark_step = b.step("build-bench-fs-ops", "Build the filesystem operations benchmark");
+    build_fs_ops_benchmark_step.dependOn(&install_fs_ops_benchmark.step);
+
+    const fs_ops_benchmark_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/fs_ops.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zettide", .module = portable_core },
+                .{ .name = "zbench", .module = zbench_module },
+            },
+        }),
+    });
+    const run_fs_ops_benchmark_tests = b.addRunArtifact(fs_ops_benchmark_tests);
+    unit_step.dependOn(&run_fs_ops_benchmark_tests.step);
+
     const image_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/image.zig"),
@@ -241,6 +287,7 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(test_step);
     ci_step.dependOn(fault_step);
     ci_step.dependOn(cross_step);
+    ci_step.dependOn(&fs_ops_benchmark.step);
 }
 
 fn createNameProfileCrossTest(

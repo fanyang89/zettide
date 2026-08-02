@@ -24,6 +24,8 @@ jobs:
         run: zig build test-fault -Doptimize=${{ matrix.optimize }}
       - name: Cross-compile Windows boundary
         run: zig build test-cross -Doptimize=${{ matrix.optimize }}
+      - name: Build filesystem benchmark
+        run: zig build build-bench-fs-ops -Doptimize=${{ matrix.optimize }}
 
   fuse:
     runs-on: ubuntu-latest
