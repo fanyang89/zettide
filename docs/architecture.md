@@ -110,6 +110,12 @@ higher ballot. Domain identifiers, incarnation identifiers, and proposal
 identifiers are generated uniquely; persistent counters prevent record ABA
 even if an opaque identifier is accidentally reused.
 
+Votes must cross a backend durability barrier before authority publication.
+The backend then rereads the durable member slots, validates the exact quorum
+certificate, and only then issues the authority compare-and-write. A caller
+cannot publish authority from an unverified in-memory or merely visible member
+snapshot.
+
 Nodes use private-network observations and their local monotonic clocks for
 failure suspicion. A majority certificate published through the voting region
 selects the surviving cohort, but never proves that an evicted node has stopped

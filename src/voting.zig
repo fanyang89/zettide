@@ -65,6 +65,10 @@ pub const Ballot = struct {
 pub const Proposal = struct {
     ballot: Ballot,
     cohort_bitmap: u8,
+
+    pub fn eql(a: Proposal, b: Proposal) bool {
+        return a.cohort_bitmap == b.cohort_bitmap and a.ballot.eql(b.ballot);
+    }
 };
 
 pub const Member = struct {
@@ -333,8 +337,13 @@ pub fn validateMemberTransition(
     if (previous.presence) |old_presence| {
         const new_presence = next.presence orelse return error.InvalidTransition;
         if (std.mem.eql(u8, &old_presence.incarnation_id, &new_presence.incarnation_id)) {
-            if (new_presence.incarnation_counter != old_presence.incarnation_counter or
-                new_presence.sequence <= old_presence.sequence) return error.InvalidTransition;
+            if (new_presence.incarnation_counter == old_presence.incarnation_counter) {
+                if (new_presence.sequence <= old_presence.sequence) return error.InvalidTransition;
+            } else if (new_presence.incarnation_counter <= old_presence.incarnation_counter or
+                new_presence.sequence != 1)
+            {
+                return error.InvalidTransition;
+            }
         } else if (new_presence.incarnation_counter <= old_presence.incarnation_counter or
             new_presence.sequence != 1)
         {
@@ -351,11 +360,11 @@ pub fn validateMemberTransition(
         next.campaign,
         previous.presence != null and
             next.presence != null and
-            !std.mem.eql(
+            (!std.mem.eql(
                 u8,
                 &previous.presence.?.incarnation_id,
                 &next.presence.?.incarnation_id,
-            ),
+            ) or previous.presence.?.incarnation_counter != next.presence.?.incarnation_counter),
     );
 }
 
@@ -411,7 +420,7 @@ pub fn validateAuthorityVotes(
     if (!proposalEql(campaign, active.proposal)) return error.MissingQuorum;
 }
 
-fn validateConfiguration(configuration: Configuration) Error!void {
+pub fn validateConfiguration(configuration: Configuration) Error!void {
     if (isZero(&configuration.domain_id)) return error.InvalidConfiguration;
     if (configuration.member_count != 3 and configuration.member_count != 5)
         return error.InvalidConfiguration;
@@ -460,7 +469,7 @@ fn validateAuthorityShape(authority: Authority) Error!void {
     }
 }
 
-fn validateProposal(configuration: Configuration, proposal: Proposal) Error!void {
+pub fn validateProposal(configuration: Configuration, proposal: Proposal) Error!void {
     try validateProposalShape(proposal);
     try validateBallot(configuration, proposal.ballot);
     const mask = memberMask(configuration.member_count);
@@ -504,7 +513,7 @@ fn validateOptionalProposalTransition(
 }
 
 fn proposalEql(a: Proposal, b: Proposal) bool {
-    return a.cohort_bitmap == b.cohort_bitmap and a.ballot.eql(b.ballot);
+    return a.eql(b);
 }
 
 fn encodeHeader(encoded: *Encoded, magic: *const [8]u8, flags: u16) void {
