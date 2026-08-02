@@ -24,6 +24,7 @@ const Inode = struct {
     cached_info: ?volume_mod.NodeInfo,
     lookup_count: u64,
     open_count: u64,
+    children: std.StringHashMapUnmanaged(*Dentry),
     next: ?*Inode,
 };
 
@@ -38,14 +39,18 @@ const Dentry = struct {
 const MountState = struct {
     volume: *volume_mod.Volume,
     nodes: ?*Inode = null,
+    node_index: std.AutoHashMapUnmanaged(c.fuse_ino_t, *Inode) = .empty,
     dentries: ?*Dentry = null,
     open_files: ?*FuseFileHandle = null,
     writeback_cache: bool = false,
 
     fn init(volume: *volume_mod.Volume) !MountState {
         var state = MountState{ .volume = volume };
+        errdefer state.node_index.deinit(std.heap.c_allocator);
         const root_info = try volume.stat("/");
         const root = try std.heap.c_allocator.create(Inode);
+        errdefer std.heap.c_allocator.destroy(root);
+        try state.node_index.ensureUnusedCapacity(std.heap.c_allocator, 1);
         root.* = .{
             .id = c.FUSE_ROOT_ID,
             .identity = root_info.identity,
@@ -54,8 +59,10 @@ const MountState = struct {
             .cached_info = root_info,
             .lookup_count = 1,
             .open_count = 0,
+            .children = .empty,
             .next = null,
         };
+        state.node_index.putAssumeCapacityNoClobber(root.id, root);
         state.nodes = root;
         return state;
     }
@@ -72,40 +79,34 @@ const MountState = struct {
         while (current) |node| {
             const next = node.next;
             if (node.object_id) |object_id| self.volume.unpinObject(object_id) catch {};
+            node.children.deinit(std.heap.c_allocator);
             std.heap.c_allocator.destroy(node);
             current = next;
         }
         self.nodes = null;
+        self.node_index.deinit(std.heap.c_allocator);
     }
 
     fn find(self: *MountState, id: c.fuse_ino_t) ?*Inode {
-        var current = self.nodes;
-        while (current) |node| : (current = node.next) {
-            if (node.id == id) return node;
-        }
-        return null;
+        return self.node_index.get(id);
     }
 
     fn findChild(self: *MountState, parent: *Inode, name: []const u8) ?*Dentry {
-        var current = self.dentries;
-        while (current) |dentry| : (current = dentry.next) {
-            if (dentry.parent == parent and
-                std.mem.eql(u8, std.mem.sliceTo(&dentry.name, 0), name)) return dentry;
-        }
-        return null;
+        _ = self;
+        return parent.children.get(name);
     }
 
     fn findIdentity(self: *MountState, identity: object_format.ObjectId) ?*Inode {
-        var current = self.nodes;
-        while (current) |node| : (current = node.next) {
-            if (std.mem.eql(u8, &node.identity, &identity)) return node;
-        }
-        return null;
+        const root = self.find(c.FUSE_ROOT_ID).?;
+        if (std.mem.eql(u8, &root.identity, &identity)) return root;
+        const node = self.find(inodeNumber(identity)) orelse return null;
+        return if (std.mem.eql(u8, &node.identity, &identity)) node else null;
     }
 
     fn addEntry(self: *MountState, parent: *Inode, name: []const u8, info: volume_mod.NodeInfo) !*Dentry {
         if (name.len >= name_capacity) return error.NameTooLong;
         if (self.findChild(parent, name) != null) return error.PathAlreadyExists;
+        try parent.children.ensureUnusedCapacity(std.heap.c_allocator, 1);
         var new_node = false;
         const node = self.findIdentity(info.identity) orelse value: {
             new_node = true;
@@ -123,6 +124,7 @@ const MountState = struct {
         };
         @memcpy(dentry.name[0..name.len], name);
         try self.setDentryPath(dentry);
+        parent.children.putAssumeCapacityNoClobber(std.mem.sliceTo(&dentry.name, 0), dentry);
         self.dentries = dentry;
         node.kind = info.metadata.kind;
         node.cached_info = info;
@@ -132,6 +134,7 @@ const MountState = struct {
     fn addNode(self: *MountState, info: volume_mod.NodeInfo) !*Inode {
         const id = inodeNumber(info.identity);
         if (self.find(id) != null) return error.CorruptFilesystem;
+        try self.node_index.ensureUnusedCapacity(std.heap.c_allocator, 1);
         const node = try std.heap.c_allocator.create(Inode);
         errdefer std.heap.c_allocator.destroy(node);
         if (info.object_id) |object_id| try self.volume.pinObject(object_id);
@@ -143,8 +146,10 @@ const MountState = struct {
             .cached_info = null,
             .lookup_count = 0,
             .open_count = 0,
+            .children = .empty,
             .next = self.nodes,
         };
+        self.node_index.putAssumeCapacityNoClobber(id, node);
         self.nodes = node;
         return node;
     }
@@ -161,7 +166,10 @@ const MountState = struct {
         while (cursor.*) |node| {
             if (node == target) {
                 cursor.* = node.next;
+                const removed = self.node_index.fetchRemove(node.id) orelse unreachable;
+                std.debug.assert(removed.value == node);
                 if (node.object_id) |object_id| self.volume.unpinObject(object_id) catch {};
+                node.children.deinit(std.heap.c_allocator);
                 std.heap.c_allocator.destroy(node);
                 return;
             }
@@ -178,11 +186,8 @@ const MountState = struct {
     }
 
     fn hasChildren(self: *MountState, target: *const Inode) bool {
-        var current = self.dentries;
-        while (current) |dentry| : (current = dentry.next) {
-            if (dentry.parent == target) return true;
-        }
-        return false;
+        _ = self;
+        return target.children.count() != 0;
     }
 
     fn pruneCaches(self: *MountState) void {
@@ -196,6 +201,7 @@ const MountState = struct {
                     const inode = dentry.inode;
                     const parent = dentry.parent;
                     cursor.* = dentry.next;
+                    self.removeEntryFromIndex(dentry);
                     std.heap.c_allocator.destroy(dentry);
                     self.removeUnreferencedNode(inode);
                     self.removeUnreferencedNode(parent);
@@ -225,11 +231,19 @@ const MountState = struct {
         while (cursor.*) |dentry| {
             if (dentry == target) {
                 cursor.* = dentry.next;
+                self.removeEntryFromIndex(dentry);
                 std.heap.c_allocator.destroy(dentry);
                 return;
             }
             cursor = &dentry.next;
         }
+    }
+
+    fn removeEntryFromIndex(self: *MountState, target: *Dentry) void {
+        _ = self;
+        const removed = target.parent.children.fetchRemove(std.mem.sliceTo(&target.name, 0)) orelse
+            unreachable;
+        std.debug.assert(removed.value == target);
     }
 
     fn updateDescendantPaths(self: *MountState, parent: *Inode) !void {
@@ -782,6 +796,8 @@ fn rename(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
         if (new_name.len >= name_capacity) return replyError(req, c.ENAMETOOLONG);
         state.validateDescendantPaths(dentry, std.mem.sliceTo(&new_path, 0)) catch |err|
             return replyError(req, errnoValue(err));
+        new_parent.children.ensureUnusedCapacity(std.heap.c_allocator, 1) catch
+            return replyError(req, c.ENOMEM);
     }
     const result = state.volume.renameWithResult(&old_path, &new_path) catch |err|
         return replyError(req, errnoValue(err));
@@ -794,10 +810,12 @@ fn rename(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
         state.removeEntry(dentry);
     }
     if (source) |dentry| {
+        state.removeEntryFromIndex(dentry);
         dentry.parent = new_parent;
         dentry.name = @splat(0);
         @memcpy(dentry.name[0..new_name.len], new_name);
         dentry.path = new_path;
+        new_parent.children.putAssumeCapacityNoClobber(std.mem.sliceTo(&dentry.name, 0), dentry);
         state.updateDescendantPaths(dentry.inode) catch {};
     }
     state.pruneCaches();
