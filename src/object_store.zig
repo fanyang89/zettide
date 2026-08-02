@@ -120,7 +120,9 @@ pub const Store = struct {
             .allocated_bytes = 0,
             .metadata = object_metadata,
         };
-        try self.writeHead(head);
+        var head_path_buffer: [max_path_bytes:0]u8 = undefined;
+        const bytes = head.encode();
+        try writeExact(self.lfs, try headPath(id, &head_path_buffer), &bytes);
         return object_ref;
     }
 

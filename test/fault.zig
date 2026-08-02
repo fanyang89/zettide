@@ -20,6 +20,52 @@ fn expectReopen(path: []const u8) !void {
     try reopened.mount();
 }
 
+fn objectCount(volume: *Volume) !usize {
+    var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+    try zettide.volume.checkLfs(c.lfs_dir_open(&volume.lfs, &directory, "/system/objects"));
+    defer _ = c.lfs_dir_close(&volume.lfs, &directory);
+    var count: usize = 0;
+    while (true) {
+        var info: c.struct_lfs_info = undefined;
+        const result = c.lfs_dir_read(&volume.lfs, &directory, &info);
+        try zettide.volume.checkLfs(result);
+        if (result == 0) return count;
+        const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+        if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, "..")) count += 1;
+    }
+}
+
+test "a failed initial head write leaves a recoverable orphan" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createPath(&tmp, &path_buffer);
+    try Volume.create(std.testing.io, path, 1024 * 1024, "CreateFaultTest");
+
+    {
+        var volume = try Volume.open(std.testing.io, path, true);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 2 };
+        volume.device.fault = &fault;
+        try std.testing.expectError(
+            error.InputOutput,
+            volume.openFile(&file, "/failed", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1),
+        );
+        try std.testing.expect(volume.isWriteFrozen());
+        fault.disable();
+    }
+
+    {
+        var volume = try Volume.open(std.testing.io, path, true);
+        defer volume.deinit();
+        try volume.mount();
+        try std.testing.expectEqual(@as(usize, 0), try objectCount(&volume));
+        try std.testing.expectError(error.FileNotFound, volume.stat("/failed"));
+    }
+}
+
 test "block device program faults have deterministic side effects" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
