@@ -14,6 +14,9 @@ pub const zero_digest: Digest = @splat(0);
 const magic = [8]u8{ 'Z', 'R', 'E', 'D', 'O', '0', '1', 0 };
 const format_version: u16 = 1;
 const checksum_offset = alignment - @sizeOf(u32);
+const anchor_magic = [8]u8{ 'Z', 'R', 'E', 'D', 'A', '0', '1', 0 };
+const anchor_format_version: u16 = 1;
+const anchor_checksum_offset = anchor_size - @sizeOf(u32);
 const digest_domain = "zettide-redo-transaction-v1\x00";
 
 const RecordKind = enum(u8) {
@@ -30,6 +33,27 @@ pub const BlockImage = struct {
 pub const Metadata = struct {
     sequence: u64,
     previous_digest: Digest = zero_digest,
+};
+
+pub const Anchor = struct {
+    generation: u64,
+    head_offset: u64,
+    used_bytes: u64,
+    tail_sequence: u64,
+    tail_digest: Digest,
+
+    pub fn validate(anchor: Anchor, data_capacity: u64) !void {
+        if (anchor.generation == 0 or data_capacity == 0 or
+            anchor.head_offset >= data_capacity or anchor.head_offset % alignment != 0 or
+            anchor.used_bytes > data_capacity or anchor.used_bytes % alignment != 0)
+            return error.InvalidRedoAnchor;
+        if (anchor.used_bytes == 0) {
+            if (anchor.tail_sequence != 0 or !std.mem.eql(u8, &anchor.tail_digest, &zero_digest))
+                return error.InvalidRedoAnchor;
+        } else if (anchor.tail_sequence == 0) {
+            return error.InvalidRedoAnchor;
+        }
+    }
 };
 
 pub const DecodedTransaction = struct {
@@ -74,6 +98,43 @@ pub fn encodedSize(block_count: usize) !usize {
         return error.TransactionTooLarge;
     return std.math.add(usize, 2 * alignment, data_size) catch
         error.TransactionTooLarge;
+}
+
+pub fn encodeAnchor(anchor: Anchor, data_capacity: u64) ![anchor_size]u8 {
+    try anchor.validate(data_capacity);
+    var bytes: [anchor_size]u8 = @splat(0);
+    @memcpy(bytes[0..anchor_magic.len], &anchor_magic);
+    putInt(u16, &bytes, 8, anchor_format_version);
+    putInt(u16, &bytes, 10, anchor_size);
+    putInt(u64, &bytes, 16, anchor.generation);
+    putInt(u64, &bytes, 24, anchor.head_offset);
+    putInt(u64, &bytes, 32, anchor.used_bytes);
+    putInt(u64, &bytes, 40, anchor.tail_sequence);
+    @memcpy(bytes[48..80], &anchor.tail_digest);
+    putInt(u32, &bytes, anchor_checksum_offset, google_crc32c.value(bytes[0..anchor_checksum_offset]));
+    return bytes;
+}
+
+pub fn decodeAnchor(bytes: *const [anchor_size]u8, data_capacity: u64) !?Anchor {
+    if (isZero(bytes)) return null;
+    if (!std.mem.eql(u8, bytes[0..anchor_magic.len], &anchor_magic))
+        return error.InvalidRedoAnchorMagic;
+    if (getInt(u32, bytes, anchor_checksum_offset) !=
+        google_crc32c.value(bytes[0..anchor_checksum_offset]))
+        return error.InvalidRedoAnchorChecksum;
+    if (getInt(u16, bytes, 8) != anchor_format_version or getInt(u16, bytes, 10) != anchor_size)
+        return error.UnsupportedRedoAnchorFormat;
+    if (getInt(u32, bytes, 12) != 0 or !isZero(bytes[80..anchor_checksum_offset]))
+        return error.InvalidRedoAnchor;
+    const anchor: Anchor = .{
+        .generation = getInt(u64, bytes, 16),
+        .head_offset = getInt(u64, bytes, 24),
+        .used_bytes = getInt(u64, bytes, 32),
+        .tail_sequence = getInt(u64, bytes, 40),
+        .tail_digest = bytes[48..80].*,
+    };
+    try anchor.validate(data_capacity);
+    return anchor;
 }
 
 pub fn transactionLength(prefix: []const u8) !?usize {
@@ -295,9 +356,9 @@ fn encodeHeader(bytes: []u8, header: Header) void {
 fn decodeHeader(bytes: []const u8) !Header {
     if (bytes.len != alignment) return error.TruncatedRecord;
     if (!std.mem.eql(u8, bytes[0..magic.len], &magic)) return error.InvalidRecordMagic;
-    if (getInt(u16, bytes, 8) != format_version) return error.UnsupportedRecordFormat;
     if (getInt(u32, bytes, checksum_offset) != google_crc32c.value(bytes[0..checksum_offset]))
         return error.InvalidRecordChecksum;
+    if (getInt(u16, bytes, 8) != format_version) return error.UnsupportedRecordFormat;
     return .{
         .kind = std.enums.fromInt(RecordKind, bytes[10]) orelse return error.InvalidRecordKind,
         .record_length = getInt(u32, bytes, 12),
@@ -328,6 +389,63 @@ fn putInt(comptime T: type, bytes: []u8, offset: usize, value: T) void {
 
 fn getInt(comptime T: type, bytes: []const u8, offset: usize) T {
     return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .little);
+}
+
+test "redo anchor round trips and validates geometry" {
+    const capacity = 64 * 1024;
+    const anchor: Anchor = .{
+        .generation = 9,
+        .head_offset = 3 * alignment,
+        .used_bytes = 7 * alignment,
+        .tail_sequence = 4,
+        .tail_digest = @splat(0x5a),
+    };
+    const encoded = try encodeAnchor(anchor, capacity);
+    const decoded = (try decodeAnchor(&encoded, capacity)).?;
+    try std.testing.expectEqualDeep(anchor, decoded);
+
+    var empty = anchor;
+    empty.used_bytes = 0;
+    empty.tail_sequence = 0;
+    empty.tail_digest = zero_digest;
+    const empty_encoded = try encodeAnchor(empty, capacity);
+    try std.testing.expectEqualDeep(empty, (try decodeAnchor(&empty_encoded, capacity)).?);
+
+    const zero: [anchor_size]u8 = @splat(0);
+    try std.testing.expectEqual(@as(?Anchor, null), try decodeAnchor(&zero, capacity));
+    try std.testing.expectError(error.InvalidRedoAnchor, encodeAnchor(.{
+        .generation = 1,
+        .head_offset = 1,
+        .used_bytes = 0,
+        .tail_sequence = 0,
+        .tail_digest = zero_digest,
+    }, capacity));
+}
+
+test "redo anchor rejects corruption and reserved fields" {
+    const capacity = 64 * 1024;
+    const anchor: Anchor = .{
+        .generation = 1,
+        .head_offset = 0,
+        .used_bytes = alignment,
+        .tail_sequence = 1,
+        .tail_digest = @splat(0x11),
+    };
+    const original = try encodeAnchor(anchor, capacity);
+    var damaged = original;
+    damaged[24] ^= 1;
+    try std.testing.expectError(error.InvalidRedoAnchorChecksum, decodeAnchor(&damaged, capacity));
+
+    damaged = original;
+    damaged[80] = 1;
+    putInt(u32, &damaged, anchor_checksum_offset, google_crc32c.value(damaged[0..anchor_checksum_offset]));
+    try std.testing.expectError(error.InvalidRedoAnchor, decodeAnchor(&damaged, capacity));
+
+    damaged = original;
+    damaged[8] = 2;
+    try std.testing.expectError(error.InvalidRedoAnchorChecksum, decodeAnchor(&damaged, capacity));
+    putInt(u32, &damaged, anchor_checksum_offset, google_crc32c.value(damaged[0..anchor_checksum_offset]));
+    try std.testing.expectError(error.UnsupportedRedoAnchorFormat, decodeAnchor(&damaged, capacity));
 }
 
 test "redo transaction round trip" {
@@ -362,6 +480,12 @@ test "redo transaction rejects damaged records and payloads" {
     defer std.testing.allocator.free(damaged);
     damaged[16] ^= 1;
     try std.testing.expectError(error.InvalidRecordChecksum, decode(std.testing.allocator, damaged, 8));
+
+    @memcpy(damaged, original);
+    damaged[8] = 2;
+    try std.testing.expectError(error.InvalidRecordChecksum, decode(std.testing.allocator, damaged, 8));
+    putInt(u32, damaged[0..alignment], checksum_offset, google_crc32c.value(damaged[0..checksum_offset]));
+    try std.testing.expectError(error.UnsupportedRecordFormat, decode(std.testing.allocator, damaged, 8));
 
     @memcpy(damaged, original);
     damaged[alignment + alignment + 17] ^= 1;

@@ -33,7 +33,8 @@ const format_major: u16 = 2;
 const format_minor_legacy: u16 = 0;
 const format_minor_name_profile: u16 = 1;
 const format_minor_encryption: u16 = 2;
-const format_minor_redo_journal: u16 = 3;
+const format_minor_linear_redo_journal: u16 = 3;
+const format_minor_redo_journal: u16 = 4;
 const format_minor_current: u16 = format_minor_redo_journal;
 const checksum_offset = header_size - @sizeOf(u32);
 const encryption_offset: usize = 256;
@@ -212,12 +213,15 @@ pub const Header = struct {
             try .fromPersisted(getInt(u16, bytes, 248), getInt(u16, bytes, 250))
         else if (format_minor == format_minor_legacy or
             format_minor == format_minor_encryption or
+            format_minor == format_minor_linear_redo_journal or
             format_minor == format_minor_redo_journal)
             .legacy_raw
         else
             return error.InvalidHeader;
         const encrypted = features & feature_encryption != 0;
         const journaled = features & feature_redo_journal != 0;
+        if (format_minor == format_minor_linear_redo_journal)
+            return error.UnsupportedRedoJournal;
         if ((format_minor == format_minor_encryption and !encrypted) or
             (format_minor < format_minor_encryption and encrypted) or
             (format_minor == format_minor_redo_journal) != journaled)
@@ -420,7 +424,7 @@ fn decodeEncryption(bytes: *const [header_size]u8) !volume_crypto.Config {
 
 fn encodeRedoJournal(bytes: *[header_size]u8, journal: RedoJournal) void {
     @memcpy(bytes[redo_journal_offset..][0..redo_journal_magic.len], &redo_journal_magic);
-    putInt(u16, bytes, redo_journal_offset + 8, 1);
+    putInt(u16, bytes, redo_journal_offset + 8, 2);
     putInt(u32, bytes, redo_journal_offset + 12, journal.alignment);
     putInt(u32, bytes, redo_journal_offset + 16, journal.block_size);
     putInt(u64, bytes, redo_journal_offset + 24, journal.offset);
@@ -433,7 +437,7 @@ fn decodeRedoJournal(bytes: *const [header_size]u8) !RedoJournal {
         u8,
         bytes[redo_journal_offset..][0..redo_journal_magic.len],
         &redo_journal_magic,
-    ) or getInt(u16, bytes, redo_journal_offset + 8) != 1 or
+    ) or getInt(u16, bytes, redo_journal_offset + 8) != 2 or
         getInt(u16, bytes, redo_journal_offset + 10) != 0 or
         getInt(u32, bytes, redo_journal_offset + 20) != 0 or
         getInt(u32, bytes, redo_journal_offset + 44) != 0)
@@ -514,6 +518,7 @@ test "redo journal descriptor round trip uses the versioned extension" {
     try header.enableRedoJournal(128 * 1024, 8);
     const bytes = header.encode();
     try std.testing.expectEqual(format_minor_redo_journal, getInt(u16, &bytes, 10));
+    try std.testing.expectEqual(@as(u16, 2), getInt(u16, &bytes, redo_journal_offset + 8));
     try std.testing.expectEqual(
         feature_object_store | feature_redo_journal,
         getInt(u32, &bytes, 28),
@@ -527,6 +532,16 @@ test "redo journal descriptor round trip uses the versioned extension" {
         decoded.redo_journal.?.offset + decoded.redo_journal.?.length,
         try requiredFileSize(decoded),
     );
+}
+
+test "linear redo journal format is rejected explicitly" {
+    var header = try Header.init(std.testing.io, 1024 * 1024, "LinearJournal");
+    try header.enableRedoJournal(128 * 1024, 8);
+    var bytes = header.encode();
+    putInt(u16, &bytes, 10, format_minor_linear_redo_journal);
+    putInt(u16, &bytes, redo_journal_offset + 8, 1);
+    putInt(u32, &bytes, checksum_offset, checksum(bytes[0..checksum_offset]));
+    try std.testing.expectError(error.UnsupportedRedoJournal, Header.decode(&bytes));
 }
 
 test "redo journal preserves encryption and name profile features" {
