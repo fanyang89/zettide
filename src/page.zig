@@ -117,6 +117,16 @@ pub const View = struct {
         return null;
     }
 
+    pub fn lowerBound(self: View, key: []const u8) Error!usize {
+        if (self.kind != .leaf) return error.WrongPageKind;
+        var cursor: usize = header_size;
+        for (0..self.entry_count) |index| {
+            const entry = parseLeafEntry(self.encoded, &cursor, self.payload_end) catch unreachable;
+            if (std.mem.order(u8, entry.key, key) != .lt) return index;
+        }
+        return self.entry_count;
+    }
+
     pub fn childFor(self: View, key: []const u8) Error!store.ObjectRef {
         return (try self.route(key)).child;
     }
@@ -350,6 +360,10 @@ test "leaf entries round trip and support lookup" {
     try std.testing.expectEqualStrings("beta", (try view.leafEntry(1)).key);
     try std.testing.expectEqualStrings("two", (try view.find("beta")).?);
     try std.testing.expectEqual(@as(?[]const u8, null), try view.find("charlie"));
+    try std.testing.expectEqual(@as(usize, 0), try view.lowerBound("a"));
+    try std.testing.expectEqual(@as(usize, 1), try view.lowerBound("beta"));
+    try std.testing.expectEqual(@as(usize, 2), try view.lowerBound("charlie"));
+    try std.testing.expectEqual(@as(usize, 3), try view.lowerBound("zulu"));
     try std.testing.expectError(error.IndexOutOfBounds, view.leafEntry(3));
     try std.testing.expectError(error.WrongPageKind, view.childFor("beta"));
 }

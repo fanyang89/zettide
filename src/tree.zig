@@ -20,6 +20,7 @@ pub const Error = error{
     LevelMismatch,
     TreeTooDeep,
     StagedPageLimit,
+    CursorInvalid,
 };
 
 const StagedPage = struct {
@@ -65,6 +66,157 @@ const PutResult = struct {
     fn deinit(self: *PutResult) void {
         if (self.split) |*split| split.deinit();
         self.* = undefined;
+    }
+};
+
+const DeleteNodeResult = struct {
+    node: store_mod.ObjectRef,
+    level: u16,
+    removed: bool,
+};
+
+pub const DeleteResult = struct {
+    root: store_mod.ObjectRef,
+    removed: bool,
+};
+
+pub const Entry = struct {
+    key: store_mod.OwnedBytes,
+    value: store_mod.OwnedBytes,
+
+    pub fn deinit(self: *Entry) void {
+        self.key.deinit();
+        self.value.deinit();
+        self.* = undefined;
+    }
+};
+
+const CursorSource = union(enum) {
+    stored: store_mod.ConditionalStore,
+    speculative: *Mutator,
+
+    fn load(self: CursorSource, object_ref: store_mod.ObjectRef, allocator: std.mem.Allocator) !LoadedPage {
+        return switch (self) {
+            .stored => |store| .{ .stored = try store.loadImmutable(object_ref, allocator) },
+            .speculative => |mutator| mutator.load(object_ref),
+        };
+    }
+};
+
+const CursorFrame = struct {
+    loaded: LoadedPage,
+    child_index: usize,
+};
+
+/// Iterates entries in bytewise key order starting at an inclusive lower
+/// bound. The source store or Mutator must outlive the Cursor. An error while
+/// moving between leaves invalidates the cursor for further iteration.
+pub const Cursor = struct {
+    source: CursorSource,
+    allocator: std.mem.Allocator,
+    frames: std.ArrayList(CursorFrame) = .empty,
+    leaf: ?LoadedPage = null,
+    leaf_index: usize = 0,
+    failed: bool = false,
+
+    fn init(
+        source: CursorSource,
+        allocator: std.mem.Allocator,
+        root: store_mod.ObjectRef,
+        start: []const u8,
+    ) !Cursor {
+        var cursor = Cursor{ .source = source, .allocator = allocator };
+        errdefer cursor.deinit();
+        try cursor.descend(root, start, null);
+        return cursor;
+    }
+
+    pub fn deinit(self: *Cursor) void {
+        if (self.leaf) |*leaf| leaf.deinit();
+        for (self.frames.items) |*frame| frame.loaded.deinit();
+        self.frames.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn next(self: *Cursor) !?Entry {
+        if (self.failed) return error.CursorInvalid;
+        while (self.leaf != null) {
+            const view = try page.decode(self.leaf.?.bytes());
+            if (self.leaf_index < view.entry_count) {
+                const item = try view.leafEntry(self.leaf_index);
+                var key = try store_mod.OwnedBytes.dupe(self.allocator, item.key);
+                errdefer key.deinit();
+                const value = try store_mod.OwnedBytes.dupe(self.allocator, item.value);
+                self.leaf_index += 1;
+                return .{ .key = key, .value = value };
+            }
+            self.advanceLeaf() catch |err| {
+                self.failed = true;
+                return err;
+            };
+        }
+        return null;
+    }
+
+    fn advanceLeaf(self: *Cursor) !void {
+        self.leaf.?.deinit();
+        self.leaf = null;
+        while (self.frames.items.len != 0) {
+            const frame = &self.frames.items[self.frames.items.len - 1];
+            const view = try page.decode(frame.loaded.bytes());
+            if (frame.child_index < view.entry_count) {
+                const child = (try view.internalEntry(frame.child_index)).child;
+                frame.child_index += 1;
+                try self.descend(child, null, view.level - 1);
+                return;
+            }
+            var finished = self.frames.pop().?;
+            finished.loaded.deinit();
+        }
+    }
+
+    fn descend(
+        self: *Cursor,
+        root: store_mod.ObjectRef,
+        start: ?[]const u8,
+        initial_level: ?u16,
+    ) !void {
+        var current = root;
+        var expected_level = initial_level;
+        var depth = self.frames.items.len;
+        while (true) : (depth += 1) {
+            if (depth > max_height) return error.TreeTooDeep;
+            var loaded = try self.source.load(current, self.allocator);
+            var retained = false;
+            defer if (!retained) loaded.deinit();
+            const view = try page.decode(loaded.bytes());
+            if (view.level > max_height) return error.TreeTooDeep;
+            if (expected_level) |level| {
+                if (view.level != level) return error.LevelMismatch;
+            }
+            switch (view.kind) {
+                .leaf => {
+                    self.leaf_index = if (start) |key| try view.lowerBound(key) else 0;
+                    self.leaf = loaded;
+                    retained = true;
+                    return;
+                },
+                .internal => {
+                    if (view.level == 0) return error.LevelMismatch;
+                    const route = if (start) |key|
+                        try view.route(key)
+                    else
+                        page.Route{ .child = try view.firstChild(), .child_index = 0 };
+                    try self.frames.append(self.allocator, .{
+                        .loaded = loaded,
+                        .child_index = route.child_index,
+                    });
+                    retained = true;
+                    current = route.child;
+                    expected_level = view.level - 1;
+                },
+            }
+        }
     }
 };
 
@@ -114,6 +266,10 @@ pub const Mutator = struct {
         return getWithLoader(self, loadMutator, self.allocator, root, key);
     }
 
+    pub fn scan(self: *Mutator, root: store_mod.ObjectRef, start: []const u8) !Cursor {
+        return Cursor.init(.{ .speculative = self }, self.allocator, root, start);
+    }
+
     pub fn put(
         self: *Mutator,
         root: store_mod.ObjectRef,
@@ -132,6 +288,16 @@ pub const Mutator = struct {
             return self.stage(&encoded);
         }
         return result.node;
+    }
+
+    pub fn delete(
+        self: *Mutator,
+        root: store_mod.ObjectRef,
+        key: []const u8,
+    ) !DeleteResult {
+        if (key.len > max_key_size) return error.KeyTooLarge;
+        const result = try self.deleteNode(root, key, 0);
+        return .{ .root = result.node, .removed = result.removed };
     }
 
     fn putNode(
@@ -254,6 +420,62 @@ pub const Mutator = struct {
         };
     }
 
+    fn deleteNode(
+        self: *Mutator,
+        node_ref: store_mod.ObjectRef,
+        key: []const u8,
+        depth: usize,
+    ) !DeleteNodeResult {
+        if (depth > max_height) return error.TreeTooDeep;
+        var loaded = try self.load(node_ref);
+        defer loaded.deinit();
+        const view = try page.decode(loaded.bytes());
+        if (view.level > max_height) return error.TreeTooDeep;
+        switch (view.kind) {
+            .leaf => {
+                var entries: std.ArrayList(page.LeafEntry) = .empty;
+                defer entries.deinit(self.allocator);
+                try entries.ensureTotalCapacity(self.allocator, view.entry_count);
+                var removed = false;
+                for (0..view.entry_count) |index| {
+                    const entry = try view.leafEntry(index);
+                    if (std.mem.eql(u8, entry.key, key)) {
+                        removed = true;
+                    } else {
+                        entries.appendAssumeCapacity(entry);
+                    }
+                }
+                if (!removed) return .{ .node = node_ref, .level = 0, .removed = false };
+                const encoded = try page.encodeLeaf(entries.items);
+                return .{ .node = try self.stage(&encoded), .level = 0, .removed = true };
+            },
+            .internal => {
+                const route = try view.route(key);
+                const child = try self.deleteNode(route.child, key, depth + 1);
+                if (child.level + 1 != view.level) return error.LevelMismatch;
+                if (!child.removed)
+                    return .{ .node = node_ref, .level = view.level, .removed = false };
+
+                var entries: std.ArrayList(page.InternalEntry) = .empty;
+                defer entries.deinit(self.allocator);
+                try entries.ensureTotalCapacity(self.allocator, view.entry_count);
+                var first_child = try view.firstChild();
+                if (route.child_index == 0) first_child = child.node;
+                for (0..view.entry_count) |index| {
+                    var entry = try view.internalEntry(index);
+                    if (index + 1 == route.child_index) entry.child = child.node;
+                    entries.appendAssumeCapacity(entry);
+                }
+                const encoded = try page.encodeInternal(view.level, first_child, entries.items);
+                return .{
+                    .node = try self.stage(&encoded),
+                    .level = view.level,
+                    .removed = true,
+                };
+            },
+        }
+    }
+
     fn load(self: *Mutator, object_ref: store_mod.ObjectRef) !LoadedPage {
         if (self.staged_index.get(object_ref)) |index|
             return .{ .staged = self.staged.items[index].encoded };
@@ -296,6 +518,15 @@ pub fn get(
     };
     var loader = Loader{ .store = store, .allocator = allocator };
     return getWithLoader(&loader, Loader.load, allocator, root, key);
+}
+
+pub fn scan(
+    store: store_mod.ConditionalStore,
+    allocator: std.mem.Allocator,
+    root: store_mod.ObjectRef,
+    start: []const u8,
+) !Cursor {
+    return Cursor.init(.{ .stored = store }, allocator, root, start);
 }
 
 fn getWithLoader(

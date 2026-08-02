@@ -67,6 +67,12 @@ returns a new root for the transaction coordinator to publish. Values larger
 than the inline entry limit will use separate immutable objects in a future
 format.
 
+Inclusive lower-bound cursors retain the immutable path needed to traverse leaf
+pages without sibling links. Cursors can read either a published root or a
+mutator's speculative pages. Deletion copies the affected path but does not
+merge pages or raise stale separator lower bounds; empty leaves remain valid.
+This keeps updates local while preserving lookup and ordered-scan correctness.
+
 Insertion and split control flow is adapted from xitdb's `SortedMap` at commit
 `97f5d68962a70cbf9d3bbaf0a087271e5da642b7`. The CAWFS fork is available at
 <https://github.com/fanyang89/xitdb>; licensing details are in
