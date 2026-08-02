@@ -234,8 +234,12 @@ pub const PoolBlockDevice = struct {
         var offset: u64 = 0;
         while (offset < logical_size) {
             const amount: usize = @intCast(@min(@as(u64, 1024 * 1024), logical_size - offset));
-            for (self.replicas[0..self.replica_count], 0..) |replica, index|
-                try replica.readData(offset, buffers[index][0..amount]);
+            var operations: [max_replica_count]ReplicaOperation = undefined;
+            for (operations[0..self.replica_count], 0..) |*operation, index|
+                operation.* = .{ .read = .{ .offset = offset, .buffer = buffers[index][0..amount] } };
+            var errors: [max_replica_count]?anyerror = @splat(null);
+            try self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]);
+            if (firstReplicaError(errors[0..self.replica_count])) |err| return err;
             for (buffers[1..self.replica_count]) |buffer| {
                 if (!std.mem.eql(u8, buffers[0][0..amount], buffer[0..amount]))
                     return error.ReplicaDivergence;
