@@ -18,6 +18,11 @@ tasks:
     cmds:
       - zig build test -Doptimize=ReleaseSafe --summary all
 
+  test-tsan:
+    desc: Run tests with ThreadSanitizer
+    cmds:
+      - zig build test -Dsanitize-thread=true --summary all
+
   fmt:
     desc: Format Zig sources
     cmds:

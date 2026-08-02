@@ -3,11 +3,13 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer");
 
     const module = b.addModule("zettide_cawfs", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
     });
 
     const library = b.addLibrary(.{
@@ -28,6 +30,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/root.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = sanitize_thread,
             .imports = &.{.{ .name = "zettide_cawfs", .module = module }},
         }),
     });

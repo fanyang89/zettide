@@ -12,9 +12,18 @@ Backends expose version tokens and object references as opaque values. The
 transaction layer never interprets physical LBAs, SCSI status, object-store
 keys, ETags, or protocol-specific errors.
 
+The logical anchor is a fixed 512-byte envelope. A SCSI backend may embed it in
+a larger logical block and use that complete physical block as its opaque
+version token. Every published envelope includes a monotonically increasing
+generation and transaction identifier, so a physical anchor value is never
+reused.
+
 The contract distinguishes a definite conflict from an indeterminate outcome.
 Indeterminate publication is resolved using the transaction identifier and the
 parent chain stored in immutable commit records; it is never retried blindly.
+Once a publication request may have reached storage, transport failure is
+reported as indeterminate rather than as an ordinary error. Stabilization is
+idempotent and may be retried.
 
 ## Planned Backends
 
@@ -23,6 +32,8 @@ It owns append allocation and maps prepare/stabilize to cache synchronization.
 
 An S3 backend can create immutable objects with `If-None-Match: *` and replace
 a fixed anchor object with `If-Match`. ETags remain opaque version tokens.
+Every backend runs the same contract scenarios in addition to its protocol
+integration tests.
 
 ## Filesystem Semantics
 
