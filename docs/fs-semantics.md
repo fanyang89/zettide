@@ -4,6 +4,10 @@ This document defines the behavior covered by the Zettide test suites. Linux
 FUSE is the only mount adapter currently implemented. Windows builds verify the
 portable container core, but do not yet provide a WinFsp filesystem.
 
+On Linux, `serve dufs` supervises an external dufs process over a private FUSE
+mount. It does not add filesystem semantics beyond those exposed by FUSE; HTTP,
+WebDAV, authentication, and TLS behavior belong to dufs.
+
 ## Supported Operations
 
 - Regular files: create, open, read, write, append, truncate, flush, and fsync.
@@ -71,6 +75,8 @@ success for these operations.
 - `test-cli` runs the emitted executable and validates exit behavior.
 - `test-fault` injects deterministic block synchronization failures.
 - `test-fuse` performs real syscalls, a forced daemon crash, and 20 mount cycles.
+- `test-dufs` covers HTTP read/write, read-only serving, persistence, signal
+  inheritance, active-request shutdown, child exit, and private-mount cleanup.
 - `test-libfuse` runs the applicable cases from libfuse's syscall test suite.
 - `test-fsx` runs deterministic buffered and mmap read, write, and truncate workloads.
 - `test-cross` compiles the portable core and CLI for x86_64 Windows GNU.

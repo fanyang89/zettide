@@ -35,6 +35,7 @@ reconciliation are not implemented yet.
 
 - Zig 0.16.0
 - Linux: libfuse3 development files for mounting support
+- Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
 - Linux raw-disk Pools: io_uring enabled by the kernel and execution sandbox
 - Windows: WinFsp developer package and runtime for mounting support
 
@@ -68,6 +69,7 @@ zig build test-spdk-vhost-blk-controller
 zig build test-spdk-daemon -Dspdk=true
 zig build test-spdk-storage
 zig build test-fuse -Dfuse-tests=required
+zig build test-dufs -Dfuse-tests=required
 zig build test-posix-baseline -Dfuse-tests=required
 zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
 zig build test-libfuse -Dexternal-tests=required
@@ -127,14 +129,45 @@ pins, manifests, and log controls are documented in
 ## Usage
 
 ```sh
-zettide create workspace.ddv --size 16GiB --label Workspace
-zettide info workspace.ddv
-zettide check workspace.ddv
+zettide format workspace.ddv --size 16GiB --label Workspace
+
+# Legacy container creation remains supported.
+zettide create legacy.ddv --size 16GiB --label Legacy
+zettide info legacy.ddv
+zettide check legacy.ddv
 zettide device inspect /dev/disk/by-id/example
 mkdir workspace
 zettide mount workspace.ddv workspace
 # From another terminal:
 zettide unmount workspace
+
+# Alternatively, serve through the external dufs frontend until interrupted.
+zettide serve dufs workspace.ddv -- -A -b 127.0.0.1 -p 5000
+```
+
+`format` creates a single-member unprotected v3 target. For a new regular file,
+`--size` is required and specifies the total backing-file length. The length
+must be at least 3 MiB and aligned to 1 MiB. Existing regular files and Linux
+block devices require a second invocation with the scan-bound confirmation
+token:
+
+```sh
+zettide format /dev/disk/by-id/example --label Workspace
+zettide format /dev/disk/by-id/example --label Workspace --confirm <token>
+```
+
+Formatting replaces the filesystem but does not securely erase every old data
+block. The confirmation token binds the target identity, geometry, path, label,
+and complete content digest observed by the plan.
+
+`serve dufs` creates a private FUSE mount, starts the `dufs` executable found on
+`PATH`, and removes the mount when either process exits. Dufs keeps its own
+read-only defaults; pass options after `--` to enable uploads, authentication,
+TLS, or other dufs behavior. `--read-only` also opens and mounts the underlying
+Zettide target read-only:
+
+```sh
+zettide serve dufs workspace.ddv --read-only -- -b 127.0.0.1 -p 5000
 ```
 
 Linux raw-disk Pools currently support exactly one unprotected device or three
@@ -170,6 +203,8 @@ pass it to `zettide pool initialize --device ... --confirm <token>`.
 - Sparse files are supported up to 9,223,372,036,854,775,807 bytes.
 - File name matching is case-sensitive on every platform.
 - Version 2 containers are not encrypted.
+- `format` writes a v3 single-member target; legacy version 2 containers remain
+  readable.
 
 The supported filesystem behavior and explicit exclusions are documented in
 `docs/fs-semantics.md`.
