@@ -494,7 +494,7 @@ pub const Volume = struct {
             return;
         }
         const bytes = value.encode();
-        try checkLfs(c.lfs_setattr(&self.lfs, translated, metadata.attribute_type, &bytes, bytes.len));
+        try self.setDirectoryMetadataTranslated(translated, bytes);
     }
 
     pub fn getMetadata(self: *Volume, path: [*:0]const u8) !metadata.Metadata {
@@ -518,6 +518,14 @@ pub const Volume = struct {
         }
         if (result != bytes.len) return error.InvalidMetadata;
         return metadata.Metadata.decode(&bytes);
+    }
+
+    fn setDirectoryMetadataTranslated(
+        self: *Volume,
+        translated: [*:0]const u8,
+        bytes: [metadata.encoded_size]u8,
+    ) !void {
+        try checkLfs(c.lfs_setattr(&self.lfs, translated, metadata.attribute_type, &bytes, bytes.len));
     }
 
     pub fn makeDirectory(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
@@ -578,7 +586,7 @@ pub const Volume = struct {
         try self.ensureGrowthCapacity();
         var head = try self.store().readHead(object_ref.object_id);
         head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-        try self.store().updateMetadata(object_ref.object_id, head.metadata);
+        head = try self.store().updateMetadataWithHead(head, head.metadata);
         self.updateOpenMetadata(object_ref.object_id, head.metadata);
         try self.updateParentTimes(new_path);
         try self.store().publishRef(new_path, object_ref, true);
@@ -607,10 +615,10 @@ pub const Volume = struct {
             null;
         if (object_count) |count| if (count.* == 0) return error.CorruptFilesystem;
         if (removed_object) |object_ref| {
-            var object_metadata = (try self.store().readHead(object_ref.object_id)).metadata;
-            object_metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-            try self.store().updateMetadata(object_ref.object_id, object_metadata);
-            self.updateOpenMetadata(object_ref.object_id, object_metadata);
+            var head = try self.store().readHead(object_ref.object_id);
+            head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+            head = try self.store().updateMetadataWithHead(head, head.metadata);
+            self.updateOpenMetadata(object_ref.object_id, head.metadata);
         }
         try self.updateParentTimes(path);
         try checkLfs(c.lfs_remove(&self.lfs, translated));
@@ -671,14 +679,21 @@ pub const Volume = struct {
         if (replaced_count) |count| if (count.* == 0) return error.CorruptFilesystem;
         const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
         if (replaced) |object_ref| {
-            var replaced_metadata = (try self.store().readHead(object_ref.object_id)).metadata;
-            replaced_metadata.ctime_ns = timestamp;
-            try self.store().updateMetadata(object_ref.object_id, replaced_metadata);
-            self.updateOpenMetadata(object_ref.object_id, replaced_metadata);
+            var head = try self.store().readHead(object_ref.object_id);
+            head.metadata.ctime_ns = timestamp;
+            head = try self.store().updateMetadataWithHead(head, head.metadata);
+            self.updateOpenMetadata(object_ref.object_id, head.metadata);
         }
-        var renamed_metadata = try self.getMetadata(old_path);
-        renamed_metadata.ctime_ns = timestamp;
-        try self.setMetadata(old_path, renamed_metadata);
+        if (source) |object_ref| {
+            var head = try self.store().readHead(object_ref.object_id);
+            head.metadata.ctime_ns = timestamp;
+            head = try self.store().updateMetadataWithHead(head, head.metadata);
+            self.updateOpenMetadata(object_ref.object_id, head.metadata);
+        } else {
+            var renamed_metadata = try self.getDirectoryMetadataTranslated(old_translated);
+            renamed_metadata.ctime_ns = timestamp;
+            try self.setDirectoryMetadataTranslated(old_translated, renamed_metadata.encode());
+        }
         try self.updateParentTimes(old_path);
         if (!std.mem.eql(u8, parentSlice(old_path), parentSlice(new_path)))
             try self.updateParentTimes(new_path);
@@ -1170,17 +1185,19 @@ pub const Volume = struct {
 
     fn updateParentTimes(self: *Volume, path: [*:0]const u8) !void {
         const parent = parentSlice(path);
-        var buffer: [4096:0]u8 = @splat(0);
-        if (parent.len >= buffer.len) return error.NameTooLong;
-        @memcpy(buffer[0..parent.len], parent);
-        var parent_metadata = self.getMetadata(&buffer) catch |err| switch (err) {
+        var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        if (parent.len >= parent_buffer.len) return error.NameTooLong;
+        @memcpy(parent_buffer[0..parent.len], parent);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const translated = try object_store.Store.translateUserPath(&parent_buffer, &translated_buffer);
+        var parent_metadata = self.getDirectoryMetadataTranslated(translated) catch |err| switch (err) {
             error.FileNotFound, error.AttributeNotFound => return,
             else => return err,
         };
         const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
         parent_metadata.mtime_ns = timestamp;
         parent_metadata.ctime_ns = timestamp;
-        try self.setMetadata(&buffer, parent_metadata);
+        try self.setDirectoryMetadataTranslated(translated, parent_metadata.encode());
     }
 };
 

@@ -409,10 +409,19 @@ pub const Store = struct {
     }
 
     pub fn updateMetadata(self: Store, id: format.ObjectId, value: metadata.Metadata) !void {
-        var head = try self.readHead(id);
+        _ = try self.updateMetadataWithHead(try self.readHead(id), value);
+    }
+
+    pub fn updateMetadataWithHead(
+        self: Store,
+        initial_head: format.ObjectHead,
+        value: metadata.Metadata,
+    ) !format.ObjectHead {
+        var head = initial_head;
         head.metadata = value;
         head.generation = std.math.add(u64, head.generation, 1) catch return error.CorruptFilesystem;
         try self.writeHead(head);
+        return head;
     }
 
     pub fn patchMetadata(self: Store, id: format.ObjectId, patch: metadata.Patch) !format.ObjectHead {
