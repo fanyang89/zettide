@@ -908,7 +908,7 @@ pub const Volume = struct {
             .original_metadata = head.metadata,
             .chunk_layout = null,
             .append = flags & c.LFS_O_APPEND != 0,
-            .writable = flags & c.LFS_O_WRONLY != 0 or flags & c.LFS_O_RDWR != 0,
+            .writable = flags & c.LFS_O_WRONLY != 0,
             .open = true,
             .previous = null,
             .next = null,
@@ -1589,6 +1589,9 @@ test "create, write, reopen, and check volume" {
 
     var reopened: FileHandle = undefined;
     try volume.openFile(&reopened, "/hello", c.LFS_O_RDONLY, 0, 0, 0);
+    try std.testing.expectError(error.AccessDenied, volume.writeFile(&reopened, "x", 0));
+    try std.testing.expectError(error.AccessDenied, volume.truncateFile(&reopened, 0));
+    try std.testing.expectError(error.AccessDenied, volume.fallocateFile(&reopened, 0, 1));
     var buffer: [5]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 5), try volume.readFile(&reopened, &buffer, 0));
     try std.testing.expectEqualStrings("hello", &buffer);
