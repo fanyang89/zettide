@@ -1,5 +1,6 @@
 const std = @import("std");
 const metadata = @import("metadata.zig");
+const google_crc32c = @import("crc32c");
 
 pub const ObjectId = [16]u8;
 pub const ref_encoded_size: usize = 64;
@@ -228,7 +229,7 @@ pub fn parseObjectId(value: []const u8) !ObjectId {
 }
 
 fn checksum(bytes: []const u8) u32 {
-    return std.hash.crc.Crc32Iscsi.hash(bytes);
+    return google_crc32c.value(bytes);
 }
 
 fn putInt(comptime T: type, bytes: anytype, offset: usize, value: T) void {

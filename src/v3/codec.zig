@@ -1,4 +1,5 @@
 const std = @import("std");
+const google_crc32c = @import("crc32c");
 
 pub const Digest = [32]u8;
 
@@ -11,7 +12,7 @@ pub fn getInt(comptime T: type, bytes: []const u8, offset: usize) T {
 }
 
 pub fn crc32c(bytes: []const u8) u32 {
-    return std.hash.crc.Crc32Iscsi.hash(bytes);
+    return google_crc32c.value(bytes);
 }
 
 pub fn blake3(bytes: []const u8) Digest {

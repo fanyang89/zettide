@@ -1,4 +1,5 @@
 const std = @import("std");
+const google_crc32c = @import("crc32c");
 
 pub const EndpointId = [16]u8;
 pub const PoolId = [16]u8;
@@ -388,7 +389,7 @@ pub const FileStore = struct {
             @memcpy(record[32..48], &spec.volume_id);
             record[48] = @intFromEnum(spec.frontend);
         }
-        std.mem.writeInt(u32, bytes[16..20], std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]), .little);
+        std.mem.writeInt(u32, bytes[16..20], google_crc32c.value(bytes[header_size..]), .little);
         return bytes;
     }
 
@@ -408,7 +409,7 @@ pub const FileStore = struct {
         const count = std.mem.readInt(u32, bytes[12..16], .little);
         if (count > max_endpoint_count or bytes.len != header_size + @as(usize, count) * actual_record_size)
             return error.InvalidDesiredState;
-        if (std.mem.readInt(u32, bytes[16..20], .little) != std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]))
+        if (std.mem.readInt(u32, bytes[16..20], .little) != google_crc32c.value(bytes[header_size..]))
             return error.InvalidDesiredState;
 
         const specs = try allocator.alloc(Spec, count);
@@ -806,7 +807,7 @@ test "file store reads v1 state as vhost and rejects unknown frontend" {
     @memcpy(v1_bytes[20..36], &spec.endpoint_id);
     @memcpy(v1_bytes[36..52], &spec.pool_id);
     @memcpy(v1_bytes[52..68], &spec.volume_id);
-    std.mem.writeInt(u32, v1_bytes[16..20], std.hash.crc.Crc32Iscsi.hash(v1_bytes[20..]), .little);
+    std.mem.writeInt(u32, v1_bytes[16..20], google_crc32c.value(v1_bytes[20..]), .little);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "endpoints.state", .data = &v1_bytes });
 
     const migrated = try desired_store.load(std.testing.allocator);
@@ -824,7 +825,7 @@ test "file store reads v1 state as vhost and rejects unknown frontend" {
     defer std.testing.allocator.free(bytes);
     try std.testing.expectEqual(FileStore.version, std.mem.readInt(u16, bytes[8..10], .little));
     bytes[FileStore.header_size + 48] = 99;
-    std.mem.writeInt(u32, bytes[16..20], std.hash.crc.Crc32Iscsi.hash(bytes[FileStore.header_size..]), .little);
+    std.mem.writeInt(u32, bytes[16..20], google_crc32c.value(bytes[FileStore.header_size..]), .little);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "endpoints.state", .data = bytes });
     try std.testing.expectError(error.InvalidDesiredState, desired_store.load(std.testing.allocator));
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
 const name_profile = @import("name_profile.zig");
+const google_crc32c = @import("crc32c");
 
 pub const header_size: usize = 4096;
 pub const header_a_offset: u64 = 0;
@@ -279,7 +280,7 @@ pub fn write(file: File, io: Io, offset: u64, header: Header) !void {
 }
 
 fn checksum(bytes: []const u8) u32 {
-    return std.hash.crc.Crc32Iscsi.hash(bytes);
+    return google_crc32c.value(bytes);
 }
 
 fn putInt(comptime T: type, bytes: *[header_size]u8, offset: usize, value: T) void {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
+const google_crc32c = @import("crc32c");
 
 pub const attribute_type: u8 = 0xe0;
 pub const directory_identity_attribute_type: u8 = 0xe1;
@@ -88,7 +89,7 @@ pub fn relatimeNeedsUpdate(value: Metadata, now_ns: i64) bool {
 }
 
 fn checksum(bytes: []const u8) u32 {
-    return std.hash.crc.Crc32Iscsi.hash(bytes);
+    return google_crc32c.value(bytes);
 }
 
 fn putInt(comptime T: type, bytes: *[encoded_size]u8, offset: usize, value: T) void {

@@ -15,10 +15,11 @@ pub fn build(b: *std.Build) void {
     const privileged_test_mode = b.option(PrivilegedTestMode, "privileged-tests", "Privileged tests: off, auto, or required") orelse .auto;
     const block_test_mode = b.option(BlockTestMode, "block-tests", "Linux block device tests: off, auto, or required") orelse .off;
     const enable_spdk = b.option(bool, "spdk", "Link the Linux endpoint daemon with SPDK") orelse false;
+    const crc32c_dependency = b.dependency("crc32c", .{});
     if (enable_spdk and target.result.os.tag != .linux) @panic("SPDK support requires Linux");
 
-    const portable_core = createCoreModule(b, target, optimize, false);
-    const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux);
+    const portable_core = createCoreModule(b, target, optimize, false, crc32c_dependency);
+    const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux, crc32c_dependency);
     if (enable_spdk) configureSpdk(app_core);
     const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
@@ -268,11 +269,11 @@ pub fn build(b: *std.Build) void {
         .os_tag = .windows,
         .abi = .gnu,
     });
-    const windows_core = createCoreModule(b, windows_target, optimize, false);
+    const windows_core = createCoreModule(b, windows_target, optimize, false, crc32c_dependency);
     const windows_exe = createExecutable(b, "zettide-windows-check", windows_target, optimize, windows_core, false);
     const windows_name_tests = createNameProfileCrossTest(b, windows_target, optimize, windows_core);
     const macos_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
-    const macos_core = createCoreModule(b, macos_target, optimize, false);
+    const macos_core = createCoreModule(b, macos_target, optimize, false, crc32c_dependency);
     const macos_name_tests = createNameProfileCrossTest(b, macos_target, optimize, macos_core);
     cross_step.dependOn(&windows_exe.step);
     cross_step.dependOn(&windows_name_tests.step);
@@ -312,6 +313,7 @@ fn createCoreModule(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     with_fuse: bool,
+    crc32c_dependency: *std.Build.Dependency,
 ) *std.Build.Module {
     const core = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -331,6 +333,15 @@ fn createCoreModule(
         },
         .flags = &.{ "-std=c99", "-DLFS_THREADSAFE", "-DUTF8PROC_STATIC" },
     });
+    const crc32c = b.createModule(.{
+        .root_source_file = b.path("src/crc32c.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    addCrc32c(crc32c, crc32c_dependency, target);
+    crc32c.link_libcpp = true;
+    core.addImport("crc32c", crc32c);
     if (with_fuse) {
         core.addCMacro("FUSE_USE_VERSION", "35");
         core.linkSystemLibrary("fuse3", .{});
@@ -340,6 +351,75 @@ fn createCoreModule(
         });
     }
     return core;
+}
+
+fn addCrc32c(
+    module: *std.Build.Module,
+    dependency: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+) void {
+    const b = module.owner;
+    const arch = target.result.cpu.arch;
+    const is_x86 = arch == .x86 or arch == .x86_64;
+    const is_aarch64 = arch == .aarch64 or arch == .aarch64_be;
+    const config_header = b.addConfigHeader(.{
+        .style = .{ .cmake = dependency.path("src/crc32c_config.h.in") },
+        .include_path = "crc32c/crc32c_config.h",
+    }, .{
+        .BYTE_ORDER_BIG_ENDIAN = arch.endian() == .big,
+        .HAVE_BUILTIN_PREFETCH = true,
+        .HAVE_MM_PREFETCH = is_x86,
+        .HAVE_SSE42 = is_x86,
+        .HAVE_ARM64_CRC32C = is_aarch64,
+        .HAVE_STRONG_GETAUXVAL = is_aarch64 and target.result.os.tag == .linux,
+        .HAVE_WEAK_GETAUXVAL = false,
+        .CRC32C_TESTS_BUILT_WITH_GLOG = false,
+    });
+    module.addConfigHeader(config_header);
+    module.addIncludePath(dependency.path("include"));
+    module.addIncludePath(dependency.path("src"));
+    module.addCSourceFiles(.{
+        .root = dependency.path(""),
+        .files = &.{
+            "src/crc32c.cc",
+            "src/crc32c_portable.cc",
+        },
+        .flags = &.{ "-fno-exceptions", "-fno-rtti" },
+    });
+    if (is_x86) {
+        module.addCSourceFile(.{
+            .file = dependency.path("src/crc32c_sse42.cc"),
+            .flags = &.{
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-Xclang",
+                "-target-feature",
+                "-Xclang",
+                "+sse4.2",
+                "-Xclang",
+                "-target-feature",
+                "-Xclang",
+                "+crc32",
+            },
+        });
+    }
+    if (is_aarch64) {
+        module.addCSourceFile(.{
+            .file = dependency.path("src/crc32c_arm64.cc"),
+            .flags = &.{
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-Xclang",
+                "-target-feature",
+                "-Xclang",
+                "+crc",
+                "-Xclang",
+                "-target-feature",
+                "-Xclang",
+                "+aes",
+            },
+        });
+    }
 }
 
 fn createExecutable(

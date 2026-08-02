@@ -3,6 +3,7 @@ const Io = std.Io;
 const c = @import("block_device.zig").c;
 const metadata = @import("metadata.zig");
 const format = @import("object_format.zig");
+const google_crc32c = @import("crc32c");
 
 pub const max_path_bytes: usize = 4096;
 pub const namespace_root = "/namespace";
@@ -621,7 +622,7 @@ pub const Store = struct {
         if (offset == 0 and buffer.len >= length) {
             const amount = c.lfs_file_read(self.lfs, &file, buffer.ptr, length);
             try checkLfs(amount);
-            if (amount != length or std.hash.crc.Crc32Iscsi.hash(buffer[0..length]) != header.crc)
+            if (amount != length or google_crc32c.value(buffer[0..length]) != header.crc)
                 return error.CorruptFilesystem;
             return;
         }
@@ -629,7 +630,7 @@ pub const Store = struct {
         defer std.heap.c_allocator.free(bytes);
         const amount = c.lfs_file_read(self.lfs, &file, bytes.ptr, length);
         try checkLfs(amount);
-        if (amount != length or std.hash.crc.Crc32Iscsi.hash(bytes) != header.crc)
+        if (amount != length or google_crc32c.value(bytes) != header.crc)
             return error.CorruptFilesystem;
         if (offset >= length) return;
         const copied = @min(buffer.len, length - offset);
@@ -795,7 +796,7 @@ pub const Store = struct {
         @memset(bytes, 0);
         const amount = c.lfs_file_read(self.lfs, &file, bytes.ptr, length);
         try checkLfs(amount);
-        if (amount != length or std.hash.crc.Crc32Iscsi.hash(bytes[0..length]) != header.crc)
+        if (amount != length or google_crc32c.value(bytes[0..length]) != header.crc)
             return error.CorruptFilesystem;
         return .{ .bytes = bytes, .stored_length = length };
     }
@@ -827,7 +828,7 @@ pub const Store = struct {
         @memcpy(header[0..8], &chunk_magic);
         std.mem.writeInt(u64, header[8..16], version.generation, .little);
         std.mem.writeInt(u32, header[16..20], @intCast(data.len), .little);
-        std.mem.writeInt(u32, header[20..24], std.hash.crc.Crc32Iscsi.hash(data), .little);
+        std.mem.writeInt(u32, header[20..24], google_crc32c.value(data), .little);
         try writeToOpenFile(self.lfs, &file, &header);
         try writeToOpenFile(self.lfs, &file, data);
         const close_result = c.lfs_file_close(self.lfs, &file);
