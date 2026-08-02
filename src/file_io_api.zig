@@ -18,6 +18,18 @@ pub const SyncMode = enum {
     full,
 };
 
+pub const LaneStats = struct {
+    submitted_sqes: u64 = 0,
+    submit_calls: u64 = 0,
+    completions: u64 = 0,
+    max_inflight: u64 = 0,
+};
+
+pub const Stats = struct {
+    foreground: LaneStats = .{},
+    writeback: LaneStats = .{},
+};
+
 pub const Write = struct {
     bytes: []const u8,
     offset: u64,
@@ -34,6 +46,8 @@ pub const FileIo = struct {
         write_all_at: *const fn (?*anyopaque, File, Io, Lane, []const u8, u64) anyerror!void,
         write_all_many_at: *const fn (?*anyopaque, File, Io, Lane, []const Write) anyerror!void,
         sync: *const fn (?*anyopaque, File, Io, Lane, SyncMode) anyerror!void,
+        stats: *const fn (?*anyopaque, Io) Stats,
+        reset_stats: *const fn (?*anyopaque, Io) void,
         deinit: *const fn (?*anyopaque) void,
     };
 
@@ -55,6 +69,14 @@ pub const FileIo = struct {
 
     pub fn sync(self: FileIo, io: Io, lane: Lane, mode: SyncMode) !void {
         try self.borrow().sync(io, lane, mode);
+    }
+
+    pub fn stats(self: FileIo, io: Io) Stats {
+        return self.vtable.stats(self.context, io);
+    }
+
+    pub fn resetStats(self: FileIo, io: Io) void {
+        self.vtable.reset_stats(self.context, io);
     }
 
     pub fn borrow(self: FileIo) BorrowedFileIo {
@@ -94,6 +116,14 @@ pub const BorrowedFileIo = struct {
     pub fn sync(self: BorrowedFileIo, io: Io, lane: Lane, mode: SyncMode) !void {
         try self.vtable.sync(self.context, self.file, io, lane, mode);
     }
+
+    pub fn stats(self: BorrowedFileIo, io: Io) Stats {
+        return self.vtable.stats(self.context, io);
+    }
+
+    pub fn resetStats(self: BorrowedFileIo, io: Io) void {
+        self.vtable.reset_stats(self.context, io);
+    }
 };
 
 fn posixReadAllAt(_: ?*anyopaque, file: File, io: Io, _: Lane, buffer: []u8, offset: u64) !void {
@@ -117,12 +147,18 @@ fn posixSync(_: ?*anyopaque, file: File, io: Io, _: Lane, mode: SyncMode) !void 
 }
 
 fn posixDeinit(_: ?*anyopaque) void {}
+fn posixStats(_: ?*anyopaque, _: Io) Stats {
+    return .{};
+}
+fn posixResetStats(_: ?*anyopaque, _: Io) void {}
 
 const posix_vtable: FileIo.VTable = .{
     .read_all_at = posixReadAllAt,
     .write_all_at = posixWriteAllAt,
     .write_all_many_at = posixWriteAllManyAt,
     .sync = posixSync,
+    .stats = posixStats,
+    .reset_stats = posixResetStats,
     .deinit = posixDeinit,
 };
 

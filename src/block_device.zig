@@ -15,6 +15,12 @@ pub const Durability = union(enum) {
 };
 
 pub const FileIoKind = file_io.Kind;
+pub const FileIoStats = file_io.Stats;
+
+pub const WritebackState = struct {
+    accepted_epoch: u64,
+    durable_epoch: u64,
+};
 
 const FlushResult = anyerror!void;
 
@@ -334,6 +340,21 @@ pub const FileBlockDevice = struct {
 
     pub fn fileIoKind(self: *const FileBlockDevice) FileIoKind {
         return self.file_io.kind;
+    }
+
+    pub fn fileIoStats(self: *FileBlockDevice) FileIoStats {
+        return self.file_io.stats(self.io);
+    }
+
+    pub fn resetFileIoStats(self: *FileBlockDevice) void {
+        self.file_io.resetStats(self.io);
+    }
+
+    pub fn writebackState(self: *const FileBlockDevice) WritebackState {
+        return .{
+            .accepted_epoch = self.accepted_epoch.load(.acquire),
+            .durable_epoch = self.durable_epoch.load(.acquire),
+        };
     }
 
     pub fn finishWriteback(self: *FileBlockDevice) !void {

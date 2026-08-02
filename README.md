@@ -37,7 +37,7 @@ reconciliation are not implemented yet.
 - Linux: libfuse3 development files for mounting support
 - Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
 - Optional Linux SMB3 feasibility tests: Samba server and client tools
-- Linux file-backed Volumes prefer io_uring and fall back to POSIX when unavailable
+- Linux file-backed Volumes use io_uring writeback with a synchronous POSIX foreground lane
 - Linux raw-disk Pools: io_uring enabled by the kernel and execution sandbox
 - Windows: WinFsp developer package and runtime for mounting support
 
@@ -73,9 +73,10 @@ accepted latency; the final sync and close drain happens outside the timed
 operation. The writable read workload includes the default relatime checks; the
 read-only workload isolates the data read path. Data workloads use a warmed
 fixed file and offset, so they measure steady-state hot-path latency rather than
-cold or streaming I/O. zBench reports average, standard deviation, range, and
-percentiles without a performance pass/fail threshold. Run with `--help` for all
-options.
+cold or streaming I/O. The pipeline line reports accepted and drained
+throughput, writeback backlog, SQE submission counts, and maximum in-flight I/O.
+zBench reports average, standard deviation, range, and percentiles without a
+performance pass/fail threshold. Run with `--help` for all options.
 
 ## Tests
 

@@ -351,15 +351,16 @@ pub fn main(init: std.process.Init) !void {
     try zbench.prettyPrintHeader(init.io, .stdout(), benchmark_name_width);
 
     if (config.operation) |operation| {
-        try runOperation(allocator, init.io, config, operation);
+        try runOperation(allocator, init.io, stdout, config, operation);
     } else {
-        for (all_operations) |operation| try runOperation(allocator, init.io, config, operation);
+        for (all_operations) |operation| try runOperation(allocator, init.io, stdout, config, operation);
     }
 }
 
 fn runOperation(
     allocator: std.mem.Allocator,
     io: Io,
+    stdout: *Io.Writer,
     config: Config,
     operation: Operation,
 ) !void {
@@ -393,6 +394,8 @@ fn runOperation(
     defer state.deinit();
     try state.prepare();
     for (0..config.warmup) |_| try runWarmup(&state);
+    try volume.sync();
+    volume.device.resetFileIoStats();
 
     const benchmark_case: BenchmarkCase = .{ .state = &state };
     var benchmark = zbench.Benchmark.init(allocator, .{
@@ -410,21 +413,78 @@ fn runOperation(
     defer active_state = null;
     var iterator = try benchmark.iterator();
     var result: ?zbench.Result = null;
+    const accepted_start = Io.Clock.awake.now(io).nanoseconds;
     while (try iterator.next(io)) |step| switch (step) {
         .progress => {},
         .result => |value| result = value,
     };
+    const accepted_end = Io.Clock.awake.now(io).nanoseconds;
+    const accepted_writeback = volume.device.writebackState();
     active_state = null;
 
     const benchmark_error = state.failure;
     try state.close();
     try volume.close();
+    const drained_end = Io.Clock.awake.now(io).nanoseconds;
+    const drained_writeback = volume.device.writebackState();
+    const io_stats = volume.device.fileIoStats();
+    const selected_backend = volume.device.fileIoKind();
     try workspace.cleanup(io);
     if (benchmark_error) |err| return err;
 
     const completed = result orelse return error.MissingBenchmarkResult;
     defer completed.deinit();
     try completed.prettyPrint(io, .stdout(), benchmark_name_width);
+    try printPipelineStats(
+        stdout,
+        operation,
+        selected_backend,
+        config.iterations,
+        @intCast(accepted_end - accepted_start),
+        @intCast(drained_end - accepted_end),
+        accepted_writeback,
+        drained_writeback,
+        io_stats,
+    );
+}
+
+fn printPipelineStats(
+    writer: *Io.Writer,
+    operation: Operation,
+    backend: zettide.file_io.Kind,
+    iterations: u32,
+    accepted_elapsed_ns: u64,
+    drain_elapsed_ns: u64,
+    accepted_writeback: zettide.block_device.WritebackState,
+    drained_writeback: zettide.block_device.WritebackState,
+    io_stats: zettide.file_io.Stats,
+) !void {
+    const total_elapsed_ns = accepted_elapsed_ns + drain_elapsed_ns;
+    const accepted_rate = @as(u128, iterations) * std.time.ns_per_s / @max(accepted_elapsed_ns, 1);
+    const durable_rate = @as(u128, iterations) * std.time.ns_per_s / @max(total_elapsed_ns, 1);
+    try writer.print(
+        "pipeline operation={s} backend={s} accepted_elapsed_ns={} drain_elapsed_ns={} accepted_ops_per_s={} durable_ops_per_s={} accepted_epoch={} durable_epoch_at_accept={} backlog_at_accept={} durable_epoch_after_drain={} foreground_sqes={} foreground_submits={} foreground_cqes={} foreground_max_inflight={} writeback_sqes={} writeback_submits={} writeback_cqes={} writeback_max_inflight={}\n",
+        .{
+            @tagName(operation),
+            @tagName(backend),
+            accepted_elapsed_ns,
+            drain_elapsed_ns,
+            accepted_rate,
+            durable_rate,
+            accepted_writeback.accepted_epoch,
+            accepted_writeback.durable_epoch,
+            accepted_writeback.accepted_epoch - accepted_writeback.durable_epoch,
+            drained_writeback.durable_epoch,
+            io_stats.foreground.submitted_sqes,
+            io_stats.foreground.submit_calls,
+            io_stats.foreground.completions,
+            io_stats.foreground.max_inflight,
+            io_stats.writeback.submitted_sqes,
+            io_stats.writeback.submit_calls,
+            io_stats.writeback.completions,
+            io_stats.writeback.max_inflight,
+        },
+    );
 }
 
 fn runWarmup(state: *CaseState) !void {
