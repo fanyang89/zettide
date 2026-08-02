@@ -90,6 +90,10 @@ pub const Runtime = struct {
         return self.active.count() != 0;
     }
 
+    pub fn hasActiveTransaction(self: *const Runtime) bool {
+        return self.active_transaction;
+    }
+
     pub fn read(self: *Runtime, block: u32, offset: u32, buffer: []u8) !void {
         try self.validateRange(block, offset, buffer.len);
         if (self.active.get(block)) |image| {
@@ -235,6 +239,12 @@ pub const Runtime = struct {
 
     pub fn needsCheckpoint(self: *Runtime) !bool {
         return self.remainingCapacity() < try self.maximumTransactionSize();
+    }
+
+    pub fn checkpointRecommended(self: *Runtime) !bool {
+        const threshold = std.math.mul(u64, try self.maximumTransactionSize(), 2) catch
+            std.math.maxInt(u64);
+        return self.remainingCapacity() < @min(self.dataCapacity(), threshold);
     }
 
     fn recover(self: *Runtime) !void {

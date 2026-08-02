@@ -86,7 +86,13 @@ pub const FileBlockDevice = struct {
         if (self.redo) |*redo| {
             try self.redo_mutex.lock(self.io);
             defer self.redo_mutex.unlock(self.io);
-            return redo.logicalSync();
+            try redo.logicalSync();
+            if (!redo.hasActiveTransaction() and try redo.checkpointRecommended())
+                redo.checkpoint(self.redoSync()) catch |err| {
+                    self.freezeWrites();
+                    return err;
+                };
+            return;
         }
         if (!self.dirty.load(.acquire)) return;
         try self.durableSync();
@@ -380,6 +386,38 @@ test "journaled block device syncs once per committed transaction" {
     try std.testing.expectEqualStrings("transaction", &actual);
     try device.checkpointRedo();
     try std.testing.expectEqual(@as(u64, 3), fault.sync_count);
+}
+
+test "journaled block device checkpoints low space on explicit sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "journal-pressure.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "JournalPressure");
+    try header.enableRedoJournal(20 * 1024, 1);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var device = FileBlockDevice.init(std.testing.io, file, header);
+    defer device.deinit();
+    try device.enableRedo(std.testing.allocator, header);
+    var fault: FaultController = .{};
+    device.fault = &fault;
+
+    try device.beginTransaction();
+    try device.program(4, 32, "transaction");
+    try device.commitTransaction();
+    try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+    try device.sync();
+    try std.testing.expectEqual(@as(u64, 3), fault.sync_count);
+
+    var home: [11]u8 = undefined;
+    _ = try file.readPositionalAll(
+        std.testing.io,
+        &home,
+        header.payload_start + 4 * header.block_size + 32,
+    );
+    try std.testing.expectEqualStrings("transaction", &home);
 }
 
 test "lookahead size is aligned and bounded" {
