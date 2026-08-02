@@ -31,6 +31,98 @@ const ChunkData = struct {
     stored_length: u32,
 };
 
+const ChunkCacheKey = struct {
+    object_id: format.ObjectId,
+    index: u64,
+    generation: u64,
+    layout: ChunkLayout,
+};
+
+pub const ChunkCache = struct {
+    const capacity = 8;
+
+    const Entry = struct {
+        key: ChunkCacheKey,
+        bytes: []u8,
+        last_used: u64,
+    };
+
+    mutex: Io.Mutex = .init,
+    entries: [capacity]?Entry = @splat(null),
+    clock: u64 = 0,
+
+    pub fn deinit(self: *ChunkCache, allocator: std.mem.Allocator) void {
+        for (&self.entries) |*entry| {
+            if (entry.*) |value| allocator.free(value.bytes);
+            entry.* = null;
+        }
+    }
+
+    fn read(self: *ChunkCache, io: Io, key: ChunkCacheKey, buffer: []u8, offset: u32) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (&self.entries) |*entry| {
+            const value = &(entry.* orelse continue);
+            if (!std.meta.eql(value.key, key)) continue;
+            self.clock +%= 1;
+            value.last_used = self.clock;
+            const start: usize = offset;
+            const copied = if (start < value.bytes.len) @min(buffer.len, value.bytes.len - start) else 0;
+            if (copied != 0) @memcpy(buffer[0..copied], value.bytes[start..][0..copied]);
+            @memset(buffer[copied..], 0);
+            return true;
+        }
+        return false;
+    }
+
+    fn put(
+        self: *ChunkCache,
+        io: Io,
+        allocator: std.mem.Allocator,
+        key: ChunkCacheKey,
+        bytes: []const u8,
+    ) !void {
+        const copy = try allocator.dupe(u8, bytes);
+        errdefer allocator.free(copy);
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        var victim: usize = 0;
+        var oldest: u64 = std.math.maxInt(u64);
+        for (&self.entries, 0..) |*entry, index| {
+            if (entry.*) |*value| {
+                if (std.meta.eql(value.key, key)) {
+                    allocator.free(value.bytes);
+                    self.clock +%= 1;
+                    entry.* = .{ .key = key, .bytes = copy, .last_used = self.clock };
+                    return;
+                }
+                if (value.last_used < oldest) {
+                    oldest = value.last_used;
+                    victim = index;
+                }
+            } else {
+                victim = index;
+                break;
+            }
+        }
+        if (self.entries[victim]) |value| allocator.free(value.bytes);
+        self.clock +%= 1;
+        self.entries[victim] = .{ .key = key, .bytes = copy, .last_used = self.clock };
+    }
+
+    fn invalidateObject(self: *ChunkCache, io: Io, allocator: std.mem.Allocator, id: format.ObjectId) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        for (&self.entries) |*entry| {
+            const value = entry.* orelse continue;
+            if (!std.mem.eql(u8, &value.key.object_id, &id)) continue;
+            allocator.free(value.bytes);
+            entry.* = null;
+        }
+    }
+};
+
 const ChunkHeader = struct {
     length: u32,
     crc: u32,
@@ -57,6 +149,7 @@ const ReservationAccounting = struct {
 pub const Store = struct {
     io: Io,
     lfs: *c.lfs_t,
+    cache: ?*ChunkCache = null,
 
     pub fn initialize(self: Store) !void {
         try makeDirectory(self.lfs, namespace_root);
@@ -312,6 +405,7 @@ pub const Store = struct {
         head.metadata.ctime_ns = now;
         try self.writeHead(head);
         self.pruneChunkVersionRange(id, first_touched, last_touched, generation) catch {};
+        self.invalidateCachedObject(id);
         return .{ .amount = data.len, .head = head };
     }
 
@@ -427,6 +521,7 @@ pub const Store = struct {
         try self.writeHead(head);
         self.pruneTouchedChunkVersions(id, &touched, generation) catch {};
         self.removeUnselectedReservationVersions(id, head.reservation_generation) catch {};
+        self.invalidateCachedObject(id);
         return head;
     }
 
@@ -476,6 +571,7 @@ pub const Store = struct {
         try removeIfPresent(self.lfs, try headPath(id, &path_buffer));
         try removeIfPresent(self.lfs, try chunksPath(id, &path_buffer));
         try removeIfPresent(self.lfs, try objectPath(id, &path_buffer));
+        self.invalidateCachedObject(id);
     }
 
     pub fn readReservationsAlloc(
@@ -621,6 +717,31 @@ pub const Store = struct {
         buffer: []u8,
         offset: u32,
     ) !void {
+        const cache_key: ChunkCacheKey = .{
+            .object_id = id,
+            .index = index,
+            .generation = generation,
+            .layout = layout,
+        };
+        if (self.cache) |cache| {
+            if (cache.read(self.io, cache_key, buffer, offset)) return;
+            const version = try self.findChunkVersionWithLayout(id, index, generation, layout) orelse {
+                @memset(buffer, 0);
+                return;
+            };
+            const chunk = try self.readChunkVersionAlloc(id, version, format.chunk_size, 0);
+            defer std.heap.c_allocator.free(chunk.bytes);
+            // Fallback versions remain uncached so corruption in an unselected
+            // generation cannot be hidden by a cache entry for the head generation.
+            if (version.generation == generation)
+                cache.put(self.io, std.heap.c_allocator, cache_key, chunk.bytes[0..chunk.stored_length]) catch {};
+            const start: usize = offset;
+            const copied = if (start < chunk.stored_length) @min(buffer.len, chunk.stored_length - start) else 0;
+            if (copied != 0) @memcpy(buffer[0..copied], chunk.bytes[start..][0..copied]);
+            @memset(buffer[copied..], 0);
+            return;
+        }
+
         var path_buffer: [max_path_bytes:0]u8 = undefined;
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         var version: ChunkVersion = .{ .index = index, .generation = generation, .layout = layout };
@@ -664,6 +785,10 @@ pub const Store = struct {
         crc = try readPayloadCrc(self.lfs, &file, length - prefix - copied, crc);
         if (crc != header.crc) return error.CorruptFilesystem;
         @memset(buffer[copied..], 0);
+    }
+
+    fn invalidateCachedObject(self: Store, id: format.ObjectId) void {
+        if (self.cache) |cache| cache.invalidateObject(self.io, std.heap.c_allocator, id);
     }
 
     fn writeChunk(
@@ -1424,4 +1549,51 @@ test "reservation merging and coverage distinguish holes" {
     try std.testing.expect(rangeCovered(merged, 120, 280));
     try std.testing.expect(!rangeCovered(merged, 280, 420));
     try std.testing.expect(rangeCovered(merged, 420, 480));
+}
+
+test "chunk cache serves partial reads, evicts LRU entries, and invalidates objects" {
+    var cache: ChunkCache = .{};
+    defer cache.deinit(std.testing.allocator);
+    const io = std.testing.io;
+    var ids: [ChunkCache.capacity + 1]format.ObjectId = @splat(@splat(0));
+    for (&ids, 0..) |*id, index| id[0] = @intCast(index + 1);
+
+    for (ids[0..ChunkCache.capacity], 0..) |id, index| {
+        const byte: u8 = @intCast(index + 1);
+        try cache.put(io, std.testing.allocator, .{
+            .object_id = id,
+            .index = 0,
+            .generation = 1,
+            .layout = .co_located,
+        }, &.{ byte, byte, byte });
+    }
+
+    var output: [4]u8 = undefined;
+    const first_key: ChunkCacheKey = .{
+        .object_id = ids[0],
+        .index = 0,
+        .generation = 1,
+        .layout = .co_located,
+    };
+    try std.testing.expect(cache.read(io, first_key, &output, 1));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 0, 0 }, &output);
+
+    const extra_key: ChunkCacheKey = .{
+        .object_id = ids[ChunkCache.capacity],
+        .index = 0,
+        .generation = 1,
+        .layout = .co_located,
+    };
+    try cache.put(io, std.testing.allocator, extra_key, &.{9});
+    try std.testing.expect(!cache.read(io, .{
+        .object_id = ids[1],
+        .index = 0,
+        .generation = 1,
+        .layout = .co_located,
+    }, &output, 0));
+    try std.testing.expect(cache.read(io, first_key, &output, 0));
+
+    cache.invalidateObject(io, std.testing.allocator, ids[0]);
+    try std.testing.expect(!cache.read(io, first_key, &output, 0));
+    try std.testing.expect(cache.read(io, extra_key, &output, 0));
 }

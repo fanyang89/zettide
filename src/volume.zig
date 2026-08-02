@@ -45,6 +45,7 @@ pub const Volume = struct {
     link_counts: std.AutoHashMap(object_format.ObjectId, u64),
     directory_link_counts: std.AutoHashMap(object_format.ObjectId, u64),
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
+    chunk_cache: object_store.ChunkCache,
     reservation_blocks: u64 = 0,
     object_transaction_mutex: Io.Mutex,
     view_lock: Io.RwLock,
@@ -322,6 +323,7 @@ pub const Volume = struct {
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.directory_link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.chunk_cache = .{};
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
         result.view_lock = .init;
@@ -412,6 +414,7 @@ pub const Volume = struct {
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.directory_link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.chunk_cache = .{};
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
         result.view_lock = .init;
@@ -509,6 +512,7 @@ pub const Volume = struct {
         self.directory_link_counts.deinit();
         self.object_pins.deinit();
         self.link_counts.deinit();
+        self.chunk_cache.deinit(std.heap.c_allocator);
         if (self.crypto_context) |context| {
             context.deinit();
             self.crypto_allocator.?.destroy(context);
@@ -1326,7 +1330,7 @@ pub const Volume = struct {
     }
 
     fn store(self: *Volume) object_store.Store {
-        return .{ .io = self.io, .lfs = &self.lfs };
+        return .{ .io = self.io, .lfs = &self.lfs, .cache = &self.chunk_cache };
     }
 
     fn ensureWritesAllowed(self: *const Volume) !void {
