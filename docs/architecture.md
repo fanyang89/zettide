@@ -52,6 +52,26 @@ If publication succeeds but stabilization fails, only stabilization is retried;
 the logical transaction is never republished. After backend recovery, terminal
 resolution can detect that an unstable publication was rolled back.
 
+## Immutable Tree
+
+The initial key-value index is a path-copying B+tree with canonical 4 KiB
+pages. Leaves contain sorted inline key-value pairs. Internal pages contain a
+first child followed by sorted separator/right-child pairs. Pages have no
+parent or sibling references, so copying one path never requires rewriting
+unrelated branches.
+
+A tree mutator caches speculative pages because prepared objects are not
+visible through `loadImmutable`. The cache uses `ObjectRef` indexing and a
+caller-configurable page budget. Each update writes children before parents and
+returns a new root for the transaction coordinator to publish. Values larger
+than the inline entry limit will use separate immutable objects in a future
+format.
+
+Insertion and split control flow is adapted from xitdb's `SortedMap` at commit
+`97f5d68962a70cbf9d3bbaf0a087271e5da642b7`. The CAWFS fork is available at
+<https://github.com/fanyang89/xitdb>; licensing details are in
+`THIRD_PARTY.md`.
+
 ## Planned Backends
 
 The SCSI backend uses one logical-block COMPARE AND WRITE for anchor updates.

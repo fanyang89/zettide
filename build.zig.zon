@@ -12,5 +12,6 @@
         "docs",
         "LICENSE",
         "README.md",
+        "THIRD_PARTY.md",
     },
 }
