@@ -16,6 +16,7 @@ pub const Error = error{
     ObjectNotFound,
     ObjectReferenceCollision,
     NoOpAnchor,
+    InjectedStabilizeFailure,
 };
 
 pub const PublishFault = enum {
@@ -40,6 +41,7 @@ pub const ModelStore = struct {
     visible_anchor: Anchor,
     stable_anchor: Anchor,
     next_publish_fault: PublishFault = .none,
+    fail_next_stabilize: bool = false,
     active_batches: usize = 0,
     epoch: u64 = 1,
 
@@ -71,12 +73,19 @@ pub const ModelStore = struct {
         self.next_publish_fault = fault;
     }
 
+    pub fn injectNextStabilizeFailure(self: *ModelStore) void {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        self.fail_next_stabilize = true;
+    }
+
     pub fn crash(self: *ModelStore) void {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
 
         self.visible_anchor = self.stable_anchor;
         self.next_publish_fault = .none;
+        self.fail_next_stabilize = false;
         self.epoch += 1;
     }
 
@@ -272,6 +281,10 @@ const ModelBatch = struct {
         spinLock(&self.store.mutex);
         defer self.store.mutex.unlock();
         if (self.store_epoch != self.store.epoch) return error.InvalidState;
+        if (self.store.fail_next_stabilize) {
+            self.store.fail_next_stabilize = false;
+            return error.InjectedStabilizeFailure;
+        }
 
         self.store.stable_anchor = self.store.visible_anchor;
     }

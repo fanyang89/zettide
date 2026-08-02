@@ -38,6 +38,20 @@ until the transaction appears at its intended generation or another commit
 advances the anchor. A future explicit fencing operation can force progress
 when no other writer advances it.
 
+## Transaction Coordination
+
+The transaction coordinator snapshots one base anchor and owns one write batch.
+It stages immutable objects, writes the commit record last, prepares the batch,
+conditionally publishes the next anchor, and stabilizes a definite winner. The
+published root must either belong to the transaction's batch or already be
+loadable from the store.
+
+A transaction is single-use. Conflicts and confirmed non-publications are
+terminal. An indeterminate publication must be resolved before stabilization.
+If publication succeeds but stabilization fails, only stabilization is retried;
+the logical transaction is never republished. After backend recovery, terminal
+resolution can detect that an unstable publication was rolled back.
+
 ## Planned Backends
 
 The SCSI backend uses one logical-block COMPARE AND WRITE for anchor updates.

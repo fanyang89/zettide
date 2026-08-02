@@ -23,7 +23,6 @@ pub const Resolution = enum {
 
 pub const Error = error{
     GenerationOverflow,
-    AnchorGenerationRegression,
     MissingCommit,
     CommitGenerationMismatch,
     AnchorCommitMismatch,
@@ -40,14 +39,36 @@ pub fn resolve(
     attempt: Attempt,
     options: Options,
 ) !Resolution {
+    return resolveInternal(store, allocator, attempt, options, true);
+}
+
+/// Resolves a request known to have finished dispatch. If the base is still
+/// current, the publication did not survive and can no longer take effect.
+pub fn resolveTerminal(
+    store: store_mod.ConditionalStore,
+    allocator: std.mem.Allocator,
+    attempt: Attempt,
+    options: Options,
+) !Resolution {
+    return resolveInternal(store, allocator, attempt, options, false);
+}
+
+fn resolveInternal(
+    store: store_mod.ConditionalStore,
+    allocator: std.mem.Allocator,
+    attempt: Attempt,
+    options: Options,
+    request_may_be_in_flight: bool,
+) !Resolution {
     const attempted_generation = std.math.add(u64, attempt.base_generation, 1) catch
         return error.GenerationOverflow;
     var snapshot = try store.readAnchor(allocator);
     defer snapshot.deinit();
     const current = try anchor.decode(&snapshot.anchor);
 
-    if (current.generation < attempt.base_generation) return error.AnchorGenerationRegression;
-    if (current.generation == attempt.base_generation) return .pending;
+    if (current.generation < attempt.base_generation) return .not_committed;
+    if (current.generation == attempt.base_generation)
+        return if (request_may_be_in_flight) .pending else .not_committed;
 
     const distance = current.generation - attempted_generation + 1;
     const max_depth = std.math.cast(u64, options.max_depth) orelse std.math.maxInt(u64);
