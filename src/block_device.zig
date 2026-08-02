@@ -47,6 +47,7 @@ pub const FileBlockDevice = struct {
     block_count: u32,
     mutex: Io.Mutex = .init,
     redo_mutex: Io.Mutex = .init,
+    redo_condition: Io.Condition = .init,
     fault: ?*FaultController = null,
     dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
@@ -136,10 +137,24 @@ pub const FileBlockDevice = struct {
             if (self.durability == .writeback) try self.flushWriteback();
             while (true) {
                 try self.redo_mutex.lock(self.io);
+                while (redo.inflightCheckpoint()) {
+                    if (self.isWriteFrozen()) {
+                        self.redo_mutex.unlock(self.io);
+                        return error.WriteFrozen;
+                    }
+                    self.redo_condition.wait(self.io, &self.redo_mutex) catch |err| {
+                        self.redo_mutex.unlock(self.io);
+                        return err;
+                    };
+                }
                 if (redo.hasPendingWrites()) {
                     self.redo_mutex.unlock(self.io);
                     try self.flushWriteback();
                     continue;
+                }
+                if (redo.hasActiveTransaction()) {
+                    self.redo_mutex.unlock(self.io);
+                    return;
                 }
                 const recommended = redo.checkpointRecommended() catch |err| {
                     self.redo_mutex.unlock(self.io);
@@ -149,12 +164,10 @@ pub const FileBlockDevice = struct {
                     self.redo_mutex.unlock(self.io);
                     break;
                 }
-                redo.checkpoint(self.redoSync()) catch |err| {
-                    self.redo_mutex.unlock(self.io);
+                self.checkpointRuntimeLocked(redo) catch |err| {
                     self.freezeWrites();
                     return err;
                 };
-                self.redo_mutex.unlock(self.io);
                 break;
             }
             return;
@@ -212,6 +225,16 @@ pub const FileBlockDevice = struct {
         const redo = &(self.redo orelse return);
         while (true) {
             try self.redo_mutex.lock(self.io);
+            while (redo.inflightCheckpoint()) {
+                if (self.isWriteFrozen()) {
+                    self.redo_mutex.unlock(self.io);
+                    return error.WriteFrozen;
+                }
+                self.redo_condition.wait(self.io, &self.redo_mutex) catch |err| {
+                    self.redo_mutex.unlock(self.io);
+                    return err;
+                };
+            }
             if (self.durability == .writeback and !self.accepting_writeback) {
                 self.redo_mutex.unlock(self.io);
                 return error.WritebackClosed;
@@ -231,12 +254,10 @@ pub const FileBlockDevice = struct {
                 self.redo_mutex.unlock(self.io);
                 continue;
             }
-            redo.checkpoint(self.redoSync()) catch |err| {
-                self.redo_mutex.unlock(self.io);
+            self.checkpointRuntimeLocked(redo) catch |err| {
                 self.freezeWrites();
                 return err;
             };
-            self.redo_mutex.unlock(self.io);
         }
     }
 
@@ -319,16 +340,24 @@ pub const FileBlockDevice = struct {
             while (true) {
                 if (self.durability == .writeback) try self.flushWriteback();
                 try self.redo_mutex.lock(self.io);
+                while (redo.inflightCheckpoint()) {
+                    if (self.isWriteFrozen()) {
+                        self.redo_mutex.unlock(self.io);
+                        return error.WriteFrozen;
+                    }
+                    self.redo_condition.wait(self.io, &self.redo_mutex) catch |err| {
+                        self.redo_mutex.unlock(self.io);
+                        return err;
+                    };
+                }
                 if (redo.hasPendingWrites()) {
                     self.redo_mutex.unlock(self.io);
                     continue;
                 }
-                redo.checkpoint(self.redoSync()) catch |err| {
-                    self.redo_mutex.unlock(self.io);
+                self.checkpointRuntimeLocked(redo) catch |err| {
                     self.freezeWrites();
                     return err;
                 };
-                self.redo_mutex.unlock(self.io);
                 break;
             }
         }
@@ -507,6 +536,37 @@ pub const FileBlockDevice = struct {
         self.group_condition.broadcast(self.io);
         self.group_mutex.unlock(self.io);
         if (more_pending) self.requestFlush();
+    }
+
+    // The caller holds redo_mutex so preparing the checkpoint is atomic with
+    // its active/pending checks. This function always releases the mutex.
+    fn checkpointRuntimeLocked(self: *FileBlockDevice, redo: *redo_runtime.Runtime) !void {
+        var prepared = (redo.prepareCheckpoint() catch |err| {
+            self.redo_mutex.unlock(self.io);
+            return err;
+        }) orelse {
+            self.redo_mutex.unlock(self.io);
+            return;
+        };
+        self.redo_mutex.unlock(self.io);
+        defer prepared.deinit();
+
+        prepared.execute(self.io, self.file_io.borrow(), self.redoSync()) catch |err| {
+            self.freezeWrites();
+            self.redo_mutex.lockUncancelable(self.io);
+            self.redo_condition.broadcast(self.io);
+            self.redo_mutex.unlock(self.io);
+            return err;
+        };
+        self.redo_mutex.lockUncancelable(self.io);
+        redo.completeCheckpoint(prepared.checkpoint) catch |err| {
+            self.freezeWrites();
+            self.redo_condition.broadcast(self.io);
+            self.redo_mutex.unlock(self.io);
+            return err;
+        };
+        self.redo_condition.broadcast(self.io);
+        self.redo_mutex.unlock(self.io);
     }
 
     fn recordWritebackError(self: *FileBlockDevice, err: anyerror) void {

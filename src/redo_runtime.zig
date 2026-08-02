@@ -55,6 +55,38 @@ pub const PreparedFlush = struct {
     }
 };
 
+pub const Checkpoint = struct {
+    anchor: redo_journal.Anchor,
+    slot: AnchorSlot,
+};
+
+pub const PreparedCheckpoint = struct {
+    allocator: std.mem.Allocator,
+    checkpoint: Checkpoint,
+    writes: []file_io.Write,
+    anchor_bytes: [redo_journal.anchor_size]u8,
+    anchor_position: u64,
+
+    pub fn execute(
+        self: *const PreparedCheckpoint,
+        io: Io,
+        backend: file_io.BorrowedFileIo,
+        durable_sync: DurableSync,
+    ) !void {
+        if (self.writes.len != 0) {
+            try backend.writeAllManyAt(io, .writeback, self.writes);
+            try durable_sync.run();
+        }
+        try backend.writeAllAt(io, .writeback, &self.anchor_bytes, self.anchor_position);
+        try durable_sync.run();
+    }
+
+    pub fn deinit(self: *PreparedCheckpoint) void {
+        self.allocator.free(self.writes);
+        self.* = undefined;
+    }
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: Io,
@@ -78,6 +110,7 @@ pub const Runtime = struct {
     staged_tail_sequence: u64 = 0,
     staged_tail_digest: redo_journal.Digest = redo_journal.zero_digest,
     inflight_flush: ?Flush = null,
+    inflight_checkpoint: ?Checkpoint = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -134,6 +167,7 @@ pub const Runtime = struct {
     }
 
     pub fn begin(self: *Runtime) !void {
+        if (self.inflight_checkpoint != null) return error.CheckpointInProgress;
         if (self.active_transaction) return error.TransactionAlreadyActive;
         if (self.remainingCapacity() < try self.maximumTransactionSize())
             return error.CheckpointRequired;
@@ -281,6 +315,7 @@ pub const Runtime = struct {
     pub fn seal(self: *Runtime) !?PreparedFlush {
         if (self.inflight_flush != null or self.flushing.count() != 0) return error.FlushInProgress;
         if (self.pending.count() == 0) return null;
+        if (self.inflight_checkpoint != null) return error.CheckpointInProgress;
         try self.committed.ensureUnusedCapacity(@intCast(self.pending.count()));
         var writes: std.ArrayList(file_io.Write) = .empty;
         errdefer writes.deinit(self.allocator);
@@ -321,6 +356,10 @@ pub const Runtime = struct {
         return self.inflight_flush;
     }
 
+    pub fn inflightCheckpoint(self: *const Runtime) bool {
+        return self.inflight_checkpoint != null;
+    }
+
     pub fn completeFlush(self: *Runtime, flush: Flush) !void {
         if (self.inflight_flush == null or !std.meta.eql(self.inflight_flush.?, flush))
             return error.InvalidFlush;
@@ -345,52 +384,67 @@ pub const Runtime = struct {
         self.inflight_flush = null;
     }
 
-    pub fn checkpoint(self: *Runtime, durable_sync: DurableSync) !void {
+    pub fn prepareCheckpoint(self: *Runtime) !?PreparedCheckpoint {
+        if (self.inflight_checkpoint != null) return error.CheckpointInProgress;
         if (self.active_transaction) return error.TransactionActive;
         if (self.hasPendingWrites()) return error.PendingTransactions;
-        if (self.committed.count() != 0) {
-            const ids = try self.sortedIds(&self.committed);
-            defer self.allocator.free(ids);
-            const writes = try self.allocator.alloc(file_io.Write, ids.len);
-            defer self.allocator.free(writes);
-            for (ids, writes) |id, *write| write.* = .{
-                .bytes = self.committed.get(id).?,
-                .offset = try self.homePosition(id, 0),
-            };
-            try self.file_io.writeAllManyAt(self.io, .writeback, writes);
-            try durable_sync.run();
+        if (self.used_bytes == 0) {
+            std.debug.assert(self.committed.count() == 0);
+            return null;
         }
-        if (self.used_bytes != 0) {
-            const next_generation = std.math.add(u64, self.anchor_generation, 1) catch
-                return error.GenerationOverflow;
-            const next_anchor: redo_journal.Anchor = .{
+        const ids = try self.sortedIds(&self.committed);
+        defer self.allocator.free(ids);
+        const writes = try self.allocator.alloc(file_io.Write, ids.len);
+        errdefer self.allocator.free(writes);
+        for (ids, writes) |id, *write| write.* = .{
+            .bytes = self.committed.get(id).?,
+            .offset = try self.homePosition(id, 0),
+        };
+        const next_generation = std.math.add(u64, self.anchor_generation, 1) catch
+            return error.GenerationOverflow;
+        const token: Checkpoint = .{
+            .anchor = .{
                 .generation = next_generation,
                 .head_offset = self.tailOffset(),
                 .used_bytes = 0,
                 .tail_sequence = 0,
                 .tail_digest = redo_journal.zero_digest,
-            };
-            const next_slot = self.nextAnchorSlot();
-            const anchor_bytes = try redo_journal.encodeAnchor(next_anchor, self.dataCapacity());
-            try self.file_io.writeAllAt(
-                self.io,
-                .writeback,
-                &anchor_bytes,
-                try self.anchorPosition(next_slot),
-            );
-            try durable_sync.run();
-            self.anchor_slot = next_slot;
-            self.anchor_generation = next_generation;
-            self.head_offset = next_anchor.head_offset;
-            self.used_bytes = 0;
-            self.tail_sequence = 0;
-            self.tail_digest = redo_journal.zero_digest;
-            self.staged_used_bytes = 0;
-            self.staged_tail_sequence = 0;
-            self.staged_tail_digest = redo_journal.zero_digest;
-        }
+            },
+            .slot = self.nextAnchorSlot(),
+        };
+        const prepared: PreparedCheckpoint = .{
+            .allocator = self.allocator,
+            .checkpoint = token,
+            .writes = writes,
+            .anchor_bytes = try redo_journal.encodeAnchor(token.anchor, self.dataCapacity()),
+            .anchor_position = try self.anchorPosition(token.slot),
+        };
+        self.inflight_checkpoint = token;
+        return prepared;
+    }
+
+    pub fn completeCheckpoint(self: *Runtime, token: Checkpoint) !void {
+        if (self.inflight_checkpoint == null or !std.meta.eql(self.inflight_checkpoint.?, token))
+            return error.InvalidCheckpoint;
+        self.anchor_slot = token.slot;
+        self.anchor_generation = token.anchor.generation;
+        self.head_offset = token.anchor.head_offset;
+        self.used_bytes = 0;
+        self.tail_sequence = 0;
+        self.tail_digest = redo_journal.zero_digest;
+        self.staged_used_bytes = 0;
+        self.staged_tail_sequence = 0;
+        self.staged_tail_digest = redo_journal.zero_digest;
         self.freeImages(&self.committed);
         self.committed.clearRetainingCapacity();
+        self.inflight_checkpoint = null;
+    }
+
+    pub fn checkpoint(self: *Runtime, durable_sync: DurableSync) !void {
+        var prepared = (try self.prepareCheckpoint()) orelse return;
+        defer prepared.deinit();
+        try prepared.execute(self.io, self.file_io, durable_sync);
+        try self.completeCheckpoint(prepared.checkpoint);
     }
 
     pub fn needsCheckpoint(self: *Runtime) !bool {
@@ -740,6 +794,40 @@ test "redo runtime commits once and recovers through the overlay" {
         try std.testing.expectEqualStrings("durable", &actual);
         try std.testing.expectEqual(@as(u64, 0), checkpointed.tail_sequence);
     }
+}
+
+test "prepared checkpoint preserves reads and blocks new transactions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "prepared-checkpoint.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "PreparedCheckpoint");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+
+    var sync_state: TestSync = .{ .io = std.testing.io, .file = file };
+    var runtime = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
+    defer runtime.deinit();
+    try runtime.begin();
+    try runtime.program(3, 100, "durable");
+    try runtime.commit(sync_state.durable());
+
+    var prepared = (try runtime.prepareCheckpoint()).?;
+    defer prepared.deinit();
+    try std.testing.expect(runtime.inflightCheckpoint());
+    try std.testing.expectError(error.CheckpointInProgress, runtime.begin());
+    try std.testing.expectError(error.CheckpointInProgress, runtime.prepareCheckpoint());
+    var actual: [7]u8 = undefined;
+    try runtime.read(3, 100, &actual);
+    try std.testing.expectEqualStrings("durable", &actual);
+
+    try prepared.execute(std.testing.io, runtime.file_io, sync_state.durable());
+    try runtime.completeCheckpoint(prepared.checkpoint);
+    try std.testing.expect(!runtime.inflightCheckpoint());
+    try runtime.begin();
+    runtime.abort();
+    try std.testing.expectEqual(@as(u64, 3), sync_state.count);
 }
 
 test "redo runtime abort discards active block images" {
