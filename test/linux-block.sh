@@ -109,6 +109,12 @@ plan=$(sudo -n "$cli" pool plan-create --device "$loop" --profile unprotected --
 grep -q '^Plan: ready$' <<<"$plan"
 token=$(grep '^Confirm token: ' <<<"$plan")
 token=${token#Confirm token: }
+printf '\001' | sudo -n dd of="$loop" bs=1 seek=$((16 * 1024 * 1024)) conv=notrunc status=none
+if sudo -n "$cli" pool create --device "$loop" --profile unprotected --label loop-cli --confirm "$token" >/dev/null 2>&1; then
+    echo "token was accepted after device contents changed" >&2
+    exit 1
+fi
+printf '\000' | sudo -n dd of="$loop" bs=1 seek=$((16 * 1024 * 1024)) conv=notrunc status=none
 if sudo -n "$cli" pool create --device "$loop" --profile unprotected --label loop-cli --confirm invalid >/dev/null 2>&1; then
     echo "invalid confirmation token was accepted" >&2
     exit 1

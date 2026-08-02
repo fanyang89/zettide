@@ -33,17 +33,32 @@ pub const Plan = struct {
     }
 };
 
+pub const AcquiredPlan = struct {
+    plan: Plan,
+    storages: []storage_api.Storage,
+    io: std.Io,
+
+    pub fn deinit(self: *AcquiredPlan) void {
+        for (self.storages) |*storage| storage.close(self.io) catch {};
+        if (self.storages.len != 0) self.plan.allocator.free(self.storages);
+        self.plan.deinit();
+        self.storages = &.{};
+    }
+
+    pub fn takeStorages(self: *AcquiredPlan) []storage_api.Storage {
+        const storages = self.storages;
+        self.storages = &.{};
+        return storages;
+    }
+};
+
 pub fn inspect(
     io: std.Io,
     allocator: std.mem.Allocator,
     paths: []const []const u8,
     options: Options,
 ) !Plan {
-    if (paths.len == 0 or paths.len > @import("pool_topology.zig").max_member_count)
-        return error.InvalidMemberCount;
-    if (options.protection == .erasure_coded) return error.ErasureCodingNotImplemented;
-    if (paths.len != try options.protection.fullWidth()) return error.UnsupportedPoolWidth;
-    _ = try @import("member_format.zig").Label.init(options.label);
+    try validateRequest(paths, options);
 
     const devices = try allocator.alloc(linux_block.DeviceInfo, paths.len);
     errdefer allocator.free(devices);
@@ -65,6 +80,51 @@ pub fn inspect(
         .token = computeToken(devices, contains_data, options),
     };
     return plan;
+}
+
+pub fn acquireCurrent(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    paths: []const []const u8,
+    options: Options,
+) !AcquiredPlan {
+    try validateRequest(paths, options);
+    const devices = try allocator.alloc(linux_block.DeviceInfo, paths.len);
+    errdefer allocator.free(devices);
+    const contains_data = try allocator.alloc(bool, paths.len);
+    errdefer allocator.free(contains_data);
+    const storages = try allocator.alloc(storage_api.Storage, paths.len);
+    var acquired: usize = 0;
+    errdefer {
+        for (storages[0..acquired]) |*storage| storage.close(io) catch {};
+        allocator.free(storages);
+    }
+
+    for (paths, 0..) |path, index| {
+        var opened = try linux_block.openStorage(io, allocator, path, true);
+        errdefer opened.storage.close(io) catch {};
+        devices[index] = opened.info;
+        for (devices[0..index]) |previous| {
+            if (linux_block.DeviceId.eql(devices[index].id, previous.id)) return error.DuplicateDevice;
+        }
+        storages[index] = opened.storage;
+        acquired += 1;
+    }
+    for (storages, 0..) |*storage, index|
+        contains_data[index] = try linux_block.hasData(storage, io, allocator);
+
+    return .{
+        .plan = .{
+            .allocator = allocator,
+            .paths = paths,
+            .devices = devices,
+            .contains_data = contains_data,
+            .options = options,
+            .token = computeToken(devices, contains_data, options),
+        },
+        .storages = storages,
+        .io = io,
+    };
 }
 
 pub fn acquire(plan: *const Plan, io: std.Io, allocator: std.mem.Allocator) ![]storage_api.Storage {
@@ -98,6 +158,14 @@ pub fn deviceReady(device: linux_block.DeviceInfo) bool {
         device.logical_sector_size <= 4096 and
         4096 % device.logical_sector_size == 0 and
         device.capacity_bytes >= minimum_capacity;
+}
+
+fn validateRequest(paths: []const []const u8, options: Options) !void {
+    if (paths.len == 0 or paths.len > @import("pool_topology.zig").max_member_count)
+        return error.InvalidMemberCount;
+    if (options.protection == .erasure_coded) return error.ErasureCodingNotImplemented;
+    if (paths.len != try options.protection.fullWidth()) return error.UnsupportedPoolWidth;
+    _ = try @import("member_format.zig").Label.init(options.label);
 }
 
 fn computeToken(devices: []const linux_block.DeviceInfo, contains_data: []const bool, options: Options) [32]u8 {

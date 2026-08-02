@@ -205,9 +205,9 @@ The Linux raw-pool CLI requires every device path explicitly. The initial mounta
 accepts exactly one device for `unprotected` and exactly three devices for `replicated`.
 `pool plan-create` scans the complete capacity of every device and rejects any nonzero data. A
 confirmation token binds the ordered device instances, capacities, logical sector sizes, profile,
-and label. `pool create` reconstructs that plan, requires the exact token, acquires all devices with
-`O_EXCL`, repeats identity and full-capacity scans through the acquired fds, and only then starts
-publication. Tokens cease to match when a device path is rebound to a different `diskseq` instance.
+and label. `pool create` acquires all devices with `O_EXCL`, reconstructs the plan from those fds,
+performs one final full-capacity scan, requires the exact token, and only then starts publication.
+Tokens cease to match when a device path is rebound to a different `diskseq` instance.
 
 `pool inspect` reopens an explicitly supplied member set read-only, selects control authority, and
 reports the topology, layout, generation, member classifications, policy-level data access, and

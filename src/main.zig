@@ -183,26 +183,31 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     if (planning and confirmation != null) return error.UnknownOption;
     if (creating and confirmation == null) return error.MissingConfirmation;
 
-    var plan = try zettide.v3.linux_pool_plan.inspect(io, allocator, paths[0..path_count], .{
+    const options: zettide.v3.linux_pool_plan.Options = .{
         .protection = protection,
         .label = label,
         .name_profile = name_profile,
-    });
-    defer plan.deinit();
-    try printPoolPlan(&plan, stdout);
-    if (!plan.ready()) {
-        if (creating) return error.PlanNotReady;
-        return;
-    }
-    var token_buffer: [64]u8 = undefined;
-    const token = zettide.v3.linux_pool_plan.formatToken(plan.token, &token_buffer);
+    };
     if (planning) {
+        var plan = try zettide.v3.linux_pool_plan.inspect(io, allocator, paths[0..path_count], options);
+        defer plan.deinit();
+        try printPoolPlan(&plan, stdout);
+        if (!plan.ready()) return;
+        var token_buffer: [64]u8 = undefined;
+        const token = zettide.v3.linux_pool_plan.formatToken(plan.token, &token_buffer);
         try stdout.print("Confirm token: {s}\n", .{token});
         return;
     }
+
+    var acquired = try zettide.v3.linux_pool_plan.acquireCurrent(io, allocator, paths[0..path_count], options);
+    defer acquired.deinit();
+    try printPoolPlan(&acquired.plan, stdout);
+    if (!acquired.plan.ready()) return error.PlanNotReady;
+    var token_buffer: [64]u8 = undefined;
+    const token = zettide.v3.linux_pool_plan.formatToken(acquired.plan.token, &token_buffer);
     if (!std.mem.eql(u8, confirmation.?, token)) return error.ConfirmationMismatch;
 
-    const storages = try zettide.v3.linux_pool_plan.acquire(&plan, io, allocator);
+    const storages = acquired.takeStorages();
     defer allocator.free(storages);
     const outcome = try zettide.v3.pool_provision.create(io, allocator, storages, .{
         .protection = protection,
