@@ -244,7 +244,6 @@ pub const Store = struct {
         if (offset >= head.logical_size or buffer.len == 0) return 0;
         const available = head.logical_size - offset;
         const amount: usize = @intCast(@min(@as(u64, buffer.len), available));
-        @memset(buffer[0..amount], 0);
 
         var consumed: usize = 0;
         while (consumed < amount) {
@@ -631,7 +630,10 @@ pub const Store = struct {
         );
         if (exact_result == c.LFS_ERR_ISDIR) return error.CorruptFilesystem;
         if (exact_result == c.LFS_ERR_NOENT) {
-            version = try self.findOlderChunkVersionWithLayout(id, index, generation, layout) orelse return;
+            version = try self.findOlderChunkVersionWithLayout(id, index, generation, layout) orelse {
+                @memset(buffer, 0);
+                return;
+            };
             file = std.mem.zeroes(c.lfs_file_t);
             const open_result = c.lfs_file_open(
                 self.lfs,
@@ -652,6 +654,7 @@ pub const Store = struct {
             try checkLfs(amount);
             if (amount != length or google_crc32c.value(buffer[0..length]) != header.crc)
                 return error.CorruptFilesystem;
+            @memset(buffer[length..], 0);
             return;
         }
         const bytes = try std.heap.c_allocator.alloc(u8, length);
@@ -660,9 +663,9 @@ pub const Store = struct {
         try checkLfs(amount);
         if (amount != length or google_crc32c.value(bytes) != header.crc)
             return error.CorruptFilesystem;
-        if (offset >= length) return;
-        const copied = @min(buffer.len, length - offset);
-        @memcpy(buffer[0..copied], bytes[offset..][0..copied]);
+        const copied = if (offset < length) @min(buffer.len, length - offset) else 0;
+        if (copied != 0) @memcpy(buffer[0..copied], bytes[offset..][0..copied]);
+        @memset(buffer[copied..], 0);
     }
 
     fn writeChunk(
@@ -679,7 +682,7 @@ pub const Store = struct {
         const old_version = try self.findChunkVersionWithLayout(id, index, old_generation, layout);
         const chunk = if (old_version) |version| try self.readChunkVersionAlloc(id, version, format.chunk_size, write_end) else value: {
             const bytes = try std.heap.c_allocator.alloc(u8, write_end);
-            @memset(bytes, 0);
+            @memset(bytes[0..offset], 0);
             break :value ChunkData{ .bytes = bytes, .stored_length = 0 };
         };
         defer std.heap.c_allocator.free(chunk.bytes);
@@ -831,11 +834,11 @@ pub const Store = struct {
         const length = header.length;
         const bytes = try std.heap.c_allocator.alloc(u8, @max(length, minimum));
         errdefer std.heap.c_allocator.free(bytes);
-        @memset(bytes, 0);
         const amount = c.lfs_file_read(self.lfs, &file, bytes.ptr, length);
         try checkLfs(amount);
         if (amount != length or google_crc32c.value(bytes[0..length]) != header.crc)
             return error.CorruptFilesystem;
+        @memset(bytes[length..], 0);
         return .{ .bytes = bytes, .stored_length = length };
     }
 

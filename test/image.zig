@@ -203,7 +203,7 @@ test "legacy private chunk directories remain readable and writable" {
         var actual: [9]u8 = undefined;
         try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
         try std.testing.expectEqualStrings("persisted", &actual);
-        var hole: [8]u8 = undefined;
+        var hole: [8]u8 = @splat(0xa5);
         try std.testing.expectEqual(
             hole.len,
             try volume.readFile(&file, &hole, zettide.object_format.chunk_size),
@@ -295,14 +295,14 @@ test "read write and truncate preserve boundary data" {
     try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "abc", 0));
     try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "XYZ", 4097));
 
-    var gap: [4094]u8 = undefined;
+    var gap: [4094]u8 = @splat(0xa5);
     try std.testing.expectEqual(gap.len, try volume.readFile(&file, &gap, 3));
     for (gap) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 
     try volume.truncateFile(&file, 2);
     try std.testing.expectEqual(@as(u64, 2), (try volume.statFile(&file)).size);
     try volume.truncateFile(&file, 513);
-    var extension: [511]u8 = undefined;
+    var extension: [511]u8 = @splat(0xa5);
     try std.testing.expectEqual(extension.len, try volume.readFile(&file, &extension, 2));
     for (extension) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
     try volume.closeFile(&file);
@@ -329,7 +329,7 @@ test "files support 63-bit sparse offsets without allocating holes" {
         try std.testing.expectEqual(distant_offset + 5, info.size);
         try std.testing.expect(info.allocated_bytes < 2 * zettide.object_format.chunk_size);
 
-        var boundary: [8]u8 = undefined;
+        var boundary: [8]u8 = @splat(0xa5);
         try std.testing.expectEqual(boundary.len, try volume.readFile(&file, &boundary, distant_offset - 3));
         try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 'r', 'i', 'g', 'h', 't' }, &boundary);
 
@@ -338,7 +338,7 @@ test "files support 63-bit sparse offsets without allocating holes" {
         try std.testing.expectEqual(huge_size, (try volume.statFile(&file)).size);
         try volume.truncateFile(&file, distant_offset + 2);
         try volume.truncateFile(&file, distant_offset + 5);
-        var regrown: [5]u8 = undefined;
+        var regrown: [5]u8 = @splat(0xa5);
         try std.testing.expectEqual(regrown.len, try volume.readFile(&file, &regrown, distant_offset));
         try std.testing.expectEqualSlices(u8, &[_]u8{ 'r', 'i', 0, 0, 0 }, &regrown);
 
