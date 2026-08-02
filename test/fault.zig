@@ -135,6 +135,7 @@ test "a failed sync freezes writes until the volume is reopened" {
 
         var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 0 };
         volume.device.fault = &fault;
+        volume.device.dirty.store(true, .release);
         try std.testing.expectError(error.InputOutput, volume.syncFile(&file));
         try std.testing.expect(file.open);
         try std.testing.expect(volume.isWriteFrozen());
@@ -176,6 +177,7 @@ test "an after-side-effect sync is durable but freezes the volume" {
         _ = try volume.writeFile(&file, "durable", 0);
         var fault: zettide.block_device.FaultController = .{ .fail_sync_after_at = 0 };
         volume.device.fault = &fault;
+        volume.device.dirty.store(true, .release);
         try std.testing.expectError(error.InputOutput, volume.syncFile(&file));
         try std.testing.expect(volume.isWriteFrozen());
         fault.disable();
@@ -217,6 +219,7 @@ test "close releases resources after before and after sync failures" {
             volume.config.lock = failLfsLock;
         }
         volume.device.fault = &fault;
+        volume.device.dirty.store(true, .release);
         try std.testing.expectError(error.InputOutput, volume.close());
         try std.testing.expect(volume.closed);
         try std.testing.expect(!volume.mounted);
@@ -236,6 +239,7 @@ test "frozen close reports the first error and releases resources" {
     try volume.mount();
     var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 0 };
     volume.device.fault = &fault;
+    volume.device.dirty.store(true, .release);
     try std.testing.expectError(error.InputOutput, volume.sync());
     fault.disable();
     const sync_count = fault.sync_count;

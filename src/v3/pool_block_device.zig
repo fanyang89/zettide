@@ -16,6 +16,7 @@ pub const PoolBlockDevice = struct {
     block_size: u32,
     block_count: u32,
     mutex: std.Io.Mutex = .init,
+    dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
@@ -102,10 +103,12 @@ pub const PoolBlockDevice = struct {
             self.freezeWrites();
             return err;
         }
+        self.dirty.store(true, .release);
     }
 
     pub fn sync(self: *PoolBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
+        if (!self.dirty.load(.acquire)) return;
         var first_error: ?anyerror = null;
         for (self.replicas[0..self.replica_count]) |replica| {
             replica.sync() catch |err| if (first_error == null) {
@@ -116,6 +119,7 @@ pub const PoolBlockDevice = struct {
             self.freezeWrites();
             return err;
         }
+        self.dirty.store(false, .release);
     }
 
     pub fn writeHeaderDurable(self: *PoolBlockDevice, offset: u64, header: container.Header) !void {
@@ -449,6 +453,9 @@ test "replicated reads require two matching members" {
     try std.testing.expectEqualStrings("offset", &offset_actual);
     try std.testing.expectError(error.ReplicaDivergence, device.prepareWritableReplicas(std.testing.allocator));
     var sync_device = try PoolBlockDevice.init(std.testing.io, &replicas, provisioned.genesis.layout, ready_header);
+    try sync_device.sync();
+    try std.testing.expect(!sync_device.isWriteFrozen());
+    sync_device.dirty.store(true, .release);
     try std.testing.expectError(error.WriteFrozen, sync_device.sync());
     try std.testing.expect(sync_device.isWriteFrozen());
 }

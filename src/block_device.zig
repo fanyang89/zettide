@@ -16,6 +16,7 @@ pub const FileBlockDevice = struct {
     block_count: u32,
     mutex: Io.Mutex = .init,
     fault: ?*FaultController = null,
+    dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
 
     pub fn init(io: Io, file: File, header: container.Header) FileBlockDevice {
@@ -48,6 +49,7 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return err;
         };
+        self.dirty.store(true, .release);
         if (action == .partial or action == .after) {
             self.freezeWrites();
             return error.InjectedFault;
@@ -56,6 +58,7 @@ pub const FileBlockDevice = struct {
 
     pub fn sync(self: *FileBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
+        if (!self.dirty.load(.acquire)) return;
         const action = if (self.fault) |fault| fault.action(.sync) else .none;
         if (action == .before) {
             self.freezeWrites();
@@ -65,6 +68,7 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return err;
         };
+        self.dirty.store(false, .release);
         if (action == .after) {
             self.freezeWrites();
             return error.InjectedFault;

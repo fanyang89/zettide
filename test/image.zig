@@ -200,6 +200,27 @@ test "read-only close does not issue a write sync" {
     try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
 }
 
+test "clean file sync avoids a redundant backing sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+    var fault: zettide.block_device.FaultController = .{};
+    volume.device.fault = &fault;
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/clean-sync", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    _ = try volume.writeFile(&file, "already durable", 0);
+    const sync_count = fault.sync_count;
+    fault.fail_sync_at = sync_count;
+    try volume.syncFile(&file);
+    try std.testing.expectEqual(sync_count, fault.sync_count);
+    try volume.closeFile(&file);
+}
+
 test "read write and truncate preserve boundary data" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
