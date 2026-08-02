@@ -649,6 +649,23 @@ pub const Volume = struct {
     }
 
     pub fn renameWithResult(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !RenameResult {
+        return self.renameWithOptions(old_path, new_path, false);
+    }
+
+    pub fn renameWithResultNoReplace(
+        self: *Volume,
+        old_path: [*:0]const u8,
+        new_path: [*:0]const u8,
+    ) !RenameResult {
+        return self.renameWithOptions(old_path, new_path, true);
+    }
+
+    fn renameWithOptions(
+        self: *Volume,
+        old_path: [*:0]const u8,
+        new_path: [*:0]const u8,
+        no_replace: bool,
+    ) !RenameResult {
         if (std.mem.eql(u8, std.mem.span(old_path), std.mem.span(new_path))) return .same_object;
         var old_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         var new_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
@@ -660,6 +677,7 @@ pub const Volume = struct {
         const new_stat_result = c.lfs_stat(&self.lfs, new_translated, &new_info);
         const new_exists = new_stat_result >= 0;
         if (!new_exists and new_stat_result != c.LFS_ERR_NOENT) try checkLfs(new_stat_result);
+        if (no_replace and new_exists) return error.PathAlreadyExists;
         if (new_exists) {
             if (old_info.type == c.LFS_TYPE_DIR and new_info.type != c.LFS_TYPE_DIR)
                 return error.NotDirectory;

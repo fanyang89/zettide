@@ -787,14 +787,6 @@ fn rename(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
     const new_parent_path = state.pathFor(new_parent) orelse return replyError(req, c.ENOENT);
     joinPath(&old_path, std.mem.span(parent_path), name) catch |err| return replyError(req, errnoValue(err));
     joinPath(&new_path, std.mem.span(new_parent_path), new_name) catch |err| return replyError(req, errnoValue(err));
-    if (flags & rename_noreplace != 0) {
-        if (state.volume.stat(&new_path)) |_| {
-            return replyError(req, c.EEXIST);
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => return replyError(req, errnoValue(err)),
-        }
-    }
     const source = state.findChild(parent, name);
     const target = state.findChild(new_parent, new_name);
     if (source) |dentry| {
@@ -804,9 +796,13 @@ fn rename(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
         new_parent.children.ensureUnusedCapacity(std.heap.c_allocator, 1) catch
             return replyError(req, c.ENOMEM);
     }
-    const result = state.volume.renameWithResult(&old_path, &new_path) catch |err|
+    const result = if (flags & rename_noreplace != 0)
+        state.volume.renameWithResultNoReplace(&old_path, &new_path)
+    else
+        state.volume.renameWithResult(&old_path, &new_path);
+    const rename_result = result catch |err|
         return replyError(req, errnoValue(err));
-    if (result == .same_object) return replyError(req, 0);
+    if (rename_result == .same_object) return replyError(req, 0);
     if (target) |dentry| {
         if (dentry.inode.cached_info) |*cached| {
             cached.nlink = if (dentry.inode.kind == .directory) 0 else cached.nlink -| 1;
