@@ -88,6 +88,38 @@ a fixed anchor object with `If-Match`. ETags remain opaque version tokens.
 Every backend runs the same contract scenarios in addition to its protocol
 integration tests.
 
+## Shared-Disk Voting
+
+An optional voting region is separate from the filesystem anchor and object
+arena. It stores one immutable fixed-membership configuration, one
+compare-and-write heartbeat and durable vote slot per member, and one active
+authority record. Version 1 supports exactly three or five configured members;
+changing the roster creates a new fencing domain.
+
+Every member restart advances a persistent incarnation counter and chooses a
+new opaque incarnation identifier. Heartbeat sequence numbers increase within
+that incarnation. A ballot number is the ordered pair of counter and candidate
+slot; its candidate incarnation identifier, candidate incarnation counter, and
+proposal identifier bind one exact campaign but do not act as ordering
+tie-breakers. Durable votes cover the full proposal, including its majority
+cohort, and never move to a lower ballot.
+
+Publishing authority requires both an exact candidate campaign and a quorum of
+member slots containing the exact proposal. Authority only advances to a
+higher ballot. Domain identifiers, incarnation identifiers, and proposal
+identifiers are generated uniquely; persistent counters prevent record ABA
+even if an opaque identifier is accidentally reused.
+
+Nodes use private-network observations and their local monotonic clocks for
+failure suspicion. A majority certificate published through the voting region
+selects the surviving cohort, but never proves that an evicted node has stopped
+I/O. Mutable file extents may be reassigned only after a watchdog, host power
+fence, or LUN-access revocation confirms that the old path is drained.
+
+The initial deployment places voting records in a reserved area of the data
+LUN. Multiple records on that LUN are not independent voting failure groups;
+loss of the LUN stops both voting and filesystem service.
+
 ## Filesystem Semantics
 
 Filesystem semantics live above this repository. Zettide will adapt its FUSE

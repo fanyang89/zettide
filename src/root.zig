@@ -8,6 +8,7 @@ pub const page = @import("page.zig");
 pub const resolution = @import("resolution.zig");
 pub const transaction = @import("transaction.zig");
 pub const tree = @import("tree.zig");
+pub const voting = @import("voting.zig");
 
 test {
     _ = store;
@@ -18,4 +19,5 @@ test {
     _ = resolution;
     _ = transaction;
     _ = tree;
+    _ = voting;
 }
