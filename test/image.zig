@@ -260,6 +260,89 @@ test "read-only close does not issue a write sync" {
     try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
 }
 
+test "read-only littlefs file caches do not require scrubbing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+    try std.testing.expectEqual(@as(c.lfs_size_t, 4096), volume.config.cache_size);
+
+    const inline_data = "inline";
+    var ctz_data: [8192]u8 = undefined;
+    for (&ctz_data, 0..) |*byte, index| byte.* = @truncate(index *% 37);
+    {
+        var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+        try zettide.volume.checkLfs(c.lfs_file_open(
+            &volume.lfs,
+            &file,
+            "/namespace/cache-inline",
+            c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
+        ));
+        try zettide.volume.checkLfs(c.lfs_file_write(&volume.lfs, &file, inline_data, inline_data.len));
+        try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &file));
+    }
+    {
+        var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+        try zettide.volume.checkLfs(c.lfs_file_open(
+            &volume.lfs,
+            &file,
+            "/namespace/cache-ctz",
+            c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
+        ));
+        try zettide.volume.checkLfs(c.lfs_file_write(&volume.lfs, &file, &ctz_data, ctz_data.len));
+        try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &file));
+    }
+
+    var cache: [4096]u8 = @splat(0xa5);
+    var file_config: c.struct_lfs_file_config = std.mem.zeroes(c.struct_lfs_file_config);
+    file_config.buffer = &cache;
+    var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+    try zettide.volume.checkLfs(c.lfs_file_opencfg(
+        &volume.lfs,
+        &file,
+        "/namespace/cache-ctz",
+        c.LFS_O_RDONLY,
+        &file_config,
+    ));
+    try std.testing.expectEqualSlices(u8, &@as([4096]u8, @splat(0xa5)), &cache);
+    var actual_ctz: [ctz_data.len]u8 = undefined;
+    try zettide.volume.checkLfs(c.lfs_file_read(&volume.lfs, &file, &actual_ctz, actual_ctz.len));
+    try std.testing.expectEqualSlices(u8, &ctz_data, &actual_ctz);
+    var eof: [4]u8 = @splat(0xa5);
+    try std.testing.expectEqual(@as(c.lfs_ssize_t, 0), c.lfs_file_read(&volume.lfs, &file, &eof, eof.len));
+    try std.testing.expectEqualSlices(u8, &@as([4]u8, @splat(0xa5)), &eof);
+    try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &file));
+
+    cache = @splat(0xa5);
+    file = std.mem.zeroes(c.lfs_file_t);
+    try zettide.volume.checkLfs(c.lfs_file_opencfg(
+        &volume.lfs,
+        &file,
+        "/namespace/cache-inline",
+        c.LFS_O_RDONLY,
+        &file_config,
+    ));
+    var actual_inline: [inline_data.len]u8 = undefined;
+    try zettide.volume.checkLfs(c.lfs_file_read(&volume.lfs, &file, &actual_inline, actual_inline.len));
+    try std.testing.expectEqualStrings(inline_data, &actual_inline);
+    try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &file));
+
+    cache = @splat(0xa5);
+    file = std.mem.zeroes(c.lfs_file_t);
+    try zettide.volume.checkLfs(c.lfs_file_opencfg(
+        &volume.lfs,
+        &file,
+        "/namespace/cache-write",
+        c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
+        &file_config,
+    ));
+    try std.testing.expectEqualSlices(u8, &@as([4096]u8, @splat(0xff)), &cache);
+    try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &file));
+}
+
 test "clean file sync avoids a redundant backing sync" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

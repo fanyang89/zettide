@@ -3201,8 +3201,17 @@ static int lfs_file_opencfg_(lfs_t *lfs, lfs_file_t *file,
         }
     }
 
-    // zero to avoid information leak
-    lfs_cache_zero(lfs, &file->cache);
+    // Read-only files never program this cache, so invalidating it is enough.
+    // Writable files still need erased bytes in program-alignment padding.
+#ifdef LFS_READONLY
+    lfs_cache_drop(lfs, &file->cache);
+#else
+    if ((file->flags & LFS_O_RDWR) == LFS_O_RDONLY) {
+        lfs_cache_drop(lfs, &file->cache);
+    } else {
+        lfs_cache_zero(lfs, &file->cache);
+    }
+#endif
 
     if (lfs_tag_type3(tag) == LFS_TYPE_INLINESTRUCT) {
         // load inline files
