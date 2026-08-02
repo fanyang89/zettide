@@ -3,6 +3,7 @@ const block_device = @import("../block_device.zig");
 const container = @import("../container.zig");
 const pool_layout = @import("pool_layout.zig");
 const ReplicaEndpoint = @import("replica_endpoint.zig").ReplicaEndpoint;
+const storage_api = @import("storage.zig");
 const volume_crypto = @import("../volume_crypto.zig");
 
 const c = block_device.c;
@@ -10,6 +11,7 @@ const max_replica_count = 3;
 
 const ReplicaOperation = union(enum) {
     read: struct { offset: u64, buffer: []u8 },
+    read_many: struct { reads: []const storage_api.Read, results: []storage_api.ReadResult },
     write: struct { offset: u64, data: []const u8 },
     sync,
 };
@@ -238,18 +240,29 @@ pub const PoolBlockDevice = struct {
         if (creating_found) return true;
         if (invalid_found) return false;
 
-        const buffer = try allocator.alloc(u8, 1024 * 1024);
+        const chunk_size = 1024 * 1024;
+        const batch_depth = 8;
+        const buffer = try allocator.alloc(u8, chunk_size * batch_depth);
         defer allocator.free(buffer);
         for (self.replicas[0..self.replica_count]) |replica| {
             var offset: u64 = 0;
             while (offset < replica.geometry.data_length) {
-                const amount: usize = @intCast(@min(
-                    @as(u64, buffer.len),
-                    replica.geometry.data_length - offset,
-                ));
-                try replica.readData(offset, buffer[0..amount]);
-                if (!std.mem.allEqual(u8, buffer[0..amount], 0)) return false;
-                offset += amount;
+                var reads: [batch_depth]storage_api.Read = undefined;
+                var results: [batch_depth]storage_api.ReadResult = undefined;
+                var count: usize = 0;
+                var batch_offset = offset;
+                while (count < batch_depth and batch_offset < replica.geometry.data_length) : (count += 1) {
+                    const amount: usize = @intCast(@min(@as(u64, chunk_size), replica.geometry.data_length - batch_offset));
+                    reads[count] = .{ .buffer = buffer[count * chunk_size ..][0..amount], .offset = batch_offset };
+                    batch_offset += amount;
+                }
+                try replica.readDataMany(reads[0..count], results[0..count]);
+                for (reads[0..count], results[0..count]) |request, result| {
+                    if (result.failure) |err| return err;
+                    if (result.amount != request.buffer.len) return error.TruncatedMember;
+                    if (!std.mem.allEqual(u8, request.buffer, 0)) return false;
+                }
+                offset = batch_offset;
             }
         }
         return true;
@@ -262,23 +275,48 @@ pub const PoolBlockDevice = struct {
         var header_states: [max_replica_count]MemberHeaderState = undefined;
         for (self.replicas[0..self.replica_count], 0..) |replica, index|
             header_states[index] = try replicaHeaderState(replica, expected_header_identity);
-        const buffers = try allocator.alloc([1024 * 1024]u8, self.replica_count);
+        const chunk_size = 1024 * 1024;
+        const batch_depth = 8;
+        const buffers = try allocator.alloc([batch_depth][chunk_size]u8, self.replica_count);
         defer allocator.free(buffers);
         const logical_size = @as(u64, self.block_size) * self.block_count;
         var offset: u64 = 0;
         while (offset < logical_size) {
-            const amount: usize = @intCast(@min(@as(u64, 1024 * 1024), logical_size - offset));
+            var reads: [max_replica_count][batch_depth]storage_api.Read = undefined;
+            var results: [max_replica_count][batch_depth]storage_api.ReadResult = undefined;
+            var count: usize = 0;
+            var batch_offset = offset;
+            while (count < batch_depth and batch_offset < logical_size) : (count += 1) {
+                const amount: usize = @intCast(@min(@as(u64, chunk_size), logical_size - batch_offset));
+                for (0..self.replica_count) |replica_index| reads[replica_index][count] = .{
+                    .buffer = buffers[replica_index][count][0..amount],
+                    .offset = batch_offset,
+                };
+                batch_offset += amount;
+            }
             var operations: [max_replica_count]ReplicaOperation = undefined;
             for (operations[0..self.replica_count], 0..) |*operation, index|
-                operation.* = .{ .read = .{ .offset = offset, .buffer = buffers[index][0..amount] } };
+                operation.* = .{ .read_many = .{
+                    .reads = reads[index][0..count],
+                    .results = results[index][0..count],
+                } };
             var errors: [max_replica_count]?anyerror = @splat(null);
             try self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]);
             if (firstReplicaError(errors[0..self.replica_count])) |err| return err;
-            for (buffers[1..self.replica_count]) |buffer| {
-                if (!std.mem.eql(u8, buffers[0][0..amount], buffer[0..amount]))
-                    return error.ReplicaDivergence;
+            for (0..count) |batch_index| {
+                for (results[0..self.replica_count], reads[0..self.replica_count]) |replica_results, replica_reads| {
+                    const result = replica_results[batch_index];
+                    if (result.failure) |err| return err;
+                    if (result.amount != replica_reads[batch_index].buffer.len)
+                        return error.TruncatedMember;
+                }
+                const expected = reads[0][batch_index].buffer;
+                for (reads[1..self.replica_count]) |replica_reads| {
+                    if (!std.mem.eql(u8, expected, replica_reads[batch_index].buffer))
+                        return error.ReplicaDivergence;
+                }
             }
-            offset += amount;
+            offset = batch_offset;
         }
         var repaired_header = expected_header;
         repaired_header.state = .ready;
@@ -428,6 +466,9 @@ fn runReplicaOperation(
 ) std.Io.Cancelable!void {
     switch (operation) {
         .read => |read| replica.readData(read.offset, read.buffer) catch |err| {
+            result.* = err;
+        },
+        .read_many => |read| replica.readDataMany(read.reads, read.results) catch |err| {
             result.* = err;
         },
         .write => |write| replica.writeData(write.offset, write.data) catch |err| {

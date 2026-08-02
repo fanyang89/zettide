@@ -466,6 +466,35 @@ pub const Member = struct {
         if (amount != buffer.len) return error.TruncatedMember;
     }
 
+    pub fn readMany(
+        self: *Member,
+        kind: RegionKind,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+    ) !void {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.isClosed()) return error.MemberClosed;
+        for (results) |*result| result.* = .{};
+
+        var index: usize = 0;
+        while (index < reads.len) {
+            const count = @min(reads.len - index, @as(usize, 32));
+            var absolute: [32]storage_api.Read = undefined;
+            for (reads[index..][0..count], absolute[0..count]) |request, *item| item.* = .{
+                .buffer = request.buffer,
+                .offset = try self.position(kind, request.offset, request.buffer.len),
+            };
+            try self.storage.readManyAt(self.io, absolute[0..count], results[index..][0..count]);
+            for (reads[index..][0..count], results[index..][0..count]) |request, *result| {
+                if (result.failure == null and result.amount != request.buffer.len)
+                    result.failure = error.TruncatedMember;
+            }
+            index += count;
+        }
+    }
+
     pub fn write(self: *Member, kind: RegionKind, offset: u64, bytes: []const u8) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -814,6 +843,7 @@ pub const Member = struct {
 const member_replica_vtable: ReplicaEndpoint.VTable = .{
     .read_metadata = replicaReadMetadata,
     .read_data = replicaReadData,
+    .read_data_many = replicaReadDataMany,
     .write_data = replicaWriteData,
     .write_metadata_durable = replicaWriteMetadataDurable,
     .sync = replicaSync,
@@ -829,6 +859,14 @@ fn replicaReadMetadata(context: *anyopaque, offset: u64, buffer: []u8) anyerror!
 
 fn replicaReadData(context: *anyopaque, offset: u64, buffer: []u8) anyerror!void {
     return replicaMember(context).read(.data, offset, buffer);
+}
+
+fn replicaReadDataMany(
+    context: *anyopaque,
+    reads: []const storage_api.Read,
+    results: []storage_api.ReadResult,
+) anyerror!void {
+    return replicaMember(context).readMany(.data, reads, results);
 }
 
 fn replicaWriteData(context: *anyopaque, offset: u64, data: []const u8) anyerror!void {

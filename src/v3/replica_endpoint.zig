@@ -1,3 +1,5 @@
+const storage_api = @import("storage.zig");
+
 pub const ReplicaEndpoint = struct {
     context: *anyopaque,
     geometry: Geometry,
@@ -11,6 +13,7 @@ pub const ReplicaEndpoint = struct {
     pub const VTable = struct {
         read_metadata: *const fn (*anyopaque, u64, []u8) anyerror!void,
         read_data: *const fn (*anyopaque, u64, []u8) anyerror!void,
+        read_data_many: ?*const fn (*anyopaque, []const storage_api.Read, []storage_api.ReadResult) anyerror!void = null,
         write_data: *const fn (*anyopaque, u64, []const u8) anyerror!void,
         write_metadata_durable: *const fn (*anyopaque, u64, []const u8) anyerror!void,
         sync: *const fn (*anyopaque) anyerror!void,
@@ -30,6 +33,24 @@ pub const ReplicaEndpoint = struct {
 
     pub fn readData(self: ReplicaEndpoint, offset: u64, buffer: []u8) anyerror!void {
         return self.vtable.read_data(self.context, offset, buffer);
+    }
+
+    pub fn readDataMany(
+        self: ReplicaEndpoint,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+    ) anyerror!void {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        if (self.vtable.read_data_many) |read_many|
+            return read_many(self.context, reads, results);
+        for (results) |*result| result.* = .{};
+        for (reads, results) |read, *result| {
+            self.readData(read.offset, read.buffer) catch |err| {
+                result.failure = err;
+                continue;
+            };
+            result.amount = read.buffer.len;
+        }
     }
 
     pub fn writeData(self: ReplicaEndpoint, offset: u64, data: []const u8) anyerror!void {
