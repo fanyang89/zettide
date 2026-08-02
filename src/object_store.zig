@@ -75,7 +75,7 @@ pub const Store = struct {
         recovered_heads: *std.AutoHashMap(format.ObjectId, format.ObjectHead),
     ) !void {
         while (try self.firstTemporaryRef()) |name| {
-            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            var path_buffer: [max_path_bytes:0]u8 = undefined;
             const path = try formatPath(&path_buffer, "{s}/{s}", .{ temporary_root, name });
             try checkLfs(c.lfs_remove(self.lfs, path));
         }
@@ -108,7 +108,7 @@ pub const Store = struct {
         try self.io.randomSecure(&id);
         const object_ref: format.ObjectRef = .{ .kind = kind, .object_id = id };
 
-        var object_path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var object_path_buffer: [max_path_bytes:0]u8 = undefined;
         const object_path = try objectPath(id, &object_path_buffer);
         try checkLfs(c.lfs_mkdir(self.lfs, object_path));
         errdefer self.removeObject(id) catch {};
@@ -130,9 +130,9 @@ pub const Store = struct {
         object_ref: format.ObjectRef,
         exclusive: bool,
     ) !void {
-        var translated_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [max_path_bytes:0]u8 = undefined;
         const translated = try translateUserPath(path, &translated_buffer);
-        var temporary_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var temporary_buffer: [max_path_bytes:0]u8 = undefined;
         var id_buffer: [32]u8 = undefined;
         const temporary = try formatPath(&temporary_buffer, "{s}/{s}.ref", .{
             temporary_root,
@@ -151,12 +151,12 @@ pub const Store = struct {
     }
 
     pub fn readRef(self: Store, path: [*:0]const u8) !format.ObjectRef {
-        var translated_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [max_path_bytes:0]u8 = undefined;
         return self.readRefInternal(try translateUserPath(path, &translated_buffer));
     }
 
     pub fn readHead(self: Store, id: format.ObjectId) !format.ObjectHead {
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         const path = try headPath(id, &path_buffer);
         var bytes: [format.head_encoded_size]u8 = undefined;
         try readExact(self.lfs, path, &bytes);
@@ -166,8 +166,8 @@ pub const Store = struct {
     }
 
     pub fn writeHead(self: Store, head: format.ObjectHead) !void {
-        var temporary_buffer: [max_path_bytes:0]u8 = @splat(0);
-        var final_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var temporary_buffer: [max_path_bytes:0]u8 = undefined;
+        var final_buffer: [max_path_bytes:0]u8 = undefined;
         const temporary = try temporaryHeadPath(head.object_id, &temporary_buffer);
         const final = try headPath(head.object_id, &final_buffer);
         const bytes = head.encode();
@@ -178,7 +178,7 @@ pub const Store = struct {
 
     pub fn recoverObject(self: Store, id: format.ObjectId) !format.ObjectHead {
         const head = try self.readHead(id);
-        var temporary_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var temporary_buffer: [max_path_bytes:0]u8 = undefined;
         try removeIfPresent(self.lfs, try temporaryHeadPath(id, &temporary_buffer));
         try self.removeUnselectedChunkVersions(id, head.data_generation);
         try self.removeUnselectedReservationVersions(id, head.reservation_generation);
@@ -192,7 +192,7 @@ pub const Store = struct {
 
     fn prepareObjectTransactionWithHead(self: Store, head: format.ObjectHead) !format.ObjectHead {
         const id = head.object_id;
-        var temporary_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var temporary_buffer: [max_path_bytes:0]u8 = undefined;
         try removeIfPresent(self.lfs, try temporaryHeadPath(id, &temporary_buffer));
         try self.removeUncommittedChunkVersions(id, head.data_generation);
         try self.removeUnselectedReservationVersions(id, head.reservation_generation);
@@ -462,21 +462,18 @@ pub const Store = struct {
 
     pub fn removeObject(self: Store, id: format.ObjectId) !void {
         while (try self.firstChunkName(id)) |name| {
-            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            var path_buffer: [max_path_bytes:0]u8 = undefined;
             try checkLfs(c.lfs_remove(self.lfs, try self.namedChunkPath(id, name, &path_buffer)));
         }
         while (try self.firstReservationName(id)) |name| {
-            var reservation_path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            var reservation_path_buffer: [max_path_bytes:0]u8 = undefined;
             try checkLfs(c.lfs_remove(self.lfs, try namedReservationPath(id, name, &reservation_path_buffer)));
         }
 
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         try removeIfPresent(self.lfs, try temporaryHeadPath(id, &path_buffer));
-        path_buffer = @splat(0);
         try removeIfPresent(self.lfs, try headPath(id, &path_buffer));
-        path_buffer = @splat(0);
         try removeIfPresent(self.lfs, try chunksPath(id, &path_buffer));
-        path_buffer = @splat(0);
         try removeIfPresent(self.lfs, try objectPath(id, &path_buffer));
     }
 
@@ -487,7 +484,7 @@ pub const Store = struct {
     ) ![]format.ReservationInterval {
         if (head.reservation_generation == 0)
             return allocator.alloc(format.ReservationInterval, 0);
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         const path = try reservationVersionPath(head.object_id, head.reservation_generation, &path_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(self.lfs, path, &info));
@@ -547,7 +544,7 @@ pub const Store = struct {
     ) !void {
         const bytes = try format.ReservationSidecar.encodeAlloc(std.heap.c_allocator, generation, intervals);
         defer std.heap.c_allocator.free(bytes);
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         const path = try reservationVersionPath(id, generation, &path_buffer);
         errdefer removeIfPresent(self.lfs, path) catch {};
         try writeExact(self.lfs, path, bytes);
@@ -560,7 +557,7 @@ pub const Store = struct {
     ) !void {
         var names: std.ArrayList([28]u8) = .empty;
         defer names.deinit(std.heap.c_allocator);
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
         try checkLfs(c.lfs_dir_open(self.lfs, &directory, try objectPath(id, &path_buffer)));
         var open = true;
@@ -581,18 +578,17 @@ pub const Store = struct {
         try checkLfs(c.lfs_dir_close(self.lfs, &directory));
         open = false;
         for (names.items) |name| {
-            path_buffer = @splat(0);
             try checkLfs(c.lfs_remove(self.lfs, try namedReservationPath(id, name, &path_buffer)));
         }
     }
 
     fn removeReservationVersion(self: Store, id: format.ObjectId, generation: u64) !void {
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         try removeIfPresent(self.lfs, try reservationVersionPath(id, generation, &path_buffer));
     }
 
     fn firstReservationName(self: Store, id: format.ObjectId) !?[28]u8 {
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
         try checkLfs(c.lfs_dir_open(self.lfs, &directory, try objectPath(id, &path_buffer)));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
@@ -624,7 +620,7 @@ pub const Store = struct {
         buffer: []u8,
         offset: u32,
     ) !void {
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         var version: ChunkVersion = .{ .index = index, .generation = generation, .layout = layout };
         const exact_result = c.lfs_file_open(
@@ -636,7 +632,6 @@ pub const Store = struct {
         if (exact_result == c.LFS_ERR_ISDIR) return error.CorruptFilesystem;
         if (exact_result == c.LFS_ERR_NOENT) {
             version = try self.findOlderChunkVersionWithLayout(id, index, generation, layout) orelse return;
-            path_buffer = @splat(0);
             file = std.mem.zeroes(c.lfs_file_t);
             const open_result = c.lfs_file_open(
                 self.lfs,
@@ -735,7 +730,7 @@ pub const Store = struct {
     }
 
     fn collectChunkIndices(self: Store, id: format.ObjectId, indices: *std.AutoHashMap(u64, void)) !void {
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
         try checkLfs(c.lfs_dir_open(self.lfs, &directory, try self.chunkDirectoryPath(id, &path_buffer)));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
@@ -763,7 +758,7 @@ pub const Store = struct {
         layout: ChunkLayout,
     ) !?ChunkVersion {
         const exact: ChunkVersion = .{ .index = index, .generation = generation, .layout = layout };
-        var exact_path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var exact_path_buffer: [max_path_bytes:0]u8 = undefined;
         var exact_info: c.struct_lfs_info = undefined;
         const exact_result = c.lfs_stat(self.lfs, try chunkVersionPathWithLayout(id, exact, &exact_path_buffer), &exact_info);
         if (exact_result >= 0) {
@@ -783,7 +778,7 @@ pub const Store = struct {
         layout: ChunkLayout,
     ) !?ChunkVersion {
         var selected: ?ChunkVersion = null;
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
         try checkLfs(c.lfs_dir_open(self.lfs, &directory, try chunkDirectoryPathWithLayout(id, layout, &path_buffer)));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
@@ -801,7 +796,7 @@ pub const Store = struct {
     }
 
     fn firstChunkName(self: Store, id: format.ObjectId) !?[33]u8 {
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
         const open_result = c.lfs_dir_open(self.lfs, &directory, try self.chunkDirectoryPath(id, &path_buffer));
         if (open_result == c.LFS_ERR_NOENT) return null;
@@ -828,7 +823,7 @@ pub const Store = struct {
         minimum: u32,
     ) !ChunkData {
         if (minimum > maximum) return error.CorruptFilesystem;
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         try checkLfs(c.lfs_file_open(self.lfs, &file, try self.chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
         defer _ = c.lfs_file_close(self.lfs, &file);
@@ -845,7 +840,7 @@ pub const Store = struct {
     }
 
     fn readChunkLength(self: Store, id: format.ObjectId, version: ChunkVersion, maximum: u32) !u32 {
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         try checkLfs(c.lfs_file_open(self.lfs, &file, try self.chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
         defer _ = c.lfs_file_close(self.lfs, &file);
@@ -853,7 +848,7 @@ pub const Store = struct {
     }
 
     fn writeChunkVersion(self: Store, id: format.ObjectId, version: ChunkVersion, data: []const u8) !void {
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         const path = try self.chunkVersionPath(id, version, &path_buffer);
         errdefer removeIfPresent(self.lfs, path) catch {};
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
@@ -891,7 +886,7 @@ pub const Store = struct {
         for (versions) |version| {
             if (version.index < first_index or version.index > last_index or version.generation == keep_generation)
                 continue;
-            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            var path_buffer: [max_path_bytes:0]u8 = undefined;
             try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPathWithLayout(id, version, &path_buffer)));
         }
     }
@@ -906,7 +901,7 @@ pub const Store = struct {
         defer std.heap.c_allocator.free(versions);
         for (versions) |version| {
             if (!touched.contains(version.index) or version.generation == keep_generation) continue;
-            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            var path_buffer: [max_path_bytes:0]u8 = undefined;
             try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPathWithLayout(id, version, &path_buffer)));
         }
     }
@@ -924,7 +919,7 @@ pub const Store = struct {
         }
         for (versions) |version| {
             if (selected.get(version.index) == version.generation) continue;
-            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            var path_buffer: [max_path_bytes:0]u8 = undefined;
             try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPathWithLayout(id, version, &path_buffer)));
         }
     }
@@ -934,7 +929,7 @@ pub const Store = struct {
         defer std.heap.c_allocator.free(versions);
         for (versions) |version| {
             if (version.generation <= committed_generation) continue;
-            var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+            var path_buffer: [max_path_bytes:0]u8 = undefined;
             try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPathWithLayout(id, version, &path_buffer)));
         }
     }
@@ -947,7 +942,7 @@ pub const Store = struct {
         const layout = try self.chunkLayout(id);
         var versions: std.ArrayList(ChunkVersion) = .empty;
         errdefer versions.deinit(allocator);
-        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
         try checkLfs(c.lfs_dir_open(self.lfs, &directory, try chunkDirectoryPathWithLayout(id, layout, &path_buffer)));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
@@ -1013,7 +1008,7 @@ pub const Store = struct {
             if (result == 0) return;
             const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
             if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-            var child_buffer: [max_path_bytes:0]u8 = @splat(0);
+            var child_buffer: [max_path_bytes:0]u8 = undefined;
             const child = try formatPath(&child_buffer, "{s}/{s}", .{ std.mem.span(directory_path), name });
             if (info.type == c.LFS_TYPE_DIR) {
                 try self.collectNamespaceRefs(child, counts);
@@ -1028,7 +1023,7 @@ pub const Store = struct {
     }
 
     pub fn chunkLayout(self: Store, id: format.ObjectId) !ChunkLayout {
-        var buffer: [max_path_bytes:0]u8 = @splat(0);
+        var buffer: [max_path_bytes:0]u8 = undefined;
         const legacy = try chunksPath(id, &buffer);
         var info: c.struct_lfs_info = undefined;
         const result = c.lfs_stat(self.lfs, legacy, &info);
@@ -1060,7 +1055,7 @@ pub const Store = struct {
         name: [33]u8,
         buffer: *[max_path_bytes:0]u8,
     ) ![*:0]const u8 {
-        var directory_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var directory_buffer: [max_path_bytes:0]u8 = undefined;
         const directory = try self.chunkDirectoryPath(id, &directory_buffer);
         return formatPath(buffer, "{s}/{s}", .{ std.mem.span(directory), name });
     }
@@ -1082,7 +1077,7 @@ fn chunkVersionPathWithLayout(
     version: ChunkVersion,
     buffer: *[max_path_bytes:0]u8,
 ) ![*:0]const u8 {
-    var directory_buffer: [max_path_bytes:0]u8 = @splat(0);
+    var directory_buffer: [max_path_bytes:0]u8 = undefined;
     const directory = try chunkDirectoryPathWithLayout(id, version.layout, &directory_buffer);
     return formatPath(buffer, "{s}/{x:0>16}-{x:0>16}", .{
         std.mem.span(directory),
@@ -1342,9 +1337,9 @@ fn namedReservationPath(id: format.ObjectId, name: [28]u8, buffer: *[max_path_by
 }
 
 fn formatPath(buffer: *[max_path_bytes:0]u8, comptime pattern: []const u8, args: anytype) ![*:0]const u8 {
-    @memset(buffer, 0);
-    _ = std.fmt.bufPrint(buffer[0..max_path_bytes], pattern, args) catch return error.NameTooLong;
-    return @ptrCast(buffer);
+    const path = std.fmt.bufPrint(buffer, pattern, args) catch return error.NameTooLong;
+    buffer[path.len] = 0;
+    return buffer[0..path.len :0].ptr;
 }
 
 fn checkLfs(result: anytype) !void {
@@ -1367,12 +1362,24 @@ fn checkLfs(result: anytype) !void {
 }
 
 test "user paths are isolated below the namespace root" {
-    var buffer: [max_path_bytes:0]u8 = @splat(0);
+    var buffer: [max_path_bytes:0]u8 = undefined;
     try std.testing.expectEqualStrings(namespace_root, std.mem.span(try Store.translateUserPath("/", &buffer)));
     try std.testing.expectEqualStrings("/namespace/a/b", std.mem.span(try Store.translateUserPath("/a/b", &buffer)));
     try std.testing.expectError(error.InvalidArgument, Store.translateUserPath("/../system", &buffer));
     try std.testing.expectError(error.InvalidArgument, Store.translateUserPath("/a/../../system", &buffer));
     try std.testing.expectError(error.InvalidArgument, Store.translateUserPath("/a//b", &buffer));
+}
+
+test "path formatting terminates reused and maximum-length buffers" {
+    var buffer: [max_path_bytes:0]u8 = undefined;
+    @memset(&buffer, 0xa5);
+    try std.testing.expectEqualStrings("longer", std.mem.span(try formatPath(&buffer, "{s}", .{"longer"})));
+    try std.testing.expectEqualStrings("x", std.mem.span(try formatPath(&buffer, "{s}", .{"x"})));
+
+    const maximum: [max_path_bytes]u8 = @splat('x');
+    try std.testing.expectEqual(maximum.len, std.mem.span(try formatPath(&buffer, "{s}", .{&maximum})).len);
+    const too_long: [max_path_bytes + 1]u8 = @splat('x');
+    try std.testing.expectError(error.NameTooLong, formatPath(&buffer, "{s}", .{&too_long}));
 }
 
 test "reservation accounting preserves sparse prefixes and chunk payload prefixes" {

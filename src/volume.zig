@@ -508,7 +508,7 @@ pub const Volume = struct {
     }
 
     pub fn stat(self: *Volume, path: [*:0]const u8) !NodeInfo {
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
@@ -599,7 +599,7 @@ pub const Volume = struct {
 
     pub fn setMetadata(self: *Volume, path: [*:0]const u8, value: metadata.Metadata) !void {
         try self.ensureWritesAllowed();
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
@@ -617,7 +617,7 @@ pub const Volume = struct {
     }
 
     pub fn getMetadata(self: *Volume, path: [*:0]const u8) !metadata.Metadata {
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
@@ -650,7 +650,7 @@ pub const Volume = struct {
     pub fn makeDirectory(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
         const inherited = try self.inheritCreateMetadata(path, mode, gid, true);
         try self.ensureGrowthCapacity();
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         try checkLfs(c.lfs_mkdir(&self.lfs, translated));
         errdefer _ = c.lfs_remove(&self.lfs, translated);
@@ -696,7 +696,7 @@ pub const Volume = struct {
         const count = self.link_counts.getPtr(object_ref.object_id) orelse
             return error.CorruptFilesystem;
         if (count.* == std.math.maxInt(u64)) return error.TooManyLinks;
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(new_path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         const stat_result = c.lfs_stat(&self.lfs, translated, &info);
@@ -722,7 +722,7 @@ pub const Volume = struct {
     }
 
     pub fn remove(self: *Volume, path: [*:0]const u8) !void {
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
@@ -772,8 +772,8 @@ pub const Volume = struct {
         no_replace: bool,
     ) !RenameResult {
         if (std.mem.eql(u8, std.mem.span(old_path), std.mem.span(new_path))) return .same_object;
-        var old_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
-        var new_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var old_buffer: [object_store.max_path_bytes:0]u8 = undefined;
+        var new_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const old_translated = try object_store.Store.translateUserPath(old_path, &old_buffer);
         const new_translated = try object_store.Store.translateUserPath(new_path, &new_buffer);
         var old_info: c.struct_lfs_info = undefined;
@@ -1078,7 +1078,7 @@ pub const Volume = struct {
     pub fn openDirectory(self: *Volume, handle: *DirectoryHandle, path: [*:0]const u8) !void {
         const info = try self.stat(path);
         if (info.metadata.kind != .directory) return error.NotDirectory;
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         try checkLfs(c.lfs_dir_open(
             &self.lfs,
             &handle.dir,
@@ -1343,7 +1343,7 @@ pub const Volume = struct {
         var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         if (parent.len >= parent_buffer.len) return;
         @memcpy(parent_buffer[0..parent.len], parent);
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = object_store.Store.translateUserPath(&parent_buffer, &translated_buffer) catch return;
         const identity = self.directoryIdentity(translated) catch return;
         const count = self.directory_link_counts.getPtr(identity) orelse return;
@@ -1378,7 +1378,7 @@ pub const Volume = struct {
         const parent = parentSlice(path);
         var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         @memcpy(parent_buffer[0..parent.len], parent);
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(&parent_buffer, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
@@ -1390,7 +1390,7 @@ pub const Volume = struct {
         var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         if (parent.len >= parent_buffer.len) return error.NameTooLong;
         @memcpy(parent_buffer[0..parent.len], parent);
-        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(&parent_buffer, &translated_buffer);
         var parent_metadata = self.getDirectoryMetadataTranslated(translated) catch |err| switch (err) {
             error.FileNotFound, error.AttributeNotFound => return,
