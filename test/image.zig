@@ -114,6 +114,56 @@ test "new small objects store chunks without a private chunk directory" {
     try volume.closeFile(&file);
 }
 
+test "co-located reads fall back to older chunks but not corrupt exact chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/versions", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    try std.testing.expectEqual(@as(usize, 5), try volume.writeFile(&file, "older", 0));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try volume.writeFile(&file, "x", 2 * zettide.object_format.chunk_size),
+    );
+
+    var actual: [5]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+    try std.testing.expectEqualStrings("older", &actual);
+
+    const store: zettide.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
+    const head = try store.readHead(file.object_id);
+    var id_buffer: [32]u8 = undefined;
+    var exact_path: [160:0]u8 = @splat(0);
+    const exact = try std.fmt.bufPrint(
+        exact_path[0..160],
+        "/system/objects/{s}/{x:0>16}-{x:0>16}",
+        .{
+            zettide.object_format.formatObjectId(file.object_id, &id_buffer),
+            @as(u64, 0),
+            head.data_generation,
+        },
+    );
+    exact_path[exact.len] = 0;
+    var raw_file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+    try zettide.volume.checkLfs(c.lfs_file_open(
+        &volume.lfs,
+        &raw_file,
+        &exact_path,
+        c.LFS_O_WRONLY | c.LFS_O_CREAT | c.LFS_O_TRUNC,
+    ));
+    const corrupt: [24]u8 = @splat(0xa5);
+    try zettide.volume.checkLfs(c.lfs_file_write(&volume.lfs, &raw_file, &corrupt, corrupt.len));
+    try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &raw_file));
+
+    try std.testing.expectError(error.CorruptFilesystem, volume.readFile(&file, &actual, 0));
+    try volume.closeFile(&file);
+}
+
 test "legacy private chunk directories remain readable and writable" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -136,6 +186,10 @@ test "legacy private chunk directories remain readable and writable" {
         chunks_path[value.len] = 0;
         try zettide.volume.checkLfs(c.lfs_mkdir(&volume.lfs, &chunks_path));
         try std.testing.expectEqual(@as(usize, 9), try volume.writeFile(&file, "persisted", 0));
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            try volume.writeFile(&file, "x", 2 * zettide.object_format.chunk_size),
+        );
         try volume.syncFile(&file);
         try volume.closeFile(&file);
     }
@@ -149,6 +203,12 @@ test "legacy private chunk directories remain readable and writable" {
         var actual: [9]u8 = undefined;
         try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
         try std.testing.expectEqualStrings("persisted", &actual);
+        var hole: [8]u8 = undefined;
+        try std.testing.expectEqual(
+            hole.len,
+            try volume.readFile(&file, &hole, zettide.object_format.chunk_size),
+        );
+        try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0)), &hole);
         try std.testing.expectEqual(@as(usize, 1), try volume.writeFile(&file, "!", actual.len));
         try volume.closeFile(&file);
     }

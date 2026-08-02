@@ -818,6 +818,7 @@ pub const Volume = struct {
             .object_id = object_id,
             .metadata = head.metadata,
             .original_metadata = head.metadata,
+            .chunk_layout = null,
             .append = flags & c.LFS_O_APPEND != 0,
             .writable = flags & c.LFS_O_WRONLY != 0 or flags & c.LFS_O_RDWR != 0,
             .open = true,
@@ -842,7 +843,13 @@ pub const Volume = struct {
     pub fn readFile(self: *Volume, handle: *FileHandle, buffer: []u8, offset: u64) !usize {
         const head = try self.store().readHead(handle.object_id);
         handle.metadata = head.metadata;
-        const result = try self.store().readWithHead(head, buffer, offset);
+        const result = if (offset >= head.logical_size or buffer.len == 0)
+            0
+        else value: {
+            const layout = handle.chunk_layout orelse try self.store().chunkLayout(handle.object_id);
+            handle.chunk_layout = layout;
+            break :value try self.store().readWithHeadLayout(head, layout, buffer, offset);
+        };
         if (self.writable and self.access_time_policy == .relatime) {
             const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
             self.updateAccessTimeFromMetadata(handle.object_id, head.metadata, timestamp) catch {};
@@ -1416,6 +1423,7 @@ pub const FileHandle = struct {
     object_id: object_format.ObjectId = @splat(0),
     metadata: metadata.Metadata = undefined,
     original_metadata: metadata.Metadata = undefined,
+    chunk_layout: ?object_store.ChunkLayout = null,
     append: bool = false,
     writable: bool = false,
     open: bool = false,

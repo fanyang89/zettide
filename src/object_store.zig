@@ -13,7 +13,7 @@ const temporary_root = system_root ++ "/tmp";
 const chunk_header_size: usize = 24;
 const chunk_magic = [8]u8{ 'D', 'D', 'V', 'C', 'H', 'N', 'K', '2' };
 
-const ChunkLayout = enum { co_located, legacy };
+pub const ChunkLayout = enum { co_located, legacy };
 
 const ChunkVersion = struct {
     index: u64,
@@ -229,6 +229,17 @@ pub const Store = struct {
         buffer: []u8,
         offset: u64,
     ) !usize {
+        if (offset >= head.logical_size or buffer.len == 0) return 0;
+        return self.readWithHeadLayout(head, try self.chunkLayout(head.object_id), buffer, offset);
+    }
+
+    pub fn readWithHeadLayout(
+        self: Store,
+        head: format.ObjectHead,
+        layout: ChunkLayout,
+        buffer: []u8,
+        offset: u64,
+    ) !usize {
         const id = head.object_id;
         if (offset >= head.logical_size or buffer.len == 0) return 0;
         const available = head.logical_size - offset;
@@ -241,7 +252,7 @@ pub const Store = struct {
             const index = position / head.stored_chunk_size;
             const chunk_offset: u32 = @intCast(position % head.stored_chunk_size);
             const part = @min(amount - consumed, head.stored_chunk_size - chunk_offset);
-            try self.readChunk(id, index, head.data_generation, buffer[consumed..][0..part], chunk_offset);
+            try self.readChunk(id, index, head.data_generation, layout, buffer[consumed..][0..part], chunk_offset);
             consumed += part;
         }
         return amount;
@@ -609,13 +620,35 @@ pub const Store = struct {
         id: format.ObjectId,
         index: u64,
         generation: u64,
+        layout: ChunkLayout,
         buffer: []u8,
         offset: u32,
     ) !void {
-        const version = try self.findChunkVersion(id, index, generation) orelse return;
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
-        try checkLfs(c.lfs_file_open(self.lfs, &file, try self.chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
+        var version: ChunkVersion = .{ .index = index, .generation = generation, .layout = layout };
+        const exact_result = c.lfs_file_open(
+            self.lfs,
+            &file,
+            try chunkVersionPathWithLayout(id, version, &path_buffer),
+            c.LFS_O_RDONLY,
+        );
+        if (exact_result == c.LFS_ERR_ISDIR) return error.CorruptFilesystem;
+        if (exact_result == c.LFS_ERR_NOENT) {
+            version = try self.findOlderChunkVersionWithLayout(id, index, generation, layout) orelse return;
+            path_buffer = @splat(0);
+            file = std.mem.zeroes(c.lfs_file_t);
+            const open_result = c.lfs_file_open(
+                self.lfs,
+                &file,
+                try chunkVersionPathWithLayout(id, version, &path_buffer),
+                c.LFS_O_RDONLY,
+            );
+            if (open_result == c.LFS_ERR_ISDIR) return error.CorruptFilesystem;
+            try checkLfs(open_result);
+        } else {
+            try checkLfs(exact_result);
+        }
         defer _ = c.lfs_file_close(self.lfs, &file);
         const header = try readChunkHeader(self.lfs, &file, version, format.chunk_size);
         const length = header.length;
@@ -739,6 +772,16 @@ pub const Store = struct {
         }
         if (exact_result != c.LFS_ERR_NOENT) try checkLfs(exact_result);
 
+        return self.findOlderChunkVersionWithLayout(id, index, generation, layout);
+    }
+
+    fn findOlderChunkVersionWithLayout(
+        self: Store,
+        id: format.ObjectId,
+        index: u64,
+        generation: u64,
+        layout: ChunkLayout,
+    ) !?ChunkVersion {
         var selected: ?ChunkVersion = null;
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
@@ -984,7 +1027,7 @@ pub const Store = struct {
         }
     }
 
-    fn chunkLayout(self: Store, id: format.ObjectId) !ChunkLayout {
+    pub fn chunkLayout(self: Store, id: format.ObjectId) !ChunkLayout {
         var buffer: [max_path_bytes:0]u8 = @splat(0);
         const legacy = try chunksPath(id, &buffer);
         var info: c.struct_lfs_info = undefined;
