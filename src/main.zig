@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const zettide = @import("zettide");
 const build_options = @import("build_options");
+const cli_crypto = @import("cli_crypto.zig");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -37,6 +38,8 @@ pub fn main(init: std.process.Init) !void {
         try poolCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "serve")) {
         try serveCommand(allocator, init.io, args[2..], stdout);
+    } else if (std.mem.eql(u8, command, "key")) {
+        try keyCommand(init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "endpoint")) {
         try endpointCommand(init.io, args[2..], stdout);
     } else {
@@ -53,6 +56,7 @@ fn serveCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
     const path = args[1];
     var read_only = false;
     var access_time: zettide.volume.AccessTimePolicy = .relatime;
+    var credential_source: ?cli_crypto.Source = null;
     var dufs_args: []const []const u8 = &.{};
     var index: usize = 2;
     while (index < args.len) : (index += 1) {
@@ -60,6 +64,12 @@ fn serveCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
             read_only = true;
         } else if (std.mem.eql(u8, args[index], "--noatime")) {
             access_time = .noatime;
+        } else if (std.mem.eql(u8, args[index], "--key-file")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            try setCredentialSource(&credential_source, .{ .key_file = args[index] });
+        } else if (std.mem.eql(u8, args[index], "--passphrase")) {
+            try setCredentialSource(&credential_source, .passphrase);
         } else if (std.mem.eql(u8, args[index], "--")) {
             dufs_args = args[index + 1 ..];
             break;
@@ -67,7 +77,44 @@ fn serveCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
             return error.UnknownOption;
         }
     }
-    return zettide.dufs_server.serve(allocator, io, path, read_only, access_time, dufs_args, stdout);
+    var secret: cli_crypto.Secret = undefined;
+    var secret_loaded = false;
+    if (credential_source) |source| {
+        try cli_crypto.loadInto(&secret, io, source, false);
+        secret_loaded = true;
+    }
+    defer if (secret_loaded) secret.deinit();
+    const volume = try allocator.create(zettide.volume.Volume);
+    defer allocator.destroy(volume);
+    try zettide.target.openVolumeIntoOptions(volume, io, allocator, path, !read_only, .{
+        .encryption_credential = if (secret_loaded) secret.credential() else null,
+    });
+    defer volume.deinit();
+    if (secret_loaded) {
+        secret.deinit();
+        secret_loaded = false;
+    }
+    return zettide.dufs_server.serve(
+        allocator,
+        io,
+        volume,
+        path,
+        read_only,
+        access_time,
+        dufs_args,
+        stdout,
+    );
+}
+
+fn keyCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+    if (args.len != 2 or !std.mem.eql(u8, args[0], "generate")) return error.InvalidArguments;
+    try cli_crypto.generateKeyFile(io, args[1]);
+    try stdout.print("Generated key: {s}\n", .{args[1]});
+}
+
+fn setCredentialSource(current: *?cli_crypto.Source, source: cli_crypto.Source) !void {
+    if (current.* != null) return error.DuplicateEncryptionCredential;
+    current.* = source;
 }
 
 fn endpointCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -521,6 +568,8 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
     var label: []const u8 = "Zettide";
     var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var confirmation: ?[]const u8 = null;
+    var encrypt = false;
+    var credential_source: ?cli_crypto.Source = null;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         if (std.mem.eql(u8, args[index], "--size")) {
@@ -539,19 +588,45 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             confirmation = args[index];
+        } else if (std.mem.eql(u8, args[index], "--encrypt")) {
+            if (encrypt) return error.DuplicateOption;
+            encrypt = true;
+        } else if (std.mem.eql(u8, args[index], "--key-file")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            try setCredentialSource(&credential_source, .{ .key_file = args[index] });
+        } else if (std.mem.eql(u8, args[index], "--passphrase")) {
+            try setCredentialSource(&credential_source, .passphrase);
         } else {
             return error.UnknownOption;
         }
     }
+    if (encrypt != (credential_source != null))
+        return if (encrypt) error.EncryptionCredentialRequired else error.EncryptionOptionRequiresEncrypt;
+
+    const hint_key: [zettide.volume_crypto.master_key_length]u8 = @splat(0);
+    const credential_hint: ?zettide.volume_crypto.Credential = if (credential_source) |source| switch (source) {
+        .key_file => .{ .raw_key = &hint_key },
+        .passphrase => .{ .argon2id = "" },
+    } else null;
 
     const plan = zettide.target.inspectFormatOptions(io, allocator, path, label, .{
         .name_profile = name_profile,
+        .encryption_credential = credential_hint,
     }) catch |err| switch (err) {
         error.FileNotFound => {
             if (confirmation != null) return error.UnexpectedConfirmation;
             const target_size = size orelse return error.MissingSize;
+            var secret: cli_crypto.Secret = undefined;
+            var secret_loaded = false;
+            if (credential_source) |source| {
+                try cli_crypto.loadInto(&secret, io, source, true);
+                secret_loaded = true;
+            }
+            defer if (secret_loaded) secret.deinit();
             const result = try zettide.target.formatNewFileOptions(io, allocator, path, target_size, label, .{
                 .name_profile = name_profile,
+                .encryption_credential = if (secret_loaded) secret.credential() else null,
             });
             try finishFormat(result, path, target_size, stdout);
             return;
@@ -567,7 +642,17 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
     try stdout.print("Plan: {s}\n", .{if (plan.eligible) "ready" else "rejected"});
     var token_buffer: [64]u8 = undefined;
     if (confirmation) |supplied| {
-        const result = try zettide.target.applyFormat(io, allocator, &plan, supplied);
+        var secret: cli_crypto.Secret = undefined;
+        var secret_loaded = false;
+        if (credential_source) |source| {
+            try cli_crypto.loadInto(&secret, io, source, true);
+            secret_loaded = true;
+        }
+        defer if (secret_loaded) secret.deinit();
+        const result = try zettide.target.applyFormatOptions(io, allocator, &plan, supplied, .{
+            .name_profile = name_profile,
+            .encryption_credential = if (secret_loaded) secret.credential() else null,
+        });
         try finishFormat(result, path, null, stdout);
     } else if (plan.eligible) {
         try stdout.print("Confirm token: {s}\n", .{plan.tokenText(&token_buffer)});
@@ -608,25 +693,21 @@ fn finishFormat(
 
 fn infoCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len != 1) return error.InvalidArguments;
-    const volume = try allocator.create(zettide.volume.Volume);
-    defer allocator.destroy(volume);
-    try zettide.target.openVolumeInto(volume, io, allocator, args[0], false);
-    defer volume.deinit();
+    const header = try zettide.target.inspectVolumeHeader(io, allocator, args[0]);
 
     try stdout.print("Path: {s}\n", .{args[0]});
-    try stdout.print("Label: {s}\n", .{volume.header.labelSlice()});
+    try stdout.print("Label: {s}\n", .{header.labelSlice()});
     try stdout.writeAll("UUID: ");
-    for (volume.header.uuid, 0..) |byte, index| {
+    for (header.uuid, 0..) |byte, index| {
         if (index == 4 or index == 6 or index == 8 or index == 10) try stdout.writeByte('-');
         try stdout.print("{x:0>2}", .{byte});
     }
-    try stdout.print("\nCapacity: {Bi:.2}\n", .{volume.header.logical_size});
-    try stdout.print("Block size: {d}\n", .{volume.header.block_size});
-    try stdout.print("Blocks: {d}\n", .{volume.header.block_count});
-    try stdout.print("Maximum file size: {Bi:.2}\n", .{volume.header.user_file_max});
-    try stdout.print("Name profile: {s}\n", .{volume.header.name_profile.name()});
-    try stdout.writeAll("Case-sensitive: yes\nEncrypted: no\n");
-    try volume.close();
+    try stdout.print("\nCapacity: {Bi:.2}\n", .{header.logical_size});
+    try stdout.print("Block size: {d}\n", .{header.block_size});
+    try stdout.print("Blocks: {d}\n", .{header.block_count});
+    try stdout.print("Maximum file size: {Bi:.2}\n", .{header.user_file_max});
+    try stdout.print("Name profile: {s}\n", .{header.name_profile.name()});
+    try stdout.print("Case-sensitive: yes\nEncrypted: {s}\n", .{if (header.isEncrypted()) "yes" else "no"});
 }
 
 fn checkCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -647,7 +728,8 @@ fn checkCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
 fn usage(writer: *Io.Writer) !void {
     try writer.writeAll(
         \\Usage:
-        \\  zettide format <file|device> [--size <size>] [--label <label>] [--name-profile <profile>] [--confirm <token>]
+        \\  zettide key generate <path>
+        \\  zettide format <file|device> [--size <size>] [--label <label>] [--name-profile <profile>] [--encrypt (--key-file <path>|--passphrase)] [--confirm <token>]
         \\  zettide create <container> --size <size> [--label <label>] [--name-profile <profile>]
         \\  zettide info <container>
         \\  zettide check <container>
@@ -659,7 +741,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other] [--noatime]
         \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>]
         \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>] --confirm <token>
-        \\  zettide serve dufs <file|device> [--read-only] [--noatime] [-- <dufs-options>...]
+        \\  zettide serve dufs <file|device> [--read-only] [--noatime] [--key-file <path>|--passphrase] [-- <dufs-options>...]
         \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]...
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.

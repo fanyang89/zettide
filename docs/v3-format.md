@@ -229,6 +229,49 @@ intentionally stricter than the version 2 layout envelope's durable-write thresh
 threshold of one; the encoded policy fields remain unchanged for format compatibility and do not
 weaken this implementation's acknowledgement or read-validation requirements.
 
+### Optional Data Encryption
+
+The initial encrypted format is restricted to a one-member unprotected Pool backed by a regular
+file. The v3 member header, control region, metadata region, and mirrored `LFSDRV2` volume headers
+remain plaintext. Encryption applies to every byte in the member data region exposed as the
+littlefs block address space, so filesystem names, metadata, object metadata, and file contents are
+ciphertext at rest. Raw block devices and replicated Pools reject encrypted initialization and open.
+
+An encrypted `LFSDRV2` header has format minor 2 and feature bit 2 (`0x00000004`) set. Its extension
+starts at byte 256 of each 4096-byte header copy:
+
+| Offset | Width | Field |
+|---:|---:|---|
+| `0x100` | 8 | Magic `DDVENC1\0` |
+| `0x108` | 2 | Extension version, 1 |
+| `0x10a` | 2 | Cipher, 1 is AES-256-XTS |
+| `0x10c` | 2 | KDF, 1 is raw key and 2 is Argon2id |
+| `0x10e` | 2 | Reserved, zero |
+| `0x110` | 4 | Data-unit size, 512 |
+| `0x114` | 4 | Argon2 time cost; zero for a raw key |
+| `0x118` | 4 | Argon2 memory cost in KiB; zero for a raw key |
+| `0x11c` | 4 | Argon2 parallelism; zero for a raw key |
+| `0x120` | 32 | Random KDF and HKDF salt |
+| `0x140` | 32 | HMAC-SHA256 credential verifier |
+
+The raw-key KDF consumes exactly 32 bytes. The passphrase KDF is Argon2id; newly formatted targets
+persist time cost 2, memory cost 65536 KiB, and parallelism 1. The resulting 32-byte master key is
+passed through HKDF-SHA256 using the persisted salt. Expand labels
+`zettide-volume-xts-v1` and `zettide-volume-verifier-v1` produce the 64-byte XTS key and 32-byte
+verifier key respectively. The verifier is HMAC-SHA256 over the canonical cipher, KDF, data-unit,
+Argon2, and salt fields. It rejects incorrect credentials before littlefs access but does not
+authenticate stored data.
+
+AES-256-XTS operates on 512-byte data units. The tweak number is the little-endian 64-bit unit index
+relative to the start of the member data region. All encrypted reads and programs are 512-byte
+aligned and cover complete units. Format writes encrypted zeroes over the complete logical data
+region before littlefs initialization, so an encrypted regular-file target is fully allocated rather
+than sparse.
+
+This format provides confidentiality only. It does not detect ciphertext modification, deletion,
+sector relocation, or replay. Encryption mode and KDF are fixed at creation; this version defines no
+in-place enable, disable, or rekey operation.
+
 Pool creation initializes the volume before reporting success. `pool inspect` emits an
 `initialize-empty-volume:<set-id>` token in either of two cases: the complete member set has no ready
 header but retains a valid creating header for one volume identity, or every header slot and every

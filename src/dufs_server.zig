@@ -1,5 +1,4 @@
 const std = @import("std");
-const target = @import("target.zig");
 const volume_api = @import("volume.zig");
 const linux_fuse = @import("linux_fuse.zig");
 const linux = std.os.linux;
@@ -113,6 +112,7 @@ const PidFd = struct {
 pub fn serve(
     allocator: std.mem.Allocator,
     io: std.Io,
+    volume: *volume_api.Volume,
     target_path: []const u8,
     read_only: bool,
     access_time: volume_api.AccessTimePolicy,
@@ -134,10 +134,6 @@ pub fn serve(
     var notification = try Notification.init();
     defer notification.deinit();
 
-    const volume = try allocator.create(volume_api.Volume);
-    defer allocator.destroy(volume);
-    try target.openVolumeInto(volume, io, allocator, target_path, !read_only);
-    defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
     try volume.mountOptions(.{ .access_time = access_time });
 

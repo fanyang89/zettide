@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const volume_api = @import("volume.zig");
+const container = @import("container.zig");
 const pool_member_set = @import("v3/pool_member_set.zig");
 const pool_provision = @import("v3/pool_provision.zig");
 const storage_api = @import("v3/storage.zig");
@@ -90,7 +91,10 @@ pub fn inspectFormatOptions(
     return switch (stat.kind) {
         .file => inspectRegularFormat(io, allocator, path, label, options),
         .block_device => if (comptime builtin.os.tag == .linux)
-            inspectBlockFormat(io, allocator, path, label, options)
+            if (options.encryption_credential != null)
+                error.EncryptedBlockDeviceNotSupported
+            else
+                inspectBlockFormat(io, allocator, path, label, options)
         else
             error.BlockDeviceNotImplemented,
         else => error.UnsupportedTargetType,
@@ -205,6 +209,61 @@ pub fn openVolumeInto(
     writable: bool,
 ) !void {
     return openVolumeIntoOptions(result, io, allocator, path, writable, .{});
+}
+
+pub fn inspectVolumeHeader(io: Io, allocator: std.mem.Allocator, path: []const u8) !container.Header {
+    const stat = try Io.Dir.cwd().statFile(io, path, .{});
+    return switch (stat.kind) {
+        .file => inspectRegularVolumeHeader(io, allocator, path),
+        .block_device => if (comptime builtin.os.tag == .linux)
+            inspectBlockVolumeHeader(io, allocator, path)
+        else
+            error.BlockDeviceNotImplemented,
+        else => error.UnsupportedTargetType,
+    };
+}
+
+fn inspectRegularVolumeHeader(io: Io, allocator: std.mem.Allocator, path: []const u8) !container.Header {
+    const file = try Io.Dir.cwd().openFile(io, path, .{
+        .mode = .read_only,
+        .lock = .shared,
+        .lock_nonblocking = true,
+    });
+    if (container.read(file, io)) |header| {
+        file.close(io);
+        return header;
+    } else |err| switch (err) {
+        error.NoValidHeader => file.close(io),
+        else => {
+            file.close(io);
+            return err;
+        },
+    }
+
+    var storage = try storage_api.Storage.openFile(io, Io.Dir.cwd(), path, false);
+    var storage_owned = true;
+    defer if (storage_owned) storage.close(io) catch {};
+    var storages = [_]storage_api.Storage{storage};
+    storage_owned = false;
+    var set = try pool_member_set.PoolMemberSet.openStorages(
+        io,
+        allocator,
+        &storages,
+        .read_only,
+    );
+    defer set.deinit();
+    return volume_api.Volume.inspectPoolHeader(io, &set);
+}
+
+fn inspectBlockVolumeHeader(io: Io, allocator: std.mem.Allocator, path: []const u8) !container.Header {
+    var opened = try linux_block.openStorageOptions(io, allocator, path, false, true);
+    var storage_owned = true;
+    defer if (storage_owned) opened.storage.close(io) catch {};
+    var storages = [_]storage_api.Storage{opened.storage};
+    storage_owned = false;
+    var set = try pool_member_set.PoolMemberSet.openStorages(io, allocator, &storages, .read_only);
+    defer set.deinit();
+    return volume_api.Volume.inspectPoolHeader(io, &set);
 }
 
 pub fn openVolumeIntoOptions(

@@ -110,6 +110,11 @@ pub fn build(b: *std.Build) void {
 
     const cli_test_cmd = b.addSystemCommand(&.{ "bash", "test/cli.sh" });
     cli_test_cmd.addArtifactArg(exe);
+    const pty_passphrase_exec = if (target.result.os.tag == .linux)
+        createPtyPassphraseExec(b, target, optimize)
+    else
+        null;
+    if (pty_passphrase_exec) |artifact| cli_test_cmd.addArtifactArg(artifact);
     const cli_step = b.step("test-cli", "Run CLI process integration tests");
     cli_step.dependOn(&cli_test_cmd.step);
 
@@ -173,6 +178,7 @@ pub fn build(b: *std.Build) void {
     dufs_test_cmd.addArg(@tagName(fuse_test_mode));
     dufs_test_cmd.addArtifactArg(exe);
     if (target.result.os.tag == .linux) dufs_test_cmd.addArtifactArg(createSignalMaskExec(b, target, optimize));
+    if (pty_passphrase_exec) |artifact| dufs_test_cmd.addArtifactArg(artifact);
     const dufs_step = b.step("test-dufs", "Run the managed dufs integration test");
     dufs_step.dependOn(&dufs_test_cmd.step);
 
@@ -469,6 +475,12 @@ fn createExecutable(
         .imports = &.{.{ .name = "zettide", .module = core }},
     });
     module.addOptions("build_options", options);
+    if (target.result.os.tag != .windows and target.result.os.tag != .wasi) {
+        module.addCSourceFile(.{
+            .file = b.path("src/terminal_echo.c"),
+            .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L" },
+        });
+    }
     return b.addExecutable(.{
         .name = name,
         .root_module = module,
@@ -631,6 +643,27 @@ fn createSignalMaskExec(
         .file = b.path("test/signal_mask_exec.c"),
         .flags = &.{"-std=c11"},
     });
+    return executable;
+}
+
+fn createPtyPassphraseExec(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const executable = b.addExecutable(.{
+        .name = "pty-passphrase-exec",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    executable.root_module.addCSourceFile(.{
+        .file = b.path("test/pty_passphrase_exec.c"),
+        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
+    });
+    executable.root_module.linkSystemLibrary("util", .{});
     return executable;
 }
 

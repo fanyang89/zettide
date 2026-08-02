@@ -163,6 +163,15 @@ pins, manifests, and log controls are documented in
 ```sh
 zettide format workspace.ddv --size 16GiB --label Workspace
 
+# Optional encrypted file-backed target using a generated 32-byte key.
+zettide key generate workspace.key
+zettide format private.ddv --size 16GiB --encrypt --key-file workspace.key
+zettide serve dufs private.ddv --key-file workspace.key -- -A -b 127.0.0.1 -p 5000
+
+# A hidden passphrase entered twice can be used instead of a key file.
+zettide format private-passphrase.ddv --size 16GiB --encrypt --passphrase
+zettide serve dufs private-passphrase.ddv --passphrase -- -A -b 127.0.0.1 -p 5000
+
 # Legacy container creation remains supported.
 zettide create legacy.ddv --size 16GiB --label Legacy
 zettide info legacy.ddv
@@ -193,7 +202,24 @@ zettide format /dev/disk/by-id/example --label Workspace --confirm <token>
 
 Formatting replaces the filesystem but does not securely erase every old data
 block. The confirmation token binds the target identity, geometry, path, label,
-and complete content digest observed by the plan.
+complete content digest observed by the plan, and encryption KDF type.
+
+Encryption is available only when `format` creates a v3 single-member,
+unprotected regular-file target. Key files contain exactly 32 random bytes;
+`zettide key generate` creates them without replacing an existing path and with
+mode `0600` on POSIX systems. Loading rejects symlinks, non-regular files, other
+lengths, and group or world permissions. `--passphrase` reads only from
+`/dev/tty` with terminal echo disabled, asks twice during format, and uses
+Argon2id with persisted parameters. `info` reports the plaintext volume identity
+and encryption status without unlocking the filesystem.
+
+The first encrypted frontend is `serve dufs`; ordinary `mount`, `check`, raw
+devices, replicated Pools, legacy `create`, mode conversion, and rekey are not
+supported. AES-256-XTS encrypts the complete littlefs data region, including
+names, metadata, and file contents. It provides confidentiality, not
+authentication: raw block modification, deletion, and replay are not detected.
+Encrypted creation writes ciphertext across the complete data region and is not
+sparse.
 
 `serve dufs` creates a private FUSE mount, starts the `dufs` executable found on
 `PATH`, and removes the mount when either process exits. Dufs keeps its own

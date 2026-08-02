@@ -2,6 +2,7 @@
 set -euo pipefail
 
 exe=$1
+pty_passphrase_exec=${2:-}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/zettide-cli.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
@@ -86,6 +87,75 @@ fi
 if "$exe" format "$formatted" --size 8MiB >/dev/null 2>&1; then
     echo "existing format target unexpectedly accepted --size" >&2
     exit 1
+fi
+
+key_file="$tmp/workspace.key"
+"$exe" key generate "$key_file" >/dev/null
+[[ $(wc -c <"$key_file") -eq 32 ]]
+if [[ $(uname -s) == Linux ]]; then
+    [[ $(stat -c '%a' "$key_file") == 600 ]]
+fi
+if "$exe" key generate "$key_file" >/dev/null 2>&1; then
+    echo "key generation replaced an existing file" >&2
+    exit 1
+fi
+
+short_key="$tmp/short.key"
+printf short >"$short_key"
+chmod 600 "$short_key"
+if "$exe" format "$tmp/short-key.ddv" --size 8MiB --encrypt --key-file "$short_key" >/dev/null 2>&1; then
+    echo "format accepted a short key file" >&2
+    exit 1
+fi
+insecure_key="$tmp/insecure.key"
+cp "$key_file" "$insecure_key"
+chmod 644 "$insecure_key"
+if "$exe" format "$tmp/insecure-key.ddv" --size 8MiB --encrypt --key-file "$insecure_key" >/dev/null 2>&1; then
+    echo "format accepted an insecure key file" >&2
+    exit 1
+fi
+key_link="$tmp/key-link"
+ln -s "$key_file" "$key_link"
+if "$exe" format "$tmp/symlink-key.ddv" --size 8MiB --encrypt --key-file "$key_link" >/dev/null 2>&1; then
+    echo "format accepted a symlink key file" >&2
+    exit 1
+fi
+if [[ $(uname -s) == Linux ]]; then
+    key_fifo="$tmp/key-fifo"
+    mkfifo "$key_fifo"
+    set +e
+    timeout 5s "$exe" format "$tmp/fifo-key.ddv" --size 8MiB --encrypt --key-file "$key_fifo" >/dev/null 2>&1
+    fifo_status=$?
+    set -e
+    if [[ $fifo_status -eq 0 || $fifo_status -eq 124 ]]; then
+        echo "format did not promptly reject a FIFO key file" >&2
+        exit 1
+    fi
+fi
+if "$exe" format "$tmp/missing-credential.ddv" --size 8MiB --encrypt >/dev/null 2>&1; then
+    echo "encrypted format accepted no credential" >&2
+    exit 1
+fi
+if "$exe" format "$tmp/missing-encrypt.ddv" --size 8MiB --key-file "$key_file" >/dev/null 2>&1; then
+    echo "format accepted a key without --encrypt" >&2
+    exit 1
+fi
+
+encrypted="$tmp/encrypted.ddv"
+"$exe" format "$encrypted" --size 8MiB --label "Encrypted Test" --encrypt --key-file "$key_file" >/dev/null
+encrypted_info=$("$exe" info "$encrypted")
+[[ "$encrypted_info" == *"Label: Encrypted Test"* ]]
+[[ "$encrypted_info" == *"Encrypted: yes"* ]]
+if "$exe" check "$encrypted" >/dev/null 2>&1; then
+    echo "check unexpectedly unlocked an encrypted target" >&2
+    exit 1
+fi
+
+if [[ $(uname -s) == Linux && -x "$pty_passphrase_exec" ]]; then
+    passphrase_image="$tmp/passphrase.ddv"
+    "$pty_passphrase_exec" 2 "test passphrase" "test passphrase" -- \
+        "$exe" format "$passphrase_image" --size 8MiB --encrypt --passphrase >/dev/null
+    "$exe" info "$passphrase_image" | grep -q '^Encrypted: yes$'
 fi
 
 if [[ "$(uname -s)" == "Linux" ]]; then
