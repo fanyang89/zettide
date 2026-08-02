@@ -7,7 +7,7 @@ const google_crc32c = @import("crc32c");
 
 const Image = [redo_journal.block_size]u8;
 const ImageMap = std.AutoHashMap(u32, *Image);
-const AnchorSlot = enum(u1) { a, b };
+pub const AnchorSlot = enum(u1) { a, b };
 
 pub const DurableSync = struct {
     context: *anyopaque,
@@ -18,6 +18,11 @@ pub const DurableSync = struct {
     }
 };
 
+pub const Flush = struct {
+    anchor: redo_journal.Anchor,
+    slot: AnchorSlot,
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: Io,
@@ -26,6 +31,8 @@ pub const Runtime = struct {
     block_count: u32,
     descriptor: container.RedoJournal,
     active: ImageMap,
+    pending: ImageMap,
+    flushing: ImageMap,
     committed: ImageMap,
     active_transaction: bool = false,
     anchor_slot: ?AnchorSlot = null,
@@ -34,6 +41,10 @@ pub const Runtime = struct {
     used_bytes: u64 = 0,
     tail_sequence: u64 = 0,
     tail_digest: redo_journal.Digest = redo_journal.zero_digest,
+    staged_used_bytes: u64 = 0,
+    staged_tail_sequence: u64 = 0,
+    staged_tail_digest: redo_journal.Digest = redo_journal.zero_digest,
+    inflight_flush: ?Flush = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -56,6 +67,8 @@ pub const Runtime = struct {
             .block_count = header.block_count,
             .descriptor = descriptor,
             .active = ImageMap.init(allocator),
+            .pending = ImageMap.init(allocator),
+            .flushing = ImageMap.init(allocator),
             .committed = ImageMap.init(allocator),
         };
         errdefer result.deinit();
@@ -66,8 +79,12 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.freeImages(&self.active);
+        self.freeImages(&self.pending);
+        self.freeImages(&self.flushing);
         self.freeImages(&self.committed);
         self.active.deinit();
+        self.pending.deinit();
+        self.flushing.deinit();
         self.committed.deinit();
         self.* = undefined;
     }
@@ -90,6 +107,14 @@ pub const Runtime = struct {
         return self.active.count() != 0;
     }
 
+    pub fn hasUndurableWrites(self: *const Runtime) bool {
+        return self.active.count() != 0 or self.pending.count() != 0 or self.flushing.count() != 0;
+    }
+
+    pub fn hasPendingWrites(self: *const Runtime) bool {
+        return self.pending.count() != 0 or self.flushing.count() != 0;
+    }
+
     pub fn hasActiveTransaction(self: *const Runtime) bool {
         return self.active_transaction;
     }
@@ -97,6 +122,14 @@ pub const Runtime = struct {
     pub fn read(self: *Runtime, block: u32, offset: u32, buffer: []u8) !void {
         try self.validateRange(block, offset, buffer.len);
         if (self.active.get(block)) |image| {
+            @memcpy(buffer, image[offset..][0..buffer.len]);
+            return;
+        }
+        if (self.pending.get(block)) |image| {
+            @memcpy(buffer, image[offset..][0..buffer.len]);
+            return;
+        }
+        if (self.flushing.get(block)) |image| {
             @memcpy(buffer, image[offset..][0..buffer.len]);
             return;
         }
@@ -123,7 +156,11 @@ pub const Runtime = struct {
             }
             const image = try self.allocator.create(Image);
             errdefer self.allocator.destroy(image);
-            if (self.committed.get(block)) |committed|
+            if (self.pending.get(block)) |pending|
+                image.* = pending.*
+            else if (self.flushing.get(block)) |flushing|
+                image.* = flushing.*
+            else if (self.committed.get(block)) |committed|
                 image.* = committed.*
             else {
                 const amount = try self.file.readPositionalAll(
@@ -144,10 +181,24 @@ pub const Runtime = struct {
     }
 
     pub fn commit(self: *Runtime, durable_sync: DurableSync) !void {
+        _ = try self.stage();
+        const flush = (try self.seal()) orelse return;
+        try durable_sync.run();
+        try self.completeFlush(flush);
+    }
+
+    pub fn stage(self: *Runtime) !?u64 {
         if (!self.active_transaction) return error.NoActiveTransaction;
         if (self.active.count() == 0) {
             self.active_transaction = false;
-            return;
+            return null;
+        }
+        if (self.pending.count() == 0) {
+            const base_generation = if (self.inflight_flush) |flush|
+                flush.anchor.generation
+            else
+                self.anchor_generation;
+            _ = std.math.add(u64, base_generation, 1) catch return error.GenerationOverflow;
         }
         const ids = try self.sortedIds(&self.active);
         defer self.allocator.free(ids);
@@ -157,33 +208,71 @@ pub const Runtime = struct {
             .block = id,
             .bytes = self.active.get(id).?,
         };
-        const next_sequence = std.math.add(u64, self.tail_sequence, 1) catch
+        const next_sequence = std.math.add(u64, self.staged_tail_sequence, 1) catch
             return error.SequenceOverflow;
         const encoded = try redo_journal.encode(self.allocator, .{
             .sequence = next_sequence,
-            .previous_digest = self.tail_digest,
+            .previous_digest = self.staged_tail_digest,
         }, blocks);
         defer self.allocator.free(encoded);
         if (encoded.len > self.remainingCapacity()) return error.JournalFull;
-        try self.committed.ensureUnusedCapacity(@intCast(self.active.count()));
-        const next_generation = std.math.add(u64, self.anchor_generation, 1) catch
-            return error.GenerationOverflow;
         const next_digest = redo_journal.encodedDigest(encoded);
-        const next_anchor: redo_journal.Anchor = .{
-            .generation = next_generation,
-            .head_offset = self.head_offset,
-            .used_bytes = self.used_bytes + encoded.len,
-            .tail_sequence = next_sequence,
-            .tail_digest = next_digest,
-        };
-        const next_slot = self.nextAnchorSlot();
-        const anchor_bytes = try redo_journal.encodeAnchor(next_anchor, self.dataCapacity());
-        try self.writeRing(self.tailOffset(), encoded);
-        try self.file.writePositionalAll(self.io, &anchor_bytes, try self.anchorPosition(next_slot));
-        try durable_sync.run();
+        try self.pending.ensureUnusedCapacity(@intCast(self.active.count()));
+        try self.writeRing(self.stagedTailOffset(), encoded);
 
         for (ids) |id| {
             const image = self.active.get(id).?;
+            if (self.pending.getPtr(id)) |existing| {
+                self.allocator.destroy(existing.*);
+                existing.* = image;
+            } else {
+                self.pending.putAssumeCapacity(id, image);
+            }
+        }
+        self.active.clearRetainingCapacity();
+        self.active_transaction = false;
+        self.staged_used_bytes += encoded.len;
+        self.staged_tail_sequence = next_sequence;
+        self.staged_tail_digest = next_digest;
+        return next_sequence;
+    }
+
+    pub fn seal(self: *Runtime) !?Flush {
+        if (self.active_transaction) return error.TransactionActive;
+        if (self.inflight_flush != null or self.flushing.count() != 0) return error.FlushInProgress;
+        if (self.pending.count() == 0) return null;
+        try self.committed.ensureUnusedCapacity(@intCast(self.pending.count()));
+        const next_generation = std.math.add(u64, self.anchor_generation, 1) catch
+            return error.GenerationOverflow;
+        const flush: Flush = .{
+            .anchor = .{
+                .generation = next_generation,
+                .head_offset = self.head_offset,
+                .used_bytes = self.staged_used_bytes,
+                .tail_sequence = self.staged_tail_sequence,
+                .tail_digest = self.staged_tail_digest,
+            },
+            .slot = self.nextAnchorSlot(),
+        };
+        const anchor_bytes = try redo_journal.encodeAnchor(flush.anchor, self.dataCapacity());
+        try self.file.writePositionalAll(self.io, &anchor_bytes, try self.anchorPosition(flush.slot));
+        std.mem.swap(ImageMap, &self.pending, &self.flushing);
+        self.inflight_flush = flush;
+        return flush;
+    }
+
+    pub fn inflightFlush(self: *const Runtime) ?Flush {
+        return self.inflight_flush;
+    }
+
+    pub fn completeFlush(self: *Runtime, flush: Flush) !void {
+        if (self.inflight_flush == null or !std.meta.eql(self.inflight_flush.?, flush))
+            return error.InvalidFlush;
+        if (self.flushing.count() == 0) return error.InvalidFlush;
+        var iterator = self.flushing.iterator();
+        while (iterator.next()) |entry| {
+            const id = entry.key_ptr.*;
+            const image = entry.value_ptr.*;
             if (self.committed.getPtr(id)) |existing| {
                 self.allocator.destroy(existing.*);
                 existing.* = image;
@@ -191,17 +280,18 @@ pub const Runtime = struct {
                 self.committed.putAssumeCapacity(id, image);
             }
         }
-        self.active.clearRetainingCapacity();
-        self.active_transaction = false;
-        self.anchor_slot = next_slot;
-        self.anchor_generation = next_generation;
-        self.used_bytes = next_anchor.used_bytes;
-        self.tail_sequence = next_sequence;
-        self.tail_digest = next_digest;
+        self.flushing.clearRetainingCapacity();
+        self.anchor_slot = flush.slot;
+        self.anchor_generation = flush.anchor.generation;
+        self.used_bytes = flush.anchor.used_bytes;
+        self.tail_sequence = flush.anchor.tail_sequence;
+        self.tail_digest = flush.anchor.tail_digest;
+        self.inflight_flush = null;
     }
 
     pub fn checkpoint(self: *Runtime, durable_sync: DurableSync) !void {
         if (self.active_transaction) return error.TransactionActive;
+        if (self.hasPendingWrites()) return error.PendingTransactions;
         if (self.committed.count() != 0) {
             const ids = try self.sortedIds(&self.committed);
             defer self.allocator.free(ids);
@@ -232,6 +322,9 @@ pub const Runtime = struct {
             self.used_bytes = 0;
             self.tail_sequence = 0;
             self.tail_digest = redo_journal.zero_digest;
+            self.staged_used_bytes = 0;
+            self.staged_tail_sequence = 0;
+            self.staged_tail_digest = redo_journal.zero_digest;
         }
         self.freeImages(&self.committed);
         self.committed.clearRetainingCapacity();
@@ -322,6 +415,9 @@ pub const Runtime = struct {
         self.used_bytes = anchor.used_bytes;
         self.tail_sequence = anchor.tail_sequence;
         self.tail_digest = anchor.tail_digest;
+        self.staged_used_bytes = anchor.used_bytes;
+        self.staged_tail_sequence = anchor.tail_sequence;
+        self.staged_tail_digest = anchor.tail_digest;
         return true;
     }
 
@@ -447,11 +543,15 @@ pub const Runtime = struct {
     }
 
     fn remainingCapacity(self: *const Runtime) u64 {
-        return self.dataCapacity() - self.used_bytes;
+        return self.dataCapacity() - self.staged_used_bytes;
     }
 
     fn tailOffset(self: *const Runtime) u64 {
         return self.ringAdvance(self.head_offset, self.used_bytes);
+    }
+
+    fn stagedTailOffset(self: *const Runtime) u64 {
+        return self.ringAdvance(self.head_offset, self.staged_used_bytes);
     }
 
     fn ringAdvance(self: *const Runtime, offset: u64, amount: u64) u64 {
@@ -572,6 +672,89 @@ test "redo runtime abort discards active block images" {
     var actual: [9]u8 = undefined;
     try runtime.read(1, 0, &actual);
     try std.testing.expectEqualSlices(u8, &@as([9]u8, @splat(0)), &actual);
+}
+
+test "redo runtime flushes multiple staged transactions with one sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "staged.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "Staged");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var sync_state: TestSync = .{ .io = std.testing.io, .file = file };
+
+    var runtime = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
+    defer runtime.deinit();
+    try runtime.begin();
+    try runtime.program(1, 0, "first");
+    try std.testing.expectEqual(@as(?u64, 1), try runtime.stage());
+    try runtime.begin();
+    try runtime.program(2, 0, "second");
+    try std.testing.expectEqual(@as(?u64, 2), try runtime.stage());
+    try std.testing.expectEqual(@as(u64, 0), sync_state.count);
+
+    {
+        var unflushed = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
+        defer unflushed.deinit();
+        var actual: [5]u8 = undefined;
+        try unflushed.read(1, 0, &actual);
+        try std.testing.expectEqualSlices(u8, &@as([5]u8, @splat(0)), &actual);
+    }
+
+    const flush = (try runtime.seal()).?;
+    try sync_state.durable().run();
+    try runtime.completeFlush(flush);
+    try std.testing.expectEqual(@as(u64, 1), sync_state.count);
+
+    var recovered = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
+    defer recovered.deinit();
+    var first: [5]u8 = undefined;
+    var second: [6]u8 = undefined;
+    try recovered.read(1, 0, &first);
+    try recovered.read(2, 0, &second);
+    try std.testing.expectEqualStrings("first", &first);
+    try std.testing.expectEqualStrings("second", &second);
+}
+
+test "redo runtime collects the next cohort during a flush" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "cohorts.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "Cohorts");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var sync_state: TestSync = .{ .io = std.testing.io, .file = file };
+    var runtime = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
+    defer runtime.deinit();
+
+    try runtime.begin();
+    try runtime.program(1, 0, "old");
+    _ = try runtime.stage();
+    const first_flush = (try runtime.seal()).?;
+    try runtime.begin();
+    try runtime.program(1, 0, "new");
+    _ = try runtime.stage();
+    var visible: [3]u8 = undefined;
+    try runtime.read(1, 0, &visible);
+    try std.testing.expectEqualStrings("new", &visible);
+
+    try sync_state.durable().run();
+    try runtime.completeFlush(first_flush);
+    try runtime.read(1, 0, &visible);
+    try std.testing.expectEqualStrings("new", &visible);
+    const second_flush = (try runtime.seal()).?;
+    try sync_state.durable().run();
+    try runtime.completeFlush(second_flush);
+    try std.testing.expectEqual(@as(u64, 2), sync_state.count);
+
+    var recovered = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
+    defer recovered.deinit();
+    try recovered.read(1, 0, &visible);
+    try std.testing.expectEqualStrings("new", &visible);
 }
 
 test "redo runtime wraps transactions after checkpoint" {
