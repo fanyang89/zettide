@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: "3"
+
+tasks:
+  build:
+    desc: Build the library
+    cmds:
+      - zig build --summary all
+
+  test:
+    desc: Run Debug tests
+    cmds:
+      - zig build test --summary all
+
+  test-release-safe:
+    desc: Run ReleaseSafe tests
+    cmds:
+      - zig build test -Doptimize=ReleaseSafe --summary all
+
+  fmt:
+    desc: Format Zig sources
+    cmds:
+      - zig fmt build.zig src tests
+
+  fmt-check:
+    desc: Check Zig formatting
+    cmds:
+      - zig build fmt-check --summary all
+
+  check:
+    desc: Run formatting and test gates
+    cmds:
+      - task: fmt-check
+      - task: test
+      - task: test-release-safe

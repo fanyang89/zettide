@@ -1,0 +1,1 @@
+//! Conditional publication storage contract.
