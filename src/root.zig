@@ -3,6 +3,7 @@ pub const container = @import("container.zig");
 pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("endpoint_control.zig") else struct {};
 pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("endpoint_daemon.zig") else struct {};
 pub const endpoint_registry = @import("endpoint_registry.zig");
+pub const dufs_server = if (@import("builtin").os.tag == .linux) @import("dufs_server.zig") else struct {};
 pub const metadata = @import("metadata.zig");
 pub const object_format = @import("object_format.zig");
 pub const object_store = @import("object_store.zig");
@@ -26,6 +27,7 @@ test {
     _ = endpoint_control;
     _ = endpoint_daemon;
     _ = endpoint_registry;
+    _ = dufs_server;
     _ = metadata;
     _ = object_format;
     _ = object_store;

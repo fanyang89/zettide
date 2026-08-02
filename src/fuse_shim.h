@@ -12,4 +12,15 @@ void zettide_fuse_set_direct_io(struct fuse_file_info *file_info);
 int zettide_fuse_configure_connection(struct fuse_conn_info *connection);
 int zettide_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations, void *user_data);
 
+struct zettide_fuse_session;
+struct zettide_fuse_session *zettide_fuse_session_create(
+    int argc,
+    char *argv[],
+    const struct fuse_lowlevel_ops *operations,
+    void *user_data);
+int zettide_fuse_session_mount(struct zettide_fuse_session *handle);
+int zettide_fuse_session_loop(struct zettide_fuse_session *handle);
+void zettide_fuse_session_exit(struct zettide_fuse_session *handle);
+void zettide_fuse_session_destroy(struct zettide_fuse_session *handle);
+
 #endif

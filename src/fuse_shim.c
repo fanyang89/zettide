@@ -2,6 +2,13 @@
 
 #include <stdlib.h>
 
+struct zettide_fuse_session {
+    struct fuse_args args;
+    struct fuse_cmdline_opts options;
+    struct fuse_session *session;
+    int mounted;
+};
+
 int zettide_fuse_get_flags(const struct fuse_file_info *file_info) {
     return file_info->flags;
 }
@@ -66,4 +73,64 @@ cleanup:
     free(options.mountpoint);
     fuse_opt_free_args(&args);
     return result;
+}
+
+struct zettide_fuse_session *zettide_fuse_session_create(
+    int argc,
+    char *argv[],
+    const struct fuse_lowlevel_ops *operations,
+    void *user_data) {
+    struct zettide_fuse_session *handle = calloc(1, sizeof(*handle));
+    if (handle == NULL)
+        return NULL;
+    handle->args = (struct fuse_args)FUSE_ARGS_INIT(argc, argv);
+    if (fuse_parse_cmdline(&handle->args, &handle->options) != 0 ||
+        handle->options.mountpoint == NULL)
+        goto fail;
+    handle->session = fuse_session_new(
+        &handle->args, operations, sizeof(*operations), user_data);
+    if (handle->session == NULL)
+        goto fail;
+    return handle;
+
+fail:
+    free(handle->options.mountpoint);
+    fuse_opt_free_args(&handle->args);
+    free(handle);
+    return NULL;
+}
+
+int zettide_fuse_session_mount(struct zettide_fuse_session *handle) {
+    if (handle == NULL || handle->session == NULL || handle->mounted)
+        return 1;
+    if (fuse_session_mount(handle->session, handle->options.mountpoint) != 0)
+        return 1;
+    handle->mounted = 1;
+    return 0;
+}
+
+int zettide_fuse_session_loop(struct zettide_fuse_session *handle) {
+    if (handle == NULL || handle->session == NULL || !handle->mounted)
+        return 1;
+    return fuse_session_loop(handle->session) == 0 ? 0 : 1;
+}
+
+void zettide_fuse_session_exit(struct zettide_fuse_session *handle) {
+    if (handle != NULL && handle->session != NULL) {
+        fuse_session_exit(handle->session);
+        if (handle->mounted)
+            fuse_session_unmount(handle->session);
+    }
+}
+
+void zettide_fuse_session_destroy(struct zettide_fuse_session *handle) {
+    if (handle == NULL)
+        return;
+    if (handle->mounted)
+        fuse_session_unmount(handle->session);
+    if (handle->session != NULL)
+        fuse_session_destroy(handle->session);
+    free(handle->options.mountpoint);
+    fuse_opt_free_args(&handle->args);
+    free(handle);
 }

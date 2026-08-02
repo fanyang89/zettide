@@ -119,6 +119,13 @@ pub fn build(b: *std.Build) void {
     const fuse_step = b.step("test-fuse", "Run real Linux FUSE syscall tests");
     fuse_step.dependOn(&fuse_test_cmd.step);
 
+    const dufs_test_cmd = b.addSystemCommand(&.{ "bash", "test/dufs.sh" });
+    dufs_test_cmd.addArg(@tagName(fuse_test_mode));
+    dufs_test_cmd.addArtifactArg(exe);
+    if (target.result.os.tag == .linux) dufs_test_cmd.addArtifactArg(createSignalMaskExec(b, target, optimize));
+    const dufs_step = b.step("test-dufs", "Run the managed dufs integration test");
+    dufs_step.dependOn(&dufs_test_cmd.step);
+
     const posix_probe = if (target.result.os.tag == .linux) createPosixProbe(b, target, optimize) else null;
     const posix_test_cmd = b.addSystemCommand(&.{ "bash", "test/posix.sh" });
     posix_test_cmd.addArg(@tagName(fuse_test_mode));
@@ -405,6 +412,26 @@ fn createDurabilityProbe(
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     return probe;
+}
+
+fn createSignalMaskExec(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const executable = b.addExecutable(.{
+        .name = "signal-mask-exec",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    executable.root_module.addCSourceFile(.{
+        .file = b.path("test/signal_mask_exec.c"),
+        .flags = &.{"-std=c11"},
+    });
+    return executable;
 }
 
 fn createPosixProbe(

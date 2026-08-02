@@ -35,6 +35,8 @@ pub fn main(init: std.process.Init) !void {
         try deviceCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "pool")) {
         try poolCommand(allocator, init.io, args[2..], stdout);
+    } else if (std.mem.eql(u8, command, "serve")) {
+        try serveCommand(allocator, init.io, args[2..], stdout);
     } else if (std.mem.eql(u8, command, "endpoint")) {
         try endpointCommand(init.io, args[2..], stdout);
     } else {
@@ -43,6 +45,26 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidCommand;
     }
     try stdout.flush();
+}
+
+fn serveCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
+    if (args.len < 2 or !std.mem.eql(u8, args[0], "dufs")) return error.InvalidArguments;
+    if (@import("builtin").os.tag != .linux) return error.ServeNotImplemented;
+    const path = args[1];
+    var read_only = false;
+    var dufs_args: []const []const u8 = &.{};
+    var index: usize = 2;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--read-only")) {
+            read_only = true;
+        } else if (std.mem.eql(u8, args[index], "--")) {
+            dufs_args = args[index + 1 ..];
+            break;
+        } else {
+            return error.UnknownOption;
+        }
+    }
+    return zettide.dufs_server.serve(allocator, io, path, read_only, dufs_args, stdout);
 }
 
 fn endpointCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -565,6 +587,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other]
         \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>]
         \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] --confirm <token>
+        \\  zettide serve dufs <file|device> [--read-only] [-- <dufs-options>...]
         \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]...
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.

@@ -306,6 +306,98 @@ const FuseDirectoryHandle = struct {
     parent_id: c.fuse_ino_t,
 };
 
+pub const Session = struct {
+    allocator: std.mem.Allocator,
+    state: *MountState,
+    handle: *c.struct_zettide_fuse_session,
+    thread: std.Thread,
+    done: std.atomic.Value(bool) = .init(false),
+    result: std.atomic.Value(c_int) = .init(0),
+    on_exit: ?*const fn (?*anyopaque) void,
+    on_exit_context: ?*anyopaque,
+
+    pub const Options = struct {
+        allow_other: bool = false,
+        read_only: bool = false,
+        on_exit: ?*const fn (?*anyopaque) void = null,
+        on_exit_context: ?*anyopaque = null,
+    };
+
+    pub fn start(
+        allocator: std.mem.Allocator,
+        volume: *volume_mod.Volume,
+        mountpoint: []const u8,
+        options: Options,
+    ) !*Session {
+        const self = try allocator.create(Session);
+        errdefer allocator.destroy(self);
+        const state = try allocator.create(MountState);
+        errdefer allocator.destroy(state);
+        state.* = try MountState.init(volume);
+        errdefer state.deinit();
+
+        const program = try allocator.dupeZ(u8, "zettide");
+        defer allocator.free(program);
+        const foreground = try allocator.dupeZ(u8, "-f");
+        defer allocator.free(foreground);
+        const single_thread = try allocator.dupeZ(u8, "-s");
+        defer allocator.free(single_thread);
+        const option = try allocator.dupeZ(u8, "-o");
+        defer allocator.free(option);
+        const permissions = try allocator.dupeZ(u8, mountOptions(options.allow_other, options.read_only));
+        defer allocator.free(permissions);
+        const mountpoint_z = try allocator.dupeZ(u8, mountpoint);
+        defer allocator.free(mountpoint_z);
+        var argv = [_][*c]u8{
+            program.ptr,
+            foreground.ptr,
+            single_thread.ptr,
+            option.ptr,
+            permissions.ptr,
+            mountpoint_z.ptr,
+        };
+        var operations = fuseOperations();
+        const handle = c.zettide_fuse_session_create(argv.len, &argv, &operations, state) orelse
+            return error.FuseSessionCreateFailed;
+        errdefer c.zettide_fuse_session_destroy(handle);
+        if (c.zettide_fuse_session_mount(handle) != 0) return error.FuseMountFailed;
+
+        self.* = .{
+            .allocator = allocator,
+            .state = state,
+            .handle = handle,
+            .thread = undefined,
+            .on_exit = options.on_exit,
+            .on_exit_context = options.on_exit_context,
+        };
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+        return self;
+    }
+
+    pub fn hasExited(self: *const Session) bool {
+        return self.done.load(.acquire);
+    }
+
+    pub fn stop(self: *Session) !void {
+        if (!self.hasExited()) c.zettide_fuse_session_exit(self.handle);
+        self.thread.join();
+        const result = self.result.load(.acquire);
+        c.zettide_fuse_session_destroy(self.handle);
+        self.state.deinit();
+        self.allocator.destroy(self.state);
+        const allocator = self.allocator;
+        allocator.destroy(self);
+        if (result != 0) return error.FuseSessionFailed;
+    }
+
+    fn run(self: *Session) void {
+        const result = c.zettide_fuse_session_loop(self.handle);
+        self.result.store(result, .release);
+        self.done.store(true, .release);
+        if (self.on_exit) |callback| callback(self.on_exit_context);
+    }
+};
+
 pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bool, read_only: bool) !void {
     const allocator = std.heap.c_allocator;
     const program = try allocator.dupeZ(u8, "zettide");
@@ -316,17 +408,7 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bo
     defer allocator.free(single_thread);
     const option = try allocator.dupeZ(u8, "-o");
     defer allocator.free(option);
-    const permissions = try allocator.dupeZ(
-        u8,
-        if (allow_other and read_only)
-            "default_permissions,allow_other,ro"
-        else if (allow_other)
-            "default_permissions,allow_other"
-        else if (read_only)
-            "default_permissions,ro"
-        else
-            "default_permissions",
-    );
+    const permissions = try allocator.dupeZ(u8, mountOptions(allow_other, read_only));
     defer allocator.free(permissions);
     const mountpoint_z = try allocator.dupeZ(u8, mountpoint);
     defer allocator.free(mountpoint_z);
@@ -341,6 +423,24 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bo
         permissions.ptr,
         mountpoint_z.ptr,
     };
+    var operations = fuseOperations();
+
+    const result = c.zettide_fuse_main(argv.len, &argv, &operations, &state);
+    if (result != 0) return error.FuseMountFailed;
+}
+
+fn mountOptions(allow_other: bool, read_only: bool) []const u8 {
+    return if (allow_other and read_only)
+        "default_permissions,allow_other,ro"
+    else if (allow_other)
+        "default_permissions,allow_other"
+    else if (read_only)
+        "default_permissions,ro"
+    else
+        "default_permissions";
+}
+
+fn fuseOperations() c.struct_fuse_lowlevel_ops {
     var operations: c.struct_fuse_lowlevel_ops = std.mem.zeroes(c.struct_fuse_lowlevel_ops);
     operations.init = initialize;
     operations.lookup = lookup;
@@ -368,9 +468,7 @@ pub fn mount(volume: *volume_mod.Volume, mountpoint: []const u8, allow_other: bo
     operations.releasedir = releaseDirectory;
     operations.fsyncdir = fsyncDirectory;
     operations.create = create;
-
-    const result = c.zettide_fuse_main(argv.len, &argv, &operations, &state);
-    if (result != 0) return error.FuseMountFailed;
+    return operations;
 }
 
 pub fn unmount(allocator: std.mem.Allocator, io: Io, mountpoint: []const u8) !void {

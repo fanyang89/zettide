@@ -38,9 +38,13 @@ jobs:
           version: 0.16.0
       - name: Install FUSE
         run: sudo apt-get update && sudo apt-get install -y e2fsprogs fuse3 libfuse3-dev util-linux
+      - name: Install dufs
+        run: cargo install dufs --version 0.46.0 --locked
       - name: Verify FUSE capability
         run: test -r /dev/fuse && test -w /dev/fuse
       - name: Run POSIX filesystem quick gate
         run: zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required -Doptimize=${{ matrix.optimize }}
       - name: Run raw block device gate
         run: zig build test-linux-block -Dblock-tests=required -Doptimize=${{ matrix.optimize }}
+      - name: Run dufs integration gate
+        run: zig build test-dufs -Dfuse-tests=required -Doptimize=${{ matrix.optimize }}
