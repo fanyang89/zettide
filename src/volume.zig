@@ -399,25 +399,26 @@ pub const Volume = struct {
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
-        const fallback_kind: metadata.Kind = if (info.type == c.LFS_TYPE_DIR) .directory else .file;
-        const stored_metadata = self.getMetadata(path) catch |err| switch (err) {
-            error.AttributeNotFound => metadata.Metadata.init(
-                self.io,
-                fallback_kind,
-                if (fallback_kind == .directory) 0o40755 else 0o100644,
-                self.fallback_uid,
-                self.fallback_gid,
-            ),
-            else => return err,
-        };
-        if (info.type == c.LFS_TYPE_DIR) return .{
-            .size = 0,
-            .allocated_bytes = 0,
-            .metadata = stored_metadata,
-            .object_id = null,
-            .identity = try self.directoryIdentity(translated),
-            .nlink = try self.directoryLinkCount(translated),
-        };
+        if (info.type == c.LFS_TYPE_DIR) {
+            const stored_metadata = self.getDirectoryMetadataTranslated(translated) catch |err| switch (err) {
+                error.AttributeNotFound => metadata.Metadata.init(
+                    self.io,
+                    .directory,
+                    0o40755,
+                    self.fallback_uid,
+                    self.fallback_gid,
+                ),
+                else => return err,
+            };
+            return .{
+                .size = 0,
+                .allocated_bytes = 0,
+                .metadata = stored_metadata,
+                .object_id = null,
+                .identity = try self.directoryIdentity(translated),
+                .nlink = try self.directoryLinkCount(translated),
+            };
+        }
         const object_ref = try self.store().readRef(path);
         const head = try self.store().readHead(object_ref.object_id);
         return .{
@@ -505,6 +506,10 @@ pub const Volume = struct {
             const object_ref = try self.store().readRef(path);
             return (try self.store().readHead(object_ref.object_id)).metadata;
         }
+        return self.getDirectoryMetadataTranslated(translated);
+    }
+
+    fn getDirectoryMetadataTranslated(self: *Volume, translated: [*:0]const u8) !metadata.Metadata {
         var bytes: [metadata.encoded_size]u8 = undefined;
         const result = c.lfs_getattr(&self.lfs, translated, metadata.attribute_type, &bytes, bytes.len);
         if (result < 0) {
@@ -775,8 +780,10 @@ pub const Volume = struct {
         const effective_offset = if (handle.append) head.logical_size else offset;
         const end = std.math.add(u64, effective_offset, data.len) catch return error.FileTooLarge;
         if (end > object_format.max_file_size) return error.FileTooLarge;
-        const footprint = try self.store().writeFootprintWithHead(head, effective_offset, data.len);
-        try self.ensureWriteCapacity(footprint);
+        if (self.reservation_blocks != 0) {
+            const footprint = try self.store().writeFootprintWithHead(head, effective_offset, data.len);
+            try self.ensureWriteCapacity(footprint);
+        }
         const result = try self.store().writeWithHead(head, data, effective_offset);
         try self.replaceReservation(head, result.head);
         self.updateOpenMetadata(handle.object_id, result.head.metadata);
