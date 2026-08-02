@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const File = Io.File;
 const container = @import("container.zig");
@@ -166,7 +167,7 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return error.InjectedFault;
         }
-        self.file.sync(self.io) catch |err| {
+        syncData(self.file, self.io) catch |err| {
             self.freezeWrites();
             return err;
         };
@@ -191,6 +192,13 @@ pub const FileBlockDevice = struct {
 
     fn freezeWrites(self: *FileBlockDevice) void {
         self.write_frozen.store(true, .release);
+    }
+
+    fn syncData(file: File, io: Io) !void {
+        if (builtin.os.tag == .linux)
+            try std.posix.fdatasync(file.handle)
+        else
+            try file.sync(io);
     }
 
     fn position(self: *const FileBlockDevice, block: u32, offset: u32, len: usize) !u64 {
