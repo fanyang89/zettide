@@ -9,6 +9,7 @@ pub const name_profile = @import("name_profile.zig");
 pub const object_format = @import("object_format.zig");
 pub const object_store = @import("object_store.zig");
 pub const redo_journal = @import("redo_journal.zig");
+pub const redo_runtime = @import("redo_runtime.zig");
 pub const size = @import("size.zig");
 pub const target = @import("target.zig");
 pub const volume_crypto = @import("volume_crypto.zig");
@@ -40,6 +41,7 @@ test {
     _ = object_format;
     _ = object_store;
     _ = redo_journal;
+    _ = redo_runtime;
     _ = size;
     _ = target;
     _ = volume_crypto;

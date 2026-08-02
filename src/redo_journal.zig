@@ -76,6 +76,23 @@ pub fn encodedSize(block_count: usize) !usize {
         error.TransactionTooLarge;
 }
 
+pub fn transactionLength(prefix: []const u8) !?usize {
+    if (prefix.len != alignment) return error.TruncatedRecord;
+    if (isZero(prefix)) return null;
+    const begin = try decodeHeader(prefix);
+    if (begin.kind != .begin or begin.record_length != alignment or
+        begin.record_index != 0 or begin.target_block != std.math.maxInt(u32) or
+        begin.payload_length != 0 or begin.sequence == 0 or
+        !std.mem.eql(u8, &begin.payload_digest, &zero_digest) or
+        !std.mem.eql(u8, &begin.transaction_digest, &zero_digest))
+        return error.InvalidBeginRecord;
+    return @as(?usize, try encodedSize(begin.record_count));
+}
+
+pub fn encodedDigest(encoded: []const u8) Digest {
+    return hash(encoded);
+}
+
 pub fn encode(
     allocator: std.mem.Allocator,
     metadata: Metadata,
@@ -142,15 +159,8 @@ pub fn decode(
     target_block_count: u32,
 ) !DecodedTransaction {
     if (encoded.len < alignment) return error.TruncatedTransaction;
+    const length = (try transactionLength(encoded[0..alignment])).?;
     const begin = try decodeHeader(encoded[0..alignment]);
-    if (begin.kind != .begin or begin.record_length != alignment or
-        begin.record_index != 0 or begin.target_block != std.math.maxInt(u32) or
-        begin.payload_length != 0 or begin.sequence == 0 or
-        !std.mem.eql(u8, &begin.payload_digest, &zero_digest) or
-        !std.mem.eql(u8, &begin.transaction_digest, &zero_digest))
-        return error.InvalidBeginRecord;
-    if (begin.record_count > max_blocks_per_transaction) return error.TransactionTooLarge;
-    const length = try encodedSize(begin.record_count);
     if (encoded.len < length) return error.TruncatedTransaction;
 
     const blocks = try allocator.alloc(BlockImage, begin.record_count);
