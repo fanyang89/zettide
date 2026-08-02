@@ -10,6 +10,7 @@ pub const object_format = @import("object_format.zig");
 pub const object_store = @import("object_store.zig");
 pub const size = @import("size.zig");
 pub const target = @import("target.zig");
+pub const volume_crypto = @import("volume_crypto.zig");
 pub const spdk_catalog_endpoint_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_endpoint_backend.zig") else struct {};
 pub const spdk_catalog_volume_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_volume_backend.zig") else struct {};
 pub const spdk_catalog_vhost_export = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_vhost_export.zig") else struct {};
@@ -39,6 +40,7 @@ test {
     _ = object_store;
     _ = size;
     _ = target;
+    _ = volume_crypto;
     _ = spdk_catalog_endpoint_backend;
     _ = spdk_catalog_volume_backend;
     _ = spdk_catalog_vhost_export;

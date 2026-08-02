@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
 const name_profile = @import("name_profile.zig");
+const volume_crypto = @import("volume_crypto.zig");
 const google_crc32c = @import("crc32c");
 
 pub const header_size: usize = 4096;
@@ -15,8 +16,9 @@ pub const default_chunk_size: u32 = 1024 * 1024;
 pub const virtual_file_max: u64 = std.math.maxInt(i64);
 pub const feature_object_store: u32 = 1 << 0;
 pub const feature_name_profile: u32 = 1 << 1;
+pub const feature_encryption: u32 = 1 << 2;
 pub const supported_features: u32 = feature_object_store;
-pub const supported_feature_mask: u32 = supported_features | feature_name_profile;
+pub const supported_feature_mask: u32 = supported_features | feature_name_profile | feature_encryption;
 pub const object_format_version: u32 = 1;
 pub const max_label_len: usize = 127;
 pub const min_volume_size: u64 = 256 * 1024;
@@ -25,8 +27,11 @@ const magic = [8]u8{ 'L', 'F', 'S', 'D', 'R', 'V', '2', 0 };
 const format_major: u16 = 2;
 const format_minor_legacy: u16 = 0;
 const format_minor_name_profile: u16 = 1;
-const format_minor_current: u16 = format_minor_name_profile;
+const format_minor_encryption: u16 = 2;
+const format_minor_current: u16 = format_minor_encryption;
 const checksum_offset = header_size - @sizeOf(u32);
+const encryption_offset: usize = 256;
+const encryption_magic = [8]u8{ 'D', 'D', 'V', 'E', 'N', 'C', '1', 0 };
 
 pub const State = enum(u8) {
     creating = 1,
@@ -52,6 +57,7 @@ pub const Header = struct {
     user_file_max: u64 = virtual_file_max,
     object_version: u32 = object_format_version,
     chunk_size: u32 = default_chunk_size,
+    encryption: ?volume_crypto.Config = null,
     label: [max_label_len]u8 = @splat(0),
     label_len: u8 = 0,
 
@@ -75,7 +81,7 @@ pub const Header = struct {
         var result: Header = .{
             .sequence = 1,
             .state = .creating,
-            .features = featuresForNameProfile(profile),
+            .features = featuresFor(profile, false),
             .name_profile = profile,
             .uuid = undefined,
             .created_ns = @intCast(Io.Clock.real.now(io).nanoseconds),
@@ -92,11 +98,20 @@ pub const Header = struct {
         return header.label[0..header.label_len];
     }
 
+    pub fn setEncryption(header: *Header, config: volume_crypto.Config) void {
+        header.encryption = config;
+        header.features = featuresFor(header.name_profile, true);
+    }
+
+    pub fn isEncrypted(header: *const Header) bool {
+        return header.encryption != null;
+    }
+
     pub fn encode(header: Header) [header_size]u8 {
         var bytes: [header_size]u8 = @splat(0);
         @memcpy(bytes[0..magic.len], &magic);
         putInt(u16, &bytes, 8, format_major);
-        putInt(u16, &bytes, 10, formatMinorForNameProfile(header.name_profile));
+        putInt(u16, &bytes, 10, formatMinor(header.name_profile, header.isEncrypted()));
         putInt(u32, &bytes, 12, header_size);
         putInt(u64, &bytes, 16, header.sequence);
         bytes[24] = @intFromEnum(header.state);
@@ -121,6 +136,7 @@ pub const Header = struct {
             putInt(u16, &bytes, 248, header.name_profile.persistedId());
             putInt(u16, &bytes, 250, header.name_profile.persistedVersion());
         }
+        if (header.encryption) |encryption| encodeEncryption(&bytes, encryption);
         putInt(u32, &bytes, checksum_offset, checksum(bytes[0..checksum_offset]));
         return bytes;
     }
@@ -144,6 +160,8 @@ pub const Header = struct {
             try .fromPersisted(getInt(u16, bytes, 248), getInt(u16, bytes, 250))
         else
             return error.InvalidHeader;
+        const encrypted = features & feature_encryption != 0;
+        if ((format_minor == format_minor_encryption) != encrypted) return error.InvalidHeader;
         var result: Header = .{
             .sequence = getInt(u64, bytes, 16),
             .state = state,
@@ -163,6 +181,7 @@ pub const Header = struct {
             .user_file_max = getInt(u64, bytes, 232),
             .object_version = getInt(u32, bytes, 240),
             .chunk_size = getInt(u32, bytes, 244),
+            .encryption = if (encrypted) try decodeEncryption(bytes) else null,
             .label_len = label_len,
         };
         @memcpy(result.label[0..label_len], bytes[104 .. 104 + label_len]);
@@ -171,7 +190,7 @@ pub const Header = struct {
     }
 
     pub fn validate(header: Header) !void {
-        if (header.features != featuresForNameProfile(header.name_profile))
+        if (header.features != featuresFor(header.name_profile, header.isEncrypted()))
             return error.UnsupportedFeatures;
         if (header.payload_start < payload_offset or header.payload_start % header_size != 0)
             return error.InvalidHeader;
@@ -193,17 +212,20 @@ pub const Header = struct {
             header.chunk_size % header.block_size != 0)
             return error.InvalidHeader;
         if (!std.unicode.utf8ValidateSlice(header.labelSlice())) return error.InvalidHeader;
+        if (header.encryption) |encryption| try encryption.validate();
     }
 };
 
-fn featuresForNameProfile(profile: name_profile.Profile) u32 {
-    return switch (profile) {
+fn featuresFor(profile: name_profile.Profile, encrypted: bool) u32 {
+    const base = switch (profile) {
         .legacy_raw => feature_object_store,
-        .portable_v1 => supported_feature_mask,
+        .portable_v1 => feature_object_store | feature_name_profile,
     };
+    return base | if (encrypted) feature_encryption else 0;
 }
 
-fn formatMinorForNameProfile(profile: name_profile.Profile) u16 {
+fn formatMinor(profile: name_profile.Profile, encrypted: bool) u16 {
+    if (encrypted) return format_minor_encryption;
     return switch (profile) {
         .legacy_raw => format_minor_legacy,
         .portable_v1 => format_minor_name_profile,
@@ -265,6 +287,7 @@ fn decodeCandidate(bytes: *const [header_size]u8, bytes_read: usize) HeaderCandi
         error.UnsupportedFormat,
         error.UnsupportedFeatures,
         error.UnsupportedNameProfile,
+        error.UnsupportedEncryptionConfig,
         => .{ .unsupported = .{
             .sequence = getInt(u64, bytes, 16),
             .cause = err,
@@ -281,6 +304,40 @@ pub fn write(file: File, io: Io, offset: u64, header: Header) !void {
 
 fn checksum(bytes: []const u8) u32 {
     return google_crc32c.value(bytes);
+}
+
+fn encodeEncryption(bytes: *[header_size]u8, config: volume_crypto.Config) void {
+    @memcpy(bytes[encryption_offset..][0..encryption_magic.len], &encryption_magic);
+    putInt(u16, bytes, encryption_offset + 8, 1);
+    putInt(u16, bytes, encryption_offset + 10, @intFromEnum(config.cipher));
+    putInt(u16, bytes, encryption_offset + 12, @intFromEnum(config.kdf));
+    putInt(u32, bytes, encryption_offset + 16, config.data_unit_size);
+    putInt(u32, bytes, encryption_offset + 20, config.argon_time);
+    putInt(u32, bytes, encryption_offset + 24, config.argon_memory_kib);
+    putInt(u32, bytes, encryption_offset + 28, config.argon_parallelism);
+    @memcpy(bytes[encryption_offset + 32 ..][0..volume_crypto.salt_length], &config.salt);
+    @memcpy(bytes[encryption_offset + 64 ..][0..volume_crypto.verifier_length], &config.verifier);
+}
+
+fn decodeEncryption(bytes: *const [header_size]u8) !volume_crypto.Config {
+    if (!std.mem.eql(u8, bytes[encryption_offset..][0..encryption_magic.len], &encryption_magic) or
+        getInt(u16, bytes, encryption_offset + 8) != 1 or
+        getInt(u16, bytes, encryption_offset + 14) != 0)
+        return error.UnsupportedEncryptionConfig;
+    const config: volume_crypto.Config = .{
+        .cipher = std.enums.fromInt(volume_crypto.Cipher, getInt(u16, bytes, encryption_offset + 10)) orelse
+            return error.UnsupportedEncryptionConfig,
+        .kdf = std.enums.fromInt(volume_crypto.Kdf, getInt(u16, bytes, encryption_offset + 12)) orelse
+            return error.UnsupportedEncryptionConfig,
+        .data_unit_size = getInt(u32, bytes, encryption_offset + 16),
+        .argon_time = getInt(u32, bytes, encryption_offset + 20),
+        .argon_memory_kib = getInt(u32, bytes, encryption_offset + 24),
+        .argon_parallelism = @intCast(getInt(u32, bytes, encryption_offset + 28)),
+        .salt = bytes[encryption_offset + 32 ..][0..volume_crypto.salt_length].*,
+        .verifier = bytes[encryption_offset + 64 ..][0..volume_crypto.verifier_length].*,
+    };
+    try config.validate();
+    return config;
 }
 
 fn putInt(comptime T: type, bytes: *[header_size]u8, offset: usize, value: T) void {
@@ -314,11 +371,35 @@ test "portable name profile uses the versioned header extension" {
     );
     const bytes = header.encode();
     try std.testing.expectEqual(format_minor_name_profile, getInt(u16, &bytes, 10));
-    try std.testing.expectEqual(supported_feature_mask, getInt(u32, &bytes, 28));
+    try std.testing.expectEqual(feature_object_store | feature_name_profile, getInt(u32, &bytes, 28));
     try std.testing.expectEqual(@as(u16, 1), getInt(u16, &bytes, 248));
     try std.testing.expectEqual(@as(u16, 1), getInt(u16, &bytes, 250));
     const decoded = try Header.decode(&bytes);
     try std.testing.expectEqual(name_profile.Profile.portable_v1, decoded.name_profile);
+}
+
+test "encrypted header round trip uses the versioned extension" {
+    const key: [volume_crypto.master_key_length]u8 = @splat(0x5a);
+    var prepared = try volume_crypto.prepare(std.testing.allocator, std.testing.io, .{ .raw_key = &key });
+    defer prepared.context.deinit();
+    var header = try Header.initWithNameProfile(std.testing.io, 1024 * 1024, "Encrypted", .portable_v1);
+    header.setEncryption(prepared.config);
+    const bytes = header.encode();
+    try std.testing.expectEqual(format_minor_encryption, getInt(u16, &bytes, 10));
+    try std.testing.expectEqual(
+        feature_object_store | feature_name_profile | feature_encryption,
+        getInt(u32, &bytes, 28),
+    );
+    const decoded = try Header.decode(&bytes);
+    try std.testing.expect(decoded.isEncrypted());
+    try std.testing.expectEqual(volume_crypto.Kdf.raw_key, decoded.encryption.?.kdf);
+    var context = try volume_crypto.Context.open(
+        std.testing.allocator,
+        std.testing.io,
+        decoded.encryption.?,
+        .{ .raw_key = &key },
+    );
+    context.deinit();
 }
 
 test "legacy headers retain the v2.0 encoding" {
