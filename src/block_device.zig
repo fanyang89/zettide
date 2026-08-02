@@ -239,31 +239,54 @@ pub const FileBlockDevice = struct {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         if (self.redo) |*redo| {
             try self.redo_mutex.lock(self.io);
-            defer self.redo_mutex.unlock(self.io);
-            if (self.durability == .writeback and !self.accepting_writeback)
+            if (self.durability == .writeback and !self.accepting_writeback) {
+                self.redo_mutex.unlock(self.io);
                 return error.WritebackClosed;
+            }
             if (self.durability == .writeback and
                 self.accepted_epoch.load(.monotonic) == std.math.maxInt(u64))
             {
+                self.redo_mutex.unlock(self.io);
                 self.freezeWrites();
                 return error.EpochOverflow;
             }
-            const staged = switch (self.durability) {
-                .durable => commit: {
-                    redo.commit(self.redoSync()) catch |err| {
+
+            const staged = redo.stage() catch |err| {
+                self.redo_mutex.unlock(self.io);
+                self.freezeWrites();
+                return err;
+            };
+            switch (self.durability) {
+                .durable => {
+                    var prepared = (redo.seal() catch |err| {
+                        self.redo_mutex.unlock(self.io);
+                        self.freezeWrites();
+                        return err;
+                    }) orelse {
+                        self.redo_mutex.unlock(self.io);
+                        return;
+                    };
+                    self.redo_mutex.unlock(self.io);
+                    defer prepared.deinit();
+                    prepared.execute(self.io, self.file_io.borrow(), self.redoSync()) catch |err| {
                         self.freezeWrites();
                         return err;
                     };
-                    break :commit null;
+                    try self.redo_mutex.lock(self.io);
+                    redo.completeFlush(prepared.flush) catch |err| {
+                        self.redo_mutex.unlock(self.io);
+                        self.freezeWrites();
+                        return err;
+                    };
+                    self.redo_mutex.unlock(self.io);
                 },
-                .writeback => redo.stage() catch |err| {
-                    self.freezeWrites();
-                    return err;
+                .writeback => {
+                    if (staged != null) {
+                        self.accepted_epoch.store(self.accepted_epoch.load(.monotonic) + 1, .release);
+                    }
+                    self.redo_mutex.unlock(self.io);
+                    if (staged != null) self.requestFlush();
                 },
-            };
-            if (staged != null) {
-                self.accepted_epoch.store(self.accepted_epoch.load(.monotonic) + 1, .release);
-                self.requestFlush();
             }
         }
     }
@@ -438,19 +461,20 @@ pub const FileBlockDevice = struct {
             self.redo_mutex.unlock(self.io);
             return error.MissingRedoJournal;
         });
-        const flush = (redo.seal() catch |err| {
+        var prepared = (redo.seal() catch |err| {
             self.redo_mutex.unlock(self.io);
             return err;
         }) orelse {
             self.redo_mutex.unlock(self.io);
             return;
         };
+        defer prepared.deinit();
         const target_epoch = self.accepted_epoch.load(.acquire);
         self.redo_mutex.unlock(self.io);
 
-        try self.durableSync();
+        try prepared.execute(self.io, self.file_io.borrow(), self.redoSync());
         try self.redo_mutex.lock(self.io);
-        redo.completeFlush(flush) catch |err| {
+        redo.completeFlush(prepared.flush) catch |err| {
             self.redo_mutex.unlock(self.io);
             self.freezeWrites();
             return err;

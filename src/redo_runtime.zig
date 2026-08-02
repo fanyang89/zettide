@@ -28,6 +28,33 @@ pub const Flush = struct {
     slot: AnchorSlot,
 };
 
+pub const PreparedFlush = struct {
+    allocator: std.mem.Allocator,
+    flush: Flush,
+    writes: std.ArrayList(file_io.Write),
+    records: std.ArrayList(PendingRecord),
+    anchor_bytes: [redo_journal.anchor_size]u8,
+    anchor_position: u64,
+
+    pub fn execute(
+        self: *const PreparedFlush,
+        io: Io,
+        backend: file_io.BorrowedFileIo,
+        durable_sync: DurableSync,
+    ) !void {
+        try backend.writeAllManyAt(io, self.writes.items);
+        try backend.writeAllAt(io, &self.anchor_bytes, self.anchor_position);
+        try durable_sync.run();
+    }
+
+    pub fn deinit(self: *PreparedFlush) void {
+        for (self.records.items) |record| self.allocator.free(record.bytes);
+        self.records.deinit(self.allocator);
+        self.writes.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: Io,
@@ -190,9 +217,10 @@ pub const Runtime = struct {
 
     pub fn commit(self: *Runtime, durable_sync: DurableSync) !void {
         _ = try self.stage();
-        const flush = (try self.seal()) orelse return;
-        try durable_sync.run();
-        try self.completeFlush(flush);
+        var prepared = (try self.seal()) orelse return;
+        defer prepared.deinit();
+        try prepared.execute(self.io, self.file_io, durable_sync);
+        try self.completeFlush(prepared.flush);
     }
 
     pub fn stage(self: *Runtime) !?u64 {
@@ -250,18 +278,17 @@ pub const Runtime = struct {
         return next_sequence;
     }
 
-    pub fn seal(self: *Runtime) !?Flush {
+    pub fn seal(self: *Runtime) !?PreparedFlush {
         if (self.inflight_flush != null or self.flushing.count() != 0) return error.FlushInProgress;
         if (self.pending.count() == 0) return null;
         try self.committed.ensureUnusedCapacity(@intCast(self.pending.count()));
         var writes: std.ArrayList(file_io.Write) = .empty;
-        defer writes.deinit(self.allocator);
+        errdefer writes.deinit(self.allocator);
         const write_capacity = std.math.mul(usize, self.pending_records.items.len, 2) catch
             return error.OutOfMemory;
         try writes.ensureTotalCapacity(self.allocator, write_capacity);
         for (self.pending_records.items) |record|
             try self.appendRingWrites(&writes, record.offset, record.bytes);
-        try self.file_io.writeAllManyAt(self.io, writes.items);
         const next_generation = std.math.add(u64, self.anchor_generation, 1) catch
             return error.GenerationOverflow;
         const flush: Flush = .{
@@ -275,11 +302,19 @@ pub const Runtime = struct {
             .slot = self.nextAnchorSlot(),
         };
         const anchor_bytes = try redo_journal.encodeAnchor(flush.anchor, self.dataCapacity());
-        try self.file_io.writeAllAt(self.io, &anchor_bytes, try self.anchorPosition(flush.slot));
-        self.freePendingRecords();
+        const anchor_position = try self.anchorPosition(flush.slot);
+        const records = self.pending_records;
+        self.pending_records = .empty;
         std.mem.swap(ImageMap, &self.pending, &self.flushing);
         self.inflight_flush = flush;
-        return flush;
+        return .{
+            .allocator = self.allocator,
+            .flush = flush,
+            .writes = writes,
+            .records = records,
+            .anchor_bytes = anchor_bytes,
+            .anchor_position = anchor_position,
+        };
     }
 
     pub fn inflightFlush(self: *const Runtime) ?Flush {
@@ -765,9 +800,10 @@ test "redo runtime flushes multiple staged transactions with one sync" {
         try std.testing.expectEqualSlices(u8, &@as([5]u8, @splat(0)), &actual);
     }
 
-    const flush = (try runtime.seal()).?;
-    try sync_state.durable().run();
-    try runtime.completeFlush(flush);
+    var prepared = (try runtime.seal()).?;
+    defer prepared.deinit();
+    try prepared.execute(std.testing.io, runtime.file_io, sync_state.durable());
+    try runtime.completeFlush(prepared.flush);
     try std.testing.expectEqual(@as(u64, 1), sync_state.count);
 
     var recovered = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
@@ -796,7 +832,8 @@ test "redo runtime collects the next cohort during a flush" {
     try runtime.begin();
     try runtime.program(1, 0, "old");
     _ = try runtime.stage();
-    const first_flush = (try runtime.seal()).?;
+    var first_prepared = (try runtime.seal()).?;
+    defer first_prepared.deinit();
     try runtime.begin();
     try runtime.program(1, 0, "new");
     _ = try runtime.stage();
@@ -804,13 +841,14 @@ test "redo runtime collects the next cohort during a flush" {
     try runtime.read(1, 0, &visible);
     try std.testing.expectEqualStrings("new", &visible);
 
-    try sync_state.durable().run();
-    try runtime.completeFlush(first_flush);
+    try first_prepared.execute(std.testing.io, runtime.file_io, sync_state.durable());
+    try runtime.completeFlush(first_prepared.flush);
     try runtime.read(1, 0, &visible);
     try std.testing.expectEqualStrings("new", &visible);
-    const second_flush = (try runtime.seal()).?;
-    try sync_state.durable().run();
-    try runtime.completeFlush(second_flush);
+    var second_prepared = (try runtime.seal()).?;
+    defer second_prepared.deinit();
+    try second_prepared.execute(std.testing.io, runtime.file_io, sync_state.durable());
+    try runtime.completeFlush(second_prepared.flush);
     try std.testing.expectEqual(@as(u64, 2), sync_state.count);
 
     var recovered = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
