@@ -327,7 +327,6 @@ fn createCoreModule(
     core.addCSourceFiles(.{
         .files = &.{
             "vendor/littlefs/lfs.c",
-            "vendor/littlefs/lfs_util.c",
             "vendor/utf8proc/utf8proc.c",
         },
         .flags = &.{ "-std=c99", "-DLFS_THREADSAFE", "-DUTF8PROC_STATIC" },

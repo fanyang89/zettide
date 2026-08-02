@@ -22,6 +22,10 @@ pub const v3 = @import("v3/root.zig");
 pub const linux_fuse = if (@import("builtin").os.tag == .linux) @import("linux_fuse.zig") else struct {};
 pub const windows_winfsp = if (@import("builtin").os.tag == .windows) @import("windows_winfsp.zig") else struct {};
 
+comptime {
+    _ = block_device.lfs_crc;
+}
+
 test {
     _ = block_device;
     _ = container;

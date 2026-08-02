@@ -8,6 +8,14 @@ pub const c = @cImport({
     @cInclude("lfs.h");
 });
 
+pub export fn lfs_crc(initial: u32, raw: ?*const anyopaque, size: usize) callconv(.c) u32 {
+    if (size == 0) return initial;
+    const bytes = @as([*]const u8, @ptrCast(raw.?))[0..size];
+    var crc: std.hash.crc.Crc32Jamcrc = .{ .crc = initial };
+    crc.update(bytes);
+    return crc.final();
+}
+
 pub const FileBlockDevice = struct {
     io: Io,
     file: File,
@@ -252,4 +260,14 @@ test "lookahead size is aligned and bounded" {
     try std.testing.expectEqual(@as(u32, 8), lookaheadSize(1));
     try std.testing.expectEqual(@as(u32, 16), lookaheadSize(65));
     try std.testing.expectEqual(@as(u32, 4096), lookaheadSize(std.math.maxInt(u32)));
+}
+
+test "littlefs CRC preserves raw streaming state" {
+    const first = lfs_crc(0xffffffff, "1234".ptr, 4);
+    try std.testing.expectEqual(@as(u32, 0x641c1f5c), first);
+    try std.testing.expectEqual(@as(u32, 0x340bc6d9), lfs_crc(first, "56789".ptr, 5));
+    try std.testing.expectEqual(@as(u32, 0x340bc6d9), lfs_crc(0xffffffff, "123456789".ptr, 9));
+    try std.testing.expectEqual(@as(u32, 0x5dd2af4d), lfs_crc(0x12345678, "abc".ptr, 3));
+    try std.testing.expectEqual(@as(u32, 0x2dfd2d88), lfs_crc(0, "123456789".ptr, 9));
+    try std.testing.expectEqual(@as(u32, 0x12345678), lfs_crc(0x12345678, null, 0));
 }
