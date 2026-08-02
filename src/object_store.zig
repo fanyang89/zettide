@@ -68,7 +68,11 @@ pub const Store = struct {
         try self.collectNamespaceRefs(namespace_root, counts);
     }
 
-    pub fn recoverOrphans(self: Store, referenced: *const std.AutoHashMap(format.ObjectId, u64)) !void {
+    pub fn recoverOrphans(
+        self: Store,
+        referenced: *const std.AutoHashMap(format.ObjectId, u64),
+        recovered_heads: *std.AutoHashMap(format.ObjectId, format.ObjectHead),
+    ) !void {
         while (try self.firstTemporaryRef()) |name| {
             var path_buffer: [max_path_bytes:0]u8 = @splat(0);
             const path = try formatPath(&path_buffer, "{s}/{s}", .{ temporary_root, name });
@@ -76,7 +80,7 @@ pub const Store = struct {
         }
         var iterator = referenced.keyIterator();
         while (iterator.next()) |id| {
-            _ = try self.recoverObject(id.*);
+            try recovered_heads.put(id.*, try self.recoverObject(id.*));
         }
         while (try self.firstOrphan(referenced)) |id| try self.removeObject(id);
     }

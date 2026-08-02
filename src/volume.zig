@@ -29,6 +29,7 @@ pub const Volume = struct {
     writable: bool = false,
     open_objects: std.AutoHashMap(object_format.ObjectId, OpenObject),
     link_counts: std.AutoHashMap(object_format.ObjectId, u64),
+    directory_link_counts: std.AutoHashMap(object_format.ObjectId, u64),
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
     reservation_blocks: u64 = 0,
     object_transaction_mutex: Io.Mutex,
@@ -220,6 +221,7 @@ pub const Volume = struct {
         result.writable = writable;
         result.open_objects = std.AutoHashMap(object_format.ObjectId, OpenObject).init(std.heap.c_allocator);
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.directory_link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
@@ -282,6 +284,7 @@ pub const Volume = struct {
         result.writable = writable;
         result.open_objects = std.AutoHashMap(object_format.ObjectId, OpenObject).init(std.heap.c_allocator);
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.directory_link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
@@ -322,10 +325,13 @@ pub const Volume = struct {
             self.mounted = false;
         }
         self.link_counts.clearRetainingCapacity();
+        self.directory_link_counts.clearRetainingCapacity();
         self.object_pins.clearRetainingCapacity();
         try self.store().collectLinkCounts(&self.link_counts);
-        if (self.writable) try self.store().recoverOrphans(&self.link_counts);
-        self.reservation_blocks = try self.collectReservationBlocks();
+        var recovered_heads = std.AutoHashMap(object_format.ObjectId, object_format.ObjectHead).init(std.heap.c_allocator);
+        defer recovered_heads.deinit();
+        if (self.writable) try self.store().recoverOrphans(&self.link_counts, &recovered_heads);
+        self.reservation_blocks = try self.collectReservationBlocks(if (self.writable) &recovered_heads else null);
     }
 
     pub fn close(self: *Volume) !void {
@@ -353,6 +359,7 @@ pub const Volume = struct {
             self.file.close(self.io);
         }
         self.open_objects.deinit();
+        self.directory_link_counts.deinit();
         self.object_pins.deinit();
         self.link_counts.deinit();
         self.closed = true;
@@ -411,13 +418,19 @@ pub const Volume = struct {
                 ),
                 else => return err,
             };
+            const identity = try self.directoryIdentity(translated);
+            const link_count = self.directory_link_counts.get(identity) orelse value: {
+                const count = try self.directoryLinkCount(translated);
+                try self.directory_link_counts.put(identity, count);
+                break :value count;
+            };
             return .{
                 .size = 0,
                 .allocated_bytes = 0,
                 .metadata = stored_metadata,
                 .object_id = null,
-                .identity = try self.directoryIdentity(translated),
-                .nlink = try self.directoryLinkCount(translated),
+                .identity = identity,
+                .nlink = link_count,
             };
         }
         const object_ref = try self.store().readRef(path);
@@ -553,6 +566,7 @@ pub const Volume = struct {
             inherited.gid,
         ));
         try self.updateParentTimes(path);
+        self.adjustCachedParentLinkCount(path, true);
     }
 
     pub fn makeSymlink(self: *Volume, path: [*:0]const u8, target: []const u8, uid: u32, gid: u32) !void {
@@ -623,6 +637,7 @@ pub const Volume = struct {
         }
         try self.updateParentTimes(path);
         try checkLfs(c.lfs_remove(&self.lfs, translated));
+        if (info.type == c.LFS_TYPE_DIR) self.adjustCachedParentLinkCount(path, false);
         if (removed_object) |object_ref| {
             object_count.?.* -= 1;
             self.reclaimObjectIfUnused(object_ref.object_id) catch {};
@@ -699,6 +714,15 @@ pub const Volume = struct {
         if (!std.mem.eql(u8, parentSlice(old_path), parentSlice(new_path)))
             try self.updateParentTimes(new_path);
         try checkLfs(c.lfs_rename(&self.lfs, old_translated, new_translated));
+        if (old_info.type == c.LFS_TYPE_DIR) {
+            const same_parent = std.mem.eql(u8, parentSlice(old_path), parentSlice(new_path));
+            if (!same_parent) self.adjustCachedParentLinkCount(old_path, false);
+            if (!new_exists) {
+                if (!same_parent) self.adjustCachedParentLinkCount(new_path, true);
+            } else if (same_parent) {
+                self.adjustCachedParentLinkCount(old_path, false);
+            }
+        }
         if (replaced) |object_ref| {
             replaced_count.?.* -= 1;
             self.reclaimObjectIfUnused(object_ref.object_id) catch {};
@@ -962,11 +986,17 @@ pub const Volume = struct {
         if (self.isWriteFrozen()) return error.VolumeFrozen;
     }
 
-    fn collectReservationBlocks(self: *Volume) !u64 {
+    fn collectReservationBlocks(
+        self: *Volume,
+        recovered_heads: ?*const std.AutoHashMap(object_format.ObjectId, object_format.ObjectHead),
+    ) !u64 {
         var total: u64 = 0;
         var iterator = self.link_counts.keyIterator();
         while (iterator.next()) |id| {
-            const head = try self.store().readHead(id.*);
+            const head = if (recovered_heads) |heads|
+                heads.get(id.*) orelse return error.CorruptFilesystem
+            else
+                try self.store().readHead(id.*);
             try self.store().validateReservations(head);
             total = try addCapacity(total, try self.reservationBlocks(head));
         }
@@ -1161,6 +1191,28 @@ pub const Volume = struct {
                 if (!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, ".."))
                     count = std.math.add(u64, count, 1) catch return error.CorruptFilesystem;
             }
+        }
+    }
+
+    fn adjustCachedParentLinkCount(self: *Volume, path: [*:0]const u8, increase: bool) void {
+        const parent = parentSlice(path);
+        var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        if (parent.len >= parent_buffer.len) return;
+        @memcpy(parent_buffer[0..parent.len], parent);
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const translated = object_store.Store.translateUserPath(&parent_buffer, &translated_buffer) catch return;
+        const identity = self.directoryIdentity(translated) catch return;
+        const count = self.directory_link_counts.getPtr(identity) orelse return;
+        if (increase) {
+            count.* = std.math.add(u64, count.*, 1) catch {
+                _ = self.directory_link_counts.remove(identity);
+                return;
+            };
+        } else {
+            count.* = std.math.sub(u64, count.*, 1) catch {
+                _ = self.directory_link_counts.remove(identity);
+                return;
+            };
         }
     }
 
