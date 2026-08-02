@@ -27,7 +27,7 @@ pub const Volume = struct {
     fallback_uid: u32 = 0,
     fallback_gid: u32 = 0,
     writable: bool = false,
-    open_files: ?*FileHandle = null,
+    open_objects: std.AutoHashMap(object_format.ObjectId, OpenObject),
     link_counts: std.AutoHashMap(object_format.ObjectId, u64),
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
     reservation_blocks: u64 = 0,
@@ -218,7 +218,7 @@ pub const Volume = struct {
         result.fallback_uid = 0;
         result.fallback_gid = 0;
         result.writable = writable;
-        result.open_files = null;
+        result.open_objects = std.AutoHashMap(object_format.ObjectId, OpenObject).init(std.heap.c_allocator);
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.reservation_blocks = 0;
@@ -280,7 +280,7 @@ pub const Volume = struct {
         result.fallback_uid = 0;
         result.fallback_gid = 0;
         result.writable = writable;
-        result.open_files = null;
+        result.open_objects = std.AutoHashMap(object_format.ObjectId, OpenObject).init(std.heap.c_allocator);
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.reservation_blocks = 0;
@@ -352,6 +352,7 @@ pub const Volume = struct {
         } else {
             self.file.close(self.io);
         }
+        self.open_objects.deinit();
         self.object_pins.deinit();
         self.link_counts.deinit();
         self.closed = true;
@@ -749,6 +750,7 @@ pub const Volume = struct {
     }
 
     fn openObjectUnlocked(self: *Volume, handle: *FileHandle, object_id: object_format.ObjectId, flags: c_int) !void {
+        try self.open_objects.ensureUnusedCapacity(1);
         const old_head = try self.store().readHead(object_id);
         const head = if (flags & c.LFS_O_TRUNC != 0) try self.store().truncate(object_id, 0) else old_head;
         if (flags & c.LFS_O_TRUNC != 0) try self.replaceReservation(old_head, head);
@@ -760,9 +762,15 @@ pub const Volume = struct {
             .append = flags & c.LFS_O_APPEND != 0,
             .writable = flags & c.LFS_O_WRONLY != 0 or flags & c.LFS_O_RDWR != 0,
             .open = true,
-            .next = self.open_files,
+            .previous = null,
+            .next = null,
         };
-        self.open_files = handle;
+        const entry = self.open_objects.getOrPutAssumeCapacity(object_id);
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        handle.next = entry.value_ptr.first;
+        if (handle.next) |next| next.previous = handle;
+        entry.value_ptr.first = handle;
+        entry.value_ptr.count += 1;
     }
 
     pub fn closeFile(self: *Volume, handle: *FileHandle) !void {
@@ -1016,9 +1024,10 @@ pub const Volume = struct {
     }
 
     fn updateOpenMetadata(self: *Volume, id: object_format.ObjectId, value: metadata.Metadata) void {
-        var current = self.open_files;
+        const object = self.open_objects.get(id) orelse return;
+        var current = object.first;
         while (current) |handle| : (current = handle.next) {
-            if (std.mem.eql(u8, &handle.object_id, &id)) handle.metadata = value;
+            handle.metadata = value;
         }
     }
 
@@ -1059,11 +1068,7 @@ pub const Volume = struct {
     }
 
     fn hasOpenObject(self: *Volume, id: object_format.ObjectId) bool {
-        var current = self.open_files;
-        while (current) |handle| : (current = handle.next) {
-            if (std.mem.eql(u8, &handle.object_id, &id)) return true;
-        }
-        return false;
+        return self.open_objects.contains(id);
     }
 
     fn reclaimObjectIfUnused(self: *Volume, id: object_format.ObjectId) !void {
@@ -1077,16 +1082,17 @@ pub const Volume = struct {
     }
 
     fn unregisterFile(self: *Volume, target: *FileHandle) !void {
-        var cursor = &self.open_files;
-        while (cursor.*) |handle| {
-            if (handle == target) {
-                cursor.* = handle.next;
-                target.next = null;
-                return;
-            }
-            cursor = &handle.next;
-        }
-        return error.InvalidArgument;
+        const object = self.open_objects.getPtr(target.object_id) orelse return error.InvalidArgument;
+        if (target.previous) |previous| {
+            previous.next = target.next;
+        } else if (object.first == target) {
+            object.first = target.next;
+        } else return error.InvalidArgument;
+        if (target.next) |next| next.previous = target.previous;
+        target.previous = null;
+        target.next = null;
+        object.count -= 1;
+        if (object.count == 0) _ = self.open_objects.remove(target.object_id);
     }
 
     fn createSpecial(
@@ -1312,7 +1318,13 @@ pub const FileHandle = struct {
     append: bool = false,
     writable: bool = false,
     open: bool = false,
+    previous: ?*FileHandle = null,
     next: ?*FileHandle = null,
+};
+
+const OpenObject = struct {
+    first: ?*FileHandle = null,
+    count: usize = 0,
 };
 
 pub const DirectoryHandle = struct {
