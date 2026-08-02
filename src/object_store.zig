@@ -100,8 +100,6 @@ pub const Store = struct {
         try checkLfs(c.lfs_mkdir(self.lfs, object_path));
         errdefer self.removeObject(id) catch {};
 
-        var chunks_path_buffer: [max_path_bytes:0]u8 = @splat(0);
-        try checkLfs(c.lfs_mkdir(self.lfs, try chunksPath(id, &chunks_path_buffer)));
         const head: format.ObjectHead = .{
             .object_id = id,
             .generation = 1,
@@ -402,7 +400,7 @@ pub const Store = struct {
     pub fn removeObject(self: Store, id: format.ObjectId) !void {
         while (try self.firstChunkName(id)) |name| {
             var path_buffer: [max_path_bytes:0]u8 = @splat(0);
-            try checkLfs(c.lfs_remove(self.lfs, try namedChunkPath(id, name, &path_buffer)));
+            try checkLfs(c.lfs_remove(self.lfs, try self.namedChunkPath(id, name, &path_buffer)));
         }
         while (try self.firstReservationName(id)) |name| {
             var reservation_path_buffer: [max_path_bytes:0]u8 = @splat(0);
@@ -634,7 +632,7 @@ pub const Store = struct {
     fn collectChunkIndices(self: Store, id: format.ObjectId, indices: *std.AutoHashMap(u64, void)) !void {
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
-        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try chunksPath(id, &path_buffer)));
+        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try self.chunkDirectoryPath(id, &path_buffer)));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
         while (true) {
             var info: c.struct_lfs_info = undefined;
@@ -651,7 +649,7 @@ pub const Store = struct {
         var selected: ?ChunkVersion = null;
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
-        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try chunksPath(id, &path_buffer)));
+        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try self.chunkDirectoryPath(id, &path_buffer)));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
         while (true) {
             var info: c.struct_lfs_info = undefined;
@@ -668,7 +666,7 @@ pub const Store = struct {
     fn firstChunkName(self: Store, id: format.ObjectId) !?[33]u8 {
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
-        const open_result = c.lfs_dir_open(self.lfs, &directory, try chunksPath(id, &path_buffer));
+        const open_result = c.lfs_dir_open(self.lfs, &directory, try self.chunkDirectoryPath(id, &path_buffer));
         if (open_result == c.LFS_ERR_NOENT) return null;
         try checkLfs(open_result);
         defer _ = c.lfs_dir_close(self.lfs, &directory);
@@ -695,7 +693,7 @@ pub const Store = struct {
         if (minimum > maximum) return error.CorruptFilesystem;
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
-        try checkLfs(c.lfs_file_open(self.lfs, &file, try chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
+        try checkLfs(c.lfs_file_open(self.lfs, &file, try self.chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
         defer _ = c.lfs_file_close(self.lfs, &file);
         var header: [chunk_header_size]u8 = undefined;
         const header_amount = c.lfs_file_read(self.lfs, &file, &header, header.len);
@@ -720,7 +718,7 @@ pub const Store = struct {
     fn readChunkLength(self: Store, id: format.ObjectId, version: ChunkVersion, maximum: u32) !u32 {
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
-        try checkLfs(c.lfs_file_open(self.lfs, &file, try chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
+        try checkLfs(c.lfs_file_open(self.lfs, &file, try self.chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
         defer _ = c.lfs_file_close(self.lfs, &file);
         var header: [chunk_header_size]u8 = undefined;
         const amount = c.lfs_file_read(self.lfs, &file, &header, header.len);
@@ -735,7 +733,7 @@ pub const Store = struct {
 
     fn writeChunkVersion(self: Store, id: format.ObjectId, version: ChunkVersion, data: []const u8) !void {
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
-        const path = try chunkVersionPath(id, version, &path_buffer);
+        const path = try self.chunkVersionPath(id, version, &path_buffer);
         errdefer removeIfPresent(self.lfs, path) catch {};
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         try checkLfs(c.lfs_file_open(
@@ -763,7 +761,7 @@ pub const Store = struct {
     fn pruneChunkVersions(self: Store, id: format.ObjectId, index: u64, keep_generation: u64) !void {
         while (try self.firstObsoleteChunkVersion(id, index, keep_generation)) |version| {
             var path_buffer: [max_path_bytes:0]u8 = @splat(0);
-            try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPath(id, version, &path_buffer)));
+            try checkLfs(c.lfs_remove(self.lfs, try self.chunkVersionPath(id, version, &path_buffer)));
         }
     }
 
@@ -781,7 +779,7 @@ pub const Store = struct {
     fn removeUncommittedChunkVersions(self: Store, id: format.ObjectId, committed_generation: u64) !void {
         while (try self.firstUncommittedChunkVersion(id, committed_generation)) |version| {
             var path_buffer: [max_path_bytes:0]u8 = @splat(0);
-            try checkLfs(c.lfs_remove(self.lfs, try chunkVersionPath(id, version, &path_buffer)));
+            try checkLfs(c.lfs_remove(self.lfs, try self.chunkVersionPath(id, version, &path_buffer)));
         }
     }
 
@@ -792,7 +790,7 @@ pub const Store = struct {
     ) !?ChunkVersion {
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
-        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try chunksPath(id, &path_buffer)));
+        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try self.chunkDirectoryPath(id, &path_buffer)));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
         while (true) {
             var info: c.struct_lfs_info = undefined;
@@ -813,7 +811,7 @@ pub const Store = struct {
     ) !?ChunkVersion {
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
-        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try chunksPath(id, &path_buffer)));
+        try checkLfs(c.lfs_dir_open(self.lfs, &directory, try self.chunkDirectoryPath(id, &path_buffer)));
         defer _ = c.lfs_dir_close(self.lfs, &directory);
         while (true) {
             var info: c.struct_lfs_info = undefined;
@@ -888,6 +886,44 @@ pub const Store = struct {
                     return error.CorruptFilesystem;
             }
         }
+    }
+
+    fn chunkDirectoryPath(self: Store, id: format.ObjectId, buffer: *[max_path_bytes:0]u8) ![*:0]const u8 {
+        const legacy = try chunksPath(id, buffer);
+        var info: c.struct_lfs_info = undefined;
+        const result = c.lfs_stat(self.lfs, legacy, &info);
+        if (result >= 0) {
+            if (info.type != c.LFS_TYPE_DIR) return error.CorruptFilesystem;
+            return legacy;
+        }
+        if (result != c.LFS_ERR_NOENT) try checkLfs(result);
+        return objectPath(id, buffer);
+    }
+
+    fn chunkVersionPath(
+        self: Store,
+        id: format.ObjectId,
+        version: ChunkVersion,
+        buffer: *[max_path_bytes:0]u8,
+    ) ![*:0]const u8 {
+        var directory_buffer: [max_path_bytes:0]u8 = @splat(0);
+        const directory = try self.chunkDirectoryPath(id, &directory_buffer);
+        return formatPath(buffer, "{s}/{x:0>16}-{x:0>16}", .{
+            std.mem.span(directory),
+            version.index,
+            version.generation,
+        });
+    }
+
+    fn namedChunkPath(
+        self: Store,
+        id: format.ObjectId,
+        name: [33]u8,
+        buffer: *[max_path_bytes:0]u8,
+    ) ![*:0]const u8 {
+        var directory_buffer: [max_path_bytes:0]u8 = @splat(0);
+        const directory = try self.chunkDirectoryPath(id, &directory_buffer);
+        return formatPath(buffer, "{s}/{s}", .{ std.mem.span(directory), name });
     }
 };
 
@@ -1118,25 +1154,6 @@ fn reservationVersionPath(id: format.ObjectId, generation: u64, buffer: *[max_pa
 fn namedReservationPath(id: format.ObjectId, name: [28]u8, buffer: *[max_path_bytes:0]u8) ![*:0]const u8 {
     var id_buffer: [32]u8 = undefined;
     return formatPath(buffer, "{s}/{s}/{s}", .{
-        objects_root,
-        format.formatObjectId(id, &id_buffer),
-        name,
-    });
-}
-
-fn chunkVersionPath(id: format.ObjectId, version: ChunkVersion, buffer: *[max_path_bytes:0]u8) ![*:0]const u8 {
-    var id_buffer: [32]u8 = undefined;
-    return formatPath(buffer, "{s}/{s}/chunks/{x:0>16}-{x:0>16}", .{
-        objects_root,
-        format.formatObjectId(id, &id_buffer),
-        version.index,
-        version.generation,
-    });
-}
-
-fn namedChunkPath(id: format.ObjectId, name: [33]u8, buffer: *[max_path_bytes:0]u8) ![*:0]const u8 {
-    var id_buffer: [32]u8 = undefined;
-    return formatPath(buffer, "{s}/{s}/chunks/{s}", .{
         objects_root,
         format.formatObjectId(id, &id_buffer),
         name,

@@ -5,6 +5,7 @@ pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("en
 pub const endpoint_registry = @import("endpoint_registry.zig");
 pub const dufs_server = if (@import("builtin").os.tag == .linux) @import("dufs_server.zig") else struct {};
 pub const metadata = @import("metadata.zig");
+pub const name_profile = @import("name_profile.zig");
 pub const object_format = @import("object_format.zig");
 pub const object_store = @import("object_store.zig");
 pub const size = @import("size.zig");
@@ -29,6 +30,7 @@ test {
     _ = endpoint_registry;
     _ = dufs_server;
     _ = metadata;
+    _ = name_profile;
     _ = object_format;
     _ = object_store;
     _ = size;

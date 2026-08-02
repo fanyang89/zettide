@@ -17,6 +17,7 @@
         "vendor/littlefs/lfs_util.c",
         "vendor/littlefs/lfs_util.h",
         "vendor/littlefs/LICENSE.md",
+        "vendor/utf8proc",
         "vendor/libfuse-tests",
         "vendor/xfstests",
     },

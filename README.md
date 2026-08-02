@@ -218,11 +218,17 @@ pass it to `zettide pool initialize --device ... --confirm <token>`.
 The supported filesystem behavior and explicit exclusions are documented in
 `docs/fs-semantics.md`.
 
+The not-yet-persisted cross-platform name contract is documented in
+`docs/portable-name-profile.md`.
+
 The target POSIX.1-2024 filesystem semantics and completion criteria are
 defined in `docs/posix-profile.md`.
 
 littlefs is licensed under BSD-3-Clause. Its pinned source and license are in
 `vendor/littlefs`.
+
+utf8proc is licensed under MIT and includes Unicode-licensed generated data.
+Its pinned source, Unicode version, and license are in `vendor/utf8proc`.
 
 Vendored libfuse and xfstests test sources are GPL-2.0 and are only compiled as
 test executables. Their source commits and licenses are recorded under `vendor/`.

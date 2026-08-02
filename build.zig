@@ -216,7 +216,7 @@ pub fn build(b: *std.Build) void {
     posix_nightly_step.dependOn(ltp_step);
     posix_nightly_step.dependOn(fault_step);
 
-    const cross_step = b.step("test-cross", "Compile portable core and CLI for Windows");
+    const cross_step = b.step("test-cross", "Compile portable boundaries for Windows and macOS");
     const windows_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .windows,
@@ -224,7 +224,13 @@ pub fn build(b: *std.Build) void {
     });
     const windows_core = createCoreModule(b, windows_target, optimize, false);
     const windows_exe = createExecutable(b, "zettide-windows-check", windows_target, optimize, windows_core, false);
+    const windows_name_tests = createNameProfileCrossTest(b, windows_target, optimize, windows_core);
+    const macos_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
+    const macos_core = createCoreModule(b, macos_target, optimize, false);
+    const macos_name_tests = createNameProfileCrossTest(b, macos_target, optimize, macos_core);
     cross_step.dependOn(&windows_exe.step);
+    cross_step.dependOn(&windows_name_tests.step);
+    cross_step.dependOn(&macos_name_tests.step);
 
     const test_step = b.step("test", "Run unit, image, and CLI tests");
     test_step.dependOn(unit_step);
@@ -235,6 +241,23 @@ pub fn build(b: *std.Build) void {
     ci_step.dependOn(test_step);
     ci_step.dependOn(fault_step);
     ci_step.dependOn(cross_step);
+}
+
+fn createNameProfileCrossTest(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    core: *std.Build.Module,
+) *std.Build.Step.Compile {
+    return b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/name-profile-cross.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zettide", .module = core }},
+        }),
+    });
 }
 
 fn createCoreModule(
@@ -250,14 +273,17 @@ fn createCoreModule(
         .link_libc = true,
     });
     core.addIncludePath(b.path("vendor/littlefs"));
+    core.addIncludePath(b.path("vendor/utf8proc"));
     core.addIncludePath(b.path("src"));
     core.addCMacro("LFS_THREADSAFE", "1");
+    core.addCMacro("UTF8PROC_STATIC", "1");
     core.addCSourceFiles(.{
         .files = &.{
             "vendor/littlefs/lfs.c",
             "vendor/littlefs/lfs_util.c",
+            "vendor/utf8proc/utf8proc.c",
         },
-        .flags = &.{ "-std=c99", "-DLFS_THREADSAFE" },
+        .flags = &.{ "-std=c99", "-DLFS_THREADSAFE", "-DUTF8PROC_STATIC" },
     });
     if (with_fuse) {
         core.addCMacro("FUSE_USE_VERSION", "35");

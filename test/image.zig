@@ -84,6 +84,76 @@ test "data and metadata survive a real container reopen" {
     }
 }
 
+test "new small objects store chunks without a private chunk directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    const before = try volume.usedBlocks();
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/compact", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+    const after_create = try volume.usedBlocks();
+    try std.testing.expectEqual(@as(u32, 2), after_create - before);
+    try std.testing.expectEqual(@as(usize, 5), try volume.writeFile(&file, "small", 0));
+    try std.testing.expectEqual(after_create, try volume.usedBlocks());
+
+    var id_buffer: [32]u8 = undefined;
+    var chunks_path: [128:0]u8 = @splat(0);
+    const value = try std.fmt.bufPrint(
+        chunks_path[0..128],
+        "/system/objects/{s}/chunks",
+        .{zettide.object_format.formatObjectId(file.object_id, &id_buffer)},
+    );
+    chunks_path[value.len] = 0;
+    var info: c.struct_lfs_info = undefined;
+    try std.testing.expectEqual(@as(c_int, c.LFS_ERR_NOENT), c.lfs_stat(&volume.lfs, &chunks_path, &info));
+    try volume.closeFile(&file);
+}
+
+test "legacy private chunk directories remain readable and writable" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/legacy", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        var id_buffer: [32]u8 = undefined;
+        var chunks_path: [128:0]u8 = @splat(0);
+        const value = try std.fmt.bufPrint(
+            chunks_path[0..128],
+            "/system/objects/{s}/chunks",
+            .{zettide.object_format.formatObjectId(file.object_id, &id_buffer)},
+        );
+        chunks_path[value.len] = 0;
+        try zettide.volume.checkLfs(c.lfs_mkdir(&volume.lfs, &chunks_path));
+        try std.testing.expectEqual(@as(usize, 9), try volume.writeFile(&file, "persisted", 0));
+        try volume.syncFile(&file);
+        try volume.closeFile(&file);
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/legacy", c.LFS_O_RDWR, 0, 0, 0);
+        var actual: [9]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+        try std.testing.expectEqualStrings("persisted", &actual);
+        try std.testing.expectEqual(@as(usize, 1), try volume.writeFile(&file, "!", actual.len));
+        try volume.closeFile(&file);
+    }
+}
+
 test "explicit close is idempotent and persists writable data" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
