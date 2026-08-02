@@ -25,6 +25,8 @@ const Inode = struct {
     lookup_count: u64,
     open_count: u64,
     children: std.StringHashMapUnmanaged(*Dentry),
+    dentries: ?*Dentry,
+    previous: ?*Inode,
     next: ?*Inode,
 };
 
@@ -33,6 +35,9 @@ const Dentry = struct {
     inode: *Inode,
     name: [name_capacity:0]u8,
     path: [path_capacity:0]u8,
+    inode_previous: ?*Dentry,
+    inode_next: ?*Dentry,
+    previous: ?*Dentry,
     next: ?*Dentry,
 };
 
@@ -60,6 +65,8 @@ const MountState = struct {
             .lookup_count = 1,
             .open_count = 0,
             .children = .empty,
+            .dentries = null,
+            .previous = null,
             .next = null,
         };
         state.node_index.putAssumeCapacityNoClobber(root.id, root);
@@ -120,11 +127,17 @@ const MountState = struct {
             .inode = node,
             .name = @splat(0),
             .path = @splat(0),
+            .inode_previous = null,
+            .inode_next = node.dentries,
+            .previous = null,
             .next = self.dentries,
         };
         @memcpy(dentry.name[0..name.len], name);
         try self.setDentryPath(dentry);
         parent.children.putAssumeCapacityNoClobber(std.mem.sliceTo(&dentry.name, 0), dentry);
+        if (dentry.inode_next) |next| next.inode_previous = dentry;
+        node.dentries = dentry;
+        if (dentry.next) |next| next.previous = dentry;
         self.dentries = dentry;
         node.kind = info.metadata.kind;
         node.cached_info = info;
@@ -147,8 +160,11 @@ const MountState = struct {
             .lookup_count = 0,
             .open_count = 0,
             .children = .empty,
+            .dentries = null,
+            .previous = null,
             .next = self.nodes,
         };
+        if (node.next) |next| next.previous = node;
         self.node_index.putAssumeCapacityNoClobber(id, node);
         self.nodes = node;
         return node;
@@ -162,27 +178,18 @@ const MountState = struct {
     fn removeUnreferencedNode(self: *MountState, target: *Inode) void {
         if (target.id == c.FUSE_ROOT_ID or target.lookup_count != 0 or target.open_count != 0 or
             self.hasDentryReference(target)) return;
-        var cursor = &self.nodes;
-        while (cursor.*) |node| {
-            if (node == target) {
-                cursor.* = node.next;
-                const removed = self.node_index.fetchRemove(node.id) orelse unreachable;
-                std.debug.assert(removed.value == node);
-                if (node.object_id) |object_id| self.volume.unpinObject(object_id) catch {};
-                node.children.deinit(std.heap.c_allocator);
-                std.heap.c_allocator.destroy(node);
-                return;
-            }
-            cursor = &node.next;
-        }
+        if (target.previous) |previous| previous.next = target.next else self.nodes = target.next;
+        if (target.next) |next| next.previous = target.previous;
+        const removed = self.node_index.fetchRemove(target.id) orelse unreachable;
+        std.debug.assert(removed.value == target);
+        if (target.object_id) |object_id| self.volume.unpinObject(object_id) catch {};
+        target.children.deinit(std.heap.c_allocator);
+        std.heap.c_allocator.destroy(target);
     }
 
     fn hasDentryReference(self: *MountState, target: *const Inode) bool {
-        var current = self.dentries;
-        while (current) |dentry| : (current = dentry.next) {
-            if (dentry.inode == target or dentry.parent == target) return true;
-        }
-        return false;
+        _ = self;
+        return target.dentries != null or target.children.count() != 0;
     }
 
     fn hasChildren(self: *MountState, target: *const Inode) bool {
@@ -192,23 +199,20 @@ const MountState = struct {
 
     fn pruneCaches(self: *MountState) void {
         while (true) {
-            var cursor = &self.dentries;
+            var current_dentry = self.dentries;
             var removed = false;
-            while (cursor.*) |dentry| {
+            while (current_dentry) |dentry| : (current_dentry = dentry.next) {
                 if (dentry.inode.lookup_count == 0 and dentry.inode.open_count == 0 and
                     !self.hasChildren(dentry.inode))
                 {
                     const inode = dentry.inode;
                     const parent = dentry.parent;
-                    cursor.* = dentry.next;
-                    self.removeEntryFromIndex(dentry);
-                    std.heap.c_allocator.destroy(dentry);
+                    self.removeEntry(dentry);
                     self.removeUnreferencedNode(inode);
                     self.removeUnreferencedNode(parent);
                     removed = true;
                     break;
                 }
-                cursor = &dentry.next;
             }
             if (removed) continue;
 
@@ -227,16 +231,16 @@ const MountState = struct {
     }
 
     fn removeEntry(self: *MountState, target: *Dentry) void {
-        var cursor = &self.dentries;
-        while (cursor.*) |dentry| {
-            if (dentry == target) {
-                cursor.* = dentry.next;
-                self.removeEntryFromIndex(dentry);
-                std.heap.c_allocator.destroy(dentry);
-                return;
-            }
-            cursor = &dentry.next;
+        if (target.previous) |previous| previous.next = target.next else self.dentries = target.next;
+        if (target.next) |next| next.previous = target.previous;
+        if (target.inode_previous) |previous| {
+            previous.inode_next = target.inode_next;
+        } else {
+            target.inode.dentries = target.inode_next;
         }
+        if (target.inode_next) |next| next.inode_previous = target.inode_previous;
+        self.removeEntryFromIndex(target);
+        std.heap.c_allocator.destroy(target);
     }
 
     fn removeEntryFromIndex(self: *MountState, target: *Dentry) void {
@@ -247,42 +251,41 @@ const MountState = struct {
     }
 
     fn updateDescendantPaths(self: *MountState, parent: *Inode) !void {
-        var current = self.dentries;
-        while (current) |dentry| : (current = dentry.next) {
-            if (dentry.parent == parent) {
-                try self.setDentryPath(dentry);
-                try self.updateDescendantPaths(dentry.inode);
-            }
+        var iterator = parent.children.valueIterator();
+        while (iterator.next()) |dentry_ptr| {
+            const dentry = dentry_ptr.*;
+            try self.setDentryPath(dentry);
+            try self.updateDescendantPaths(dentry.inode);
         }
     }
 
     fn validateDescendantPaths(self: *MountState, source: *Dentry, new_path: []const u8) !void {
-        const old_path_length = std.mem.sliceTo(&source.path, 0).len;
-        var current = self.dentries;
-        while (current) |dentry| : (current = dentry.next) {
-            if (dentry == source or !self.isDescendant(dentry, source.inode)) continue;
-            const path_length = std.mem.sliceTo(&dentry.path, 0).len;
-            if (new_path.len + path_length - old_path_length >= path_capacity)
-                return error.NameTooLong;
-        }
+        return self.validateChildPaths(
+            source.inode,
+            std.mem.sliceTo(&source.path, 0).len,
+            new_path.len,
+        );
     }
 
-    fn isDescendant(self: *MountState, dentry: *const Dentry, ancestor: *const Inode) bool {
-        var parent: ?*Inode = dentry.parent;
-        while (parent) |current| {
-            if (current == ancestor) return true;
-            const parent_dentry = self.findEntryForInode(current) orelse return false;
-            parent = parent_dentry.parent;
+    fn validateChildPaths(
+        self: *MountState,
+        parent: *Inode,
+        old_prefix_length: usize,
+        new_prefix_length: usize,
+    ) !void {
+        var iterator = parent.children.valueIterator();
+        while (iterator.next()) |dentry_ptr| {
+            const dentry = dentry_ptr.*;
+            const path_length = std.mem.sliceTo(&dentry.path, 0).len;
+            if (new_prefix_length + path_length - old_prefix_length >= path_capacity)
+                return error.NameTooLong;
+            try self.validateChildPaths(dentry.inode, old_prefix_length, new_prefix_length);
         }
-        return false;
     }
 
     fn findEntryForInode(self: *MountState, inode: *const Inode) ?*Dentry {
-        var current = self.dentries;
-        while (current) |dentry| : (current = dentry.next) {
-            if (dentry.inode == inode) return dentry;
-        }
-        return null;
+        _ = self;
+        return inode.dentries;
     }
 
     fn pathFor(self: *MountState, inode: *const Inode) ?[*:0]const u8 {
