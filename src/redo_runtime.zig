@@ -154,6 +154,7 @@ pub const Runtime = struct {
                 _ = self.active.remove(block);
                 return error.TransactionTooLarge;
             }
+            errdefer std.debug.assert(self.active.remove(block));
             const image = try self.allocator.create(Image);
             errdefer self.allocator.destroy(image);
             if (self.pending.get(block)) |pending|
@@ -238,7 +239,6 @@ pub const Runtime = struct {
     }
 
     pub fn seal(self: *Runtime) !?Flush {
-        if (self.active_transaction) return error.TransactionActive;
         if (self.inflight_flush != null or self.flushing.count() != 0) return error.FlushInProgress;
         if (self.pending.count() == 0) return null;
         try self.committed.ensureUnusedCapacity(@intCast(self.pending.count()));
@@ -672,6 +672,25 @@ test "redo runtime abort discards active block images" {
     var actual: [9]u8 = undefined;
     try runtime.read(1, 0, &actual);
     try std.testing.expectEqualSlices(u8, &@as([9]u8, @splat(0)), &actual);
+}
+
+test "redo runtime removes a block entry when loading its image fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "load-failure.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "LoadFailure");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+
+    var runtime = try Runtime.init(std.testing.allocator, std.testing.io, file, header);
+    defer runtime.deinit();
+    try file.setLength(std.testing.io, header.payload_start + 1);
+    try runtime.begin();
+    try std.testing.expectError(error.UnexpectedEndOfFile, runtime.program(1, 0, "unreadable"));
+    runtime.abort();
+    try std.testing.expectEqual(@as(u32, 0), runtime.active.count());
 }
 
 test "redo runtime flushes multiple staged transactions with one sync" {

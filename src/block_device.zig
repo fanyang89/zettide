@@ -5,6 +5,17 @@ const File = Io.File;
 const container = @import("container.zig");
 const redo_runtime = @import("redo_runtime.zig");
 
+pub const Durability = union(enum) {
+    durable,
+    writeback: Writeback,
+
+    pub const Writeback = struct {
+        max_delay_ns: u64 = std.time.ns_per_ms,
+    };
+};
+
+const FlushResult = anyerror!void;
+
 pub const c = @cImport({
     @cDefine("_FORTIFY_SOURCE", "0");
     @cInclude("lfs.h");
@@ -32,6 +43,19 @@ pub const FileBlockDevice = struct {
     dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
     redo: ?redo_runtime.Runtime = null,
+    durability: Durability = .durable,
+    lifecycle_mutex: Io.Mutex = .init,
+    group_mutex: Io.Mutex = .init,
+    group_condition: Io.Condition = .init,
+    flush_future: ?Io.Future(FlushResult) = null,
+    flush_requested: bool = false,
+    force_flush: bool = false,
+    delay_elapsed: bool = false,
+    closing: bool = false,
+    accepting_writeback: bool = true,
+    writeback_error: ?anyerror = null,
+    accepted_epoch: std.atomic.Value(u64) = .init(0),
+    durable_epoch: std.atomic.Value(u64) = .init(0),
 
     pub fn init(io: Io, file: File, header: container.Header) FileBlockDevice {
         return .{
@@ -56,6 +80,7 @@ pub const FileBlockDevice = struct {
     }
 
     pub fn program(self: *FileBlockDevice, block: u32, offset: u32, data: []const u8) !void {
+        try self.checkWritebackError();
         if (self.isWriteFrozen()) return error.WriteFrozen;
         const file_offset = try self.position(block, offset, data.len);
         const action = if (self.fault) |fault| fault.action(.program) else .none;
@@ -83,16 +108,41 @@ pub const FileBlockDevice = struct {
     }
 
     pub fn sync(self: *FileBlockDevice) !void {
+        try self.checkWritebackError();
         if (self.isWriteFrozen()) return error.WriteFrozen;
         if (self.redo) |*redo| {
             try self.redo_mutex.lock(self.io);
-            defer self.redo_mutex.unlock(self.io);
-            try redo.logicalSync();
-            if (!redo.hasActiveTransaction() and try redo.checkpointRecommended())
+            redo.logicalSync() catch |err| {
+                self.redo_mutex.unlock(self.io);
+                return err;
+            };
+            const active = redo.hasActiveTransaction();
+            self.redo_mutex.unlock(self.io);
+            if (active) return;
+            if (self.durability == .writeback) try self.flushWriteback();
+            while (true) {
+                try self.redo_mutex.lock(self.io);
+                if (redo.hasPendingWrites()) {
+                    self.redo_mutex.unlock(self.io);
+                    try self.flushWriteback();
+                    continue;
+                }
+                const recommended = redo.checkpointRecommended() catch |err| {
+                    self.redo_mutex.unlock(self.io);
+                    return err;
+                };
+                if (!recommended) {
+                    self.redo_mutex.unlock(self.io);
+                    break;
+                }
                 redo.checkpoint(self.redoSync()) catch |err| {
+                    self.redo_mutex.unlock(self.io);
                     self.freezeWrites();
                     return err;
                 };
+                self.redo_mutex.unlock(self.io);
+                break;
+            }
             return;
         }
         if (!self.dirty.load(.acquire)) return;
@@ -105,7 +155,31 @@ pub const FileBlockDevice = struct {
         self.redo = try redo_runtime.Runtime.init(allocator, self.io, self.file, header);
     }
 
+    pub fn setDurability(self: *FileBlockDevice, durability: Durability) !void {
+        try self.lifecycle_mutex.lock(self.io);
+        defer self.lifecycle_mutex.unlock(self.io);
+        try self.checkWritebackError();
+        self.group_mutex.lockUncancelable(self.io);
+        const closing = self.closing;
+        self.group_mutex.unlock(self.io);
+        if (closing) return error.WritebackClosed;
+        if (self.flush_future != null) return error.DurabilityAlreadyConfigured;
+        if (self.redo == null) {
+            if (durability == .writeback) return error.WritebackRequiresRedoJournal;
+            self.durability = durability;
+            return;
+        }
+        self.durability = durability;
+        if (durability == .writeback) {
+            self.flush_future = self.io.concurrent(writebackLoop, .{self}) catch |err| {
+                self.durability = .durable;
+                return err;
+            };
+        }
+    }
+
     pub fn deinit(self: *FileBlockDevice) void {
+        self.finishWriteback() catch {};
         if (self.redo) |*redo| {
             redo.deinit();
             self.redo = null;
@@ -113,23 +187,70 @@ pub const FileBlockDevice = struct {
     }
 
     pub fn beginTransaction(self: *FileBlockDevice) !void {
+        try self.checkWritebackError();
         if (self.isWriteFrozen()) return error.WriteFrozen;
         const redo = &(self.redo orelse return);
-        try self.redo_mutex.lock(self.io);
-        defer self.redo_mutex.unlock(self.io);
-        if (try redo.needsCheckpoint()) try redo.checkpoint(self.redoSync());
-        try redo.begin();
+        while (true) {
+            try self.redo_mutex.lock(self.io);
+            if (self.durability == .writeback and !self.accepting_writeback) {
+                self.redo_mutex.unlock(self.io);
+                return error.WritebackClosed;
+            }
+            const needs_checkpoint = redo.needsCheckpoint() catch |err| {
+                self.redo_mutex.unlock(self.io);
+                return err;
+            };
+            if (!needs_checkpoint) {
+                defer self.redo_mutex.unlock(self.io);
+                return redo.begin();
+            }
+            self.redo_mutex.unlock(self.io);
+            if (self.durability == .writeback) try self.flushWriteback();
+            try self.redo_mutex.lock(self.io);
+            if (redo.hasPendingWrites()) {
+                self.redo_mutex.unlock(self.io);
+                continue;
+            }
+            redo.checkpoint(self.redoSync()) catch |err| {
+                self.redo_mutex.unlock(self.io);
+                self.freezeWrites();
+                return err;
+            };
+            self.redo_mutex.unlock(self.io);
+        }
     }
 
     pub fn commitTransaction(self: *FileBlockDevice) !void {
+        try self.checkWritebackError();
         if (self.isWriteFrozen()) return error.WriteFrozen;
         if (self.redo) |*redo| {
             try self.redo_mutex.lock(self.io);
             defer self.redo_mutex.unlock(self.io);
-            redo.commit(self.redoSync()) catch |err| {
+            if (self.durability == .writeback and !self.accepting_writeback)
+                return error.WritebackClosed;
+            if (self.durability == .writeback and
+                self.accepted_epoch.load(.monotonic) == std.math.maxInt(u64))
+            {
                 self.freezeWrites();
-                return err;
+                return error.EpochOverflow;
+            }
+            const staged = switch (self.durability) {
+                .durable => commit: {
+                    redo.commit(self.redoSync()) catch |err| {
+                        self.freezeWrites();
+                        return err;
+                    };
+                    break :commit null;
+                },
+                .writeback => redo.stage() catch |err| {
+                    self.freezeWrites();
+                    return err;
+                },
             };
+            if (staged != null) {
+                self.accepted_epoch.store(self.accepted_epoch.load(.monotonic) + 1, .release);
+                self.requestFlush();
+            }
         }
     }
 
@@ -137,7 +258,10 @@ pub const FileBlockDevice = struct {
         if (self.redo) |*redo| {
             try self.redo_mutex.lock(self.io);
             defer self.redo_mutex.unlock(self.io);
-            const had_writes = redo.hasActiveWrites();
+            const had_writes = switch (self.durability) {
+                .durable => redo.hasUndurableWrites(),
+                .writeback => redo.hasActiveWrites(),
+            };
             redo.abort();
             if (had_writes) self.freezeWrites();
             return had_writes;
@@ -146,19 +270,194 @@ pub const FileBlockDevice = struct {
     }
 
     pub fn checkpointRedo(self: *FileBlockDevice) !void {
+        try self.checkWritebackError();
         if (self.isWriteFrozen()) return error.WriteFrozen;
         if (self.redo) |*redo| {
-            try self.redo_mutex.lock(self.io);
-            defer self.redo_mutex.unlock(self.io);
-            redo.checkpoint(self.redoSync()) catch |err| {
-                self.freezeWrites();
-                return err;
-            };
+            while (true) {
+                if (self.durability == .writeback) try self.flushWriteback();
+                try self.redo_mutex.lock(self.io);
+                if (redo.hasPendingWrites()) {
+                    self.redo_mutex.unlock(self.io);
+                    continue;
+                }
+                redo.checkpoint(self.redoSync()) catch |err| {
+                    self.redo_mutex.unlock(self.io);
+                    self.freezeWrites();
+                    return err;
+                };
+                self.redo_mutex.unlock(self.io);
+                break;
+            }
         }
     }
 
     pub fn isJournaled(self: *const FileBlockDevice) bool {
         return self.redo != null;
+    }
+
+    pub fn finishWriteback(self: *FileBlockDevice) !void {
+        try self.lifecycle_mutex.lock(self.io);
+        defer self.lifecycle_mutex.unlock(self.io);
+        const future = if (self.flush_future) |*value| value else {
+            try self.checkWritebackError();
+            return;
+        };
+        self.redo_mutex.lockUncancelable(self.io);
+        self.accepting_writeback = false;
+        self.redo_mutex.unlock(self.io);
+        var first_error: ?anyerror = null;
+        self.group_mutex.lockUncancelable(self.io);
+        self.closing = true;
+        self.force_flush = true;
+        self.flush_requested = true;
+        self.group_condition.broadcast(self.io);
+        self.group_mutex.unlock(self.io);
+        self.flushWriteback() catch |err| {
+            first_error = err;
+        };
+        future.await(self.io) catch |err| {
+            if (first_error == null) first_error = err;
+        };
+        self.flush_future = null;
+        if (first_error) |err| return err;
+    }
+
+    fn requestFlush(self: *FileBlockDevice) void {
+        self.group_mutex.lockUncancelable(self.io);
+        self.flush_requested = true;
+        self.group_condition.signal(self.io);
+        self.group_mutex.unlock(self.io);
+    }
+
+    fn flushWriteback(self: *FileBlockDevice) !void {
+        try self.checkWritebackError();
+        if (self.flush_future == null) return;
+        const target = self.accepted_epoch.load(.acquire);
+        if (self.durable_epoch.load(.acquire) >= target) return;
+        try self.group_mutex.lock(self.io);
+        defer self.group_mutex.unlock(self.io);
+        if (self.writeback_error) |err| return err;
+        self.flush_requested = true;
+        self.force_flush = true;
+        self.group_condition.signal(self.io);
+        while (self.durable_epoch.load(.acquire) < target) {
+            if (self.writeback_error) |err| return err;
+            try self.group_condition.wait(self.io, &self.group_mutex);
+        }
+    }
+
+    fn writebackLoop(self: *FileBlockDevice) FlushResult {
+        while (true) {
+            self.group_mutex.lockUncancelable(self.io);
+            while (!self.flush_requested and !self.closing and self.writeback_error == null)
+                self.group_condition.waitUncancelable(self.io, &self.group_mutex);
+            if (self.writeback_error) |err| {
+                self.group_mutex.unlock(self.io);
+                return err;
+            }
+            if (self.closing and
+                self.durable_epoch.load(.acquire) >= self.accepted_epoch.load(.acquire))
+            {
+                self.group_mutex.unlock(self.io);
+                return;
+            }
+            self.flush_requested = false;
+            const immediate = self.closing or self.force_flush;
+            self.force_flush = false;
+            const delay_ns = switch (self.durability) {
+                .durable => 0,
+                .writeback => |options| options.max_delay_ns,
+            };
+            self.group_mutex.unlock(self.io);
+
+            if (!immediate and delay_ns != 0)
+                self.waitForBatchDelay(delay_ns) catch |err| {
+                    self.recordWritebackError(err);
+                    return err;
+                };
+            self.flushCohort() catch |err| {
+                self.recordWritebackError(err);
+                return err;
+            };
+        }
+    }
+
+    fn waitForBatchDelay(self: *FileBlockDevice, delay_ns: u64) !void {
+        self.group_mutex.lockUncancelable(self.io);
+        if (self.force_flush or self.closing) {
+            self.force_flush = false;
+            self.group_mutex.unlock(self.io);
+            return;
+        }
+        self.delay_elapsed = false;
+        self.group_mutex.unlock(self.io);
+
+        var timer = try self.io.concurrent(batchDelay, .{ self, delay_ns });
+        self.group_mutex.lockUncancelable(self.io);
+        while (!self.delay_elapsed and !self.force_flush and !self.closing)
+            self.group_condition.waitUncancelable(self.io, &self.group_mutex);
+        const cancel_timer = !self.delay_elapsed;
+        self.force_flush = false;
+        self.group_mutex.unlock(self.io);
+
+        if (cancel_timer)
+            timer.cancel(self.io) catch {}
+        else
+            try timer.await(self.io);
+    }
+
+    fn batchDelay(self: *FileBlockDevice, delay_ns: u64) Io.Cancelable!void {
+        try self.io.sleep(.fromNanoseconds(delay_ns), .awake);
+        self.group_mutex.lockUncancelable(self.io);
+        self.delay_elapsed = true;
+        self.group_condition.broadcast(self.io);
+        self.group_mutex.unlock(self.io);
+    }
+
+    fn flushCohort(self: *FileBlockDevice) !void {
+        try self.redo_mutex.lock(self.io);
+        const redo = &(self.redo orelse {
+            self.redo_mutex.unlock(self.io);
+            return error.MissingRedoJournal;
+        });
+        const flush = (redo.seal() catch |err| {
+            self.redo_mutex.unlock(self.io);
+            return err;
+        }) orelse {
+            self.redo_mutex.unlock(self.io);
+            return;
+        };
+        const target_epoch = self.accepted_epoch.load(.acquire);
+        self.redo_mutex.unlock(self.io);
+
+        try self.durableSync();
+        try self.redo_mutex.lock(self.io);
+        redo.completeFlush(flush) catch |err| {
+            self.redo_mutex.unlock(self.io);
+            self.freezeWrites();
+            return err;
+        };
+        const more_pending = redo.hasPendingWrites();
+        self.redo_mutex.unlock(self.io);
+        self.durable_epoch.store(target_epoch, .release);
+        self.group_mutex.lockUncancelable(self.io);
+        self.group_condition.broadcast(self.io);
+        self.group_mutex.unlock(self.io);
+        if (more_pending) self.requestFlush();
+    }
+
+    fn recordWritebackError(self: *FileBlockDevice, err: anyerror) void {
+        self.freezeWrites();
+        self.group_mutex.lockUncancelable(self.io);
+        if (self.writeback_error == null) self.writeback_error = err;
+        self.group_condition.broadcast(self.io);
+        self.group_mutex.unlock(self.io);
+    }
+
+    fn checkWritebackError(self: *FileBlockDevice) !void {
+        self.group_mutex.lockUncancelable(self.io);
+        defer self.group_mutex.unlock(self.io);
+        if (self.writeback_error) |err| return err;
     }
 
     fn durableSync(self: *FileBlockDevice) !void {
@@ -271,6 +570,7 @@ pub const FileBlockDevice = struct {
 };
 
 pub const FaultController = struct {
+    mutex: std.atomic.Mutex = .unlocked,
     fail_read_at: ?u64 = null,
     fail_program_at: ?u64 = null,
     fail_program_partial_at: ?u64 = null,
@@ -282,6 +582,8 @@ pub const FaultController = struct {
     sync_count: u64 = 0,
 
     pub fn disable(self: *FaultController) void {
+        self.lock();
+        defer self.mutex.unlock();
         self.fail_read_at = null;
         self.fail_program_at = null;
         self.fail_program_partial_at = null;
@@ -290,7 +592,15 @@ pub const FaultController = struct {
         self.fail_sync_after_at = null;
     }
 
+    pub fn syncCalls(self: *FaultController) u64 {
+        self.lock();
+        defer self.mutex.unlock();
+        return self.sync_count;
+    }
+
     fn action(self: *FaultController, operation: enum { read, program, sync }) FaultAction {
+        self.lock();
+        defer self.mutex.unlock();
         const count = switch (operation) {
             .read => &self.read_count,
             .program => &self.program_count,
@@ -315,6 +625,10 @@ pub const FaultController = struct {
             else
                 .none,
         };
+    }
+
+    fn lock(self: *FaultController) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
 };
 
@@ -385,15 +699,15 @@ test "journaled block device syncs once per committed transaction" {
     try device.beginTransaction();
     try device.program(4, 32, "transaction");
     try device.sync();
-    try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
+    try std.testing.expectEqual(@as(u64, 0), fault.syncCalls());
     try device.commitTransaction();
-    try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+    try std.testing.expectEqual(@as(u64, 1), fault.syncCalls());
 
     var actual: [11]u8 = undefined;
     try device.read(4, 32, &actual);
     try std.testing.expectEqualStrings("transaction", &actual);
     try device.checkpointRedo();
-    try std.testing.expectEqual(@as(u64, 3), fault.sync_count);
+    try std.testing.expectEqual(@as(u64, 3), fault.syncCalls());
 }
 
 test "journaled block device checkpoints low space on explicit sync" {
@@ -415,9 +729,9 @@ test "journaled block device checkpoints low space on explicit sync" {
     try device.beginTransaction();
     try device.program(4, 32, "transaction");
     try device.commitTransaction();
-    try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+    try std.testing.expectEqual(@as(u64, 1), fault.syncCalls());
     try device.sync();
-    try std.testing.expectEqual(@as(u64, 3), fault.sync_count);
+    try std.testing.expectEqual(@as(u64, 3), fault.syncCalls());
 
     var home: [11]u8 = undefined;
     _ = try file.readPositionalAll(
@@ -426,6 +740,150 @@ test "journaled block device checkpoints low space on explicit sync" {
         header.payload_start + 4 * header.block_size + 32,
     );
     try std.testing.expectEqualStrings("transaction", &home);
+}
+
+test "writeback groups staged transactions into one sync" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "writeback.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "Writeback");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var device = FileBlockDevice.init(std.testing.io, file, header);
+    defer device.deinit();
+    try device.enableRedo(std.testing.allocator, header);
+    try device.setDurability(.{ .writeback = .{ .max_delay_ns = std.time.ns_per_min } });
+    var fault: FaultController = .{};
+    device.fault = &fault;
+
+    try device.beginTransaction();
+    try device.program(1, 0, "first");
+    try device.commitTransaction();
+    try device.beginTransaction();
+    try device.program(2, 0, "second");
+    try device.commitTransaction();
+    try std.testing.expectEqual(@as(u64, 0), fault.syncCalls());
+
+    var visible: [6]u8 = undefined;
+    try device.read(2, 0, &visible);
+    try std.testing.expectEqualStrings("second", &visible);
+    try device.sync();
+    try std.testing.expectEqual(@as(u64, 1), fault.syncCalls());
+}
+
+test "writeback flushes a pending cohort while a transaction is active" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "writeback-active.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "WritebackActive");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var device = FileBlockDevice.init(std.testing.io, file, header);
+    defer device.deinit();
+    try device.enableRedo(std.testing.allocator, header);
+    try device.setDurability(.{ .writeback = .{} });
+    var fault: FaultController = .{};
+    device.fault = &fault;
+
+    device.redo_mutex.lockUncancelable(std.testing.io);
+    var redo_locked = true;
+    defer if (redo_locked) device.redo_mutex.unlock(std.testing.io);
+    const redo = &device.redo.?;
+    try redo.begin();
+    try redo.program(1, 0, "first");
+    _ = try redo.stage();
+    device.accepted_epoch.store(1, .release);
+    try redo.begin();
+    try redo.program(2, 0, "second");
+    device.redo_mutex.unlock(std.testing.io);
+    redo_locked = false;
+
+    try device.flushWriteback();
+    try std.testing.expectEqual(@as(u64, 1), fault.syncCalls());
+    try device.commitTransaction();
+    try device.sync();
+    try std.testing.expectEqual(@as(u64, 2), fault.syncCalls());
+}
+
+test "finishing writeback drains writes and closes acceptance" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "writeback-finish.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "WritebackFinish");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var device = FileBlockDevice.init(std.testing.io, file, header);
+    defer device.deinit();
+    try device.enableRedo(std.testing.allocator, header);
+    try device.setDurability(.{ .writeback = .{} });
+    var fault: FaultController = .{};
+    device.fault = &fault;
+
+    try device.beginTransaction();
+    try device.program(1, 0, "transaction");
+    try device.commitTransaction();
+    try device.finishWriteback();
+    try std.testing.expectEqual(@as(u64, 1), fault.syncCalls());
+    try std.testing.expectError(error.WritebackClosed, device.beginTransaction());
+    try std.testing.expectError(error.WritebackClosed, device.setDurability(.{ .writeback = .{} }));
+}
+
+test "aborting an empty transaction preserves an older writeback cohort" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "writeback-abort.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "WritebackAbort");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var device = FileBlockDevice.init(std.testing.io, file, header);
+    defer device.deinit();
+    try device.enableRedo(std.testing.allocator, header);
+    try device.setDurability(.{ .writeback = .{ .max_delay_ns = std.time.ns_per_min } });
+
+    try device.beginTransaction();
+    try device.program(1, 0, "transaction");
+    try device.commitTransaction();
+    try device.beginTransaction();
+    try std.testing.expect(!try device.abortTransaction());
+    try std.testing.expect(!device.isWriteFrozen());
+    try device.sync();
+}
+
+test "writeback preserves an asynchronous sync error" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "writeback-error.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "WritebackError");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var device = FileBlockDevice.init(std.testing.io, file, header);
+    defer device.deinit();
+    try device.enableRedo(std.testing.allocator, header);
+    try device.setDurability(.{ .writeback = .{} });
+    var fault: FaultController = .{ .fail_sync_at = 0 };
+    device.fault = &fault;
+
+    try device.beginTransaction();
+    try device.program(1, 0, "transaction");
+    try device.commitTransaction();
+    try std.testing.expectError(error.InjectedFault, device.sync());
+    try std.testing.expectError(error.InjectedFault, device.beginTransaction());
+    try std.testing.expectError(error.InjectedFault, device.finishWriteback());
 }
 
 test "lookahead size is aligned and bounded" {
