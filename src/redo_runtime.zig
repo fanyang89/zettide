@@ -2,11 +2,16 @@ const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
 const container = @import("container.zig");
+const file_io = @import("file_io.zig");
 const redo_journal = @import("redo_journal.zig");
 const google_crc32c = @import("crc32c");
 
 const Image = [redo_journal.block_size]u8;
 const ImageMap = std.AutoHashMap(u32, *Image);
+const PendingRecord = struct {
+    offset: u64,
+    bytes: []u8,
+};
 pub const AnchorSlot = enum(u1) { a, b };
 
 pub const DurableSync = struct {
@@ -26,7 +31,7 @@ pub const Flush = struct {
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     io: Io,
-    file: File,
+    file_io: file_io.BorrowedFileIo,
     payload_start: u64,
     block_count: u32,
     descriptor: container.RedoJournal,
@@ -34,6 +39,7 @@ pub const Runtime = struct {
     pending: ImageMap,
     flushing: ImageMap,
     committed: ImageMap,
+    pending_records: std.ArrayList(PendingRecord) = .empty,
     active_transaction: bool = false,
     anchor_slot: ?AnchorSlot = null,
     anchor_generation: u64 = 0,
@@ -52,6 +58,15 @@ pub const Runtime = struct {
         file: File,
         header: container.Header,
     ) !Runtime {
+        return initWithFileIo(allocator, io, file_io.FileIo.posix(file).borrow(), header);
+    }
+
+    pub fn initWithFileIo(
+        allocator: std.mem.Allocator,
+        io: Io,
+        backend: file_io.BorrowedFileIo,
+        header: container.Header,
+    ) !Runtime {
         const descriptor = header.redo_journal orelse return error.MissingRedoJournal;
         try descriptor.validate(
             std.math.add(u64, header.payload_start, header.logical_size) catch
@@ -62,7 +77,7 @@ pub const Runtime = struct {
         var result: Runtime = .{
             .allocator = allocator,
             .io = io,
-            .file = file,
+            .file_io = backend,
             .payload_start = header.payload_start,
             .block_count = header.block_count,
             .descriptor = descriptor,
@@ -82,10 +97,12 @@ pub const Runtime = struct {
         self.freeImages(&self.pending);
         self.freeImages(&self.flushing);
         self.freeImages(&self.committed);
+        self.freePendingRecords();
         self.active.deinit();
         self.pending.deinit();
         self.flushing.deinit();
         self.committed.deinit();
+        self.pending_records.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -137,12 +154,7 @@ pub const Runtime = struct {
             @memcpy(buffer, image[offset..][0..buffer.len]);
             return;
         }
-        const amount = try self.file.readPositionalAll(
-            self.io,
-            buffer,
-            try self.homePosition(block, offset),
-        );
-        if (amount != buffer.len) return error.UnexpectedEndOfFile;
+        try self.file_io.readAllAt(self.io, buffer, try self.homePosition(block, offset));
     }
 
     pub fn program(self: *Runtime, block: u32, offset: u32, data: []const u8) !void {
@@ -164,12 +176,7 @@ pub const Runtime = struct {
             else if (self.committed.get(block)) |committed|
                 image.* = committed.*
             else {
-                const amount = try self.file.readPositionalAll(
-                    self.io,
-                    image,
-                    try self.homePosition(block, 0),
-                );
-                if (amount != image.len) return error.UnexpectedEndOfFile;
+                try self.file_io.readAllAt(self.io, image, try self.homePosition(block, 0));
             }
             entry.value_ptr.* = image;
         }
@@ -211,15 +218,16 @@ pub const Runtime = struct {
         };
         const next_sequence = std.math.add(u64, self.staged_tail_sequence, 1) catch
             return error.SequenceOverflow;
+        try self.pending.ensureUnusedCapacity(@intCast(self.active.count()));
+        try self.pending_records.ensureUnusedCapacity(self.allocator, 1);
         const encoded = try redo_journal.encode(self.allocator, .{
             .sequence = next_sequence,
             .previous_digest = self.staged_tail_digest,
         }, blocks);
-        defer self.allocator.free(encoded);
+        errdefer self.allocator.free(encoded);
         if (encoded.len > self.remainingCapacity()) return error.JournalFull;
         const next_digest = redo_journal.encodedDigest(encoded);
-        try self.pending.ensureUnusedCapacity(@intCast(self.active.count()));
-        try self.writeRing(self.stagedTailOffset(), encoded);
+        const record_offset = self.stagedTailOffset();
 
         for (ids) |id| {
             const image = self.active.get(id).?;
@@ -235,6 +243,10 @@ pub const Runtime = struct {
         self.staged_used_bytes += encoded.len;
         self.staged_tail_sequence = next_sequence;
         self.staged_tail_digest = next_digest;
+        self.pending_records.appendAssumeCapacity(.{
+            .offset = record_offset,
+            .bytes = encoded,
+        });
         return next_sequence;
     }
 
@@ -242,6 +254,14 @@ pub const Runtime = struct {
         if (self.inflight_flush != null or self.flushing.count() != 0) return error.FlushInProgress;
         if (self.pending.count() == 0) return null;
         try self.committed.ensureUnusedCapacity(@intCast(self.pending.count()));
+        var writes: std.ArrayList(file_io.Write) = .empty;
+        defer writes.deinit(self.allocator);
+        const write_capacity = std.math.mul(usize, self.pending_records.items.len, 2) catch
+            return error.OutOfMemory;
+        try writes.ensureTotalCapacity(self.allocator, write_capacity);
+        for (self.pending_records.items) |record|
+            try self.appendRingWrites(&writes, record.offset, record.bytes);
+        try self.file_io.writeAllManyAt(self.io, writes.items);
         const next_generation = std.math.add(u64, self.anchor_generation, 1) catch
             return error.GenerationOverflow;
         const flush: Flush = .{
@@ -255,7 +275,8 @@ pub const Runtime = struct {
             .slot = self.nextAnchorSlot(),
         };
         const anchor_bytes = try redo_journal.encodeAnchor(flush.anchor, self.dataCapacity());
-        try self.file.writePositionalAll(self.io, &anchor_bytes, try self.anchorPosition(flush.slot));
+        try self.file_io.writeAllAt(self.io, &anchor_bytes, try self.anchorPosition(flush.slot));
+        self.freePendingRecords();
         std.mem.swap(ImageMap, &self.pending, &self.flushing);
         self.inflight_flush = flush;
         return flush;
@@ -295,7 +316,7 @@ pub const Runtime = struct {
         if (self.committed.count() != 0) {
             const ids = try self.sortedIds(&self.committed);
             defer self.allocator.free(ids);
-            for (ids) |id| try self.file.writePositionalAll(
+            for (ids) |id| try self.file_io.writeAllAt(
                 self.io,
                 self.committed.get(id).?,
                 try self.homePosition(id, 0),
@@ -314,7 +335,7 @@ pub const Runtime = struct {
             };
             const next_slot = self.nextAnchorSlot();
             const anchor_bytes = try redo_journal.encodeAnchor(next_anchor, self.dataCapacity());
-            try self.file.writePositionalAll(self.io, &anchor_bytes, try self.anchorPosition(next_slot));
+            try self.file_io.writeAllAt(self.io, &anchor_bytes, try self.anchorPosition(next_slot));
             try durable_sync.run();
             self.anchor_slot = next_slot;
             self.anchor_generation = next_generation;
@@ -345,12 +366,14 @@ pub const Runtime = struct {
         var anchors: [redo_journal.anchor_count]?redo_journal.Anchor = @splat(null);
         var zero_anchor: bool = false;
         for (&encoded_anchors, 0..) |*encoded, index| {
-            const amount = try self.file.readPositionalAll(
+            self.file_io.readAllAt(
                 self.io,
                 encoded,
                 try self.anchorPosition(@enumFromInt(index)),
-            );
-            if (amount != encoded.len) return error.TruncatedRedoJournal;
+            ) catch |err| switch (err) {
+                error.UnexpectedEndOfFile => return error.TruncatedRedoJournal,
+                else => return err,
+            };
             zero_anchor = zero_anchor or std.mem.allEqual(u8, encoded, 0);
             anchors[index] = redo_journal.decodeAnchor(encoded, self.dataCapacity()) catch |err| switch (err) {
                 error.InvalidRedoAnchorMagic,
@@ -480,6 +503,11 @@ pub const Runtime = struct {
         while (iterator.next()) |image| self.allocator.destroy(image.*);
     }
 
+    fn freePendingRecords(self: *Runtime) void {
+        for (self.pending_records.items) |record| self.allocator.free(record.bytes);
+        self.pending_records.clearRetainingCapacity();
+    }
+
     fn clearCommitted(self: *Runtime) void {
         self.freeImages(&self.committed);
         self.committed.clearRetainingCapacity();
@@ -514,28 +542,43 @@ pub const Runtime = struct {
         if (offset >= self.dataCapacity() or buffer.len > self.dataCapacity())
             return error.InvalidRedoJournalRange;
         const first_length: usize = @intCast(@min(buffer.len, self.dataCapacity() - offset));
-        const first_amount = try self.file.readPositionalAll(
+        self.file_io.readAllAt(
             self.io,
             buffer[0..first_length],
             try self.journalPosition(offset),
-        );
-        if (first_amount != first_length) return error.TruncatedRedoJournal;
+        ) catch |err| switch (err) {
+            error.UnexpectedEndOfFile => return error.TruncatedRedoJournal,
+            else => return err,
+        };
         if (first_length == buffer.len) return;
-        const second_amount = try self.file.readPositionalAll(
+        self.file_io.readAllAt(
             self.io,
             buffer[first_length..],
             try self.journalPosition(0),
-        );
-        if (second_amount != buffer.len - first_length) return error.TruncatedRedoJournal;
+        ) catch |err| switch (err) {
+            error.UnexpectedEndOfFile => return error.TruncatedRedoJournal,
+            else => return err,
+        };
     }
 
-    fn writeRing(self: *Runtime, offset: u64, bytes: []const u8) !void {
+    fn appendRingWrites(
+        self: *const Runtime,
+        writes: *std.ArrayList(file_io.Write),
+        offset: u64,
+        bytes: []const u8,
+    ) !void {
         if (offset >= self.dataCapacity() or bytes.len > self.dataCapacity())
             return error.InvalidRedoJournalRange;
         const first_length: usize = @intCast(@min(bytes.len, self.dataCapacity() - offset));
-        try self.file.writePositionalAll(self.io, bytes[0..first_length], try self.journalPosition(offset));
+        writes.appendAssumeCapacity(.{
+            .bytes = bytes[0..first_length],
+            .offset = try self.journalPosition(offset),
+        });
         if (first_length != bytes.len)
-            try self.file.writePositionalAll(self.io, bytes[first_length..], try self.journalPosition(0));
+            writes.appendAssumeCapacity(.{
+                .bytes = bytes[first_length..],
+                .offset = try self.journalPosition(0),
+            });
     }
 
     fn dataCapacity(self: *const Runtime) u64 {

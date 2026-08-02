@@ -1,8 +1,8 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Io = std.Io;
 const File = Io.File;
 const container = @import("container.zig");
+const file_io = @import("file_io.zig");
 const redo_runtime = @import("redo_runtime.zig");
 
 pub const Durability = union(enum) {
@@ -13,6 +13,8 @@ pub const Durability = union(enum) {
         max_delay_ns: u64 = std.time.ns_per_ms,
     };
 };
+
+pub const FileIoKind = file_io.Kind;
 
 const FlushResult = anyerror!void;
 
@@ -33,7 +35,7 @@ pub export fn lfs_crc(initial: u32, raw: ?*const anyopaque, size: usize) callcon
 
 pub const FileBlockDevice = struct {
     io: Io,
-    file: File,
+    file_io: file_io.FileIo,
     payload_start: u64,
     block_size: u32,
     block_count: u32,
@@ -58,13 +60,20 @@ pub const FileBlockDevice = struct {
     durable_epoch: std.atomic.Value(u64) = .init(0),
 
     pub fn init(io: Io, file: File, header: container.Header) FileBlockDevice {
-        return .{
+        var backend = file_io.FileIo.posix(file);
+        return initWithFileIo(io, &backend, header);
+    }
+
+    pub fn initWithFileIo(io: Io, backend: *file_io.FileIo, header: container.Header) FileBlockDevice {
+        const result: FileBlockDevice = .{
             .io = io,
-            .file = file,
+            .file_io = backend.*,
             .payload_start = header.payload_start,
             .block_size = header.block_size,
             .block_count = header.block_count,
         };
+        backend.* = undefined;
+        return result;
     }
 
     pub fn read(self: *FileBlockDevice, block: u32, offset: u32, buffer: []u8) !void {
@@ -75,8 +84,7 @@ pub const FileBlockDevice = struct {
             return redo.read(block, offset, buffer);
         }
         const file_offset = try self.position(block, offset, buffer.len);
-        const amount = try self.file.readPositionalAll(self.io, buffer, file_offset);
-        if (amount != buffer.len) return error.UnexpectedEndOfFile;
+        try self.file_io.readAllAt(self.io, buffer, file_offset);
     }
 
     pub fn program(self: *FileBlockDevice, block: u32, offset: u32, data: []const u8) !void {
@@ -96,7 +104,7 @@ pub const FileBlockDevice = struct {
                 self.freezeWrites();
                 return err;
             };
-        } else self.file.writePositionalAll(self.io, write_data, file_offset) catch |err| {
+        } else self.file_io.writeAllAt(self.io, write_data, file_offset) catch |err| {
             self.freezeWrites();
             return err;
         };
@@ -152,7 +160,12 @@ pub const FileBlockDevice = struct {
 
     pub fn enableRedo(self: *FileBlockDevice, allocator: std.mem.Allocator, header: container.Header) !void {
         if (self.redo != null) return error.RedoAlreadyEnabled;
-        self.redo = try redo_runtime.Runtime.init(allocator, self.io, self.file, header);
+        self.redo = try redo_runtime.Runtime.initWithFileIo(
+            allocator,
+            self.io,
+            self.file_io.borrow(),
+            header,
+        );
     }
 
     pub fn setDurability(self: *FileBlockDevice, durability: Durability) !void {
@@ -184,6 +197,7 @@ pub const FileBlockDevice = struct {
             redo.deinit();
             self.redo = null;
         }
+        self.file_io.deinit();
     }
 
     pub fn beginTransaction(self: *FileBlockDevice) !void {
@@ -293,6 +307,10 @@ pub const FileBlockDevice = struct {
 
     pub fn isJournaled(self: *const FileBlockDevice) bool {
         return self.redo != null;
+    }
+
+    pub fn fileIoKind(self: *const FileBlockDevice) FileIoKind {
+        return self.file_io.kind;
     }
 
     pub fn finishWriteback(self: *FileBlockDevice) !void {
@@ -466,7 +484,7 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return error.InjectedFault;
         }
-        syncData(self.file, self.io) catch |err| {
+        self.file_io.dataSync(self.io) catch |err| {
             self.freezeWrites();
             return err;
         };
@@ -491,13 +509,6 @@ pub const FileBlockDevice = struct {
 
     fn freezeWrites(self: *FileBlockDevice) void {
         self.write_frozen.store(true, .release);
-    }
-
-    fn syncData(file: File, io: Io) !void {
-        if (builtin.os.tag == .linux)
-            try std.posix.fdatasync(file.handle)
-        else
-            try file.sync(io);
     }
 
     fn position(self: *const FileBlockDevice, block: u32, offset: u32, len: usize) !u64 {

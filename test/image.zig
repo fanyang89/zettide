@@ -137,6 +137,53 @@ test "journaled writeback becomes durable on sync and survives reopen" {
     }
 }
 
+test "journaled volume uses forced io_uring through recovery and reopen" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try fullImagePath(&tmp, &path_buffer);
+    Volume.createOptions(std.testing.io, path, 4 * 1024 * 1024, "IoUringImageTest", .{
+        .file_io = .io_uring,
+        .redo_journal = .{
+            .length = 4 * 1024 * 1024,
+            .max_transaction_blocks = 128,
+        },
+    }) catch |err| switch (err) {
+        error.PermissionDenied,
+        error.SystemOutdated,
+        error.UnsupportedIoUringOperations,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+
+    {
+        var volume = try Volume.openOptions(std.testing.io, path, true, .{ .file_io = .io_uring });
+        defer volume.deinit();
+        try std.testing.expectEqual(zettide.file_io.Kind.io_uring, volume.device.fileIoKind());
+        try volume.mountOptions(.{ .access_time = .noatime });
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/payload", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100640, 123, 456);
+        try std.testing.expectEqual(@as(usize, 8), try volume.writeFile(&file, "io_uring", 0));
+        try volume.syncFile(&file);
+        try volume.closeFile(&file);
+        try volume.close();
+    }
+
+    {
+        var volume = try Volume.openOptions(std.testing.io, path, false, .{ .file_io = .io_uring });
+        defer volume.deinit();
+        try std.testing.expectEqual(zettide.file_io.Kind.io_uring, volume.device.fileIoKind());
+        try volume.mountOptions(.{ .access_time = .noatime });
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/payload", c.LFS_O_RDONLY, 0, 0, 0);
+        var actual: [8]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+        try std.testing.expectEqualStrings("io_uring", &actual);
+        try volume.closeFile(&file);
+    }
+}
+
 test "journaled namespace mutations survive checkpoint and reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

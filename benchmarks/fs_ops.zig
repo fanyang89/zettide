@@ -64,6 +64,27 @@ const DurabilityMode = enum {
     }
 };
 
+const FileIoMode = enum {
+    auto,
+    posix,
+    io_uring,
+
+    fn parse(value: []const u8) !FileIoMode {
+        if (std.mem.eql(u8, value, "auto")) return .auto;
+        if (std.mem.eql(u8, value, "posix")) return .posix;
+        if (std.mem.eql(u8, value, "io_uring")) return .io_uring;
+        return error.InvalidFileIo;
+    }
+
+    fn volumeValue(self: FileIoMode) zettide.file_io.Mode {
+        return switch (self) {
+            .auto => .auto,
+            .posix => .posix,
+            .io_uring => .io_uring,
+        };
+    }
+};
+
 const benchmark_name_width = blk: {
     var width: usize = 0;
     for (all_operations) |operation| width = @max(width, @tagName(operation).len);
@@ -79,6 +100,7 @@ const Config = struct {
     workspace_root: []const u8 = ".zig-cache/benchmarks",
     journaled: bool = false,
     durability: DurabilityMode = .writeback,
+    file_io: FileIoMode = .posix,
     help: bool = false,
 };
 
@@ -310,7 +332,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.print(
-        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} workspace_root={s} journaled={} durability={s}\n",
+        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} workspace_root={s} journaled={} durability={s} file_io={s}\n",
         .{
             @tagName(builtin.mode),
             @tagName(builtin.os.tag),
@@ -322,6 +344,7 @@ pub fn main(init: std.process.Init) !void {
             config.workspace_root,
             config.journaled,
             @tagName(config.durability),
+            @tagName(config.file_io),
         },
     );
     try stdout.flush();
@@ -345,6 +368,7 @@ fn runOperation(
     var image_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const image_path = try std.fmt.bufPrint(&image_path_buffer, "{s}/image.ddv", .{workspace.path()});
     try Volume.createOptions(io, image_path, config.image_size, "FsOpsBenchmark", .{
+        .file_io = config.file_io.volumeValue(),
         .redo_journal = if (config.journaled) .{
             .length = 1024 * 1024 * 1024,
             .max_transaction_blocks = 1024,
@@ -359,7 +383,9 @@ fn runOperation(
         if (operation == .read_partial) zettide.object_format.chunk_size else config.block_size,
     );
 
-    var volume = try Volume.open(io, image_path, !read_only);
+    var volume = try Volume.openOptions(io, image_path, !read_only, .{
+        .file_io = config.file_io.volumeValue(),
+    });
     defer volume.deinit();
     try volume.mountOptions(.{ .journal_durability = config.durability.mountValue() });
 
@@ -457,7 +483,8 @@ fn parseArgs(args: []const []const u8) !Config {
             std.mem.eql(u8, argument, "--block-size") or
             std.mem.eql(u8, argument, "--image-size") or
             std.mem.eql(u8, argument, "--workspace-root") or
-            std.mem.eql(u8, argument, "--durability");
+            std.mem.eql(u8, argument, "--durability") or
+            std.mem.eql(u8, argument, "--file-io");
         if (!known_option) return error.UnknownArgument;
         if (index + 1 >= args.len) return error.MissingArgumentValue;
         const value = args[index + 1];
@@ -476,6 +503,8 @@ fn parseArgs(args: []const []const u8) !Config {
             config.workspace_root = value;
         } else if (std.mem.eql(u8, argument, "--durability")) {
             config.durability = try DurabilityMode.parse(value);
+        } else if (std.mem.eql(u8, argument, "--file-io")) {
+            config.file_io = try FileIoMode.parse(value);
         }
         index += 2;
     }
@@ -515,6 +544,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  --workspace-root P  benchmark workspace parent (default: .zig-cache/benchmarks)
         \\  --journaled         use redo journaling (block size up to 1048576)
         \\  --durability NAME   durable or writeback (default: writeback)
+        \\  --file-io NAME      auto, posix, or io_uring (default: posix)
         \\  --help              show this help
         \\
     );
@@ -529,6 +559,7 @@ test "parse filesystem benchmark defaults and options" {
     try std.testing.expectEqualStrings(".zig-cache/benchmarks", defaults.workspace_root);
     try std.testing.expect(!defaults.journaled);
     try std.testing.expectEqual(DurabilityMode.writeback, defaults.durability);
+    try std.testing.expectEqual(FileIoMode.posix, defaults.file_io);
 
     const configured = try parseArgs(&.{
         "benchmark",
@@ -547,6 +578,8 @@ test "parse filesystem benchmark defaults and options" {
         "--journaled",
         "--durability",
         "durable",
+        "--file-io",
+        "io_uring",
     });
     try std.testing.expectEqual(Operation.write_overwrite, configured.operation.?);
     try std.testing.expectEqual(@as(u32, 12), configured.iterations);
@@ -556,6 +589,7 @@ test "parse filesystem benchmark defaults and options" {
     try std.testing.expectEqualStrings("/var/tmp/zettide-bench", configured.workspace_root);
     try std.testing.expect(configured.journaled);
     try std.testing.expectEqual(DurabilityMode.durable, configured.durability);
+    try std.testing.expectEqual(FileIoMode.io_uring, configured.file_io);
 }
 
 test "reject invalid filesystem benchmark options" {
@@ -566,6 +600,7 @@ test "reject invalid filesystem benchmark options" {
     try std.testing.expectError(error.InvalidImageSize, parseArgs(&.{ "benchmark", "--image-size", "12345" }));
     try std.testing.expectError(error.EmptyWorkspaceRoot, parseArgs(&.{ "benchmark", "--workspace-root", "" }));
     try std.testing.expectError(error.InvalidDurability, parseArgs(&.{ "benchmark", "--durability", "other" }));
+    try std.testing.expectError(error.InvalidFileIo, parseArgs(&.{ "benchmark", "--file-io", "other" }));
     try std.testing.expectError(
         error.JournaledBlockSizeTooLarge,
         parseArgs(&.{ "benchmark", "--journaled", "--block-size", "4194304" }),

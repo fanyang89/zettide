@@ -3,6 +3,7 @@ const Io = std.Io;
 const File = Io.File;
 const container = @import("container.zig");
 const block_device = @import("block_device.zig");
+const file_io = @import("file_io.zig");
 const metadata = @import("metadata.zig");
 const object_format = @import("object_format.zig");
 const object_store = @import("object_store.zig");
@@ -62,10 +63,12 @@ pub const Volume = struct {
         name_profile: name_profile.Profile = .legacy_raw,
         encryption_credential: ?volume_crypto.Credential = null,
         redo_journal: ?RedoJournalOptions = null,
+        file_io: file_io.Mode = .posix,
     };
 
     pub const OpenOptions = struct {
         encryption_credential: ?volume_crypto.Credential = null,
+        file_io: file_io.Mode = .posix,
     };
 
     pub fn create(io: Io, path: []const u8, logical_size: u64, label: []const u8) !void {
@@ -97,7 +100,8 @@ pub const Volume = struct {
         try container.write(file, io, container.header_b_offset, header);
         try file.sync(io);
 
-        var device = block_device.FileBlockDevice.init(io, file, header);
+        var backend = try file_io.init(std.heap.c_allocator, file, options.file_io);
+        var device = block_device.FileBlockDevice.initWithFileIo(io, &backend, header);
         defer device.deinit();
         if (header.isJournaled()) try device.enableRedo(std.heap.c_allocator, header);
         var config = device.configure(header);
@@ -176,6 +180,7 @@ pub const Volume = struct {
         options: InitializeOptions,
     ) !void {
         if (options.redo_journal != null) return error.RedoJournalRequiresFileBacking;
+        if (options.file_io == .io_uring) return error.FileIoRequiresFileBacking;
         const capacity = members[0].header().logical_capacity;
         const maximum_size = @as(u64, std.math.maxInt(u32)) * container.default_block_size;
         const logical_size = @min(capacity, maximum_size) / container.default_block_size * container.default_block_size;
@@ -252,6 +257,7 @@ pub const Volume = struct {
         writable: bool,
         options: OpenOptions,
     ) !void {
+        if (options.file_io == .io_uring) return error.FileIoRequiresFileBacking;
         result.* = undefined;
         result.pool_set = set_source.*;
         set_source.* = .{};
@@ -383,7 +389,8 @@ pub const Volume = struct {
         result.io = io;
         result.file = file;
         result.header = header;
-        result.device = block_device.FileBlockDevice.init(io, file, header);
+        var backend = try file_io.init(std.heap.c_allocator, file, options.file_io);
+        result.device = block_device.FileBlockDevice.initWithFileIo(io, &backend, header);
         errdefer result.device.deinit();
         if (header.isJournaled()) try result.device.enableRedo(std.heap.c_allocator, header);
         result.config = result.device.configure(header);
