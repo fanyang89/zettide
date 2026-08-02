@@ -20,6 +20,15 @@ fn expectReopen(path: []const u8) !void {
     try reopened.mount();
 }
 
+fn createJournaledVolume(path: []const u8, size: u64, label: []const u8) !void {
+    try Volume.createOptions(std.testing.io, path, size, label, .{
+        .redo_journal = .{
+            .length = 4 * 1024 * 1024,
+            .max_transaction_blocks = 128,
+        },
+    });
+}
+
 fn objectCount(volume: *Volume) !usize {
     var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
     try zettide.volume.checkLfs(c.lfs_dir_open(&volume.lfs, &directory, "/system/objects"));
@@ -203,6 +212,43 @@ test "a failed sync freezes writes until the volume is reopened" {
         try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
         try std.testing.expectEqualStrings("durable", &actual);
         try volume.syncFile(&file);
+        try volume.closeFile(&file);
+    }
+}
+
+test "a failed journal commit invalidates the mounted view until reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createPath(&tmp, &path_buffer);
+    try createJournaledVolume(path, 4 * 1024 * 1024, "JournalCommitFault");
+
+    {
+        var volume = try Volume.open(std.testing.io, path, true);
+        defer volume.deinit();
+        try volume.mountOptions(.{ .access_time = .noatime });
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
+        try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "old", 0));
+
+        var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 0 };
+        volume.device.fault = &fault;
+        try std.testing.expectError(error.InputOutput, volume.writeFile(&file, "new", 0));
+        try std.testing.expect(volume.isWriteFrozen());
+        var actual: [3]u8 = undefined;
+        try std.testing.expectError(error.VolumeRequiresReopen, volume.readFile(&file, &actual, 0));
+        fault.disable();
+    }
+
+    {
+        var volume = try Volume.open(std.testing.io, path, false);
+        defer volume.deinit();
+        try volume.mountOptions(.{ .access_time = .noatime });
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/data", c.LFS_O_RDONLY, 0, 0, 0);
+        var actual: [3]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+        try std.testing.expect(std.mem.eql(u8, &actual, "old") or std.mem.eql(u8, &actual, "new"));
         try volume.closeFile(&file);
     }
 }

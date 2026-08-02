@@ -34,6 +34,7 @@ pub const Volume = struct {
     lfs: c.lfs_t,
     mounted: bool = false,
     closed: bool = false,
+    invalidated: std.atomic.Value(bool) = .init(false),
     fallback_uid: u32 = 0,
     fallback_gid: u32 = 0,
     writable: bool = false,
@@ -44,15 +45,22 @@ pub const Volume = struct {
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
     reservation_blocks: u64 = 0,
     object_transaction_mutex: Io.Mutex,
+    view_lock: Io.RwLock,
     backing: Backing = .file,
     pool_set: ?pool_member_set.PoolMemberSet = null,
     pool_device: pool_block_device.PoolBlockDevice = undefined,
     crypto_context: ?*volume_crypto.Context = null,
     crypto_allocator: ?std.mem.Allocator = null,
 
+    pub const RedoJournalOptions = struct {
+        length: u64,
+        max_transaction_blocks: u32,
+    };
+
     pub const InitializeOptions = struct {
         name_profile: name_profile.Profile = .legacy_raw,
         encryption_credential: ?volume_crypto.Credential = null,
+        redo_journal: ?RedoJournalOptions = null,
     };
 
     pub const OpenOptions = struct {
@@ -73,6 +81,8 @@ pub const Volume = struct {
         if (options.encryption_credential != null)
             return error.EncryptionNotSupportedForLegacyContainer;
         var header = try container.Header.initWithNameProfile(io, logical_size, label, options.name_profile);
+        if (options.redo_journal) |journal|
+            try header.enableRedoJournal(journal.length, journal.max_transaction_blocks);
         const file = try Io.Dir.cwd().createFile(io, path, .{
             .read = true,
             .exclusive = true,
@@ -81,16 +91,21 @@ pub const Volume = struct {
         });
         defer file.close(io);
 
-        const total_size = std.math.add(u64, header.payload_start, logical_size) catch
-            return error.VolumeTooLarge;
-        try file.setLength(io, total_size);
+        try file.setLength(io, try container.requiredFileSize(header));
         try container.write(file, io, container.header_a_offset, header);
         try container.write(file, io, container.header_b_offset, header);
         try file.sync(io);
 
         var device = block_device.FileBlockDevice.init(io, file, header);
+        defer device.deinit();
+        if (header.isJournaled()) try device.enableRedo(std.heap.c_allocator, header);
         var config = device.configure(header);
-        try initializeFilesystem(io, &config);
+        try device.beginTransaction();
+        initializeFilesystem(io, &config) catch |err| {
+            _ = device.abortTransaction() catch {};
+            return err;
+        };
+        try device.commitTransaction();
 
         header.state = .ready;
         header.sequence += 1;
@@ -159,6 +174,7 @@ pub const Volume = struct {
         label: []const u8,
         options: InitializeOptions,
     ) !void {
+        if (options.redo_journal != null) return error.RedoJournalRequiresFileBacking;
         const capacity = members[0].header().logical_capacity;
         const maximum_size = @as(u64, std.math.maxInt(u32)) * container.default_block_size;
         const logical_size = @min(capacity, maximum_size) / container.default_block_size * container.default_block_size;
@@ -287,6 +303,7 @@ pub const Volume = struct {
         result.lfs = std.mem.zeroes(c.lfs_t);
         result.mounted = false;
         result.closed = false;
+        result.invalidated = .init(false);
         result.fallback_uid = 0;
         result.fallback_gid = 0;
         result.writable = writable;
@@ -297,6 +314,7 @@ pub const Volume = struct {
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
+        result.view_lock = .init;
         result.backing = .pool;
         result.pool_device = undefined;
         result.crypto_context = crypto_context;
@@ -365,10 +383,13 @@ pub const Volume = struct {
         result.file = file;
         result.header = header;
         result.device = block_device.FileBlockDevice.init(io, file, header);
+        errdefer result.device.deinit();
+        if (header.isJournaled()) try result.device.enableRedo(std.heap.c_allocator, header);
         result.config = result.device.configure(header);
         result.lfs = std.mem.zeroes(c.lfs_t);
         result.mounted = false;
         result.closed = false;
+        result.invalidated = .init(false);
         result.fallback_uid = 0;
         result.fallback_gid = 0;
         result.writable = writable;
@@ -379,6 +400,7 @@ pub const Volume = struct {
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
+        result.view_lock = .init;
         result.backing = .file;
         result.pool_set = null;
         result.pool_device = undefined;
@@ -387,6 +409,8 @@ pub const Volume = struct {
     }
 
     pub fn setFallbackOwner(self: *Volume, uid: u32, gid: u32) void {
+        self.view_lock.lockUncancelable(self.io);
+        defer self.view_lock.unlock(self.io);
         self.fallback_uid = uid;
         self.fallback_gid = gid;
     }
@@ -429,8 +453,11 @@ pub const Volume = struct {
         try self.store().collectLinkCounts(&self.link_counts);
         var recovered_heads = std.AutoHashMap(object_format.ObjectId, object_format.ObjectHead).init(std.heap.c_allocator);
         defer recovered_heads.deinit();
+        var recovery_mutation = if (self.writable) try self.beginMutation() else Mutation{};
+        defer recovery_mutation.deinit();
         if (self.writable) try self.store().recoverOrphans(&self.link_counts, &recovered_heads);
         self.reservation_blocks = try self.collectReservationBlocks(if (self.writable) &recovered_heads else null);
+        try recovery_mutation.commit();
     }
 
     pub fn close(self: *Volume) !void {
@@ -455,6 +482,7 @@ pub const Volume = struct {
             };
             self.pool_set = null;
         } else {
+            self.device.deinit();
             self.file.close(self.io);
         }
         self.open_objects.deinit();
@@ -477,18 +505,28 @@ pub const Volume = struct {
     }
 
     pub fn usedBlocks(self: *Volume) !u32 {
+        var view = try self.beginView();
+        defer view.deinit();
+        return self.usedBlocksUnlocked();
+    }
+
+    fn usedBlocksUnlocked(self: *Volume) !u32 {
         const result = c.lfs_fs_size(&self.lfs);
         try checkLfs(result);
         return @intCast(result);
     }
 
     pub fn availableBlocks(self: *Volume) !u64 {
-        const used = try self.usedBlocks();
+        var view = try self.beginView();
+        defer view.deinit();
+        const used = try self.usedBlocksUnlocked();
         const free = @as(u64, self.header.block_count) - used;
         return free -| self.reservation_blocks;
     }
 
-    pub fn reservedCapacityBlocks(self: *const Volume) u64 {
+    pub fn reservedCapacityBlocks(self: *Volume) !u64 {
+        var view = try self.beginView();
+        defer view.deinit();
         return self.reservation_blocks;
     }
 
@@ -508,6 +546,16 @@ pub const Volume = struct {
     }
 
     pub fn stat(self: *Volume, path: [*:0]const u8) !NodeInfo {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginStateMutation();
+        defer mutation.deinit();
+        const result = try self.statUnlocked(path);
+        try mutation.commit();
+        return result;
+    }
+
+    fn statUnlocked(self: *Volume, path: [*:0]const u8) !NodeInfo {
         var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
@@ -546,17 +594,25 @@ pub const Volume = struct {
             .metadata = head.metadata,
             .object_id = object_ref.object_id,
             .identity = object_ref.object_id,
-            .nlink = try self.linkCount(object_ref.object_id),
+            .nlink = try self.linkCountUnlocked(object_ref.object_id),
         };
     }
 
     pub fn statFile(self: *Volume, handle: *FileHandle) !NodeInfo {
-        const info = try self.statObject(handle.object_id);
+        var view = try self.beginView();
+        defer view.deinit();
+        const info = try self.statObjectUnlocked(handle.object_id);
         handle.metadata = info.metadata;
         return info;
     }
 
     pub fn statObject(self: *Volume, object_id: object_format.ObjectId) !NodeInfo {
+        var view = try self.beginView();
+        defer view.deinit();
+        return self.statObjectUnlocked(object_id);
+    }
+
+    fn statObjectUnlocked(self: *Volume, object_id: object_format.ObjectId) !NodeInfo {
         const head = try self.store().readHead(object_id);
         return .{
             .size = head.logical_size,
@@ -564,59 +620,93 @@ pub const Volume = struct {
             .metadata = head.metadata,
             .object_id = object_id,
             .identity = object_id,
-            .nlink = try self.linkCount(object_id),
+            .nlink = try self.linkCountUnlocked(object_id),
         };
     }
 
     pub fn linkCount(self: *const Volume, object_id: object_format.ObjectId) !u64 {
+        const mutable: *Volume = @constCast(self);
+        var view = try mutable.beginView();
+        defer view.deinit();
+        return self.linkCountUnlocked(object_id);
+    }
+
+    fn linkCountUnlocked(self: *const Volume, object_id: object_format.ObjectId) !u64 {
         return self.link_counts.get(object_id) orelse error.CorruptFilesystem;
     }
 
     pub fn pinObject(self: *Volume, object_id: object_format.ObjectId) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginStateMutation();
+        defer mutation.deinit();
         if (!self.link_counts.contains(object_id)) return error.CorruptFilesystem;
         const entry = try self.object_pins.getOrPut(object_id);
         if (!entry.found_existing) entry.value_ptr.* = 0;
         entry.value_ptr.* = std.math.add(u64, entry.value_ptr.*, 1) catch
             return error.TooManyReferences;
+        try mutation.commit();
     }
 
     pub fn unpinObject(self: *Volume, object_id: object_format.ObjectId) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const count = self.object_pins.getPtr(object_id) orelse return error.InvalidArgument;
         if (count.* == 0) return error.InvalidArgument;
         count.* -= 1;
-        if (count.* != 0) return;
-        _ = self.object_pins.remove(object_id);
-        try self.reclaimObjectIfUnused(object_id);
+        if (count.* == 0) {
+            _ = self.object_pins.remove(object_id);
+            try self.reclaimObjectIfUnused(object_id);
+        }
+        try mutation.commit();
     }
 
-    pub fn objectPinCount(self: *const Volume, object_id: object_format.ObjectId) u64 {
+    pub fn objectPinCount(self: *Volume, object_id: object_format.ObjectId) !u64 {
+        var view = try self.beginView();
+        defer view.deinit();
+        return self.objectPinCountUnlocked(object_id);
+    }
+
+    fn objectPinCountUnlocked(self: *const Volume, object_id: object_format.ObjectId) u64 {
         return self.object_pins.get(object_id) orelse 0;
     }
 
-    pub fn trackedObjectCount(self: *const Volume) usize {
+    pub fn trackedObjectCount(self: *Volume) !usize {
+        var view = try self.beginView();
+        defer view.deinit();
         return self.link_counts.count();
     }
 
     pub fn setMetadata(self: *Volume, path: [*:0]const u8, value: metadata.Metadata) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
         if (info.type != c.LFS_TYPE_DIR) {
-            try self.object_transaction_mutex.lock(self.io);
-            defer self.object_transaction_mutex.unlock(self.io);
-            try self.ensureWritesAllowed();
             const object_ref = try self.store().readRef(path);
             try self.store().updateMetadata(object_ref.object_id, value);
             self.updateOpenMetadata(object_ref.object_id, value);
-            return;
+        } else {
+            const bytes = value.encode();
+            try self.setDirectoryMetadataTranslated(translated, bytes);
         }
-        const bytes = value.encode();
-        try self.setDirectoryMetadataTranslated(translated, bytes);
+        try mutation.commit();
     }
 
     pub fn getMetadata(self: *Volume, path: [*:0]const u8) !metadata.Metadata {
+        var view = try self.beginView();
+        defer view.deinit();
+        return self.getMetadataUnlocked(path);
+    }
+
+    fn getMetadataUnlocked(self: *Volume, path: [*:0]const u8) !metadata.Metadata {
         var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
@@ -648,6 +738,10 @@ pub const Volume = struct {
     }
 
     pub fn makeDirectory(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const inherited = try self.inheritCreateMetadata(path, mode, gid, true);
         try self.ensureGrowthCapacity();
         var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
@@ -663,25 +757,37 @@ pub const Volume = struct {
             &identity,
             identity.len,
         ));
-        try self.setMetadata(path, metadata.Metadata.init(
+        const directory_metadata = metadata.Metadata.init(
             self.io,
             .directory,
             inherited.mode,
             uid,
             inherited.gid,
-        ));
+        );
+        try self.setDirectoryMetadataTranslated(translated, directory_metadata.encode());
         try self.updateParentTimes(path);
         self.adjustCachedParentLinkCount(path, true);
+        try mutation.commit();
     }
 
     pub fn makeSymlink(self: *Volume, path: [*:0]const u8, target: []const u8, uid: u32, gid: u32) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const inherited = try self.inheritCreateMetadata(path, 0o120777, gid, false);
         try self.createSpecial(path, target, .symlink, .symlink, inherited.mode, uid, inherited.gid);
+        try mutation.commit();
     }
 
     pub fn makeFifo(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const inherited = try self.inheritCreateMetadata(path, mode, gid, false);
         try self.createSpecial(path, "", .fifo, .fifo, inherited.mode, uid, inherited.gid);
+        try mutation.commit();
     }
 
     pub fn link(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !void {
@@ -689,6 +795,10 @@ pub const Volume = struct {
     }
 
     pub fn linkWithInfo(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !NodeInfo {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const object_ref = self.store().readRef(old_path) catch |err| switch (err) {
             error.IsDirectory => return error.PermissionDenied,
             else => return err,
@@ -711,7 +821,7 @@ pub const Volume = struct {
         try self.updateParentTimes(new_path);
         try self.store().publishRef(new_path, object_ref, true);
         count.* += 1;
-        return .{
+        const result: NodeInfo = .{
             .size = head.logical_size,
             .allocated_bytes = head.allocated_bytes,
             .metadata = head.metadata,
@@ -719,9 +829,15 @@ pub const Volume = struct {
             .identity = object_ref.object_id,
             .nlink = count.*,
         };
+        try mutation.commit();
+        return result;
     }
 
     pub fn remove(self: *Volume, path: [*:0]const u8) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
@@ -737,7 +853,7 @@ pub const Volume = struct {
         if (removed_object) |object_ref| {
             const retained = object_count.?.* > 1 or
                 self.hasOpenObject(object_ref.object_id) or
-                self.objectPinCount(object_ref.object_id) != 0;
+                self.objectPinCountUnlocked(object_ref.object_id) != 0;
             if (retained) {
                 var head = try self.store().readHead(object_ref.object_id);
                 head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
@@ -752,6 +868,7 @@ pub const Volume = struct {
             object_count.?.* -= 1;
             self.reclaimObjectIfUnused(object_ref.object_id) catch {};
         }
+        try mutation.commit();
     }
 
     pub fn rename(self: *Volume, old_path: [*:0]const u8, new_path: [*:0]const u8) !void {
@@ -777,6 +894,10 @@ pub const Volume = struct {
         no_replace: bool,
     ) !RenameResult {
         if (std.mem.eql(u8, std.mem.span(old_path), std.mem.span(new_path))) return .same_object;
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         var old_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         var new_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const old_translated = try object_store.Store.translateUserPath(old_path, &old_buffer);
@@ -855,10 +976,14 @@ pub const Volume = struct {
             replaced_count.?.* -= 1;
             self.reclaimObjectIfUnused(object_ref.object_id) catch {};
         }
+        try mutation.commit();
         return .renamed;
     }
 
     pub fn openFile(self: *Volume, handle: *FileHandle, path: [*:0]const u8, flags: c_int, mode: u32, uid: u32, gid: u32) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureReadable();
         const existing_ref = self.store().readRef(path) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
@@ -866,6 +991,10 @@ pub const Volume = struct {
         if (existing_ref != null and flags & c.LFS_O_CREAT != 0 and flags & c.LFS_O_EXCL != 0)
             return error.PathAlreadyExists;
         if (existing_ref == null and flags & c.LFS_O_CREAT == 0) return error.FileNotFound;
+        const mutating = existing_ref == null or flags & c.LFS_O_TRUNC != 0;
+        if (existing_ref != null and flags & c.LFS_O_TRUNC != 0) try self.ensureWritesAllowed();
+        var mutation = if (mutating) try self.beginMutation() else Mutation{};
+        defer mutation.deinit();
 
         const object_ref = existing_ref orelse value: {
             const inherited = try self.inheritCreateMetadata(path, mode, gid, false);
@@ -890,15 +1019,21 @@ pub const Volume = struct {
             self.updateParentTimes(path) catch {};
             break :value created;
         };
-        try self.openObject(handle, object_ref.object_id, flags);
+        try self.openObjectUnlocked(handle, object_ref.object_id, flags);
+        try mutation.commit();
     }
 
     pub fn openObject(self: *Volume, handle: *FileHandle, object_id: object_format.ObjectId, flags: c_int) !void {
-        if (flags & c.LFS_O_TRUNC == 0) return self.openObjectUnlocked(handle, object_id, flags);
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
-        try self.ensureWritesAllowed();
-        return self.openObjectUnlocked(handle, object_id, flags);
+        if (flags & c.LFS_O_TRUNC != 0) try self.ensureWritesAllowed();
+        var mutation = if (flags & c.LFS_O_TRUNC != 0)
+            try self.beginMutation()
+        else
+            try self.beginStateMutation();
+        defer mutation.deinit();
+        try self.openObjectUnlocked(handle, object_id, flags);
+        try mutation.commit();
     }
 
     fn openObjectUnlocked(self: *Volume, handle: *FileHandle, object_id: object_format.ObjectId, flags: c_int) !void {
@@ -928,24 +1063,32 @@ pub const Volume = struct {
 
     pub fn closeFile(self: *Volume, handle: *FileHandle) !void {
         if (!handle.open) return;
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         try self.unregisterFile(handle);
         handle.open = false;
         try self.reclaimObjectIfUnused(handle.object_id);
+        try mutation.commit();
     }
 
     pub fn readFile(self: *Volume, handle: *FileHandle, buffer: []u8, offset: u64) !usize {
-        const head = try self.store().readHead(handle.object_id);
-        handle.metadata = head.metadata;
-        const result = if (offset >= head.logical_size or buffer.len == 0)
-            0
-        else value: {
+        var value_metadata: metadata.Metadata = undefined;
+        const result = value: {
+            var view = try self.beginView();
+            defer view.deinit();
+            const head = try self.store().readHead(handle.object_id);
+            value_metadata = head.metadata;
+            handle.metadata = head.metadata;
+            if (offset >= head.logical_size or buffer.len == 0) break :value 0;
             const layout = handle.chunk_layout orelse try self.store().chunkLayout(handle.object_id);
             handle.chunk_layout = layout;
             break :value try self.store().readWithHeadLayout(head, layout, buffer, offset);
         };
         if (self.writable and self.access_time_policy == .relatime) {
             const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-            self.updateAccessTimeFromMetadata(handle.object_id, head.metadata, timestamp) catch {};
+            self.updateAccessTimeFromMetadata(handle.object_id, value_metadata, timestamp) catch {};
         }
         return result;
     }
@@ -955,6 +1098,8 @@ pub const Volume = struct {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const head = try self.store().readHead(handle.object_id);
         const effective_offset = if (handle.append) head.logical_size else offset;
         const end = std.math.add(u64, effective_offset, data.len) catch return error.FileTooLarge;
@@ -966,6 +1111,7 @@ pub const Volume = struct {
         const result = try self.store().writeWithHead(head, data, effective_offset);
         try self.replaceReservation(head, result.head);
         self.updateOpenMetadata(handle.object_id, result.head.metadata);
+        try mutation.commit();
         return result.amount;
     }
 
@@ -974,10 +1120,13 @@ pub const Volume = struct {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const old_head = try self.store().readHead(handle.object_id);
         const head = try self.store().truncate(handle.object_id, size);
         try self.replaceReservation(old_head, head);
         self.updateOpenMetadata(handle.object_id, head.metadata);
+        try mutation.commit();
     }
 
     pub fn fallocateFile(self: *Volume, handle: *FileHandle, offset: u64, length: u64) !void {
@@ -988,12 +1137,14 @@ pub const Volume = struct {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const old_head = try self.store().readHead(handle.object_id);
         const proposed = try self.store().reservationProposal(handle.object_id, offset, length);
         const old_blocks = try self.reservationBlocks(old_head);
         const new_blocks = try self.reservationBlocks(proposed);
         if (new_blocks > old_blocks) {
-            const free = @as(u64, self.header.block_count) - try self.usedBlocks();
+            const free = @as(u64, self.header.block_count) - try self.usedBlocksUnlocked();
             var needed = try addCapacity(self.reservation_blocks, new_blocks - old_blocks);
             needed = try addCapacity(needed, accounting_metadata_blocks);
             if (free < needed) return error.NoSpaceLeft;
@@ -1001,6 +1152,7 @@ pub const Volume = struct {
         const head = try self.store().reserve(handle.object_id, offset, length);
         try self.replaceReservation(old_head, head);
         self.updateOpenMetadata(handle.object_id, head.metadata);
+        try mutation.commit();
     }
 
     pub fn syncFile(self: *Volume, handle: *FileHandle) !void {
@@ -1026,17 +1178,23 @@ pub const Volume = struct {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         try self.store().updateMetadata(handle.object_id, handle.metadata);
         self.updateOpenMetadata(handle.object_id, handle.metadata);
         handle.original_metadata = handle.metadata;
+        try mutation.commit();
     }
 
     pub fn setObjectMetadata(self: *Volume, object_id: object_format.ObjectId, value: metadata.Metadata) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         try self.store().updateMetadata(object_id, value);
         self.updateOpenMetadata(object_id, value);
+        try mutation.commit();
     }
 
     pub fn patchObjectMetadata(
@@ -1047,20 +1205,29 @@ pub const Volume = struct {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
         const head = try self.store().patchMetadata(object_id, patch);
         self.updateOpenMetadata(object_id, head.metadata);
+        try mutation.commit();
         return head;
     }
 
     pub fn readObject(self: *Volume, object_id: object_format.ObjectId, buffer: []u8, offset: u64) !usize {
+        var view = try self.beginView();
+        defer view.deinit();
         return self.store().read(object_id, buffer, offset);
     }
 
     pub fn updateAccessTime(self: *Volume, object_id: object_format.ObjectId) !void {
         if (!self.writable or self.access_time_policy == .noatime) return;
-        const head = try self.store().readHead(object_id);
+        const value_metadata = value: {
+            var view = try self.beginView();
+            defer view.deinit();
+            break :value (try self.store().readHead(object_id)).metadata;
+        };
         const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-        try self.updateAccessTimeFromMetadata(object_id, head.metadata, timestamp);
+        try self.updateAccessTimeFromMetadata(object_id, value_metadata, timestamp);
     }
 
     pub fn accessTimeUpdateRequired(self: *const Volume, value: metadata.Metadata, now_ns: i64) bool {
@@ -1082,6 +1249,8 @@ pub const Volume = struct {
 
     pub fn openDirectory(self: *Volume, handle: *DirectoryHandle, path: [*:0]const u8) !void {
         const info = try self.stat(path);
+        var view = try self.beginView();
+        defer view.deinit();
         if (info.metadata.kind != .directory) return error.NotDirectory;
         var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         try checkLfs(c.lfs_dir_open(
@@ -1094,16 +1263,22 @@ pub const Volume = struct {
     }
 
     pub fn readDirectory(self: *Volume, handle: *DirectoryHandle, info: *c.struct_lfs_info) !bool {
+        var view = try self.beginView();
+        defer view.deinit();
         const result = c.lfs_dir_read(&self.lfs, &handle.dir, info);
         try checkLfs(result);
         return result > 0;
     }
 
     pub fn seekDirectory(self: *Volume, handle: *DirectoryHandle, offset: u32) !void {
+        var view = try self.beginView();
+        defer view.deinit();
         try checkLfs(c.lfs_dir_seek(&self.lfs, &handle.dir, offset));
     }
 
     pub fn tellDirectory(self: *Volume, handle: *DirectoryHandle) !u32 {
+        var view = try self.beginView();
+        defer view.deinit();
         const result = c.lfs_dir_tell(&self.lfs, &handle.dir);
         try checkLfs(result);
         return @intCast(result);
@@ -1111,6 +1286,8 @@ pub const Volume = struct {
 
     pub fn closeDirectory(self: *Volume, handle: *DirectoryHandle) !void {
         if (!handle.open) return;
+        var view = try self.beginView();
+        defer view.deinit();
         handle.open = false;
         try checkLfs(c.lfs_dir_close(&self.lfs, &handle.dir));
     }
@@ -1118,6 +1295,8 @@ pub const Volume = struct {
     pub fn check(self: *Volume) !CheckResult {
         if (self.closed) return error.VolumeClosed;
         if (!self.mounted) return error.NotMounted;
+        var view = try self.beginView();
+        defer view.deinit();
         var context = CheckContext{};
         try checkLfs(c.lfs_fs_traverse(&self.lfs, traverseCallback, &context));
         return .{
@@ -1131,8 +1310,36 @@ pub const Volume = struct {
     }
 
     fn ensureWritesAllowed(self: *const Volume) !void {
+        try self.ensureReadable();
         if (!self.writable) return error.ReadOnlyVolume;
         if (self.isWriteFrozen()) return error.VolumeFrozen;
+    }
+
+    fn ensureReadable(self: *const Volume) !void {
+        if (self.invalidated.load(.acquire)) return error.VolumeRequiresReopen;
+    }
+
+    fn beginView(self: *Volume) !View {
+        try self.view_lock.lockShared(self.io);
+        errdefer self.view_lock.unlockShared(self.io);
+        try self.ensureReadable();
+        return .{ .volume = self };
+    }
+
+    fn beginMutation(self: *Volume) !Mutation {
+        var mutation = try self.beginStateMutation();
+        errdefer mutation.deinit();
+        if (!self.writable or self.backing != .file or !self.device.isJournaled()) return mutation;
+        self.device.beginTransaction() catch return error.InputOutput;
+        mutation.device = &self.device;
+        return mutation;
+    }
+
+    fn beginStateMutation(self: *Volume) !Mutation {
+        try self.view_lock.lock(self.io);
+        errdefer self.view_lock.unlock(self.io);
+        try self.ensureReadable();
+        return .{ .volume = self, .locked = true };
     }
 
     fn collectReservationBlocks(
@@ -1180,14 +1387,14 @@ pub const Volume = struct {
         operation = try addCapacity(operation, try std.math.mul(u64, footprint.chunk_count, 2));
         operation = try addCapacity(operation, accounting_metadata_blocks);
         operation = try addCapacity(operation, self.reservation_blocks);
-        const free = @as(u64, self.header.block_count) - try self.usedBlocks();
+        const free = @as(u64, self.header.block_count) - try self.usedBlocksUnlocked();
         if (free < operation) return error.NoSpaceLeft;
     }
 
     fn ensureGrowthCapacity(self: *Volume) !void {
         if (self.reservation_blocks == 0) return;
         const protected = try addCapacity(self.reservation_blocks, accounting_metadata_blocks);
-        const free = @as(u64, self.header.block_count) - try self.usedBlocks();
+        const free = @as(u64, self.header.block_count) - try self.usedBlocksUnlocked();
         if (free < protected) return error.NoSpaceLeft;
     }
 
@@ -1228,7 +1435,7 @@ pub const Volume = struct {
             unreachable;
         }
 
-        if (self.writable) {
+        if (self.writable and (self.backing != .file or !self.device.isJournaled())) {
             try self.io.randomSecure(&identity);
             const set_result = c.lfs_setattr(
                 &self.lfs,
@@ -1252,7 +1459,7 @@ pub const Volume = struct {
 
     fn reclaimObjectIfUnused(self: *Volume, id: object_format.ObjectId) !void {
         const links = self.link_counts.get(id) orelse return error.CorruptFilesystem;
-        if (links != 0 or self.hasOpenObject(id) or self.objectPinCount(id) != 0) return;
+        if (links != 0 or self.hasOpenObject(id) or self.objectPinCountUnlocked(id) != 0) return;
         const head = try self.store().readHead(id);
         try self.store().removeObject(id);
         self.reservation_blocks = std.math.sub(u64, self.reservation_blocks, try self.reservationBlocks(head)) catch
@@ -1317,7 +1524,7 @@ pub const Volume = struct {
         var buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
         if (parent.len >= buffer.len) return error.NameTooLong;
         @memcpy(buffer[0..parent.len], parent);
-        const parent_metadata = try self.getMetadata(&buffer);
+        const parent_metadata = try self.getMetadataUnlocked(&buffer);
         if (parent_metadata.mode & 0o2000 == 0) return .{ .mode = mode, .gid = gid };
         return .{
             .mode = if (directory) mode | 0o2000 else mode,
@@ -1406,6 +1613,34 @@ pub const Volume = struct {
         parent_metadata.ctime_ns = timestamp;
         try self.setDirectoryMetadataTranslated(translated, parent_metadata.encode());
     }
+
+    const Mutation = struct {
+        device: ?*block_device.FileBlockDevice = null,
+        volume: ?*Volume = null,
+        locked: bool = false,
+        committed: bool = false,
+
+        fn commit(self: *Mutation) !void {
+            if (self.device) |device| device.commitTransaction() catch return error.InputOutput;
+            self.committed = true;
+        }
+
+        fn deinit(self: *Mutation) void {
+            if (!self.committed) if (self.device) |device| {
+                const had_writes = device.abortTransaction() catch true;
+                if (had_writes) self.volume.?.invalidated.store(true, .release);
+            };
+            if (self.locked) self.volume.?.view_lock.unlock(self.volume.?.io);
+        }
+    };
+
+    const View = struct {
+        volume: *Volume,
+
+        fn deinit(self: View) void {
+            self.volume.view_lock.unlockShared(self.volume.io);
+        }
+    };
 };
 
 fn initializeFilesystem(io: Io, config: *c.struct_lfs_config) !void {

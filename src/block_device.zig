@@ -26,6 +26,7 @@ pub const FileBlockDevice = struct {
     block_size: u32,
     block_count: u32,
     mutex: Io.Mutex = .init,
+    redo_mutex: Io.Mutex = .init,
     fault: ?*FaultController = null,
     dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
@@ -43,7 +44,11 @@ pub const FileBlockDevice = struct {
 
     pub fn read(self: *FileBlockDevice, block: u32, offset: u32, buffer: []u8) !void {
         if (self.fault) |fault| if (fault.action(.read) == .before) return error.InjectedFault;
-        if (self.redo) |*redo| return redo.read(block, offset, buffer);
+        if (self.redo) |*redo| {
+            try self.redo_mutex.lock(self.io);
+            defer self.redo_mutex.unlock(self.io);
+            return redo.read(block, offset, buffer);
+        }
         const file_offset = try self.position(block, offset, buffer.len);
         const amount = try self.file.readPositionalAll(self.io, buffer, file_offset);
         if (amount != buffer.len) return error.UnexpectedEndOfFile;
@@ -58,16 +63,17 @@ pub const FileBlockDevice = struct {
             return error.InjectedFault;
         }
         const write_data = if (action == .partial) data[0 .. data.len / 2] else data;
-        if (self.redo) |*redo|
+        if (self.redo) |*redo| {
+            try self.redo_mutex.lock(self.io);
+            defer self.redo_mutex.unlock(self.io);
             redo.program(block, offset, write_data) catch |err| {
                 self.freezeWrites();
                 return err;
-            }
-        else
-            self.file.writePositionalAll(self.io, write_data, file_offset) catch |err| {
-                self.freezeWrites();
-                return err;
             };
+        } else self.file.writePositionalAll(self.io, write_data, file_offset) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
         if (self.redo == null) self.dirty.store(true, .release);
         if (action == .partial or action == .after) {
             self.freezeWrites();
@@ -77,7 +83,11 @@ pub const FileBlockDevice = struct {
 
     pub fn sync(self: *FileBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
-        if (self.redo) |*redo| return redo.logicalSync();
+        if (self.redo) |*redo| {
+            try self.redo_mutex.lock(self.io);
+            defer self.redo_mutex.unlock(self.io);
+            return redo.logicalSync();
+        }
         if (!self.dirty.load(.acquire)) return;
         try self.durableSync();
         self.dirty.store(false, .release);
@@ -98,28 +108,46 @@ pub const FileBlockDevice = struct {
     pub fn beginTransaction(self: *FileBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         const redo = &(self.redo orelse return);
+        try self.redo_mutex.lock(self.io);
+        defer self.redo_mutex.unlock(self.io);
         if (try redo.needsCheckpoint()) try redo.checkpoint(self.redoSync());
         try redo.begin();
     }
 
     pub fn commitTransaction(self: *FileBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
-        if (self.redo) |*redo| redo.commit(self.redoSync()) catch |err| {
-            self.freezeWrites();
-            return err;
-        };
+        if (self.redo) |*redo| {
+            try self.redo_mutex.lock(self.io);
+            defer self.redo_mutex.unlock(self.io);
+            redo.commit(self.redoSync()) catch |err| {
+                self.freezeWrites();
+                return err;
+            };
+        }
     }
 
-    pub fn abortTransaction(self: *FileBlockDevice) void {
-        if (self.redo) |*redo| redo.abort();
+    pub fn abortTransaction(self: *FileBlockDevice) !bool {
+        if (self.redo) |*redo| {
+            try self.redo_mutex.lock(self.io);
+            defer self.redo_mutex.unlock(self.io);
+            const had_writes = redo.hasActiveWrites();
+            redo.abort();
+            if (had_writes) self.freezeWrites();
+            return had_writes;
+        }
+        return false;
     }
 
     pub fn checkpointRedo(self: *FileBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
-        if (self.redo) |*redo| redo.checkpoint(self.redoSync()) catch |err| {
-            self.freezeWrites();
-            return err;
-        };
+        if (self.redo) |*redo| {
+            try self.redo_mutex.lock(self.io);
+            defer self.redo_mutex.unlock(self.io);
+            redo.checkpoint(self.redoSync()) catch |err| {
+                self.freezeWrites();
+                return err;
+            };
+        }
     }
 
     pub fn isJournaled(self: *const FileBlockDevice) bool {

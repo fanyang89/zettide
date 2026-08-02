@@ -21,6 +21,17 @@ fn openVolume(path: []const u8) !Volume {
     return Volume.open(std.testing.io, path, true);
 }
 
+fn createJournaledVolume(tmp: *std.testing.TmpDir, path_buffer: []u8, size: u64) ![]const u8 {
+    const path = try fullImagePath(tmp, path_buffer);
+    try Volume.createOptions(std.testing.io, path, size, "JournaledImageTest", .{
+        .redo_journal = .{
+            .length = 4 * 1024 * 1024,
+            .max_transaction_blocks = 128,
+        },
+    });
+    return path;
+}
+
 fn writeFileWorker(
     volume: *Volume,
     handle: *FileHandle,
@@ -80,6 +91,88 @@ test "data and metadata survive a real container reopen" {
         var actual: [expected.len]u8 = undefined;
         try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
         try std.testing.expectEqualSlices(u8, &expected, &actual);
+        try volume.closeFile(&file);
+    }
+}
+
+test "journaled overwrite is durable with one sync and survives reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createJournaledVolume(&tmp, &path_buffer, 4 * 1024 * 1024);
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try std.testing.expect(volume.header.isJournaled());
+        try volume.mountOptions(.{ .access_time = .noatime });
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/payload", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100640, 123, 456);
+        try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "old", 0));
+
+        var fault: zettide.block_device.FaultController = .{};
+        volume.device.fault = &fault;
+        try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "new", 0));
+        try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+        volume.device.fault = null;
+        try volume.closeFile(&file);
+    }
+
+    {
+        var volume = try Volume.open(std.testing.io, path, false);
+        defer volume.deinit();
+        try volume.mountOptions(.{ .access_time = .noatime });
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/payload", c.LFS_O_RDONLY, 0, 0, 0);
+        var actual: [3]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+        try std.testing.expectEqualStrings("new", &actual);
+        try volume.closeFile(&file);
+    }
+}
+
+test "journaled namespace mutations survive checkpoint and reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createJournaledVolume(&tmp, &path_buffer, 4 * 1024 * 1024);
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mountOptions(.{ .access_time = .noatime });
+        try volume.makeDirectory("/dir", 0o40755, 10, 20);
+        try volume.makeSymlink("/dir/link", "target", 10, 20);
+        try volume.makeFifo("/dir/fifo", 0o10640, 10, 20);
+
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/source", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100640, 10, 20);
+        try std.testing.expectEqual(@as(usize, 7), try volume.writeFile(&file, "payload", 0));
+        try volume.closeFile(&file);
+        try volume.link("/source", "/alias");
+        try volume.rename("/alias", "/dir/renamed");
+        try volume.remove("/source");
+
+        var directory_metadata = try volume.getMetadata("/dir");
+        directory_metadata.mode = 0o40750;
+        try volume.setMetadata("/dir", directory_metadata);
+        try volume.device.checkpointRedo();
+    }
+
+    {
+        var volume = try Volume.open(std.testing.io, path, false);
+        defer volume.deinit();
+        try volume.mountOptions(.{ .access_time = .noatime });
+        try std.testing.expectEqual(@as(u32, 0o40750), (try volume.stat("/dir")).metadata.mode);
+        try std.testing.expectEqual(zettide.metadata.Kind.symlink, (try volume.stat("/dir/link")).metadata.kind);
+        try std.testing.expectEqual(zettide.metadata.Kind.fifo, (try volume.stat("/dir/fifo")).metadata.kind);
+        try std.testing.expectError(error.FileNotFound, volume.stat("/source"));
+
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/dir/renamed", c.LFS_O_RDONLY, 0, 0, 0);
+        var actual: [7]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+        try std.testing.expectEqualStrings("payload", &actual);
         try volume.closeFile(&file);
     }
 }
@@ -1184,10 +1277,10 @@ test "fallocate reservations persist, isolate space, share links, and release" {
         var zeroes: [32]u8 = undefined;
         try std.testing.expectEqual(zeroes.len, try volume.readFile(&file, &zeroes, 4096));
         for (zeroes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-        expected_blocks = volume.reservedCapacityBlocks();
+        expected_blocks = try volume.reservedCapacityBlocks();
         try std.testing.expect(expected_blocks != 0);
         try volume.link("/reserved-a", "/reserved-b");
-        try std.testing.expectEqual(expected_blocks, volume.reservedCapacityBlocks());
+        try std.testing.expectEqual(expected_blocks, try volume.reservedCapacityBlocks());
         try volume.syncFile(&file);
         try volume.closeFile(&file);
     }
@@ -1196,7 +1289,7 @@ test "fallocate reservations persist, isolate space, share links, and release" {
         var volume = try openVolume(path);
         defer volume.deinit();
         try volume.mount();
-        try std.testing.expectEqual(expected_blocks, volume.reservedCapacityBlocks());
+        try std.testing.expectEqual(expected_blocks, try volume.reservedCapacityBlocks());
         try std.testing.expectEqualSlices(
             u8,
             &(try volume.stat("/reserved-a")).object_id.?,
@@ -1231,18 +1324,18 @@ test "fallocate reservations persist, isolate space, share links, and release" {
         try volume.openFile(&reserved, "/reserved-b", c.LFS_O_RDWR, 0, 0, 0);
         try std.testing.expectError(error.NoSpaceLeft, volume.writeFile(&reserved, &block, 32 * 1024));
         try std.testing.expectEqual(block.len, try volume.writeFile(&reserved, &block, 96 * 1024));
-        const post_write_blocks = volume.reservedCapacityBlocks();
+        const post_write_blocks = try volume.reservedCapacityBlocks();
         var actual: [9]u8 = undefined;
         try std.testing.expectEqual(actual.len, try volume.readFile(&reserved, &actual, 0));
         try std.testing.expectEqualStrings("preserved", &actual);
 
         try volume.remove("/reserved-a");
-        try std.testing.expectEqual(post_write_blocks, volume.reservedCapacityBlocks());
+        try std.testing.expectEqual(post_write_blocks, try volume.reservedCapacityBlocks());
         try volume.remove("/reserved-b");
         try std.testing.expectEqual(@as(u64, 0), (try volume.statFile(&reserved)).nlink);
-        try std.testing.expectEqual(post_write_blocks, volume.reservedCapacityBlocks());
+        try std.testing.expectEqual(post_write_blocks, try volume.reservedCapacityBlocks());
         try volume.closeFile(&reserved);
-        try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
+        try std.testing.expectEqual(@as(u64, 0), try volume.reservedCapacityBlocks());
 
         var released: FileHandle = undefined;
         try volume.openFile(&released, "/released", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
@@ -1265,7 +1358,7 @@ test "truncate and open truncation release fallocate reservations" {
     try volume.openFile(&file, "/truncate-reservation", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
     try volume.fallocateFile(&file, 0, 128 * 1024);
     try volume.fallocateFile(&file, 256 * 1024, 128 * 1024);
-    const full = volume.reservedCapacityBlocks();
+    const full = try volume.reservedCapacityBlocks();
     try volume.truncateFile(&file, 320 * 1024);
     var stored = try readReservations(&volume, file.object_id);
     try std.testing.expectEqual(@as(usize, 2), stored.intervals.len);
@@ -1276,12 +1369,12 @@ test "truncate and open truncation release fallocate reservations" {
     try std.testing.expectEqual(@as(usize, 1), stored.intervals.len);
     try std.testing.expectEqual(@as(u64, 32 * 1024), stored.intervals[0].end);
     std.testing.allocator.free(stored.intervals);
-    try std.testing.expect(volume.reservedCapacityBlocks() < full);
-    try std.testing.expect(volume.reservedCapacityBlocks() != 0);
+    try std.testing.expect(try volume.reservedCapacityBlocks() < full);
+    try std.testing.expect(try volume.reservedCapacityBlocks() != 0);
     try volume.closeFile(&file);
 
     try volume.openFile(&file, "/truncate-reservation", c.LFS_O_RDWR | c.LFS_O_TRUNC, 0, 0, 0);
-    try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
+    try std.testing.expectEqual(@as(u64, 0), try volume.reservedCapacityBlocks());
     try volume.closeFile(&file);
 }
 
@@ -1300,9 +1393,9 @@ test "fallocate rejects ranges beyond the supported file size" {
         error.FileTooLarge,
         volume.fallocateFile(&file, zettide.object_format.max_file_size, 1),
     );
-    try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
+    try std.testing.expectEqual(@as(u64, 0), try volume.reservedCapacityBlocks());
     try std.testing.expectError(error.InvalidArgument, volume.fallocateFile(&file, 0, 0));
-    try std.testing.expectEqual(@as(u64, 0), volume.reservedCapacityBlocks());
+    try std.testing.expectEqual(@as(u64, 0), try volume.reservedCapacityBlocks());
     try volume.closeFile(&file);
 }
 
@@ -1486,16 +1579,16 @@ test "object pins retain zero-link objects and reclamation drops tracking state"
     object_metadata.ctime_ns = 1;
     try volume.setObjectMetadata(object_id, object_metadata);
     try volume.pinObject(object_id);
-    try std.testing.expectEqual(@as(u64, 1), volume.objectPinCount(object_id));
+    try std.testing.expectEqual(@as(u64, 1), try volume.objectPinCount(object_id));
     try volume.remove("/pinned");
     const unlinked = try volume.statObject(object_id);
     try std.testing.expectEqual(@as(u64, 0), unlinked.nlink);
     try std.testing.expect(unlinked.metadata.ctime_ns > 1);
-    try std.testing.expectEqual(@as(usize, 1), volume.trackedObjectCount());
+    try std.testing.expectEqual(@as(usize, 1), try volume.trackedObjectCount());
 
     try volume.unpinObject(object_id);
-    try std.testing.expectEqual(@as(u64, 0), volume.objectPinCount(object_id));
-    try std.testing.expectEqual(@as(usize, 0), volume.trackedObjectCount());
+    try std.testing.expectEqual(@as(u64, 0), try volume.objectPinCount(object_id));
+    try std.testing.expectEqual(@as(usize, 0), try volume.trackedObjectCount());
     try std.testing.expectError(error.FileNotFound, volume.statObject(object_id));
     try std.testing.expectError(error.CorruptFilesystem, volume.linkCount(object_id));
     try std.testing.expectError(error.InvalidArgument, volume.unpinObject(object_id));

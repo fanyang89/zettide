@@ -58,6 +58,7 @@ const Config = struct {
     warmup: u32 = 5,
     block_size: usize = 4096,
     image_size: u64 = 512 * 1024 * 1024,
+    journaled: bool = false,
     help: bool = false,
 };
 
@@ -290,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.print(
-        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={}\n",
+        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} journaled={}\n",
         .{
             @tagName(builtin.mode),
             @tagName(builtin.os.tag),
@@ -299,6 +300,7 @@ pub fn main(init: std.process.Init) !void {
             config.warmup,
             config.block_size,
             config.image_size,
+            config.journaled,
         },
     );
     try stdout.flush();
@@ -321,7 +323,12 @@ fn runOperation(
     errdefer workspace.cleanup(io) catch {};
     var image_path_buffer: [192]u8 = undefined;
     const image_path = try std.fmt.bufPrint(&image_path_buffer, "{s}/image.ddv", .{workspace.path()});
-    try Volume.create(io, image_path, config.image_size, "FsOpsBenchmark");
+    try Volume.createOptions(io, image_path, config.image_size, "FsOpsBenchmark", .{
+        .redo_journal = if (config.journaled) .{
+            .length = 1024 * 1024 * 1024,
+            .max_transaction_blocks = 1024,
+        } else null,
+    });
 
     const read_only = operation == .read_readonly or operation == .read_partial;
     if (read_only) try populateReadOnlyImage(
@@ -418,6 +425,11 @@ fn parseArgs(args: []const []const u8) !Config {
             config.help = true;
             return config;
         }
+        if (std.mem.eql(u8, argument, "--journaled")) {
+            config.journaled = true;
+            index += 1;
+            continue;
+        }
         const known_option = std.mem.eql(u8, argument, "--operation") or
             std.mem.eql(u8, argument, "--iterations") or
             std.mem.eql(u8, argument, "--warmup") or
@@ -443,6 +455,8 @@ fn parseArgs(args: []const []const u8) !Config {
         config.image_size % zettide.container.default_block_size != 0)
         return error.InvalidImageSize;
     if (config.block_size > config.image_size / 4) return error.BlockSizeTooLarge;
+    if (config.journaled and config.block_size > zettide.object_format.chunk_size)
+        return error.JournaledBlockSizeTooLarge;
     return config;
 }
 
@@ -470,6 +484,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  --warmup N         warmup operations per workload (default: 5)
         \\  --block-size N      data operation size in bytes (default: 4096)
         \\  --image-size N      container logical size in bytes (default: 536870912)
+        \\  --journaled         use redo journaling (block size up to 1048576)
         \\  --help              show this help
         \\
     );
@@ -481,6 +496,7 @@ test "parse filesystem benchmark defaults and options" {
     try std.testing.expectEqual(@as(u32, 100), defaults.iterations);
     try std.testing.expectEqual(@as(u32, 5), defaults.warmup);
     try std.testing.expectEqual(@as(usize, 4096), defaults.block_size);
+    try std.testing.expect(!defaults.journaled);
 
     const configured = try parseArgs(&.{
         "benchmark",
@@ -494,12 +510,14 @@ test "parse filesystem benchmark defaults and options" {
         "8192",
         "--image-size",
         "67108864",
+        "--journaled",
     });
     try std.testing.expectEqual(Operation.write_overwrite, configured.operation.?);
     try std.testing.expectEqual(@as(u32, 12), configured.iterations);
     try std.testing.expectEqual(@as(u32, 0), configured.warmup);
     try std.testing.expectEqual(@as(usize, 8192), configured.block_size);
     try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024), configured.image_size);
+    try std.testing.expect(configured.journaled);
 }
 
 test "reject invalid filesystem benchmark options" {
@@ -508,5 +526,9 @@ test "reject invalid filesystem benchmark options" {
     try std.testing.expectError(error.MissingArgumentValue, parseArgs(&.{ "benchmark", "--warmup" }));
     try std.testing.expectError(error.UnknownArgument, parseArgs(&.{ "benchmark", "--other" }));
     try std.testing.expectError(error.InvalidImageSize, parseArgs(&.{ "benchmark", "--image-size", "12345" }));
+    try std.testing.expectError(
+        error.JournaledBlockSizeTooLarge,
+        parseArgs(&.{ "benchmark", "--journaled", "--block-size", "4194304" }),
+    );
     try std.testing.expect((try parseArgs(&.{ "benchmark", "--help", "--other" })).help);
 }

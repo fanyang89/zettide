@@ -82,6 +82,10 @@ pub const Runtime = struct {
         self.active_transaction = false;
     }
 
+    pub fn hasActiveWrites(self: *const Runtime) bool {
+        return self.active.count() != 0;
+    }
+
     pub fn read(self: *Runtime, block: u32, offset: u32, buffer: []u8) !void {
         try self.validateRange(block, offset, buffer.len);
         if (self.active.get(block)) |image| {
