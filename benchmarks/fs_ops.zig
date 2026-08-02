@@ -46,6 +46,24 @@ const all_operations = [_]Operation{
     .remove,
 };
 
+const DurabilityMode = enum {
+    durable,
+    writeback,
+
+    fn parse(value: []const u8) !DurabilityMode {
+        if (std.mem.eql(u8, value, "durable")) return .durable;
+        if (std.mem.eql(u8, value, "writeback")) return .writeback;
+        return error.InvalidDurability;
+    }
+
+    fn mountValue(self: DurabilityMode) zettide.block_device.Durability {
+        return switch (self) {
+            .durable => .durable,
+            .writeback => .{ .writeback = .{} },
+        };
+    }
+};
+
 const benchmark_name_width = blk: {
     var width: usize = 0;
     for (all_operations) |operation| width = @max(width, @tagName(operation).len);
@@ -60,6 +78,7 @@ const Config = struct {
     image_size: u64 = 512 * 1024 * 1024,
     workspace_root: []const u8 = ".zig-cache/benchmarks",
     journaled: bool = false,
+    durability: DurabilityMode = .writeback,
     help: bool = false,
 };
 
@@ -291,7 +310,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.print(
-        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} workspace_root={s} journaled={}\n",
+        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} workspace_root={s} journaled={} durability={s}\n",
         .{
             @tagName(builtin.mode),
             @tagName(builtin.os.tag),
@@ -302,6 +321,7 @@ pub fn main(init: std.process.Init) !void {
             config.image_size,
             config.workspace_root,
             config.journaled,
+            @tagName(config.durability),
         },
     );
     try stdout.flush();
@@ -341,7 +361,7 @@ fn runOperation(
 
     var volume = try Volume.open(io, image_path, !read_only);
     defer volume.deinit();
-    try volume.mount();
+    try volume.mountOptions(.{ .journal_durability = config.durability.mountValue() });
 
     var state = try CaseState.init(allocator, &volume, operation, config.block_size);
     defer state.deinit();
@@ -436,7 +456,8 @@ fn parseArgs(args: []const []const u8) !Config {
             std.mem.eql(u8, argument, "--warmup") or
             std.mem.eql(u8, argument, "--block-size") or
             std.mem.eql(u8, argument, "--image-size") or
-            std.mem.eql(u8, argument, "--workspace-root");
+            std.mem.eql(u8, argument, "--workspace-root") or
+            std.mem.eql(u8, argument, "--durability");
         if (!known_option) return error.UnknownArgument;
         if (index + 1 >= args.len) return error.MissingArgumentValue;
         const value = args[index + 1];
@@ -453,6 +474,8 @@ fn parseArgs(args: []const []const u8) !Config {
         } else if (std.mem.eql(u8, argument, "--workspace-root")) {
             if (value.len == 0) return error.EmptyWorkspaceRoot;
             config.workspace_root = value;
+        } else if (std.mem.eql(u8, argument, "--durability")) {
+            config.durability = try DurabilityMode.parse(value);
         }
         index += 2;
     }
@@ -491,6 +514,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  --image-size N      container logical size in bytes (default: 536870912)
         \\  --workspace-root P  benchmark workspace parent (default: .zig-cache/benchmarks)
         \\  --journaled         use redo journaling (block size up to 1048576)
+        \\  --durability NAME   durable or writeback (default: writeback)
         \\  --help              show this help
         \\
     );
@@ -504,6 +528,7 @@ test "parse filesystem benchmark defaults and options" {
     try std.testing.expectEqual(@as(usize, 4096), defaults.block_size);
     try std.testing.expectEqualStrings(".zig-cache/benchmarks", defaults.workspace_root);
     try std.testing.expect(!defaults.journaled);
+    try std.testing.expectEqual(DurabilityMode.writeback, defaults.durability);
 
     const configured = try parseArgs(&.{
         "benchmark",
@@ -520,6 +545,8 @@ test "parse filesystem benchmark defaults and options" {
         "--workspace-root",
         "/var/tmp/zettide-bench",
         "--journaled",
+        "--durability",
+        "durable",
     });
     try std.testing.expectEqual(Operation.write_overwrite, configured.operation.?);
     try std.testing.expectEqual(@as(u32, 12), configured.iterations);
@@ -528,6 +555,7 @@ test "parse filesystem benchmark defaults and options" {
     try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024), configured.image_size);
     try std.testing.expectEqualStrings("/var/tmp/zettide-bench", configured.workspace_root);
     try std.testing.expect(configured.journaled);
+    try std.testing.expectEqual(DurabilityMode.durable, configured.durability);
 }
 
 test "reject invalid filesystem benchmark options" {
@@ -537,6 +565,7 @@ test "reject invalid filesystem benchmark options" {
     try std.testing.expectError(error.UnknownArgument, parseArgs(&.{ "benchmark", "--other" }));
     try std.testing.expectError(error.InvalidImageSize, parseArgs(&.{ "benchmark", "--image-size", "12345" }));
     try std.testing.expectError(error.EmptyWorkspaceRoot, parseArgs(&.{ "benchmark", "--workspace-root", "" }));
+    try std.testing.expectError(error.InvalidDurability, parseArgs(&.{ "benchmark", "--durability", "other" }));
     try std.testing.expectError(
         error.JournaledBlockSizeTooLarge,
         parseArgs(&.{ "benchmark", "--journaled", "--block-size", "4194304" }),
