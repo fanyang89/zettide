@@ -21,6 +21,7 @@ pub const AccessTimePolicy = enum {
 
 pub const MountOptions = struct {
     access_time: AccessTimePolicy = .relatime,
+    journal_durability: block_device.Durability = .{ .writeback = .{} },
 };
 
 pub const Volume = struct {
@@ -445,8 +446,11 @@ pub const Volume = struct {
         self.mounted = true;
         errdefer {
             _ = c.lfs_unmount(&self.lfs);
+            if (self.backing == .file) self.device.finishWriteback() catch {};
             self.mounted = false;
         }
+        if (self.backing == .file and self.writable and self.device.isJournaled())
+            try self.device.setDurability(options.journal_durability);
         self.link_counts.clearRetainingCapacity();
         self.directory_link_counts.clearRetainingCapacity();
         self.object_pins.clearRetainingCapacity();
@@ -482,6 +486,9 @@ pub const Volume = struct {
             };
             self.pool_set = null;
         } else {
+            self.device.finishWriteback() catch |err| {
+                if (first_error == null) first_error = err;
+            };
             self.device.deinit();
             self.file.close(self.io);
         }

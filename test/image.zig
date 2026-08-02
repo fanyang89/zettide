@@ -95,7 +95,7 @@ test "data and metadata survive a real container reopen" {
     }
 }
 
-test "journaled overwrite is durable with one sync and survives reopen" {
+test "journaled writeback becomes durable on sync and survives reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -105,15 +105,21 @@ test "journaled overwrite is durable with one sync and survives reopen" {
         var volume = try openVolume(path);
         defer volume.deinit();
         try std.testing.expect(volume.header.isJournaled());
-        try volume.mountOptions(.{ .access_time = .noatime });
+        try volume.mountOptions(.{
+            .access_time = .noatime,
+            .journal_durability = .{ .writeback = .{ .max_delay_ns = std.time.ns_per_min } },
+        });
         var file: FileHandle = undefined;
         try volume.openFile(&file, "/payload", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100640, 123, 456);
         try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "old", 0));
+        try volume.syncFile(&file);
 
         var fault: zettide.block_device.FaultController = .{};
         volume.device.fault = &fault;
         try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "new", 0));
-        try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+        try std.testing.expectEqual(@as(u64, 0), fault.syncCalls());
+        try volume.syncFile(&file);
+        try std.testing.expectEqual(@as(u64, 1), fault.syncCalls());
         volume.device.fault = null;
         try volume.closeFile(&file);
     }

@@ -216,7 +216,7 @@ test "a failed sync freezes writes until the volume is reopened" {
     }
 }
 
-test "a failed journal commit invalidates the mounted view until reopen" {
+test "a failed journal writeback flush freezes writes and preserves the mounted view" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -226,18 +226,25 @@ test "a failed journal commit invalidates the mounted view until reopen" {
     {
         var volume = try Volume.open(std.testing.io, path, true);
         defer volume.deinit();
-        try volume.mountOptions(.{ .access_time = .noatime });
+        try volume.mountOptions(.{
+            .access_time = .noatime,
+            .journal_durability = .{ .writeback = .{ .max_delay_ns = std.time.ns_per_min } },
+        });
         var file: FileHandle = undefined;
         try volume.openFile(&file, "/data", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 1);
         try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "old", 0));
+        try volume.syncFile(&file);
 
         var fault: zettide.block_device.FaultController = .{ .fail_sync_at = 0 };
         volume.device.fault = &fault;
-        try std.testing.expectError(error.InputOutput, volume.writeFile(&file, "new", 0));
+        try std.testing.expectEqual(@as(usize, 3), try volume.writeFile(&file, "new", 0));
+        try std.testing.expectError(error.InputOutput, volume.syncFile(&file));
         try std.testing.expect(volume.isWriteFrozen());
         var actual: [3]u8 = undefined;
-        try std.testing.expectError(error.VolumeRequiresReopen, volume.readFile(&file, &actual, 0));
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+        try std.testing.expectEqualStrings("new", &actual);
         fault.disable();
+        try std.testing.expectError(error.VolumeFrozen, volume.writeFile(&file, "x", 0));
     }
 
     {
