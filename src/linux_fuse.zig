@@ -1,9 +1,10 @@
 const std = @import("std");
 const Io = std.Io;
 const volume_mod = @import("volume.zig");
+const filesystem_backend = @import("filesystem_backend.zig");
+const littlefs_volume_adapter = @import("littlefs_volume_adapter.zig");
 const metadata = @import("metadata.zig");
 const object_format = @import("object_format.zig");
-const lfs = volume_mod.c;
 
 const c = @cImport({
     @cDefine("_FORTIFY_SOURCE", "0");
@@ -614,7 +615,7 @@ fn setAttr(req: c.fuse_req_t, id: c.fuse_ino_t, attr: ?*c.struct_stat, to_set: c
             if (node.kind != .file) return replyError(req, c.EINVAL);
             if (value.st_size < 0) return replyError(req, c.EINVAL);
             var handle: volume_mod.FileHandle = undefined;
-            state.volume.openObject(&handle, object_id, lfs.LFS_O_RDWR) catch |err|
+            littlefs_volume_adapter.openObject(state.volume, &handle, object_id, .{ .access = .read_write }) catch |err|
                 return replyError(req, errnoValue(err));
             var open_handle = true;
             defer if (open_handle) state.volume.closeFile(&handle) catch {};
@@ -871,14 +872,14 @@ fn create(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
     const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
     const context = c.fuse_req_ctx(req).?;
     const host_flags = c.zettide_fuse_get_flags(fi.?);
-    var flags: c_int = switch (host_flags & 3) {
-        0 => lfs.LFS_O_RDONLY,
-        else => lfs.LFS_O_RDWR,
+    const options: filesystem_backend.OpenOptions = .{
+        .access = if (host_flags & 3 == 0) .read_only else .read_write,
+        .create = true,
+        .exclusive = true,
+        .append = !state.writeback_cache and host_flags & c.O_APPEND != 0,
     };
-    flags |= lfs.LFS_O_CREAT | lfs.LFS_O_EXCL;
-    if (!state.writeback_cache and host_flags & c.O_APPEND != 0) flags |= lfs.LFS_O_APPEND;
     const permissions = @as(u32, mode) & ~@as(u32, context[0].umask);
-    state.volume.openFile(&handle.file, &path, flags, permissions | 0o100000, context[0].uid, context[0].gid) catch |err| {
+    littlefs_volume_adapter.openFile(state.volume, &handle.file, &path, options, permissions | 0o100000, context[0].uid, context[0].gid) catch |err| {
         std.heap.c_allocator.destroy(handle);
         return replyError(req, errnoValue(err));
     };
@@ -910,19 +911,19 @@ fn create(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
 fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.struct_fuse_file_info) void {
     const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
     const host_flags = c.zettide_fuse_get_flags(fi);
-    const flags: c_int = if (state.writeback_cache)
-        lfs.LFS_O_RDWR
-    else switch (host_flags & 3) {
-        0 => lfs.LFS_O_RDONLY,
-        else => lfs.LFS_O_RDWR,
+    const options: filesystem_backend.OpenOptions = .{
+        .access = if (state.writeback_cache or host_flags & 3 != 0)
+            .read_write
+        else
+            .read_only,
+        .truncate = host_flags & c.O_TRUNC != 0,
+        .append = !state.writeback_cache and host_flags & c.O_APPEND != 0,
     };
-    var open_flags = flags | if (host_flags & c.O_TRUNC != 0) lfs.LFS_O_TRUNC else 0;
-    if (!state.writeback_cache and host_flags & c.O_APPEND != 0) open_flags |= lfs.LFS_O_APPEND;
     const object_id = node.object_id orelse {
         std.heap.c_allocator.destroy(handle);
         return replyError(req, c.EIO);
     };
-    state.volume.openObject(&handle.file, object_id, open_flags) catch |err| {
+    littlefs_volume_adapter.openObject(state.volume, &handle.file, object_id, options) catch |err| {
         std.heap.c_allocator.destroy(handle);
         return replyError(req, errnoValue(err));
     };
@@ -1046,15 +1047,15 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
     const buffer = state.reply_buffer.items;
     var used: usize = 0;
     while (true) {
-        var info: lfs.struct_lfs_info = undefined;
-        const has_entry = state.volume.readDirectory(&handle.directory, &info) catch |err|
+        var info: filesystem_backend.DirectoryEntry = undefined;
+        const has_entry = littlefs_volume_adapter.readDirectory(state.volume, &handle.directory, &info) catch |err|
             return replyError(req, errnoValue(err));
         if (!has_entry) break;
         const next_offset = state.volume.tellDirectory(&handle.directory) catch |err|
             return replyError(req, errnoValue(err));
         var stat: c.struct_stat = std.mem.zeroes(c.struct_stat);
-        stat.st_mode = if (info.type == lfs.LFS_TYPE_DIR) 0o040000 else 0o100000;
-        const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+        stat.st_mode = if (info.kind == .directory) 0o040000 else 0o100000;
+        const name = info.name();
         if (std.mem.eql(u8, name, ".")) {
             stat.st_ino = handle.inode.id;
         } else if (std.mem.eql(u8, name, "..")) {
@@ -1076,7 +1077,7 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
             stat.st_ino = dentry.inode.id;
             stat.st_mode = kindMode(dentry.inode.kind);
         }
-        const needed = c.fuse_add_direntry(req, buffer.ptr + used, size - used, @ptrCast(&info.name), &stat, next_offset);
+        const needed = c.fuse_add_direntry(req, buffer.ptr + used, size - used, name.ptr, &stat, next_offset);
         if (needed > size - used) break;
         used += needed;
     }
