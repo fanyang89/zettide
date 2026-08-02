@@ -5,11 +5,12 @@ const std = @import("std");
 pub const TransactionId = [16]u8;
 pub const anchor_size = 512;
 pub const Anchor = [anchor_size]u8;
+pub const object_ref_size = 64;
 
 /// A backend-owned locator. Callers may compare and persist it, but must not
 /// interpret its bytes.
 pub const ObjectRef = struct {
-    bytes: [64]u8 = @splat(0),
+    bytes: [object_ref_size]u8 = @splat(0),
 
     pub fn eql(a: ObjectRef, b: ObjectRef) bool {
         return std.mem.eql(u8, &a.bytes, &b.bytes);
