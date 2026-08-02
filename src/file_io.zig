@@ -8,6 +8,7 @@ pub const FileIo = file_io_api.FileIo;
 pub const BorrowedFileIo = file_io_api.BorrowedFileIo;
 pub const Kind = file_io_api.Kind;
 pub const Lane = file_io_api.Lane;
+pub const SyncMode = file_io_api.SyncMode;
 pub const Write = file_io_api.Write;
 
 pub const Mode = enum {

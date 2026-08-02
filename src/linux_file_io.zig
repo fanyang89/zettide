@@ -174,7 +174,13 @@ fn writeAllManyAt(raw: ?*anyopaque, _: File, io: Io, lane_kind: file_io_api.Lane
     }
 }
 
-fn dataSync(raw: ?*anyopaque, _: File, io: Io, lane_kind: file_io_api.Lane) !void {
+fn sync(
+    raw: ?*anyopaque,
+    _: File,
+    io: Io,
+    lane_kind: file_io_api.Lane,
+    mode: file_io_api.SyncMode,
+) !void {
     const context: *Context = @ptrCast(@alignCast(raw.?));
     const lane = selectLane(context, lane_kind);
     try lane.mutex.lock(io);
@@ -183,7 +189,8 @@ fn dataSync(raw: ?*anyopaque, _: File, io: Io, lane_kind: file_io_api.Lane) !voi
     while (true) {
         try requireActive(lane);
         const token = nextToken(lane);
-        const sqe = lane.ring.fsync(token, 0, linux.IORING_FSYNC_DATASYNC) catch |err| {
+        const flags: u32 = if (mode == .data) linux.IORING_FSYNC_DATASYNC else 0;
+        const sqe = lane.ring.fsync(token, 0, flags) catch |err| {
             failLane(lane);
             return err;
         };
@@ -315,7 +322,7 @@ const vtable: file_io_api.FileIo.VTable = .{
     .read_all_at = readAllAt,
     .write_all_at = writeAllAt,
     .write_all_many_at = writeAllManyAt,
-    .data_sync = dataSync,
+    .sync = sync,
     .deinit = deinit,
 };
 
@@ -348,7 +355,7 @@ test "Linux file IO uses io_uring for borrowed file operations" {
         }}),
     );
     try backend.writeAllAt(std.testing.io, .foreground, "still-active", 3072);
-    try backend.dataSync(std.testing.io, .writeback);
+    try backend.sync(std.testing.io, .writeback, .data);
     var actual: [8]u8 = undefined;
     try backend.readAllAt(std.testing.io, .foreground, &actual, 512);
     try std.testing.expectEqualStrings("io_uring", &actual);

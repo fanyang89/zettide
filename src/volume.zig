@@ -96,12 +96,15 @@ pub const Volume = struct {
         defer file.close(io);
 
         try file.setLength(io, try container.requiredFileSize(header));
-        try container.write(file, io, container.header_a_offset, header);
-        try container.write(file, io, container.header_b_offset, header);
-        try file.sync(io);
-
         var backend = try file_io.init(std.heap.c_allocator, file, options.file_io);
+        var owns_backend = true;
+        defer if (owns_backend) backend.deinit();
+        try container.writeWithFileIo(io, backend.borrow(), container.header_a_offset, header);
+        try container.writeWithFileIo(io, backend.borrow(), container.header_b_offset, header);
+        try backend.sync(io, .foreground, .full);
+
         var device = block_device.FileBlockDevice.initWithFileIo(io, &backend, header);
+        owns_backend = false;
         defer device.deinit();
         if (header.isJournaled()) try device.enableRedo(std.heap.c_allocator, header);
         var config = device.configure(header);
@@ -114,11 +117,11 @@ pub const Volume = struct {
 
         header.state = .ready;
         header.sequence += 1;
-        try container.write(file, io, container.header_b_offset, header);
-        try file.sync(io);
+        try container.writeWithFileIo(io, device.file_io.borrow(), container.header_b_offset, header);
+        try device.file_io.sync(io, .foreground, .full);
         header.sequence += 1;
-        try container.write(file, io, container.header_a_offset, header);
-        try file.sync(io);
+        try container.writeWithFileIo(io, device.file_io.borrow(), container.header_a_offset, header);
+        try device.file_io.sync(io, .foreground, .full);
     }
 
     pub fn initializePool(
@@ -381,7 +384,10 @@ pub const Volume = struct {
             .lock_nonblocking = true,
         });
         errdefer file.close(io);
-        const header = try container.read(file, io);
+        var backend = try file_io.init(std.heap.c_allocator, file, options.file_io);
+        var owns_backend = true;
+        errdefer if (owns_backend) backend.deinit();
+        const header = try container.readWithFileIo(file, io, backend.borrow());
         if (header.isEncrypted()) return error.EncryptionNotSupportedForLegacyContainer;
         if (options.encryption_credential != null) return error.UnexpectedEncryptionCredential;
 
@@ -389,8 +395,8 @@ pub const Volume = struct {
         result.io = io;
         result.file = file;
         result.header = header;
-        var backend = try file_io.init(std.heap.c_allocator, file, options.file_io);
         result.device = block_device.FileBlockDevice.initWithFileIo(io, &backend, header);
+        owns_backend = false;
         errdefer result.device.deinit();
         if (header.isJournaled()) try result.device.enableRedo(std.heap.c_allocator, header);
         result.config = result.device.configure(header);

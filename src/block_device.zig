@@ -508,7 +508,11 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return error.InjectedFault;
         }
-        self.file_io.dataSync(self.io, if (self.redo == null) .foreground else .writeback) catch |err| {
+        self.file_io.sync(
+            self.io,
+            if (self.redo == null) .foreground else .writeback,
+            .data,
+        ) catch |err| {
             self.freezeWrites();
             return err;
         };

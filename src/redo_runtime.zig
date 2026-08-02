@@ -351,12 +351,13 @@ pub const Runtime = struct {
         if (self.committed.count() != 0) {
             const ids = try self.sortedIds(&self.committed);
             defer self.allocator.free(ids);
-            for (ids) |id| try self.file_io.writeAllAt(
-                self.io,
-                .writeback,
-                self.committed.get(id).?,
-                try self.homePosition(id, 0),
-            );
+            const writes = try self.allocator.alloc(file_io.Write, ids.len);
+            defer self.allocator.free(writes);
+            for (ids, writes) |id, *write| write.* = .{
+                .bytes = self.committed.get(id).?,
+                .offset = try self.homePosition(id, 0),
+            };
+            try self.file_io.writeAllManyAt(self.io, .writeback, writes);
             try durable_sync.run();
         }
         if (self.used_bytes != 0) {

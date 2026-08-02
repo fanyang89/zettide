@@ -13,6 +13,11 @@ pub const Lane = enum {
     writeback,
 };
 
+pub const SyncMode = enum {
+    data,
+    full,
+};
+
 pub const Write = struct {
     bytes: []const u8,
     offset: u64,
@@ -28,7 +33,7 @@ pub const FileIo = struct {
         read_all_at: *const fn (?*anyopaque, File, Io, Lane, []u8, u64) anyerror!void,
         write_all_at: *const fn (?*anyopaque, File, Io, Lane, []const u8, u64) anyerror!void,
         write_all_many_at: *const fn (?*anyopaque, File, Io, Lane, []const Write) anyerror!void,
-        data_sync: *const fn (?*anyopaque, File, Io, Lane) anyerror!void,
+        sync: *const fn (?*anyopaque, File, Io, Lane, SyncMode) anyerror!void,
         deinit: *const fn (?*anyopaque) void,
     };
 
@@ -48,8 +53,8 @@ pub const FileIo = struct {
         try self.borrow().writeAllManyAt(io, lane, writes);
     }
 
-    pub fn dataSync(self: FileIo, io: Io, lane: Lane) !void {
-        try self.borrow().dataSync(io, lane);
+    pub fn sync(self: FileIo, io: Io, lane: Lane, mode: SyncMode) !void {
+        try self.borrow().sync(io, lane, mode);
     }
 
     pub fn borrow(self: FileIo) BorrowedFileIo {
@@ -86,8 +91,8 @@ pub const BorrowedFileIo = struct {
         try self.vtable.write_all_many_at(self.context, self.file, io, lane, writes);
     }
 
-    pub fn dataSync(self: BorrowedFileIo, io: Io, lane: Lane) !void {
-        try self.vtable.data_sync(self.context, self.file, io, lane);
+    pub fn sync(self: BorrowedFileIo, io: Io, lane: Lane, mode: SyncMode) !void {
+        try self.vtable.sync(self.context, self.file, io, lane, mode);
     }
 };
 
@@ -104,8 +109,8 @@ fn posixWriteAllManyAt(_: ?*anyopaque, file: File, io: Io, _: Lane, writes: []co
     for (writes) |write| try file.writePositionalAll(io, write.bytes, write.offset);
 }
 
-fn posixDataSync(_: ?*anyopaque, file: File, io: Io, _: Lane) !void {
-    if (@import("builtin").os.tag == .linux)
+fn posixSync(_: ?*anyopaque, file: File, io: Io, _: Lane, mode: SyncMode) !void {
+    if (mode == .data and @import("builtin").os.tag == .linux)
         try std.posix.fdatasync(file.handle)
     else
         try file.sync(io);
@@ -117,7 +122,7 @@ const posix_vtable: FileIo.VTable = .{
     .read_all_at = posixReadAllAt,
     .write_all_at = posixWriteAllAt,
     .write_all_many_at = posixWriteAllManyAt,
-    .data_sync = posixDataSync,
+    .sync = posixSync,
     .deinit = posixDeinit,
 };
 
@@ -131,7 +136,7 @@ test "POSIX file IO reads writes and syncs borrowed files" {
     var backend = FileIo.posix(file);
     defer backend.deinit();
     try backend.writeAllAt(std.testing.io, .foreground, "payload", 1024);
-    try backend.dataSync(std.testing.io, .foreground);
+    try backend.sync(std.testing.io, .foreground, .data);
     var actual: [7]u8 = undefined;
     try backend.readAllAt(std.testing.io, .foreground, &actual, 1024);
     try std.testing.expectEqualStrings("payload", &actual);

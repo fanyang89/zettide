@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
+const file_io = @import("file_io.zig");
 const name_profile = @import("name_profile.zig");
 const redo_journal = @import("redo_journal.zig");
 const volume_crypto = @import("volume_crypto.zig");
@@ -310,8 +311,20 @@ pub fn read(file: File, io: Io) !Header {
     var b_bytes: [header_size]u8 = undefined;
     const a_read = try file.readPositionalAll(io, &a_bytes, header_a_offset);
     const b_read = try file.readPositionalAll(io, &b_bytes, header_b_offset);
-    const a = decodeCandidate(&a_bytes, a_read);
-    const b = decodeCandidate(&b_bytes, b_read);
+    const selected = try selectHeader(&a_bytes, a_read, &b_bytes, b_read);
+    const expected_len = try requiredFileSize(selected);
+    if (try file.length(io) < expected_len) return error.TruncatedContainer;
+    return selected;
+}
+
+fn selectHeader(
+    a_bytes: *const [header_size]u8,
+    a_read: usize,
+    b_bytes: *const [header_size]u8,
+    b_read: usize,
+) !Header {
+    const a = decodeCandidate(a_bytes, a_read);
+    const b = decodeCandidate(b_bytes, b_read);
     const selected = if (a.sequence()) |a_sequence|
         if (b.sequence()) |b_sequence|
             if (b_sequence > a_sequence) try b.resolve() else try a.resolve()
@@ -323,8 +336,28 @@ pub fn read(file: File, io: Io) !Header {
         return error.NoValidHeader;
 
     if (selected.state != .ready) return error.IncompleteContainer;
-    const expected_len = try requiredFileSize(selected);
-    if (try file.length(io) < expected_len) return error.TruncatedContainer;
+    return selected;
+}
+
+pub fn readWithFileIo(file: File, io: Io, backend: file_io.BorrowedFileIo) !Header {
+    var a_bytes: [header_size]u8 = undefined;
+    var b_bytes: [header_size]u8 = undefined;
+    const a_read: usize = read: {
+        backend.readAllAt(io, .foreground, &a_bytes, header_a_offset) catch |err| switch (err) {
+            error.UnexpectedEndOfFile => break :read 0,
+            else => return err,
+        };
+        break :read header_size;
+    };
+    const b_read: usize = read: {
+        backend.readAllAt(io, .foreground, &b_bytes, header_b_offset) catch |err| switch (err) {
+            error.UnexpectedEndOfFile => break :read 0,
+            else => return err,
+        };
+        break :read header_size;
+    };
+    const selected = try selectHeader(&a_bytes, a_read, &b_bytes, b_read);
+    if (try file.length(io) < try requiredFileSize(selected)) return error.TruncatedContainer;
     return selected;
 }
 
@@ -382,6 +415,16 @@ fn decodeCandidate(bytes: *const [header_size]u8, bytes_read: usize) HeaderCandi
 pub fn write(file: File, io: Io, offset: u64, header: Header) !void {
     const bytes = header.encode();
     try file.writePositionalAll(io, &bytes, offset);
+}
+
+pub fn writeWithFileIo(
+    io: Io,
+    backend: file_io.BorrowedFileIo,
+    offset: u64,
+    header: Header,
+) !void {
+    const bytes = header.encode();
+    try backend.writeAllAt(io, .foreground, &bytes, offset);
 }
 
 fn checksum(bytes: []const u8) u32 {
