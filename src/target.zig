@@ -59,6 +59,37 @@ pub const FormatOptions = struct {
     encryption_credential: ?volume_crypto.Credential = null,
 };
 
+pub const AcquiredFormat = struct {
+    plan: FormatPlan,
+    storage: storage_api.Storage,
+    io: Io,
+    storage_owned: bool = true,
+
+    pub fn deinit(self: *AcquiredFormat) void {
+        if (self.storage_owned) self.storage.close(self.io) catch {};
+        self.storage_owned = false;
+    }
+
+    pub fn apply(
+        self: *AcquiredFormat,
+        allocator: std.mem.Allocator,
+        confirmation: []const u8,
+        options: FormatOptions,
+    ) !FormatResult {
+        if (self.plan.name_profile != options.name_profile or
+            self.plan.encryption_kdf != credentialKdf(options.encryption_credential))
+            return error.FormatPlanChanged;
+        if (!std.mem.eql(u8, &self.plan.token, &computeToken(&self.plan)))
+            return error.FormatPlanChanged;
+        var token_buffer: [64]u8 = undefined;
+        if (!std.mem.eql(u8, confirmation, self.plan.tokenText(&token_buffer)))
+            return error.ConfirmationMismatch;
+        if (!self.plan.eligible) return error.TargetNotEligible;
+        self.storage_owned = false;
+        return provision(self.io, allocator, &self.storage, self.plan.label, options);
+    }
+};
+
 pub const OpenOptions = volume_api.Volume.OpenOptions;
 
 pub const FormatResult = union(enum) {
@@ -95,6 +126,28 @@ pub fn inspectFormatOptions(
                 error.EncryptedBlockDeviceNotSupported
             else
                 inspectBlockFormat(io, allocator, path, label, options)
+        else
+            error.BlockDeviceNotImplemented,
+        else => error.UnsupportedTargetType,
+    };
+}
+
+pub fn acquireFormatOptions(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    label: []const u8,
+    options: FormatOptions,
+) !AcquiredFormat {
+    _ = try @import("v3/member_format.zig").Label.init(label);
+    const stat = try Io.Dir.cwd().statFile(io, path, .{});
+    return switch (stat.kind) {
+        .file => acquireRegularFormat(io, allocator, path, label, options),
+        .block_device => if (comptime builtin.os.tag == .linux)
+            if (options.encryption_credential != null)
+                error.EncryptedBlockDeviceNotSupported
+            else
+                acquireBlockFormat(io, allocator, path, label, options)
         else
             error.BlockDeviceNotImplemented,
         else => error.UnsupportedTargetType,
@@ -425,6 +478,90 @@ fn inspectBlockFormat(
     return plan;
 }
 
+fn acquireRegularFormat(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    label: []const u8,
+    options: FormatOptions,
+) !AcquiredFormat {
+    const file = try Io.Dir.cwd().openFile(io, path, .{
+        .mode = .read_write,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    });
+    var file_owned = true;
+    errdefer if (file_owned) file.close(io);
+    const capacity = try file.length(io);
+    var storage = storage_api.Storage.initOwned(file, capacity, .regular_file, 1, true);
+    file_owned = false;
+    errdefer storage.close(io) catch {};
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.UnsupportedTargetType;
+    const scan = try scanStorage(&storage, io, allocator);
+    var plan: FormatPlan = .{
+        .path = path,
+        .label = label,
+        .name_profile = options.name_profile,
+        .encryption_kdf = credentialKdf(options.encryption_credential),
+        .canonical_path_digest = try canonicalPathDigest(io, path),
+        .kind = .regular_file,
+        .capacity_bytes = capacity,
+        .minimum_io_size = 1,
+        .contains_data = scan.contains_data,
+        .data_digest = scan.digest,
+        .eligible = capacity >= 3 * member_alignment and capacity % member_alignment == 0,
+        .token = undefined,
+        .identity = .{ .regular_file = .{
+            .inode = inodeValue(stat.inode),
+            .mtime_ns = stat.mtime.nanoseconds,
+            .ctime_ns = stat.ctime.nanoseconds,
+        } },
+    };
+    plan.token = computeToken(&plan);
+    return .{ .plan = plan, .storage = storage, .io = io };
+}
+
+fn acquireBlockFormat(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    label: []const u8,
+    options: FormatOptions,
+) !AcquiredFormat {
+    var opened = try linux_block.openStorage(io, allocator, path, true);
+    errdefer opened.storage.close(io) catch {};
+    const info = opened.info;
+    const scan = try scanStorage(&opened.storage, io, allocator);
+    var plan: FormatPlan = .{
+        .path = path,
+        .label = label,
+        .name_profile = options.name_profile,
+        .encryption_kdf = credentialKdf(options.encryption_credential),
+        .canonical_path_digest = try canonicalPathDigest(io, path),
+        .kind = .block_device,
+        .capacity_bytes = info.capacity_bytes,
+        .minimum_io_size = info.logical_sector_size,
+        .contains_data = scan.contains_data,
+        .data_digest = scan.digest,
+        .eligible = info.preflightEligible() and
+            std.math.isPowerOfTwo(info.logical_sector_size) and
+            info.logical_sector_size <= 4096 and
+            4096 % info.logical_sector_size == 0 and
+            info.capacity_bytes >= 3 * member_alignment,
+        .token = undefined,
+        .identity = .{ .block_device = .{
+            .major = info.id.major,
+            .minor = info.id.minor,
+            .disk_sequence = info.disk_sequence,
+            .capacity_bytes = info.capacity_bytes,
+            .logical_sector_size = info.logical_sector_size,
+        } },
+    };
+    plan.token = computeToken(&plan);
+    return .{ .plan = plan, .storage = opened.storage, .io = io };
+}
+
 fn provision(
     io: Io,
     allocator: std.mem.Allocator,
@@ -575,6 +712,28 @@ test "new regular target formats and reopens as a volume" {
     try volume.mount();
     try std.testing.expectEqualStrings("Target Test", volume.header.labelSlice());
     try volume.close();
+}
+
+test "acquired regular target reproduces inspection token" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(directory);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ directory, "existing" });
+    defer std.testing.allocator.free(path);
+    const file = try Io.Dir.cwd().createFile(std.testing.io, path, .{ .read = true });
+    try file.setLength(std.testing.io, 8 * member_alignment);
+    file.close(std.testing.io);
+
+    const inspected = try inspectFormat(std.testing.io, std.testing.allocator, path, "Existing");
+    var acquired = try acquireFormatOptions(std.testing.io, std.testing.allocator, path, "Existing", .{});
+    defer acquired.deinit();
+    try std.testing.expectEqualSlices(u8, &inspected.token, &acquired.plan.token);
+    try std.testing.expectEqualDeep(inspected.identity, acquired.plan.identity);
+    try std.testing.expectError(
+        error.ConfirmationMismatch,
+        acquired.apply(std.testing.allocator, "invalid", .{}),
+    );
 }
 
 test "encrypted regular target hides and reopens filesystem data" {

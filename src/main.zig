@@ -615,12 +615,37 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
         .passphrase => .{ .argon2id = "" },
     } else null;
 
+    if (confirmation) |supplied| {
+        var acquired = zettide.target.acquireFormatOptions(io, allocator, path, label, .{
+            .name_profile = name_profile,
+            .encryption_credential = credential_hint,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return error.UnexpectedConfirmation,
+            else => return err,
+        };
+        defer acquired.deinit();
+        try printFormatPlan(&acquired.plan, stdout);
+        if (size != null) return error.SizeOnlyValidForNewFile;
+        var secret: cli_crypto.Secret = undefined;
+        var secret_loaded = false;
+        if (credential_source) |source| {
+            try cli_crypto.loadInto(&secret, io, source, true);
+            secret_loaded = true;
+        }
+        defer if (secret_loaded) secret.deinit();
+        const result = try acquired.apply(allocator, supplied, .{
+            .name_profile = name_profile,
+            .encryption_credential = if (secret_loaded) secret.credential() else null,
+        });
+        try finishFormat(result, path, null, stdout);
+        return;
+    }
+
     const plan = zettide.target.inspectFormatOptions(io, allocator, path, label, .{
         .name_profile = name_profile,
         .encryption_credential = credential_hint,
     }) catch |err| switch (err) {
         error.FileNotFound => {
-            if (confirmation != null) return error.UnexpectedConfirmation;
             const target_size = size orelse return error.MissingSize;
             var secret: cli_crypto.Secret = undefined;
             var secret_loaded = false;
@@ -639,29 +664,20 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
         else => return err,
     };
     if (size != null) return error.SizeOnlyValidForNewFile;
-    try stdout.print("Target: {s}\n", .{path});
+    try printFormatPlan(&plan, stdout);
+    var token_buffer: [64]u8 = undefined;
+    if (plan.eligible) {
+        try stdout.print("Confirm token: {s}\n", .{plan.tokenText(&token_buffer)});
+    }
+}
+
+fn printFormatPlan(plan: *const zettide.target.FormatPlan, stdout: *Io.Writer) !void {
+    try stdout.print("Target: {s}\n", .{plan.path});
     try stdout.print("Type: {s}\n", .{@tagName(plan.kind)});
     try stdout.print("Capacity: {Bi:.2}\n", .{plan.capacity_bytes});
     try stdout.print("Contains data: {s}\n", .{if (plan.contains_data) "yes" else "no"});
     try stdout.print("Name profile: {s}\n", .{plan.name_profile.name()});
     try stdout.print("Plan: {s}\n", .{if (plan.eligible) "ready" else "rejected"});
-    var token_buffer: [64]u8 = undefined;
-    if (confirmation) |supplied| {
-        var secret: cli_crypto.Secret = undefined;
-        var secret_loaded = false;
-        if (credential_source) |source| {
-            try cli_crypto.loadInto(&secret, io, source, true);
-            secret_loaded = true;
-        }
-        defer if (secret_loaded) secret.deinit();
-        const result = try zettide.target.applyFormatOptions(io, allocator, &plan, supplied, .{
-            .name_profile = name_profile,
-            .encryption_credential = if (secret_loaded) secret.credential() else null,
-        });
-        try finishFormat(result, path, null, stdout);
-    } else if (plan.eligible) {
-        try stdout.print("Confirm token: {s}\n", .{plan.tokenText(&token_buffer)});
-    }
 }
 
 fn finishFormat(
