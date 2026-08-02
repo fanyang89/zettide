@@ -1367,8 +1367,13 @@ test "hard links persist and keep objects alive through final unlink" {
         try volume.remove("/link-a");
         try std.testing.expectEqual(@as(u64, 1), (try volume.statFile(&file)).nlink);
         try std.testing.expectEqual(@as(u64, 1), (try volume.stat("/link-b")).nlink);
+        var open_metadata = (try volume.statFile(&file)).metadata;
+        open_metadata.ctime_ns = 1;
+        try volume.setObjectMetadata(object_id, open_metadata);
         try volume.remove("/link-b");
-        try std.testing.expectEqual(@as(u64, 0), (try volume.statFile(&file)).nlink);
+        const unlinked = try volume.statFile(&file);
+        try std.testing.expectEqual(@as(u64, 0), unlinked.nlink);
+        try std.testing.expect(unlinked.metadata.ctime_ns > 1);
         _ = try volume.writeFile(&file, "!", 6);
         try volume.closeFile(&file);
 

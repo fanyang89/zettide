@@ -735,10 +735,15 @@ pub const Volume = struct {
             null;
         if (object_count) |count| if (count.* == 0) return error.CorruptFilesystem;
         if (removed_object) |object_ref| {
-            var head = try self.store().readHead(object_ref.object_id);
-            head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-            head = try self.store().updateMetadataWithHead(head, head.metadata);
-            self.updateOpenMetadata(object_ref.object_id, head.metadata);
+            const retained = object_count.?.* > 1 or
+                self.hasOpenObject(object_ref.object_id) or
+                self.objectPinCount(object_ref.object_id) != 0;
+            if (retained) {
+                var head = try self.store().readHead(object_ref.object_id);
+                head.metadata.ctime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+                head = try self.store().updateMetadataWithHead(head, head.metadata);
+                self.updateOpenMetadata(object_ref.object_id, head.metadata);
+            }
         }
         try self.updateParentTimes(path);
         try checkLfs(c.lfs_remove(&self.lfs, translated));
