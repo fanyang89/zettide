@@ -50,7 +50,7 @@ trap cleanup EXIT INT TERM
 
 start_mount() {
     : >"$log"
-    "$exe" mount "$image" "$mount_dir" >"$log" 2>&1 &
+    "$exe" mount "$image" "$mount_dir" "$@" >"$log" 2>&1 &
     mount_pid=$!
     for _ in $(seq 1 100); do
         mountpoint -q "$mount_dir" && return 0
@@ -156,6 +156,14 @@ start_mount
 }
 root_mtime_after=$(stat -c %Y "$mount_dir")
 (( root_mtime_after > root_mtime_before )) || { echo "parent directory mtime did not advance" >&2; exit 1; }
+stop_mount
+
+start_mount --noatime
+touch -a -d @1000000000 "$mount_dir/hello.txt"
+atime_before=$(stat -c %X "$mount_dir/hello.txt")
+[[ $(<"$mount_dir/hello.txt") == "hello from fuse" ]]
+atime_after=$(stat -c %X "$mount_dir/hello.txt")
+[[ $atime_after == "$atime_before" ]] || { echo "noatime read changed atime" >&2; exit 1; }
 stop_mount
 
 # Each synchronization primitive must independently survive abrupt daemon

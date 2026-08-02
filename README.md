@@ -66,10 +66,10 @@ zig build bench-fs-ops -Doptimize=ReleaseFast -- \
 ```
 
 Use `--operation NAME` to select one workload. The available workloads are
-`create`, `open`, `stat`, `read-readonly`, `read-writable-atime`,
+`create`, `open`, `stat`, `read-readonly`, `read-writable-relatime`,
 `write-overwrite`, `rename`, and `remove`. Writes are already durable when the
 internal littlefs files close, so there is no separate sync-write workload. The
-writable read workload includes the current persistent-atime behavior; the
+writable read workload includes the default relatime checks; the
 read-only workload isolates the data read path. Data workloads use a warmed
 fixed file and offset, so they measure steady-state hot-path latency rather than
 cold or streaming I/O. zBench reports average, standard deviation, range, and
@@ -176,6 +176,9 @@ zettide unmount workspace
 # Alternatively, serve through the external dufs frontend until interrupted.
 zettide serve dufs workspace.ddv -- -A -b 127.0.0.1 -p 5000
 ```
+
+Mounts use relatime by default. Pass `--noatime` to disable automatic
+access-time updates.
 
 `format` creates a single-member unprotected v3 target. For a new regular file,
 `--size` is required and specifies the total backing-file length. The length

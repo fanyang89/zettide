@@ -512,7 +512,7 @@ test "directories from old images receive a compatible persistent identity" {
     }
 }
 
-test "every observable file read advances atime without changing ctime" {
+test "default relatime updates once without changing ctime" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -522,7 +522,7 @@ test "every observable file read advances atime without changing ctime" {
     try volume.mount();
 
     var file: FileHandle = undefined;
-    try volume.openFile(&file, "/strict-atime", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 2);
+    try volume.openFile(&file, "/relatime", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 2);
     _ = try volume.writeFile(&file, "x", 0);
     var baseline = file.metadata;
     baseline.atime_ns = 1;
@@ -536,8 +536,33 @@ test "every observable file read advances atime without changing ctime" {
     try std.testing.expectEqual(baseline.ctime_ns, first.ctime_ns);
     try std.testing.expectEqual(@as(usize, 1), try volume.readFile(&file, &byte, 0));
     const second = (try volume.statFile(&file)).metadata;
-    try std.testing.expect(second.atime_ns > first.atime_ns);
+    try std.testing.expectEqual(first.atime_ns, second.atime_ns);
     try std.testing.expectEqual(baseline.ctime_ns, second.ctime_ns);
+    try volume.closeFile(&file);
+}
+
+test "noatime suppresses automatic file access time updates" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mountOptions(.{ .access_time = .noatime });
+
+    var file: FileHandle = undefined;
+    try volume.openFile(&file, "/noatime", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1, 2);
+    _ = try volume.writeFile(&file, "x", 0);
+    var baseline = file.metadata;
+    baseline.atime_ns = 1;
+    baseline.ctime_ns = 2;
+    try volume.setObjectMetadata(file.object_id, baseline);
+
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try volume.readFile(&file, &byte, 0));
+    const after = (try volume.statFile(&file)).metadata;
+    try std.testing.expectEqual(baseline.atime_ns, after.atime_ns);
+    try std.testing.expectEqual(baseline.ctime_ns, after.ctime_ns);
     try volume.closeFile(&file);
 }
 

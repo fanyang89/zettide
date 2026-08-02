@@ -491,9 +491,9 @@ static void test_directory_iteration(const char *root) {
     while (readdir(stream) != NULL) {}
     if (closedir(stream) != 0) fail("closedir repeated readdir");
     if (stat(directory, &after_second) != 0) fail("stat after repeated readdir");
-    if (compare_timespec(after_second.st_atim, after_first.st_atim) <= 0 ||
+    if (compare_timespec(after_second.st_atim, after_first.st_atim) != 0 ||
         compare_timespec(after_second.st_ctim, after_first.st_ctim) != 0) {
-        fprintf(stderr, "repeated readdir did not strictly advance only atime\n");
+        fprintf(stderr, "relatime changed timestamps after repeated readdir\n");
         exit(1);
     }
 }
@@ -552,8 +552,8 @@ static void test_timestamps(const char *root) {
         fprintf(stderr, "read changed ctime\n");
         exit(1);
     }
-    if (compare_timespec(after_read.st_atim, before_second_read.st_atim) <= 0) {
-        fprintf(stderr, "repeated read did not strictly advance atime\n");
+    if (compare_timespec(after_read.st_atim, before_second_read.st_atim) != 0) {
+        fprintf(stderr, "relatime changed atime after repeated read\n");
         exit(1);
     }
 
@@ -594,9 +594,9 @@ static void test_symlink_atime(const char *root) {
     pause_for_timestamp();
     if (readlink(link, actual, sizeof(actual)) != (ssize_t)strlen("atime-link-target")) fail("second readlink");
     if (lstat(link, &after_second) != 0) fail("lstat after second readlink");
-    if (compare_timespec(after_second.st_atim, after_first.st_atim) <= 0 ||
+    if (compare_timespec(after_second.st_atim, after_first.st_atim) != 0 ||
         compare_timespec(after_second.st_ctim, after_first.st_ctim) != 0) {
-        fprintf(stderr, "repeated readlink did not strictly advance only atime\n");
+        fprintf(stderr, "relatime changed timestamps after repeated readlink\n");
         exit(1);
     }
 }

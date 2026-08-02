@@ -30,10 +30,11 @@ WebDAV, authentication, and TLS behavior belong to dufs.
   reservations that survive remount and are shared by hard links.
 
 Linux mounts use `default_permissions`; the kernel enforces user access before
-requests reach the filesystem. Each read, readlink, or readdir request observed
-by the daemon attempts to persist a newer atime without changing ctime. Linux
-page-cache hits do not generate FUSE requests, so those accesses cannot update
-the persisted atime while cached I/O remains enabled. An atime persistence
+requests reach the filesystem. Mounts use relatime by default: a read, readlink,
+or readdir request observed by the daemon attempts to persist atime when it is
+not newer than mtime or ctime, or when it is more than 24 hours old. `--noatime`
+disables these automatic updates without affecting explicit timestamp changes.
+Linux page-cache hits do not generate FUSE requests. An atime persistence
 failure does not turn an otherwise successful read into an error.
 
 ## Persistence

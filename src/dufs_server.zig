@@ -115,6 +115,7 @@ pub fn serve(
     io: std.Io,
     target_path: []const u8,
     read_only: bool,
+    access_time: volume_api.AccessTimePolicy,
     dufs_args: []const []const u8,
     stdout: *std.Io.Writer,
 ) !void {
@@ -138,7 +139,7 @@ pub fn serve(
     try target.openVolumeInto(volume, io, allocator, target_path, !read_only);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
-    try volume.mount();
+    try volume.mountOptions(.{ .access_time = access_time });
 
     var session = try linux_fuse.Session.start(allocator, volume, mountpoint, .{
         .read_only = read_only,

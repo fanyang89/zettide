@@ -13,7 +13,7 @@ const Operation = enum {
     open,
     stat,
     read_readonly,
-    read_writable_atime,
+    read_writable_relatime,
     write_overwrite,
     rename,
     remove,
@@ -24,7 +24,7 @@ const Operation = enum {
         if (std.mem.eql(u8, value, "open")) return .open;
         if (std.mem.eql(u8, value, "stat")) return .stat;
         if (std.mem.eql(u8, value, "read-readonly")) return .read_readonly;
-        if (std.mem.eql(u8, value, "read-writable-atime")) return .read_writable_atime;
+        if (std.mem.eql(u8, value, "read-writable-relatime")) return .read_writable_relatime;
         if (std.mem.eql(u8, value, "write-overwrite")) return .write_overwrite;
         if (std.mem.eql(u8, value, "rename")) return .rename;
         if (std.mem.eql(u8, value, "remove")) return .remove;
@@ -37,7 +37,7 @@ const all_operations = [_]Operation{
     .open,
     .stat,
     .read_readonly,
-    .read_writable_atime,
+    .read_writable_relatime,
     .write_overwrite,
     .rename,
     .remove,
@@ -146,7 +146,7 @@ const CaseState = struct {
                 try self.volume.openFile(&self.handle, "/data", c.LFS_O_RDONLY, 0, 0, 0);
                 self.handle_open = true;
             },
-            .read_writable_atime, .write_overwrite => {
+            .read_writable_relatime, .write_overwrite => {
                 try self.volume.openFile(
                     &self.handle,
                     "/data",
@@ -199,7 +199,7 @@ const CaseState = struct {
                 const info = try self.volume.stat("/subject");
                 std.mem.doNotOptimizeAway(info.size);
             },
-            .read_readonly, .read_writable_atime => {
+            .read_readonly, .read_writable_relatime => {
                 const amount = try self.volume.readFile(&self.handle, self.read_buffer, 0);
                 if (amount != self.read_buffer.len) return error.ShortRead;
                 std.mem.doNotOptimizeAway(self.read_buffer);
@@ -454,7 +454,7 @@ fn usage(writer: *Io.Writer) !void {
         \\
         \\Options:
         \\  --operation NAME   all, create, open, stat, read-readonly,
-        \\                     read-writable-atime, write-overwrite,
+        \\                     read-writable-relatime, write-overwrite,
         \\                     rename, or remove
         \\  --iterations N     measured operations per workload (default: 100)
         \\  --warmup N         warmup operations per workload (default: 5)

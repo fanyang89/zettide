@@ -80,6 +80,13 @@ pub const Patch = struct {
     update_ctime: bool = true,
 };
 
+pub fn relatimeNeedsUpdate(value: Metadata, now_ns: i64) bool {
+    if (value.atime_ns <= value.mtime_ns or value.atime_ns <= value.ctime_ns) return true;
+    const now_seconds = @divFloor(now_ns, @as(i64, std.time.ns_per_s));
+    const atime_seconds = @divFloor(value.atime_ns, @as(i64, std.time.ns_per_s));
+    return now_seconds - atime_seconds > 24 * 60 * 60;
+}
+
 fn checksum(bytes: []const u8) u32 {
     return std.hash.crc.Crc32Iscsi.hash(bytes);
 }
@@ -136,4 +143,32 @@ test "metadata rejects corruption version and kind" {
     bytes[1] = 99;
     std.mem.writeInt(u32, bytes[60..64], checksum(bytes[0..60]), .little);
     try std.testing.expectError(error.InvalidMetadata, Metadata.decode(&bytes));
+}
+
+test "relatime updates for metadata changes and once per day" {
+    const day_ns: i64 = 24 * 60 * 60 * std.time.ns_per_s;
+    const base: Metadata = .{
+        .kind = .file,
+        .mode = 0o100644,
+        .uid = 1,
+        .gid = 2,
+        .atime_ns = 10 * std.time.ns_per_s + 500,
+        .mtime_ns = 9 * std.time.ns_per_s,
+        .ctime_ns = 9 * std.time.ns_per_s,
+        .birthtime_ns = 0,
+    };
+
+    try std.testing.expect(!relatimeNeedsUpdate(base, base.atime_ns + day_ns));
+    try std.testing.expect(relatimeNeedsUpdate(base, base.atime_ns + day_ns + std.time.ns_per_s));
+
+    var changed = base;
+    changed.mtime_ns = changed.atime_ns;
+    try std.testing.expect(relatimeNeedsUpdate(changed, changed.atime_ns));
+    changed.mtime_ns -= 1;
+    changed.ctime_ns = changed.atime_ns;
+    try std.testing.expect(relatimeNeedsUpdate(changed, changed.atime_ns));
+
+    var future = base;
+    future.atime_ns = 20 * std.time.ns_per_s;
+    try std.testing.expect(!relatimeNeedsUpdate(future, 10 * std.time.ns_per_s));
 }

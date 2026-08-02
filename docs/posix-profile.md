@@ -27,9 +27,9 @@ project conformance profile, not an operating-system POSIX certification.
 - Process-owned and open-file-description advisory record locks.
 - Mode, ownership, umask, set-id clearing, setgid directory inheritance, and
   sticky-directory protection.
-- atime advances without changing ctime for every read, readlink, and readdir
-  request delivered to the FUSE daemon; mtime and ctime follow POSIX mutation
-  rules.
+- atime uses relatime by default and advances without changing ctime when it is
+  not newer than mtime or ctime, or is more than 24 hours old; `--noatime`
+  disables automatic access-time updates.
 - `fsync()`, `fdatasync()`, directory synchronization, and crash recovery after
   a successful synchronization call.
 - POSIX pathname resolution, component limits, required errors, sparse files,

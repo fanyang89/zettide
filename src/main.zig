@@ -52,11 +52,14 @@ fn serveCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
     if (@import("builtin").os.tag != .linux) return error.ServeNotImplemented;
     const path = args[1];
     var read_only = false;
+    var access_time: zettide.volume.AccessTimePolicy = .relatime;
     var dufs_args: []const []const u8 = &.{};
     var index: usize = 2;
     while (index < args.len) : (index += 1) {
         if (std.mem.eql(u8, args[index], "--read-only")) {
             read_only = true;
+        } else if (std.mem.eql(u8, args[index], "--noatime")) {
+            access_time = .noatime;
         } else if (std.mem.eql(u8, args[index], "--")) {
             dufs_args = args[index + 1 ..];
             break;
@@ -64,7 +67,7 @@ fn serveCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
             return error.UnknownOption;
         }
     }
-    return zettide.dufs_server.serve(allocator, io, path, read_only, dufs_args, stdout);
+    return zettide.dufs_server.serve(allocator, io, path, read_only, access_time, dufs_args, stdout);
 }
 
 fn endpointCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -299,6 +302,7 @@ fn poolMountCommand(
     var path_count: usize = 0;
     var writable = true;
     var allow_other = false;
+    var access_time: zettide.volume.AccessTimePolicy = .relatime;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         if (std.mem.eql(u8, args[index], "--device")) {
@@ -311,6 +315,8 @@ fn poolMountCommand(
             writable = false;
         } else if (std.mem.eql(u8, args[index], "--allow-other")) {
             allow_other = true;
+        } else if (std.mem.eql(u8, args[index], "--noatime")) {
+            access_time = .noatime;
         } else {
             return error.UnknownOption;
         }
@@ -323,7 +329,7 @@ fn poolMountCommand(
     var volume = try zettide.volume.Volume.openPool(io, allocator, &set, writable);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
-    try volume.mount();
+    try volume.mountOptions(.{ .access_time = access_time });
     try stdout.print("Mounted pool at {s}; press Ctrl-C to stop\n", .{mountpoint});
     try stdout.flush();
     try zettide.linux_fuse.mount(&volume, mountpoint, allow_other, !writable);
@@ -442,16 +448,25 @@ fn deviceCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
 }
 
 fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
-    if (args.len < 2 or args.len > 3) return error.InvalidArguments;
-    const allow_other = args.len == 3 and std.mem.eql(u8, args[2], "--allow-other");
-    if (args.len == 3 and !allow_other) return error.UnknownOption;
+    if (args.len < 2) return error.InvalidArguments;
+    var allow_other = false;
+    var access_time: zettide.volume.AccessTimePolicy = .relatime;
+    for (args[2..]) |option| {
+        if (std.mem.eql(u8, option, "--allow-other")) {
+            allow_other = true;
+        } else if (std.mem.eql(u8, option, "--noatime")) {
+            access_time = .noatime;
+        } else {
+            return error.UnknownOption;
+        }
+    }
     if (@import("builtin").os.tag != .linux) return error.MountNotImplemented;
     const volume = try allocator.create(zettide.volume.Volume);
     defer allocator.destroy(volume);
     try zettide.target.openVolumeInto(volume, io, allocator, args[0], true);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
-    try volume.mount();
+    try volume.mountOptions(.{ .access_time = access_time });
     try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
     try stdout.flush();
     try zettide.linux_fuse.mount(volume, args[1], allow_other, false);
@@ -636,15 +651,15 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide create <container> --size <size> [--label <label>] [--name-profile <profile>]
         \\  zettide info <container>
         \\  zettide check <container>
-        \\  zettide mount <container> <mountpoint> [--allow-other]
+        \\  zettide mount <container> <mountpoint> [--allow-other] [--noatime]
         \\  zettide unmount <mountpoint>
         \\  zettide device inspect <device>
         \\  zettide pool inspect --device <device>... [--name-profile <profile>]
         \\  zettide pool initialize --device <device>... [--label <label>] [--name-profile <profile>] --confirm <token>
-        \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other]
+        \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other] [--noatime]
         \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>]
         \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>] --confirm <token>
-        \\  zettide serve dufs <file|device> [--read-only] [-- <dufs-options>...]
+        \\  zettide serve dufs <file|device> [--read-only] [--noatime] [-- <dufs-options>...]
         \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]...
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.

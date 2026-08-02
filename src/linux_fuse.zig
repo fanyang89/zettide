@@ -1131,9 +1131,10 @@ fn patchDirectoryMetadata(
 }
 
 fn updateDirectoryAccessTime(state: *MountState, handle: *FuseDirectoryHandle) !void {
-    if (!state.volume.writable) return;
     var info = try currentDirectoryInfo(state, handle.inode);
-    info.metadata.atime_ns = now(state.volume.io);
+    const timestamp = now(state.volume.io);
+    if (!state.volume.accessTimeUpdateRequired(info.metadata, timestamp)) return;
+    info.metadata.atime_ns = timestamp;
     if (state.pathFor(handle.inode)) |path| try state.volume.setMetadata(path, info.metadata);
     handle.directory.info = info;
     handle.inode.cached_info = info;

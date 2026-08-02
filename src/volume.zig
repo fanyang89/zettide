@@ -13,6 +13,15 @@ const pool_provision = @import("v3/pool_provision.zig");
 const name_profile = @import("name_profile.zig");
 pub const c = block_device.c;
 
+pub const AccessTimePolicy = enum {
+    relatime,
+    noatime,
+};
+
+pub const MountOptions = struct {
+    access_time: AccessTimePolicy = .relatime,
+};
+
 pub const Volume = struct {
     const Backing = enum { file, pool };
 
@@ -27,6 +36,7 @@ pub const Volume = struct {
     fallback_uid: u32 = 0,
     fallback_gid: u32 = 0,
     writable: bool = false,
+    access_time_policy: AccessTimePolicy = .relatime,
     open_objects: std.AutoHashMap(object_format.ObjectId, OpenObject),
     link_counts: std.AutoHashMap(object_format.ObjectId, u64),
     directory_link_counts: std.AutoHashMap(object_format.ObjectId, u64),
@@ -219,6 +229,7 @@ pub const Volume = struct {
         result.fallback_uid = 0;
         result.fallback_gid = 0;
         result.writable = writable;
+        result.access_time_policy = .relatime;
         result.open_objects = std.AutoHashMap(object_format.ObjectId, OpenObject).init(std.heap.c_allocator);
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.directory_link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
@@ -282,6 +293,7 @@ pub const Volume = struct {
         result.fallback_uid = 0;
         result.fallback_gid = 0;
         result.writable = writable;
+        result.access_time_policy = .relatime;
         result.open_objects = std.AutoHashMap(object_format.ObjectId, OpenObject).init(std.heap.c_allocator);
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.directory_link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
@@ -299,8 +311,13 @@ pub const Volume = struct {
     }
 
     pub fn mount(self: *Volume) !void {
+        return self.mountOptions(.{});
+    }
+
+    pub fn mountOptions(self: *Volume, options: MountOptions) !void {
         if (self.closed) return error.VolumeClosed;
         if (self.mounted) return error.AlreadyMounted;
+        self.access_time_policy = options.access_time;
         // Moving Volume after this call is invalid because littlefs retains these pointers.
         if (self.backing == .pool) {
             const authority = self.pool_set.?.authority() orelse return error.MissingAuthority;
@@ -826,12 +843,9 @@ pub const Volume = struct {
         const head = try self.store().readHead(handle.object_id);
         handle.metadata = head.metadata;
         const result = try self.store().readWithHead(head, buffer, offset);
-        if (self.writable) {
+        if (self.writable and self.access_time_policy == .relatime) {
             const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
-            _ = self.patchObjectMetadata(handle.object_id, .{
-                .atime_ns = timestamp,
-                .update_ctime = false,
-            }) catch {};
+            self.updateAccessTimeFromMetadata(handle.object_id, head.metadata, timestamp) catch {};
         }
         return result;
     }
@@ -943,8 +957,25 @@ pub const Volume = struct {
     }
 
     pub fn updateAccessTime(self: *Volume, object_id: object_format.ObjectId) !void {
+        if (!self.writable or self.access_time_policy == .noatime) return;
+        const head = try self.store().readHead(object_id);
+        const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
+        try self.updateAccessTimeFromMetadata(object_id, head.metadata, timestamp);
+    }
+
+    pub fn accessTimeUpdateRequired(self: *const Volume, value: metadata.Metadata, now_ns: i64) bool {
+        return self.writable and self.access_time_policy == .relatime and metadata.relatimeNeedsUpdate(value, now_ns);
+    }
+
+    fn updateAccessTimeFromMetadata(
+        self: *Volume,
+        object_id: object_format.ObjectId,
+        value: metadata.Metadata,
+        timestamp: i64,
+    ) !void {
+        if (!self.accessTimeUpdateRequired(value, timestamp)) return;
         _ = try self.patchObjectMetadata(object_id, .{
-            .atime_ns = @intCast(Io.Clock.real.now(self.io).nanoseconds),
+            .atime_ns = timestamp,
             .update_ctime = false,
         });
     }
