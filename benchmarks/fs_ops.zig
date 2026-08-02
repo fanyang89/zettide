@@ -58,17 +58,17 @@ const Config = struct {
     warmup: u32 = 5,
     block_size: usize = 4096,
     image_size: u64 = 512 * 1024 * 1024,
+    workspace_root: []const u8 = ".zig-cache/benchmarks",
     journaled: bool = false,
     help: bool = false,
 };
 
 const TempWorkspace = struct {
-    path_buffer: [128]u8,
+    path_buffer: [Io.Dir.max_path_bytes]u8,
     path_length: usize,
 
-    fn init(io: Io) !TempWorkspace {
+    fn init(io: Io, parent_path: []const u8) !TempWorkspace {
         const cwd = Io.Dir.cwd();
-        const parent_path = ".zig-cache/benchmarks";
         try cwd.createDirPath(io, parent_path);
 
         var random_bytes: [12]u8 = undefined;
@@ -291,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.print(
-        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} journaled={}\n",
+        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} workspace_root={s} journaled={}\n",
         .{
             @tagName(builtin.mode),
             @tagName(builtin.os.tag),
@@ -300,6 +300,7 @@ pub fn main(init: std.process.Init) !void {
             config.warmup,
             config.block_size,
             config.image_size,
+            config.workspace_root,
             config.journaled,
         },
     );
@@ -319,9 +320,9 @@ fn runOperation(
     config: Config,
     operation: Operation,
 ) !void {
-    var workspace = try TempWorkspace.init(io);
+    var workspace = try TempWorkspace.init(io, config.workspace_root);
     errdefer workspace.cleanup(io) catch {};
-    var image_path_buffer: [192]u8 = undefined;
+    var image_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const image_path = try std.fmt.bufPrint(&image_path_buffer, "{s}/image.ddv", .{workspace.path()});
     try Volume.createOptions(io, image_path, config.image_size, "FsOpsBenchmark", .{
         .redo_journal = if (config.journaled) .{
@@ -434,7 +435,8 @@ fn parseArgs(args: []const []const u8) !Config {
             std.mem.eql(u8, argument, "--iterations") or
             std.mem.eql(u8, argument, "--warmup") or
             std.mem.eql(u8, argument, "--block-size") or
-            std.mem.eql(u8, argument, "--image-size");
+            std.mem.eql(u8, argument, "--image-size") or
+            std.mem.eql(u8, argument, "--workspace-root");
         if (!known_option) return error.UnknownArgument;
         if (index + 1 >= args.len) return error.MissingArgumentValue;
         const value = args[index + 1];
@@ -448,6 +450,9 @@ fn parseArgs(args: []const []const u8) !Config {
             config.block_size = try parsePositiveUsize(value);
         } else if (std.mem.eql(u8, argument, "--image-size")) {
             config.image_size = try std.fmt.parseUnsigned(u64, value, 10);
+        } else if (std.mem.eql(u8, argument, "--workspace-root")) {
+            if (value.len == 0) return error.EmptyWorkspaceRoot;
+            config.workspace_root = value;
         }
         index += 2;
     }
@@ -484,6 +489,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  --warmup N         warmup operations per workload (default: 5)
         \\  --block-size N      data operation size in bytes (default: 4096)
         \\  --image-size N      container logical size in bytes (default: 536870912)
+        \\  --workspace-root P  benchmark workspace parent (default: .zig-cache/benchmarks)
         \\  --journaled         use redo journaling (block size up to 1048576)
         \\  --help              show this help
         \\
@@ -496,6 +502,7 @@ test "parse filesystem benchmark defaults and options" {
     try std.testing.expectEqual(@as(u32, 100), defaults.iterations);
     try std.testing.expectEqual(@as(u32, 5), defaults.warmup);
     try std.testing.expectEqual(@as(usize, 4096), defaults.block_size);
+    try std.testing.expectEqualStrings(".zig-cache/benchmarks", defaults.workspace_root);
     try std.testing.expect(!defaults.journaled);
 
     const configured = try parseArgs(&.{
@@ -510,6 +517,8 @@ test "parse filesystem benchmark defaults and options" {
         "8192",
         "--image-size",
         "67108864",
+        "--workspace-root",
+        "/var/tmp/zettide-bench",
         "--journaled",
     });
     try std.testing.expectEqual(Operation.write_overwrite, configured.operation.?);
@@ -517,6 +526,7 @@ test "parse filesystem benchmark defaults and options" {
     try std.testing.expectEqual(@as(u32, 0), configured.warmup);
     try std.testing.expectEqual(@as(usize, 8192), configured.block_size);
     try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024), configured.image_size);
+    try std.testing.expectEqualStrings("/var/tmp/zettide-bench", configured.workspace_root);
     try std.testing.expect(configured.journaled);
 }
 
@@ -526,6 +536,7 @@ test "reject invalid filesystem benchmark options" {
     try std.testing.expectError(error.MissingArgumentValue, parseArgs(&.{ "benchmark", "--warmup" }));
     try std.testing.expectError(error.UnknownArgument, parseArgs(&.{ "benchmark", "--other" }));
     try std.testing.expectError(error.InvalidImageSize, parseArgs(&.{ "benchmark", "--image-size", "12345" }));
+    try std.testing.expectError(error.EmptyWorkspaceRoot, parseArgs(&.{ "benchmark", "--workspace-root", "" }));
     try std.testing.expectError(
         error.JournaledBlockSizeTooLarge,
         parseArgs(&.{ "benchmark", "--journaled", "--block-size", "4194304" }),
