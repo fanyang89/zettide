@@ -154,10 +154,10 @@ pub const Header = struct {
         if (label_len > max_label_len) return error.InvalidHeader;
         const state = std.enums.fromInt(State, bytes[24]) orelse return error.InvalidHeader;
         const features = getInt(u32, bytes, 28);
-        const profile: name_profile.Profile = if (format_minor == format_minor_legacy)
-            .legacy_raw
-        else if (features & feature_name_profile != 0)
+        const profile: name_profile.Profile = if (features & feature_name_profile != 0)
             try .fromPersisted(getInt(u16, bytes, 248), getInt(u16, bytes, 250))
+        else if (format_minor == format_minor_legacy or format_minor == format_minor_encryption)
+            .legacy_raw
         else
             return error.InvalidHeader;
         const encrypted = features & feature_encryption != 0;

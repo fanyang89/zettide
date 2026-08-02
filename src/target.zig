@@ -5,6 +5,7 @@ const pool_member_set = @import("v3/pool_member_set.zig");
 const pool_provision = @import("v3/pool_provision.zig");
 const storage_api = @import("v3/storage.zig");
 const name_profile = @import("name_profile.zig");
+const volume_crypto = @import("volume_crypto.zig");
 const linux_block = if (builtin.os.tag == .linux) @import("v3/linux_block_device.zig") else struct {};
 
 const Io = std.Io;
@@ -33,6 +34,7 @@ pub const FormatPlan = struct {
     path: []const u8,
     label: []const u8,
     name_profile: name_profile.Profile,
+    encryption_kdf: ?volume_crypto.Kdf,
     canonical_path_digest: [32]u8,
     kind: Kind,
     capacity_bytes: u64,
@@ -53,7 +55,10 @@ pub const FormatPlan = struct {
 
 pub const FormatOptions = struct {
     name_profile: name_profile.Profile = .legacy_raw,
+    encryption_credential: ?volume_crypto.Credential = null,
 };
+
+pub const OpenOptions = volume_api.Volume.OpenOptions;
 
 pub const FormatResult = union(enum) {
     complete,
@@ -126,6 +131,19 @@ pub fn applyFormat(
     plan: *const FormatPlan,
     confirmation: []const u8,
 ) !FormatResult {
+    return applyFormatOptions(io, allocator, plan, confirmation, .{});
+}
+
+pub fn applyFormatOptions(
+    io: Io,
+    allocator: std.mem.Allocator,
+    plan: *const FormatPlan,
+    confirmation: []const u8,
+    options: FormatOptions,
+) !FormatResult {
+    if (plan.name_profile != options.name_profile or
+        plan.encryption_kdf != credentialKdf(options.encryption_credential))
+        return error.FormatPlanChanged;
     if (!std.mem.eql(u8, &plan.token, &computeToken(plan))) return error.FormatPlanChanged;
     if (!try pathMatchesPlan(io, plan)) return error.TargetChanged;
     var token_buffer: [64]u8 = undefined;
@@ -155,9 +173,10 @@ pub fn applyFormat(
             const scan = try scanStorage(&storage, io, allocator);
             if (!std.mem.eql(u8, &scan.digest, &plan.data_digest)) return error.TargetChanged;
             storage_owned = false;
-            return provision(io, allocator, &storage, plan.label, .{ .name_profile = plan.name_profile });
+            return provision(io, allocator, &storage, plan.label, options);
         },
         .block_device => {
+            if (options.encryption_credential != null) return error.EncryptedBlockDeviceNotSupported;
             if (comptime builtin.os.tag != .linux) return error.BlockDeviceNotImplemented;
             var opened = try linux_block.openStorage(io, allocator, plan.path, true);
             var storage_owned = true;
@@ -185,11 +204,25 @@ pub fn openVolumeInto(
     path: []const u8,
     writable: bool,
 ) !void {
+    return openVolumeIntoOptions(result, io, allocator, path, writable, .{});
+}
+
+pub fn openVolumeIntoOptions(
+    result: *volume_api.Volume,
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    writable: bool,
+    options: OpenOptions,
+) !void {
     const stat = try Io.Dir.cwd().statFile(io, path, .{});
     switch (stat.kind) {
-        .file => try openRegularVolumeInto(result, io, allocator, path, writable),
+        .file => try openRegularVolumeInto(result, io, allocator, path, writable, options),
         .block_device => if (comptime builtin.os.tag == .linux)
-            try openBlockVolumeInto(result, io, allocator, path, writable)
+            if (options.encryption_credential != null)
+                return error.EncryptedBlockDeviceNotSupported
+            else
+                try openBlockVolumeInto(result, io, allocator, path, writable)
         else
             return error.BlockDeviceNotImplemented,
         else => return error.UnsupportedTargetType,
@@ -202,8 +235,9 @@ fn openRegularVolumeInto(
     allocator: std.mem.Allocator,
     path: []const u8,
     writable: bool,
+    options: OpenOptions,
 ) !void {
-    if (volume_api.Volume.openInto(result, io, path, writable)) |_| return else |err| switch (err) {
+    if (volume_api.Volume.openIntoOptions(result, io, path, writable, options)) |_| return else |err| switch (err) {
         error.NoValidHeader => {},
         else => return err,
     }
@@ -221,7 +255,7 @@ fn openRegularVolumeInto(
         &storages,
         if (writable) .writable else .read_only,
     );
-    return volume_api.Volume.openPoolInto(result, io, allocator, set, writable);
+    return volume_api.Volume.openPoolIntoOptions(result, io, allocator, set, writable, options);
 }
 
 fn openBlockVolumeInto(
@@ -273,6 +307,7 @@ fn inspectRegularFormat(
         .path = path,
         .label = label,
         .name_profile = options.name_profile,
+        .encryption_kdf = credentialKdf(options.encryption_credential),
         .canonical_path_digest = try canonicalPathDigest(io, path),
         .kind = .regular_file,
         .capacity_bytes = capacity,
@@ -306,6 +341,7 @@ fn inspectBlockFormat(
         .path = path,
         .label = label,
         .name_profile = options.name_profile,
+        .encryption_kdf = credentialKdf(options.encryption_credential),
         .canonical_path_digest = try canonicalPathDigest(io, path),
         .kind = .block_device,
         .capacity_bytes = info.capacity_bytes,
@@ -349,6 +385,7 @@ fn provision(
             const set_id = provisioned.genesis.topology.set_id;
             volume_api.Volume.initializePoolOptions(io, &provisioned, label, .{
                 .name_profile = options.name_profile,
+                .encryption_credential = options.encryption_credential,
             }) catch |cause| {
                 return .{ .pool_created = .{ .set_id = set_id, .cause = cause } };
             };
@@ -411,6 +448,12 @@ fn computeToken(plan: *const FormatPlan) [32]u8 {
         hasher.update("zettide-name-profile\x00");
         hashSlice(&hasher, plan.name_profile.name());
     }
+    if (plan.encryption_kdf) |kdf| {
+        hasher.update("zettide-encryption-kdf\x00");
+        var encoded: [2]u8 = undefined;
+        std.mem.writeInt(u16, &encoded, @intFromEnum(kdf), .little);
+        hasher.update(&encoded);
+    }
     if (plan.kind == .regular_file) {
         var timestamps: [24]u8 = undefined;
         std.mem.writeInt(i96, timestamps[0..12], plan.identity.regular_file.mtime_ns, .little);
@@ -451,6 +494,10 @@ fn inodeValue(inode: anytype) u64 {
     return @bitCast(inode);
 }
 
+fn credentialKdf(credential: ?volume_crypto.Credential) ?volume_crypto.Kdf {
+    return if (credential) |value| value.kind() else null;
+}
+
 test "new regular target formats and reopens as a volume" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -469,4 +516,77 @@ test "new regular target formats and reopens as a volume" {
     try volume.mount();
     try std.testing.expectEqualStrings("Target Test", volume.header.labelSlice());
     try volume.close();
+}
+
+test "encrypted regular target hides and reopens filesystem data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(directory);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ directory, "encrypted-image" });
+    defer std.testing.allocator.free(path);
+    const key: [volume_crypto.master_key_length]u8 = @splat(0x3c);
+    const credential: volume_crypto.Credential = .{ .raw_key = &key };
+    try std.testing.expectEqual(
+        FormatResult.complete,
+        try formatNewFileOptions(std.testing.io, std.testing.allocator, path, 8 * member_alignment, "Encrypted", .{
+            .encryption_credential = credential,
+        }),
+    );
+
+    const wrong_key: [volume_crypto.master_key_length]u8 = @splat(0x4d);
+    const rejected = try std.testing.allocator.create(volume_api.Volume);
+    defer std.testing.allocator.destroy(rejected);
+    try std.testing.expectError(
+        error.InvalidEncryptionCredential,
+        openVolumeIntoOptions(rejected, std.testing.io, std.testing.allocator, path, true, .{
+            .encryption_credential = .{ .raw_key = &wrong_key },
+        }),
+    );
+
+    const secret_path = "/hidden-filename";
+    const secret_payload = "hidden payload bytes";
+    {
+        const volume = try std.testing.allocator.create(volume_api.Volume);
+        defer std.testing.allocator.destroy(volume);
+        try openVolumeIntoOptions(volume, std.testing.io, std.testing.allocator, path, true, .{
+            .encryption_credential = credential,
+        });
+        defer volume.deinit();
+        try volume.mount();
+        var file: volume_api.FileHandle = undefined;
+        try volume.openFile(&file, secret_path, volume_api.c.LFS_O_CREAT | volume_api.c.LFS_O_RDWR, 0o100600, 1, 1);
+        try std.testing.expectEqual(secret_payload.len, try volume.writeFile(&file, secret_payload, 0));
+        try volume.closeFile(&file);
+        try volume.close();
+    }
+    {
+        const volume = try std.testing.allocator.create(volume_api.Volume);
+        defer std.testing.allocator.destroy(volume);
+        try openVolumeIntoOptions(volume, std.testing.io, std.testing.allocator, path, false, .{
+            .encryption_credential = credential,
+        });
+        defer volume.deinit();
+        try volume.mount();
+        var file: volume_api.FileHandle = undefined;
+        try volume.openFile(&file, secret_path, volume_api.c.LFS_O_RDONLY, 0, 0, 0);
+        var actual: [secret_payload.len]u8 = undefined;
+        try std.testing.expectEqual(actual.len, try volume.readFile(&file, &actual, 0));
+        try std.testing.expectEqualStrings(secret_payload, &actual);
+        try volume.closeFile(&file);
+        try volume.close();
+    }
+
+    const raw = try Io.Dir.cwd().openFile(std.testing.io, path, .{ .mode = .read_only });
+    defer raw.close(std.testing.io);
+    const buffer = try std.testing.allocator.alloc(u8, 1024 * 1024 + 256);
+    defer std.testing.allocator.free(buffer);
+    const length = try raw.length(std.testing.io);
+    var offset: u64 = 0;
+    while (offset < length) : (offset += 1024 * 1024) {
+        const amount: usize = @intCast(@min(@as(u64, buffer.len), length - offset));
+        try std.testing.expectEqual(amount, try raw.readPositionalAll(std.testing.io, buffer[0..amount], offset));
+        try std.testing.expect(std.mem.indexOf(u8, buffer[0..amount], secret_path[1..]) == null);
+        try std.testing.expect(std.mem.indexOf(u8, buffer[0..amount], secret_payload) == null);
+    }
 }

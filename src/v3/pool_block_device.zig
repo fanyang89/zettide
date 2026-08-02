@@ -3,6 +3,7 @@ const block_device = @import("../block_device.zig");
 const container = @import("../container.zig");
 const pool_layout = @import("pool_layout.zig");
 const ReplicaEndpoint = @import("replica_endpoint.zig").ReplicaEndpoint;
+const volume_crypto = @import("../volume_crypto.zig");
 
 const c = block_device.c;
 const max_replica_count = 3;
@@ -24,12 +25,23 @@ pub const PoolBlockDevice = struct {
     mutex: std.Io.Mutex = .init,
     dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
+    crypto: ?*const volume_crypto.Context = null,
 
     pub fn init(
         io: std.Io,
         replicas: []const ReplicaEndpoint,
         layout: pool_layout.Layout,
         header: container.Header,
+    ) !PoolBlockDevice {
+        return initCrypto(io, replicas, layout, header, null);
+    }
+
+    pub fn initCrypto(
+        io: std.Io,
+        replicas: []const ReplicaEndpoint,
+        layout: pool_layout.Layout,
+        header: container.Header,
+        crypto: ?*const volume_crypto.Context,
     ) !PoolBlockDevice {
         const required_count: usize = switch (layout.kind) {
             .unprotected => 1,
@@ -47,6 +59,7 @@ pub const PoolBlockDevice = struct {
             .volume_header = header,
             .block_size = header.block_size,
             .block_count = header.block_count,
+            .crypto = crypto,
         };
         for (replicas, 0..) |replica, index| {
             if (header.logical_size > replica.geometry.logical_capacity)
@@ -70,8 +83,13 @@ pub const PoolBlockDevice = struct {
 
     pub fn read(self: *PoolBlockDevice, block: u32, offset: u32, buffer: []u8) !void {
         const data_offset = try self.position(block, offset, buffer.len);
-        if (self.kind == .unprotected)
-            return self.replicas[0].readData(data_offset, buffer);
+        if (self.kind == .unprotected) {
+            if (self.crypto == null) return self.replicas[0].readData(data_offset, buffer);
+            if (buffer.len > container.default_block_size) return error.OutOfBounds;
+            var ciphertext: [container.default_block_size]u8 = undefined;
+            try self.replicas[0].readData(data_offset, ciphertext[0..buffer.len]);
+            return self.decrypt(buffer, ciphertext[0..buffer.len], data_offset);
+        }
         if (buffer.len > container.default_block_size) return error.OutOfBounds;
 
         var copies: [max_replica_count][container.default_block_size]u8 = undefined;
@@ -88,7 +106,10 @@ pub const PoolBlockDevice = struct {
                     copies[left][0..buffer.len],
                     copies[right][0..buffer.len],
                 )) {
-                    @memcpy(buffer, copies[left][0..buffer.len]);
+                    if (self.crypto != null)
+                        try self.decrypt(buffer, copies[left][0..buffer.len], data_offset)
+                    else
+                        @memcpy(buffer, copies[left][0..buffer.len]);
                     return;
                 }
             }
@@ -99,9 +120,15 @@ pub const PoolBlockDevice = struct {
     pub fn program(self: *PoolBlockDevice, block: u32, offset: u32, data: []const u8) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         const data_offset = try self.position(block, offset, data.len);
+        var ciphertext: [container.default_block_size]u8 = undefined;
+        const write_data = if (self.crypto != null) encrypted: {
+            if (data.len > ciphertext.len) return error.OutOfBounds;
+            try self.encrypt(ciphertext[0..data.len], data, data_offset);
+            break :encrypted ciphertext[0..data.len];
+        } else data;
         var operations: [max_replica_count]ReplicaOperation = undefined;
         for (operations[0..self.replica_count]) |*operation|
-            operation.* = .{ .write = .{ .offset = data_offset, .data = data } };
+            operation.* = .{ .write = .{ .offset = data_offset, .data = write_data } };
         var errors: [max_replica_count]?anyerror = @splat(null);
         self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]) catch |err| {
             self.freezeWrites();
@@ -128,6 +155,13 @@ pub const PoolBlockDevice = struct {
             return err;
         }
         self.dirty.store(false, .release);
+    }
+
+    pub fn initializeEncryptedData(self: *PoolBlockDevice) !void {
+        if (self.crypto == null) return error.EncryptionNotConfigured;
+        const zeros: [container.default_block_size]u8 = @splat(0);
+        for (0..self.block_count) |block| try self.program(@intCast(block), 0, &zeros);
+        try self.sync();
     }
 
     pub fn writeHeaderDurable(self: *PoolBlockDevice, offset: u64, header: container.Header) !void {
@@ -309,6 +343,42 @@ pub const PoolBlockDevice = struct {
         if (len > self.block_size - offset) return error.OutOfBounds;
         const block_offset = std.math.mul(u64, block, self.block_size) catch return error.OutOfBounds;
         return std.math.add(u64, block_offset, offset) catch return error.OutOfBounds;
+    }
+
+    fn encrypt(self: *const PoolBlockDevice, output: []u8, input: []const u8, offset: u64) !void {
+        return self.crypt(output, input, offset, true);
+    }
+
+    fn decrypt(self: *const PoolBlockDevice, output: []u8, input: []const u8, offset: u64) !void {
+        return self.crypt(output, input, offset, false);
+    }
+
+    fn crypt(
+        self: *const PoolBlockDevice,
+        output: []u8,
+        input: []const u8,
+        offset: u64,
+        encrypting: bool,
+    ) !void {
+        const crypto = self.crypto orelse return error.EncryptionNotConfigured;
+        if (offset % volume_crypto.sector_size != 0 or input.len % volume_crypto.sector_size != 0 or
+            output.len != input.len) return error.InvalidEncryptedIo;
+        var processed: usize = 0;
+        while (processed < input.len) : (processed += volume_crypto.sector_size) {
+            const data_unit = offset / volume_crypto.sector_size + processed / volume_crypto.sector_size;
+            if (encrypting)
+                try crypto.encrypt(
+                    output[processed..][0..volume_crypto.sector_size],
+                    input[processed..][0..volume_crypto.sector_size],
+                    data_unit,
+                )
+            else
+                try crypto.decrypt(
+                    output[processed..][0..volume_crypto.sector_size],
+                    input[processed..][0..volume_crypto.sector_size],
+                    data_unit,
+                );
+        }
     }
 
     fn fromConfig(config: *const c.struct_lfs_config) *PoolBlockDevice {

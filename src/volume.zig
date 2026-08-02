@@ -11,6 +11,7 @@ const pool_member_set = @import("v3/pool_member_set.zig");
 const ReplicaEndpoint = @import("v3/replica_endpoint.zig").ReplicaEndpoint;
 const pool_provision = @import("v3/pool_provision.zig");
 const name_profile = @import("name_profile.zig");
+const volume_crypto = @import("volume_crypto.zig");
 pub const c = block_device.c;
 
 pub const AccessTimePolicy = enum {
@@ -46,9 +47,16 @@ pub const Volume = struct {
     backing: Backing = .file,
     pool_set: ?pool_member_set.PoolMemberSet = null,
     pool_device: pool_block_device.PoolBlockDevice = undefined,
+    crypto_context: ?*volume_crypto.Context = null,
+    crypto_allocator: ?std.mem.Allocator = null,
 
     pub const InitializeOptions = struct {
         name_profile: name_profile.Profile = .legacy_raw,
+        encryption_credential: ?volume_crypto.Credential = null,
+    };
+
+    pub const OpenOptions = struct {
+        encryption_credential: ?volume_crypto.Credential = null,
     };
 
     pub fn create(io: Io, path: []const u8, logical_size: u64, label: []const u8) !void {
@@ -62,6 +70,8 @@ pub const Volume = struct {
         label: []const u8,
         options: InitializeOptions,
     ) !void {
+        if (options.encryption_credential != null)
+            return error.EncryptionNotSupportedForLegacyContainer;
         var header = try container.Header.initWithNameProfile(io, logical_size, label, options.name_profile);
         const file = try Io.Dir.cwd().createFile(io, path, .{
             .read = true,
@@ -153,20 +163,30 @@ pub const Volume = struct {
         const maximum_size = @as(u64, std.math.maxInt(u32)) * container.default_block_size;
         const logical_size = @min(capacity, maximum_size) / container.default_block_size * container.default_block_size;
         var header = try container.Header.initWithNameProfile(io, logical_size, label, options.name_profile);
+        var prepared_crypto: ?volume_crypto.Prepared = null;
+        defer if (prepared_crypto) |*prepared| prepared.context.deinit();
+        if (options.encryption_credential) |credential| {
+            if (members.len != 1 or layout.kind != .unprotected)
+                return error.EncryptionRequiresUnprotectedSingleMember;
+            prepared_crypto = try volume_crypto.prepare(std.heap.c_allocator, io, credential);
+            header.setEncryption(prepared_crypto.?.config);
+        }
         for (members) |member| {
             header.read_size = @max(header.read_size, member.header().metadata_read_size);
             header.prog_size = @max(header.prog_size, member.header().metadata_program_size);
         }
         try header.validate();
         var replica_endpoints: [3]ReplicaEndpoint = undefined;
-        var device = try pool_block_device.PoolBlockDevice.init(
+        var device = try pool_block_device.PoolBlockDevice.initCrypto(
             io,
             makeReplicaEndpoints(members, &replica_endpoints),
             layout,
             header,
+            if (prepared_crypto) |*prepared| &prepared.context else null,
         );
         try device.writeHeaderDurable(container.header_a_offset, header);
         try device.writeHeaderDurable(container.header_b_offset, header);
+        if (prepared_crypto != null) try device.initializeEncryptedData();
         var config = device.configure(header);
         try initializeFilesystem(io, &config);
         header.state = .ready;
@@ -182,8 +202,18 @@ pub const Volume = struct {
         set_source: *pool_member_set.PoolMemberSet,
         writable: bool,
     ) !Volume {
+        return openPoolOptions(io, allocator, set_source, writable, .{});
+    }
+
+    pub fn openPoolOptions(
+        io: Io,
+        allocator: std.mem.Allocator,
+        set_source: *pool_member_set.PoolMemberSet,
+        writable: bool,
+        options: OpenOptions,
+    ) !Volume {
         var result: Volume = undefined;
-        try openPoolInto(&result, io, allocator, set_source, writable);
+        try openPoolIntoOptions(&result, io, allocator, set_source, writable, options);
         return result;
     }
 
@@ -193,6 +223,17 @@ pub const Volume = struct {
         allocator: std.mem.Allocator,
         set_source: *pool_member_set.PoolMemberSet,
         writable: bool,
+    ) !void {
+        return openPoolIntoOptions(result, io, allocator, set_source, writable, .{});
+    }
+
+    pub fn openPoolIntoOptions(
+        result: *Volume,
+        io: Io,
+        allocator: std.mem.Allocator,
+        set_source: *pool_member_set.PoolMemberSet,
+        writable: bool,
+        options: OpenOptions,
     ) !void {
         result.* = undefined;
         result.pool_set = set_source.*;
@@ -209,12 +250,32 @@ pub const Volume = struct {
         const header = try inspectPoolHeader(io, set);
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(set, &member_pointers);
+        var crypto_context: ?*volume_crypto.Context = null;
+        errdefer if (crypto_context) |context| {
+            context.deinit();
+            allocator.destroy(context);
+        };
+        if (header.encryption) |encryption| {
+            if (authority.layout.kind != .unprotected or member_count != 1)
+                return error.UnsupportedEncryptedPool;
+            const credential = options.encryption_credential orelse
+                return error.EncryptionCredentialRequired;
+            const context = try allocator.create(volume_crypto.Context);
+            context.* = volume_crypto.Context.open(allocator, io, encryption, credential) catch |err| {
+                allocator.destroy(context);
+                return err;
+            };
+            crypto_context = context;
+        } else if (options.encryption_credential != null) {
+            return error.UnexpectedEncryptionCredential;
+        }
         var replica_endpoints: [3]ReplicaEndpoint = undefined;
-        var verifier = try pool_block_device.PoolBlockDevice.init(
+        var verifier = try pool_block_device.PoolBlockDevice.initCrypto(
             io,
             makeReplicaEndpoints(member_pointers[0..member_count], &replica_endpoints),
             authority.layout,
             header,
+            crypto_context,
         );
         if (writable) try verifier.prepareWritableReplicas(allocator);
 
@@ -238,6 +299,8 @@ pub const Volume = struct {
         result.object_transaction_mutex = .init;
         result.backing = .pool;
         result.pool_device = undefined;
+        result.crypto_context = crypto_context;
+        result.crypto_allocator = if (crypto_context != null) allocator else null;
     }
 
     pub fn inspectPoolHeader(io: Io, set: *pool_member_set.PoolMemberSet) !container.Header {
@@ -267,12 +330,26 @@ pub const Volume = struct {
     }
 
     pub fn open(io: Io, path: []const u8, writable: bool) !Volume {
+        return openOptions(io, path, writable, .{});
+    }
+
+    pub fn openOptions(io: Io, path: []const u8, writable: bool, options: OpenOptions) !Volume {
         var result: Volume = undefined;
-        try openInto(&result, io, path, writable);
+        try openIntoOptions(&result, io, path, writable, options);
         return result;
     }
 
     pub fn openInto(result: *Volume, io: Io, path: []const u8, writable: bool) !void {
+        return openIntoOptions(result, io, path, writable, .{});
+    }
+
+    pub fn openIntoOptions(
+        result: *Volume,
+        io: Io,
+        path: []const u8,
+        writable: bool,
+        options: OpenOptions,
+    ) !void {
         const file = try Io.Dir.cwd().openFile(io, path, .{
             .mode = if (writable) .read_write else .read_only,
             .lock = if (writable) .exclusive else .shared,
@@ -280,6 +357,8 @@ pub const Volume = struct {
         });
         errdefer file.close(io);
         const header = try container.read(file, io);
+        if (header.isEncrypted()) return error.EncryptionNotSupportedForLegacyContainer;
+        if (options.encryption_credential != null) return error.UnexpectedEncryptionCredential;
 
         result.* = undefined;
         result.io = io;
@@ -303,6 +382,8 @@ pub const Volume = struct {
         result.backing = .file;
         result.pool_set = null;
         result.pool_device = undefined;
+        result.crypto_context = null;
+        result.crypto_allocator = null;
     }
 
     pub fn setFallbackOwner(self: *Volume, uid: u32, gid: u32) void {
@@ -324,11 +405,12 @@ pub const Volume = struct {
             var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
             const member_count = try collectPoolMembers(&self.pool_set.?, &member_pointers);
             var replica_endpoints: [3]ReplicaEndpoint = undefined;
-            self.pool_device = try pool_block_device.PoolBlockDevice.init(
+            self.pool_device = try pool_block_device.PoolBlockDevice.initCrypto(
                 self.io,
                 makeReplicaEndpoints(member_pointers[0..member_count], &replica_endpoints),
                 authority.layout,
                 self.header,
+                self.crypto_context,
             );
             self.config = self.pool_device.configure(self.header);
             self.config.context = &self.pool_device;
@@ -379,6 +461,12 @@ pub const Volume = struct {
         self.directory_link_counts.deinit();
         self.object_pins.deinit();
         self.link_counts.deinit();
+        if (self.crypto_context) |context| {
+            context.deinit();
+            self.crypto_allocator.?.destroy(context);
+            self.crypto_context = null;
+            self.crypto_allocator = null;
+        }
         self.closed = true;
 
         if (first_error) |err| return err;
