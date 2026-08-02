@@ -174,7 +174,11 @@ pub const Store = struct {
     }
 
     fn prepareObjectTransaction(self: Store, id: format.ObjectId) !format.ObjectHead {
-        const head = try self.readHead(id);
+        return self.prepareObjectTransactionWithHead(try self.readHead(id));
+    }
+
+    fn prepareObjectTransactionWithHead(self: Store, head: format.ObjectHead) !format.ObjectHead {
+        const id = head.object_id;
         var temporary_buffer: [max_path_bytes:0]u8 = @splat(0);
         try removeIfPresent(self.lfs, try temporaryHeadPath(id, &temporary_buffer));
         try self.removeUncommittedChunkVersions(id, head.data_generation);
@@ -203,6 +207,16 @@ pub const Store = struct {
         offset: u64,
     ) !usize {
         const head = try self.readHead(id);
+        return self.readWithHead(head, buffer, offset);
+    }
+
+    pub fn readWithHead(
+        self: Store,
+        head: format.ObjectHead,
+        buffer: []u8,
+        offset: u64,
+    ) !usize {
+        const id = head.object_id;
         if (offset >= head.logical_size or buffer.len == 0) return 0;
         const available = head.logical_size - offset;
         const amount: usize = @intCast(@min(@as(u64, buffer.len), available));
@@ -226,11 +240,21 @@ pub const Store = struct {
         data: []const u8,
         offset: u64,
     ) !WriteResult {
+        return self.writeWithHead(try self.readHead(id), data, offset);
+    }
+
+    pub fn writeWithHead(
+        self: Store,
+        initial_head: format.ObjectHead,
+        data: []const u8,
+        offset: u64,
+    ) !WriteResult {
+        const id = initial_head.object_id;
         const end = std.math.add(u64, offset, data.len) catch return error.FileTooLarge;
         if (end > format.max_file_size) return error.FileTooLarge;
-        if (data.len == 0) return .{ .amount = 0, .head = try self.readHead(id) };
+        if (data.len == 0) return .{ .amount = 0, .head = initial_head };
 
-        var head = try self.prepareObjectTransaction(id);
+        var head = try self.prepareObjectTransactionWithHead(initial_head);
         const reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
         defer std.heap.c_allocator.free(reservations);
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
@@ -269,10 +293,19 @@ pub const Store = struct {
     }
 
     pub fn writeFootprint(self: Store, id: format.ObjectId, offset: u64, length: u64) !WriteFootprint {
+        return self.writeFootprintWithHead(try self.readHead(id), offset, length);
+    }
+
+    pub fn writeFootprintWithHead(
+        self: Store,
+        head: format.ObjectHead,
+        offset: u64,
+        length: u64,
+    ) !WriteFootprint {
+        const id = head.object_id;
         const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
         if (end > format.max_file_size) return error.FileTooLarge;
         if (length == 0) return .{ .payload_bytes = 0, .chunk_count = 0, .reserved = false };
-        const head = try self.readHead(id);
         const reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
         defer std.heap.c_allocator.free(reservations);
         var position = offset;

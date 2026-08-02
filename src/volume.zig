@@ -720,7 +720,7 @@ pub const Volume = struct {
     pub fn readFile(self: *Volume, handle: *FileHandle, buffer: []u8, offset: u64) !usize {
         const head = try self.store().readHead(handle.object_id);
         handle.metadata = head.metadata;
-        const result = try self.store().read(handle.object_id, buffer, offset);
+        const result = try self.store().readWithHead(head, buffer, offset);
         if (self.writable) {
             const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
             _ = self.patchObjectMetadata(handle.object_id, .{
@@ -736,16 +736,13 @@ pub const Volume = struct {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
         try self.ensureWritesAllowed();
-        const effective_offset = if (handle.append)
-            (try self.store().readHead(handle.object_id)).logical_size
-        else
-            offset;
         const head = try self.store().readHead(handle.object_id);
+        const effective_offset = if (handle.append) head.logical_size else offset;
         const end = std.math.add(u64, effective_offset, data.len) catch return error.FileTooLarge;
         if (end > object_format.max_file_size) return error.FileTooLarge;
-        const footprint = try self.store().writeFootprint(handle.object_id, effective_offset, data.len);
+        const footprint = try self.store().writeFootprintWithHead(head, effective_offset, data.len);
         try self.ensureWriteCapacity(footprint);
-        const result = try self.store().write(handle.object_id, data, effective_offset);
+        const result = try self.store().writeWithHead(head, data, effective_offset);
         try self.replaceReservation(head, result.head);
         self.updateOpenMetadata(handle.object_id, result.head.metadata);
         return result.amount;
