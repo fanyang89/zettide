@@ -63,12 +63,12 @@ pub const Volume = struct {
         name_profile: name_profile.Profile = .legacy_raw,
         encryption_credential: ?volume_crypto.Credential = null,
         redo_journal: ?RedoJournalOptions = null,
-        file_io: file_io.Mode = .posix,
+        file_io: file_io.Mode = .auto,
     };
 
     pub const OpenOptions = struct {
         encryption_credential: ?volume_crypto.Credential = null,
-        file_io: file_io.Mode = .posix,
+        file_io: file_io.Mode = .auto,
     };
 
     pub fn create(io: Io, path: []const u8, logical_size: u64, label: []const u8) !void {

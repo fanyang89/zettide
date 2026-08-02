@@ -57,3 +57,26 @@ test "automatic file IO only falls back for unavailable io_uring" {
     try std.testing.expect(!fallbackAllowed(error.SystemResources));
     try std.testing.expect(!fallbackAllowed(error.ProcessFdQuotaExceeded));
 }
+
+test "automatic file IO prefers io_uring when available" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "auto-file-io", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var automatic = try init(std.testing.allocator, file, .auto);
+    defer automatic.deinit();
+    var forced = linux_file_io.init(std.testing.allocator, file) catch |err| switch (err) {
+        error.PermissionDenied,
+        error.SystemOutdated,
+        error.UnsupportedIoUringOperations,
+        => {
+            try std.testing.expectEqual(Kind.posix, automatic.kind);
+            return;
+        },
+        else => return err,
+    };
+    defer forced.deinit();
+    try std.testing.expectEqual(Kind.io_uring, automatic.kind);
+}

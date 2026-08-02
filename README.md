@@ -37,6 +37,7 @@ reconciliation are not implemented yet.
 - Linux: libfuse3 development files for mounting support
 - Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
 - Optional Linux SMB3 feasibility tests: Samba server and client tools
+- Linux file-backed Volumes prefer io_uring and fall back to POSIX when unavailable
 - Linux raw-disk Pools: io_uring enabled by the kernel and execution sandbox
 - Windows: WinFsp developer package and runtime for mounting support
 
@@ -67,9 +68,9 @@ zig build bench-fs-ops -Doptimize=ReleaseFast -- \
 
 Use `--operation NAME` to select one workload. The available workloads are
 `create`, `open`, `stat`, `read-readonly`, `read-writable-relatime`,
-`write-overwrite`, `rename`, and `remove`. Writes are already durable when the
-internal littlefs files close, so there is no separate sync-write workload. The
-writable read workload includes the default relatime checks; the
+`write-overwrite`, `rename`, and `remove`. Journaled writeback results measure
+accepted latency; the final sync and close drain happens outside the timed
+operation. The writable read workload includes the default relatime checks; the
 read-only workload isolates the data read path. Data workloads use a warmed
 fixed file and offset, so they measure steady-state hot-path latency rather than
 cold or streaming I/O. zBench reports average, standard deviation, range, and

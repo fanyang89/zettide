@@ -100,7 +100,7 @@ const Config = struct {
     workspace_root: []const u8 = ".zig-cache/benchmarks",
     journaled: bool = false,
     durability: DurabilityMode = .writeback,
-    file_io: FileIoMode = .posix,
+    file_io: FileIoMode = .auto,
     help: bool = false,
 };
 
@@ -544,7 +544,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  --workspace-root P  benchmark workspace parent (default: .zig-cache/benchmarks)
         \\  --journaled         use redo journaling (block size up to 1048576)
         \\  --durability NAME   durable or writeback (default: writeback)
-        \\  --file-io NAME      auto, posix, or io_uring (default: posix)
+        \\  --file-io NAME      auto, posix, or io_uring (default: auto)
         \\  --help              show this help
         \\
     );
@@ -559,7 +559,7 @@ test "parse filesystem benchmark defaults and options" {
     try std.testing.expectEqualStrings(".zig-cache/benchmarks", defaults.workspace_root);
     try std.testing.expect(!defaults.journaled);
     try std.testing.expectEqual(DurabilityMode.writeback, defaults.durability);
-    try std.testing.expectEqual(FileIoMode.posix, defaults.file_io);
+    try std.testing.expectEqual(FileIoMode.auto, defaults.file_io);
 
     const configured = try parseArgs(&.{
         "benchmark",
