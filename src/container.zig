@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
 const name_profile = @import("name_profile.zig");
+const redo_journal = @import("redo_journal.zig");
 const volume_crypto = @import("volume_crypto.zig");
 const google_crc32c = @import("crc32c");
 
@@ -17,8 +18,12 @@ pub const virtual_file_max: u64 = std.math.maxInt(i64);
 pub const feature_object_store: u32 = 1 << 0;
 pub const feature_name_profile: u32 = 1 << 1;
 pub const feature_encryption: u32 = 1 << 2;
+pub const feature_redo_journal: u32 = 1 << 3;
 pub const supported_features: u32 = feature_object_store;
-pub const supported_feature_mask: u32 = supported_features | feature_name_profile | feature_encryption;
+pub const supported_feature_mask: u32 = supported_features |
+    feature_name_profile |
+    feature_encryption |
+    feature_redo_journal;
 pub const object_format_version: u32 = 1;
 pub const max_label_len: usize = 127;
 pub const min_volume_size: u64 = 256 * 1024;
@@ -28,10 +33,39 @@ const format_major: u16 = 2;
 const format_minor_legacy: u16 = 0;
 const format_minor_name_profile: u16 = 1;
 const format_minor_encryption: u16 = 2;
-const format_minor_current: u16 = format_minor_encryption;
+const format_minor_redo_journal: u16 = 3;
+const format_minor_current: u16 = format_minor_redo_journal;
 const checksum_offset = header_size - @sizeOf(u32);
 const encryption_offset: usize = 256;
 const encryption_magic = [8]u8{ 'D', 'D', 'V', 'E', 'N', 'C', '1', 0 };
+const redo_journal_offset: usize = 384;
+const redo_journal_magic = [8]u8{ 'D', 'D', 'V', 'R', 'E', 'D', 'O', '1' };
+
+pub const RedoJournal = struct {
+    offset: u64,
+    length: u64,
+    alignment: u32 = redo_journal.alignment,
+    block_size: u32 = redo_journal.block_size,
+    max_transaction_blocks: u32,
+
+    pub fn validate(journal: RedoJournal, home_end: u64, home_block_size: u32) !void {
+        if (journal.offset != home_end) return error.InvalidRedoJournal;
+        if (journal.length == 0 or journal.length % redo_journal.anchor_size != 0)
+            return error.InvalidRedoJournal;
+        if (journal.alignment != redo_journal.alignment or
+            journal.block_size != home_block_size or
+            journal.max_transaction_blocks == 0 or
+            journal.max_transaction_blocks > redo_journal.max_blocks_per_transaction)
+            return error.UnsupportedRedoJournal;
+        const transaction_size = redo_journal.encodedSize(journal.max_transaction_blocks) catch
+            return error.InvalidRedoJournal;
+        const transaction_space = std.math.mul(u64, 2, transaction_size) catch
+            return error.InvalidRedoJournal;
+        const required = std.math.add(u64, redo_journal.data_offset, transaction_space) catch
+            return error.InvalidRedoJournal;
+        if (journal.length < required) return error.InvalidRedoJournal;
+    }
+};
 
 pub const State = enum(u8) {
     creating = 1,
@@ -58,6 +92,7 @@ pub const Header = struct {
     object_version: u32 = object_format_version,
     chunk_size: u32 = default_chunk_size,
     encryption: ?volume_crypto.Config = null,
+    redo_journal: ?RedoJournal = null,
     label: [max_label_len]u8 = @splat(0),
     label_len: u8 = 0,
 
@@ -81,7 +116,7 @@ pub const Header = struct {
         var result: Header = .{
             .sequence = 1,
             .state = .creating,
-            .features = featuresFor(profile, false),
+            .features = featuresFor(profile, false, false),
             .name_profile = profile,
             .uuid = undefined,
             .created_ns = @intCast(Io.Clock.real.now(io).nanoseconds),
@@ -100,18 +135,36 @@ pub const Header = struct {
 
     pub fn setEncryption(header: *Header, config: volume_crypto.Config) void {
         header.encryption = config;
-        header.features = featuresFor(header.name_profile, true);
+        header.features = featuresFor(header.name_profile, true, header.isJournaled());
     }
 
     pub fn isEncrypted(header: *const Header) bool {
         return header.encryption != null;
     }
 
+    pub fn enableRedoJournal(header: *Header, length: u64, max_transaction_blocks: u32) !void {
+        const home_end = std.math.add(u64, header.payload_start, header.logical_size) catch
+            return error.VolumeTooLarge;
+        const journal: RedoJournal = .{
+            .offset = home_end,
+            .length = length,
+            .block_size = header.block_size,
+            .max_transaction_blocks = max_transaction_blocks,
+        };
+        try journal.validate(home_end, header.block_size);
+        header.redo_journal = journal;
+        header.features = featuresFor(header.name_profile, header.isEncrypted(), true);
+    }
+
+    pub fn isJournaled(header: *const Header) bool {
+        return header.redo_journal != null;
+    }
+
     pub fn encode(header: Header) [header_size]u8 {
         var bytes: [header_size]u8 = @splat(0);
         @memcpy(bytes[0..magic.len], &magic);
         putInt(u16, &bytes, 8, format_major);
-        putInt(u16, &bytes, 10, formatMinor(header.name_profile, header.isEncrypted()));
+        putInt(u16, &bytes, 10, formatMinor(header.name_profile, header.isEncrypted(), header.isJournaled()));
         putInt(u32, &bytes, 12, header_size);
         putInt(u64, &bytes, 16, header.sequence);
         bytes[24] = @intFromEnum(header.state);
@@ -137,6 +190,7 @@ pub const Header = struct {
             putInt(u16, &bytes, 250, header.name_profile.persistedVersion());
         }
         if (header.encryption) |encryption| encodeEncryption(&bytes, encryption);
+        if (header.redo_journal) |journal| encodeRedoJournal(&bytes, journal);
         putInt(u32, &bytes, checksum_offset, checksum(bytes[0..checksum_offset]));
         return bytes;
     }
@@ -156,12 +210,18 @@ pub const Header = struct {
         const features = getInt(u32, bytes, 28);
         const profile: name_profile.Profile = if (features & feature_name_profile != 0)
             try .fromPersisted(getInt(u16, bytes, 248), getInt(u16, bytes, 250))
-        else if (format_minor == format_minor_legacy or format_minor == format_minor_encryption)
+        else if (format_minor == format_minor_legacy or
+            format_minor == format_minor_encryption or
+            format_minor == format_minor_redo_journal)
             .legacy_raw
         else
             return error.InvalidHeader;
         const encrypted = features & feature_encryption != 0;
-        if ((format_minor == format_minor_encryption) != encrypted) return error.InvalidHeader;
+        const journaled = features & feature_redo_journal != 0;
+        if ((format_minor == format_minor_encryption and !encrypted) or
+            (format_minor < format_minor_encryption and encrypted) or
+            (format_minor == format_minor_redo_journal) != journaled)
+            return error.InvalidHeader;
         var result: Header = .{
             .sequence = getInt(u64, bytes, 16),
             .state = state,
@@ -182,6 +242,7 @@ pub const Header = struct {
             .object_version = getInt(u32, bytes, 240),
             .chunk_size = getInt(u32, bytes, 244),
             .encryption = if (encrypted) try decodeEncryption(bytes) else null,
+            .redo_journal = if (journaled) try decodeRedoJournal(bytes) else null,
             .label_len = label_len,
         };
         @memcpy(result.label[0..label_len], bytes[104 .. 104 + label_len]);
@@ -190,7 +251,7 @@ pub const Header = struct {
     }
 
     pub fn validate(header: Header) !void {
-        if (header.features != featuresFor(header.name_profile, header.isEncrypted()))
+        if (header.features != featuresFor(header.name_profile, header.isEncrypted(), header.isJournaled()))
             return error.UnsupportedFeatures;
         if (header.payload_start < payload_offset or header.payload_start % header_size != 0)
             return error.InvalidHeader;
@@ -213,18 +274,26 @@ pub const Header = struct {
             return error.InvalidHeader;
         if (!std.unicode.utf8ValidateSlice(header.labelSlice())) return error.InvalidHeader;
         if (header.encryption) |encryption| try encryption.validate();
+        if (header.redo_journal) |journal| {
+            const home_end = std.math.add(u64, header.payload_start, header.logical_size) catch
+                return error.InvalidHeader;
+            try journal.validate(home_end, header.block_size);
+        }
     }
 };
 
-fn featuresFor(profile: name_profile.Profile, encrypted: bool) u32 {
+fn featuresFor(profile: name_profile.Profile, encrypted: bool, journaled: bool) u32 {
     const base = switch (profile) {
         .legacy_raw => feature_object_store,
         .portable_v1 => feature_object_store | feature_name_profile,
     };
-    return base | if (encrypted) feature_encryption else 0;
+    return base |
+        (if (encrypted) feature_encryption else 0) |
+        (if (journaled) feature_redo_journal else 0);
 }
 
-fn formatMinor(profile: name_profile.Profile, encrypted: bool) u16 {
+fn formatMinor(profile: name_profile.Profile, encrypted: bool, journaled: bool) u16 {
+    if (journaled) return format_minor_redo_journal;
     if (encrypted) return format_minor_encryption;
     return switch (profile) {
         .legacy_raw => format_minor_legacy,
@@ -250,10 +319,18 @@ pub fn read(file: File, io: Io) !Header {
         return error.NoValidHeader;
 
     if (selected.state != .ready) return error.IncompleteContainer;
-    const expected_len = std.math.add(u64, selected.payload_start, selected.logical_size) catch
-        return error.InvalidHeader;
+    const expected_len = try requiredFileSize(selected);
     if (try file.length(io) < expected_len) return error.TruncatedContainer;
     return selected;
+}
+
+pub fn requiredFileSize(header: Header) !u64 {
+    const home_end = std.math.add(u64, header.payload_start, header.logical_size) catch
+        return error.InvalidHeader;
+    return if (header.redo_journal) |journal|
+        std.math.add(u64, journal.offset, journal.length) catch error.InvalidHeader
+    else
+        home_end;
 }
 
 const HeaderCandidate = union(enum) {
@@ -288,6 +365,7 @@ fn decodeCandidate(bytes: *const [header_size]u8, bytes_read: usize) HeaderCandi
         error.UnsupportedFeatures,
         error.UnsupportedNameProfile,
         error.UnsupportedEncryptionConfig,
+        error.UnsupportedRedoJournal,
         => .{ .unsupported = .{
             .sequence = getInt(u64, bytes, 16),
             .cause = err,
@@ -338,6 +416,35 @@ fn decodeEncryption(bytes: *const [header_size]u8) !volume_crypto.Config {
     };
     try config.validate();
     return config;
+}
+
+fn encodeRedoJournal(bytes: *[header_size]u8, journal: RedoJournal) void {
+    @memcpy(bytes[redo_journal_offset..][0..redo_journal_magic.len], &redo_journal_magic);
+    putInt(u16, bytes, redo_journal_offset + 8, 1);
+    putInt(u32, bytes, redo_journal_offset + 12, journal.alignment);
+    putInt(u32, bytes, redo_journal_offset + 16, journal.block_size);
+    putInt(u64, bytes, redo_journal_offset + 24, journal.offset);
+    putInt(u64, bytes, redo_journal_offset + 32, journal.length);
+    putInt(u32, bytes, redo_journal_offset + 40, journal.max_transaction_blocks);
+}
+
+fn decodeRedoJournal(bytes: *const [header_size]u8) !RedoJournal {
+    if (!std.mem.eql(
+        u8,
+        bytes[redo_journal_offset..][0..redo_journal_magic.len],
+        &redo_journal_magic,
+    ) or getInt(u16, bytes, redo_journal_offset + 8) != 1 or
+        getInt(u16, bytes, redo_journal_offset + 10) != 0 or
+        getInt(u32, bytes, redo_journal_offset + 20) != 0 or
+        getInt(u32, bytes, redo_journal_offset + 44) != 0)
+        return error.UnsupportedRedoJournal;
+    return .{
+        .alignment = getInt(u32, bytes, redo_journal_offset + 12),
+        .block_size = getInt(u32, bytes, redo_journal_offset + 16),
+        .offset = getInt(u64, bytes, redo_journal_offset + 24),
+        .length = getInt(u64, bytes, redo_journal_offset + 32),
+        .max_transaction_blocks = getInt(u32, bytes, redo_journal_offset + 40),
+    };
 }
 
 fn putInt(comptime T: type, bytes: *[header_size]u8, offset: usize, value: T) void {
@@ -400,6 +507,69 @@ test "encrypted header round trip uses the versioned extension" {
         .{ .raw_key = &key },
     );
     context.deinit();
+}
+
+test "redo journal descriptor round trip uses the versioned extension" {
+    var header = try Header.init(std.testing.io, 1024 * 1024, "Journaled");
+    try header.enableRedoJournal(128 * 1024, 8);
+    const bytes = header.encode();
+    try std.testing.expectEqual(format_minor_redo_journal, getInt(u16, &bytes, 10));
+    try std.testing.expectEqual(
+        feature_object_store | feature_redo_journal,
+        getInt(u32, &bytes, 28),
+    );
+    const decoded = try Header.decode(&bytes);
+    try std.testing.expect(decoded.isJournaled());
+    try std.testing.expectEqual(header.payload_start + header.logical_size, decoded.redo_journal.?.offset);
+    try std.testing.expectEqual(@as(u64, 128 * 1024), decoded.redo_journal.?.length);
+    try std.testing.expectEqual(@as(u32, 8), decoded.redo_journal.?.max_transaction_blocks);
+    try std.testing.expectEqual(
+        decoded.redo_journal.?.offset + decoded.redo_journal.?.length,
+        try requiredFileSize(decoded),
+    );
+}
+
+test "redo journal preserves encryption and name profile features" {
+    const key: [volume_crypto.master_key_length]u8 = @splat(0x6b);
+    var prepared = try volume_crypto.prepare(std.testing.allocator, std.testing.io, .{ .raw_key = &key });
+    defer prepared.context.deinit();
+    var header = try Header.initWithNameProfile(std.testing.io, 1024 * 1024, "Combined", .portable_v1);
+    try header.enableRedoJournal(128 * 1024, 8);
+    header.setEncryption(prepared.config);
+    const decoded = try Header.decode(&header.encode());
+    try std.testing.expect(decoded.isEncrypted());
+    try std.testing.expect(decoded.isJournaled());
+    try std.testing.expectEqual(name_profile.Profile.portable_v1, decoded.name_profile);
+    try std.testing.expectEqual(
+        feature_object_store | feature_name_profile | feature_encryption | feature_redo_journal,
+        decoded.features,
+    );
+}
+
+test "redo journal rejects invalid capacity" {
+    var header = try Header.init(std.testing.io, 1024 * 1024, "InvalidJournal");
+    try std.testing.expectError(error.InvalidRedoJournal, header.enableRedoJournal(4096, 8));
+    try std.testing.expectError(error.InvalidRedoJournal, header.enableRedoJournal(128 * 1024 + 1, 8));
+    try std.testing.expectError(error.UnsupportedRedoJournal, header.enableRedoJournal(128 * 1024, 0));
+}
+
+test "reader includes redo journal tail in container length" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "journaled.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var header = try Header.init(std.testing.io, 1024 * 1024, "JournaledLength");
+    try header.enableRedoJournal(128 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, header.payload_start + header.logical_size);
+    try write(file, std.testing.io, header_a_offset, header);
+    try write(file, std.testing.io, header_b_offset, header);
+    try std.testing.expectError(error.TruncatedContainer, read(file, std.testing.io));
+
+    try file.setLength(std.testing.io, try requiredFileSize(header));
+    const decoded = try read(file, std.testing.io);
+    try std.testing.expect(decoded.isJournaled());
 }
 
 test "legacy headers retain the v2.0 encoding" {

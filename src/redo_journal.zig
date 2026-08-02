@@ -3,6 +3,9 @@ const google_crc32c = @import("crc32c");
 
 pub const alignment: usize = 512;
 pub const block_size: usize = 4096;
+pub const anchor_size: usize = 4096;
+pub const anchor_count: usize = 2;
+pub const data_offset: usize = anchor_count * anchor_size;
 pub const data_record_size: usize = alignment + block_size;
 pub const max_blocks_per_transaction: u32 = 4096;
 pub const Digest = [32]u8;
