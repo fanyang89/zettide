@@ -2,6 +2,8 @@
 
 const std = @import("std");
 
+/// Globally unique for each logical transaction. Publication resolution relies
+/// on identifiers never being reused.
 pub const TransactionId = [16]u8;
 pub const anchor_size = 512;
 pub const Anchor = [anchor_size]u8;

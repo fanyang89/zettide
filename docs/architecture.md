@@ -25,6 +25,19 @@ Once a publication request may have reached storage, transport failure is
 reported as indeterminate rather than as an ordinary error. Stabilization is
 idempotent and may be retried.
 
+Every immutable commit record stores its generation, globally unique
+transaction identifier, optional parent commit reference, and filesystem root
+reference. Resolution requires generations to decrease by one along the parent
+chain and applies a caller-controlled traversal limit. A missing, malformed, or
+inconsistent chain is an unresolved error rather than evidence of success or
+failure.
+
+An unchanged base anchor does not prove that an indeterminate request failed:
+the request may still reach storage after the read. Resolution remains pending
+until the transaction appears at its intended generation or another commit
+advances the anchor. A future explicit fencing operation can force progress
+when no other writer advances it.
+
 ## Planned Backends
 
 The SCSI backend uses one logical-block COMPARE AND WRITE for anchor updates.
