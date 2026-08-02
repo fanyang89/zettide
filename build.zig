@@ -223,6 +223,12 @@ pub fn build(b: *std.Build) void {
     const fsx_step = b.step("test-fsx", "Run vendored fsx with deterministic seeds");
     fsx_step.dependOn(&fsx_test_cmd.step);
 
+    const fio_test_cmd = b.addSystemCommand(&.{ "bash", "test/external/fio-verify.sh" });
+    fio_test_cmd.addArg(@tagName(external_test_mode));
+    fio_test_cmd.addArtifactArg(exe);
+    const fio_step = b.step("test-fio", "Verify file data before and after a clean remount with fio");
+    fio_step.dependOn(&fio_test_cmd.step);
+
     const external_step = b.step("test-external", "Run vendored external filesystem tests");
     external_step.dependOn(libfuse_step);
     external_step.dependOn(fsx_step);
@@ -269,6 +275,7 @@ pub fn build(b: *std.Build) void {
     posix_nightly_step.dependOn(xfstests_step);
     posix_nightly_step.dependOn(ltp_step);
     posix_nightly_step.dependOn(fault_step);
+    posix_nightly_step.dependOn(fio_step);
 
     const cross_step = b.step("test-cross", "Compile portable boundaries for Windows and macOS");
     const windows_target = b.resolveTargetQuery(.{

@@ -80,6 +80,8 @@ success for these operations.
   inheritance, active-request shutdown, child exit, and private-mount cleanup.
 - `test-libfuse` runs the applicable cases from libfuse's syscall test suite.
 - `test-fsx` runs deterministic buffered and mmap read, write, and truncate workloads.
+- `test-fio` performs CRC32C data verification over small, sequential, and
+  random files before and after a clean remount.
 - `test-cross` compiles the portable core and CLI for x86_64 Windows GNU.
 
 The required FUSE gate must not skip because `/dev/fuse` or helper programs are

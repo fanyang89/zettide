@@ -99,6 +99,7 @@ zig build test-posix-baseline -Dfuse-tests=required
 zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
 zig build test-libfuse -Dexternal-tests=required
 zig build test-fsx -Dexternal-tests=required
+zig build test-fio -Dexternal-tests=required
 zig build test-external -Dexternal-tests=required
 zig build test-posix-privileged -Dprivileged-tests=required
 zig build -j1 test-posix-nightly -Dfuse-tests=required -Dexternal-tests=required -Dprivileged-tests=required
@@ -142,6 +143,13 @@ SMB3 and verifies write, rename, read-only access, unmount, and persistence. The
 gate does not install a product SMB service or modify the system Samba
 configuration. Its current scope and exclusions are documented in
 `docs/smb3-profile.md`.
+
+`test-fio` runs deterministic CRC32C verification over buffered synchronous I/O
+to small files and multi-chunk sequential and random files. It verifies every
+write on the live mount, cleanly unmounts the file-backed image, runs `check`,
+remounts it, and verifies the complete data set from a separate fio process.
+The gate requires the `fio` executable and is part of `test-posix-nightly`, not
+the pull-request quick gate. Set `ZETTIDE_FIO` to select a non-default executable.
 
 The privileged and nightly gates use pinned upstream suites prepared by an
 explicit networked step. Test execution itself never downloads dependencies:

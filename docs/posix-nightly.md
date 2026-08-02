@@ -33,7 +33,7 @@ network clients.
 
 Required build tools include a C compiler, Git, Make, Autoconf, Automake, Perl
 TAP Harness, and the xfstests development dependencies. Runtime tools include
-FUSE3, `findmnt`, `mountpoint`, `runuser`, `timeout`, and `xfs_io`.
+FUSE3, `findmnt`, `fio`, `mountpoint`, `runuser`, `timeout`, and `xfs_io`.
 
 ## Manifests
 
@@ -54,6 +54,7 @@ comma-separated or group-wide exclusions are rejected by the runner.
 zig build test-posix-privileged -Dprivileged-tests=required
 zig build test-xfstests -Dexternal-tests=required
 zig build test-ltp-open-posix -Dexternal-tests=required
+zig build test-fio -Dexternal-tests=required
 zig build -j1 test-posix-nightly \
   -Dfuse-tests=required -Dexternal-tests=required -Dprivileged-tests=required
 ```
@@ -66,6 +67,12 @@ process termination in that order.
 
 The aggregate nightly target uses `-j1` because xfstests identifies its test
 filesystem by mount source and must not overlap another Zettide mount.
+
+The fio gate uses buffered synchronous I/O with fixed seeds and CRC32C headers.
+It fully writes and verifies independent small, sequential, and random file
+sets, performs a clean unmount and `zettide check`, then remounts and runs
+`verify_only` from a separate fio process. It has no performance threshold and
+does not use elapsed-time workloads, so every configured block must be covered.
 
 Set `ZETTIDE_TEST_LOG_DIR` to retain suite, mount, and xfstests result logs.
 Set `ZETTIDE_KEEP_TEST_ARTIFACTS=1` to retain a failed runner's temporary image

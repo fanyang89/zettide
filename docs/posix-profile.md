@@ -68,8 +68,9 @@ this base filesystem profile:
 
 `test-posix-quick` is the required pull-request gate. `test-posix-nightly`
 contains privileged pjdfstest cases, selected xfstests generic cases, mmap
-stress, fault injection, and crash recovery. `test-posix-soak` increases seeds,
-operation counts, and concurrent lock and namespace workloads.
+stress, fault injection, crash recovery, and multi-file fio data verification
+across a clean remount. `test-posix-soak` increases seeds, operation counts, and
+concurrent lock and namespace workloads.
 
 `test-posix-privileged` covers sticky directories, ownership changes, set-id
 clearing, and setgid inheritance using multiple real Linux identities. The
