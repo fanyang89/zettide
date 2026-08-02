@@ -93,6 +93,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     var path_count: usize = 0;
     var protection: zettide.v3.pool_policy.Protection = .replicated;
     var label: []const u8 = "Zettide";
+    var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var confirmation: ?[]const u8 = null;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -116,6 +117,10 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             label = args[index];
+        } else if (std.mem.eql(u8, option, "--name-profile")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            name_profile = try zettide.name_profile.Profile.parse(args[index]);
         } else if (std.mem.eql(u8, option, "--confirm")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -131,6 +136,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     var plan = try zettide.v3.linux_pool_plan.inspect(io, allocator, paths[0..path_count], .{
         .protection = protection,
         .label = label,
+        .name_profile = name_profile,
     });
     defer plan.deinit();
     try printPoolPlan(&plan, stdout);
@@ -156,7 +162,9 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         .complete => |value| {
             var provisioned = value;
             defer provisioned.deinit();
-            zettide.volume.Volume.initializePool(io, &provisioned, label) catch |cause| {
+            zettide.volume.Volume.initializePoolOptions(io, &provisioned, label, .{
+                .name_profile = name_profile,
+            }) catch |cause| {
                 try stdout.print("Pool created but volume initialization failed: {x} ({s})\n", .{
                     provisioned.genesis.topology.set_id,
                     @errorName(cause),
@@ -184,14 +192,22 @@ fn poolInspectCommand(
 ) !void {
     var paths: [zettide.v3.pool_topology.max_member_count][]const u8 = undefined;
     var path_count: usize = 0;
+    var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
-        if (!std.mem.eql(u8, args[index], "--device")) return error.UnknownOption;
-        index += 1;
-        if (index == args.len) return error.MissingOptionValue;
-        if (path_count == paths.len) return error.TooManyDevices;
-        paths[path_count] = args[index];
-        path_count += 1;
+        if (std.mem.eql(u8, args[index], "--device")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            if (path_count == paths.len) return error.TooManyDevices;
+            paths[path_count] = args[index];
+            path_count += 1;
+        } else if (std.mem.eql(u8, args[index], "--name-profile")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            name_profile = try zettide.name_profile.Profile.parse(args[index]);
+        } else {
+            return error.UnknownOption;
+        }
     }
     if (path_count == 0) return error.InvalidMemberCount;
 
@@ -209,10 +225,13 @@ fn poolInspectCommand(
     const mountable = zettide.volume.Volume.inspectPoolHeader(io, &set) catch null;
     try stdout.print("Mountable: {s}\n", .{if (mountable != null) "yes" else "no"});
     const can_initialize = zettide.volume.Volume.canInitializePool(io, &set) catch false;
-    if (can_initialize)
-        try stdout.print("Initialize token: initialize-empty-volume:{x}\n", .{
-            authority.topology.set_id,
+    if (can_initialize) {
+        try stdout.print("Initialize name profile: {s}\n", .{name_profile.name()});
+        var token_buffer: [96]u8 = undefined;
+        try stdout.print("Initialize token: {s}\n", .{
+            poolInitializeToken(&token_buffer, authority.topology.set_id, name_profile),
         });
+    }
     for (paths[0..path_count], 0..) |path, member_index| {
         try stdout.print("Member: {s} ({s})\n", .{ path, memberStatusName(try set.statusAt(member_index)) });
     }
@@ -227,6 +246,7 @@ fn poolInitializeCommand(
     var paths: [zettide.v3.pool_topology.max_member_count][]const u8 = undefined;
     var path_count: usize = 0;
     var label: []const u8 = "Zettide";
+    var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var confirmation: ?[]const u8 = null;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
@@ -240,6 +260,10 @@ fn poolInitializeCommand(
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             label = args[index];
+        } else if (std.mem.eql(u8, args[index], "--name-profile")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            name_profile = try zettide.name_profile.Profile.parse(args[index]);
         } else if (std.mem.eql(u8, args[index], "--confirm")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -254,12 +278,12 @@ fn poolInitializeCommand(
     var set = try openRawPoolSet(allocator, io, paths[0..path_count], true, true, .writable);
     defer set.deinit();
     const authority = set.authority() orelse return error.MissingAuthority;
-    var expected_buffer: [64]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "initialize-empty-volume:{x}", .{
-        authority.topology.set_id,
-    });
+    var expected_buffer: [96]u8 = undefined;
+    const expected = poolInitializeToken(&expected_buffer, authority.topology.set_id, name_profile);
     if (!std.mem.eql(u8, supplied_confirmation, expected)) return error.ConfirmationMismatch;
-    try zettide.volume.Volume.initializePoolSet(io, &set, label);
+    try zettide.volume.Volume.initializePoolSetOptions(io, &set, label, .{
+        .name_profile = name_profile,
+    });
     try stdout.print("Initialized pool: {x}\n", .{authority.topology.set_id});
 }
 
@@ -358,6 +382,20 @@ fn memberStatusName(status: zettide.v3.pool_member_set.MemberStatus) []const u8 
     };
 }
 
+fn poolInitializeToken(
+    buffer: *[96]u8,
+    set_id: [16]u8,
+    name_profile: zettide.name_profile.Profile,
+) []const u8 {
+    return if (name_profile == .legacy_raw)
+        std.fmt.bufPrint(buffer, "initialize-empty-volume:{x}", .{set_id}) catch unreachable
+    else
+        std.fmt.bufPrint(buffer, "initialize-empty-volume:{x}:{s}", .{
+            set_id,
+            name_profile.name(),
+        }) catch unreachable;
+}
+
 fn printPoolPlan(plan: *const zettide.v3.linux_pool_plan.Plan, stdout: *Io.Writer) !void {
     for (plan.paths, plan.devices, plan.contains_data) |path, device, has_data| {
         try stdout.print("Device: {s} ({d}:{d}, sequence {d}, {Bi:.2})\n", .{
@@ -378,6 +416,7 @@ fn printPoolPlan(plan: *const zettide.v3.linux_pool_plan.Plan, stdout: *Io.Write
                 "ready",
         });
     }
+    try stdout.print("Name profile: {s}\n", .{plan.options.name_profile.name()});
     try stdout.print("Plan: {s}\n", .{if (plan.ready()) "ready" else "rejected"});
 }
 
@@ -431,6 +470,7 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     const path = args[0];
     var size: ?u64 = null;
     var label: []const u8 = "Zettide";
+    var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var index: usize = 1;
     while (index < args.len) {
         const option = args[index];
@@ -442,6 +482,10 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             label = args[index];
+        } else if (std.mem.eql(u8, option, "--name-profile")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            name_profile = try zettide.name_profile.Profile.parse(args[index]);
         } else {
             return error.UnknownOption;
         }
@@ -449,7 +493,9 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     }
 
     const logical_size = size orelse return error.MissingSize;
-    try zettide.volume.Volume.create(io, path, logical_size, label);
+    try zettide.volume.Volume.createOptions(io, path, logical_size, label, .{
+        .name_profile = name_profile,
+    });
     try stdout.print("Created {s} ({Bi:.2})\n", .{ path, logical_size });
 }
 
@@ -458,6 +504,7 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
     const path = args[0];
     var size: ?u64 = null;
     var label: []const u8 = "Zettide";
+    var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var confirmation: ?[]const u8 = null;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -469,6 +516,10 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             label = args[index];
+        } else if (std.mem.eql(u8, args[index], "--name-profile")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            name_profile = try zettide.name_profile.Profile.parse(args[index]);
         } else if (std.mem.eql(u8, args[index], "--confirm")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -478,11 +529,15 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
         }
     }
 
-    const plan = zettide.target.inspectFormat(io, allocator, path, label) catch |err| switch (err) {
+    const plan = zettide.target.inspectFormatOptions(io, allocator, path, label, .{
+        .name_profile = name_profile,
+    }) catch |err| switch (err) {
         error.FileNotFound => {
             if (confirmation != null) return error.UnexpectedConfirmation;
             const target_size = size orelse return error.MissingSize;
-            const result = try zettide.target.formatNewFile(io, allocator, path, target_size, label);
+            const result = try zettide.target.formatNewFileOptions(io, allocator, path, target_size, label, .{
+                .name_profile = name_profile,
+            });
             try finishFormat(result, path, target_size, stdout);
             return;
         },
@@ -493,6 +548,7 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
     try stdout.print("Type: {s}\n", .{@tagName(plan.kind)});
     try stdout.print("Capacity: {Bi:.2}\n", .{plan.capacity_bytes});
     try stdout.print("Contains data: {s}\n", .{if (plan.contains_data) "yes" else "no"});
+    try stdout.print("Name profile: {s}\n", .{plan.name_profile.name()});
     try stdout.print("Plan: {s}\n", .{if (plan.eligible) "ready" else "rejected"});
     var token_buffer: [64]u8 = undefined;
     if (confirmation) |supplied| {
@@ -553,6 +609,7 @@ fn infoCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     try stdout.print("Block size: {d}\n", .{volume.header.block_size});
     try stdout.print("Blocks: {d}\n", .{volume.header.block_count});
     try stdout.print("Maximum file size: {Bi:.2}\n", .{volume.header.user_file_max});
+    try stdout.print("Name profile: {s}\n", .{volume.header.name_profile.name()});
     try stdout.writeAll("Case-sensitive: yes\nEncrypted: no\n");
     try volume.close();
 }
@@ -575,22 +632,23 @@ fn checkCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
 fn usage(writer: *Io.Writer) !void {
     try writer.writeAll(
         \\Usage:
-        \\  zettide format <file|device> [--size <size>] [--label <label>] [--confirm <token>]
-        \\  zettide create <container> --size <size> [--label <label>]
+        \\  zettide format <file|device> [--size <size>] [--label <label>] [--name-profile <profile>] [--confirm <token>]
+        \\  zettide create <container> --size <size> [--label <label>] [--name-profile <profile>]
         \\  zettide info <container>
         \\  zettide check <container>
         \\  zettide mount <container> <mountpoint> [--allow-other]
         \\  zettide unmount <mountpoint>
         \\  zettide device inspect <device>
-        \\  zettide pool inspect --device <device>...
-        \\  zettide pool initialize --device <device>... [--label <label>] --confirm <token>
+        \\  zettide pool inspect --device <device>... [--name-profile <profile>]
+        \\  zettide pool initialize --device <device>... [--label <label>] [--name-profile <profile>] --confirm <token>
         \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other]
-        \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>]
-        \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] --confirm <token>
+        \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>]
+        \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>] --confirm <token>
         \\  zettide serve dufs <file|device> [--read-only] [-- <dufs-options>...]
         \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]...
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
+        \\Name profiles are legacy-raw and portable-v1; legacy-raw is the default.
         \\
     );
 }

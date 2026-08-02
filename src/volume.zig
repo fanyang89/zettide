@@ -10,6 +10,7 @@ const pool_block_device = @import("v3/pool_block_device.zig");
 const pool_member_set = @import("v3/pool_member_set.zig");
 const ReplicaEndpoint = @import("v3/replica_endpoint.zig").ReplicaEndpoint;
 const pool_provision = @import("v3/pool_provision.zig");
+const name_profile = @import("name_profile.zig");
 pub const c = block_device.c;
 
 pub const Volume = struct {
@@ -35,8 +36,22 @@ pub const Volume = struct {
     pool_set: ?pool_member_set.PoolMemberSet = null,
     pool_device: pool_block_device.PoolBlockDevice = undefined,
 
+    pub const InitializeOptions = struct {
+        name_profile: name_profile.Profile = .legacy_raw,
+    };
+
     pub fn create(io: Io, path: []const u8, logical_size: u64, label: []const u8) !void {
-        var header = try container.Header.init(io, logical_size, label);
+        return createOptions(io, path, logical_size, label, .{});
+    }
+
+    pub fn createOptions(
+        io: Io,
+        path: []const u8,
+        logical_size: u64,
+        label: []const u8,
+        options: InitializeOptions,
+    ) !void {
+        var header = try container.Header.initWithNameProfile(io, logical_size, label, options.name_profile);
         const file = try Io.Dir.cwd().createFile(io, path, .{
             .read = true,
             .exclusive = true,
@@ -70,6 +85,15 @@ pub const Volume = struct {
         provisioned: *pool_provision.ProvisionedPool,
         label: []const u8,
     ) !void {
+        return initializePoolOptions(io, provisioned, label, .{});
+    }
+
+    pub fn initializePoolOptions(
+        io: Io,
+        provisioned: *pool_provision.ProvisionedPool,
+        label: []const u8,
+        options: InitializeOptions,
+    ) !void {
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         if (provisioned.members.len > member_pointers.len) return error.UnsupportedPoolWidth;
         for (provisioned.members, 0..) |*member, index| member_pointers[index] = member;
@@ -78,10 +102,20 @@ pub const Volume = struct {
             member_pointers[0..provisioned.members.len],
             provisioned.genesis.layout,
             label,
+            options,
         );
     }
 
     pub fn initializePoolSet(io: Io, set: *pool_member_set.PoolMemberSet, label: []const u8) !void {
+        return initializePoolSetOptions(io, set, label, .{});
+    }
+
+    pub fn initializePoolSetOptions(
+        io: Io,
+        set: *pool_member_set.PoolMemberSet,
+        label: []const u8,
+        options: InitializeOptions,
+    ) !void {
         const authority = set.authority() orelse return error.MissingAuthority;
         if (set.controlWriteReady() == null or set.dataAccess() != .read_write)
             return error.PoolWriteUnavailable;
@@ -94,7 +128,7 @@ pub const Volume = struct {
             authority.layout,
         );
         if (!try reader.canInitializeVolume(std.heap.c_allocator)) return error.PoolVolumeNotEmpty;
-        return initializePoolMembers(io, member_pointers[0..member_count], authority.layout, label);
+        return initializePoolMembers(io, member_pointers[0..member_count], authority.layout, label, options);
     }
 
     fn initializePoolMembers(
@@ -102,11 +136,12 @@ pub const Volume = struct {
         members: []const *@import("v3/member.zig").Member,
         layout: @import("v3/pool_layout.zig").Layout,
         label: []const u8,
+        options: InitializeOptions,
     ) !void {
         const capacity = members[0].header().logical_capacity;
         const maximum_size = @as(u64, std.math.maxInt(u32)) * container.default_block_size;
         const logical_size = @min(capacity, maximum_size) / container.default_block_size * container.default_block_size;
-        var header = try container.Header.init(io, logical_size, label);
+        var header = try container.Header.initWithNameProfile(io, logical_size, label, options.name_profile);
         for (members) |member| {
             header.read_size = @max(header.read_size, member.header().metadata_read_size);
             header.prog_size = @max(header.prog_size, member.header().metadata_program_size);

@@ -4,6 +4,7 @@ const volume_api = @import("volume.zig");
 const pool_member_set = @import("v3/pool_member_set.zig");
 const pool_provision = @import("v3/pool_provision.zig");
 const storage_api = @import("v3/storage.zig");
+const name_profile = @import("name_profile.zig");
 const linux_block = if (builtin.os.tag == .linux) @import("v3/linux_block_device.zig") else struct {};
 
 const Io = std.Io;
@@ -31,6 +32,7 @@ const BlockIdentity = struct {
 pub const FormatPlan = struct {
     path: []const u8,
     label: []const u8,
+    name_profile: name_profile.Profile,
     canonical_path_digest: [32]u8,
     kind: Kind,
     capacity_bytes: u64,
@@ -49,6 +51,10 @@ pub const FormatPlan = struct {
     }
 };
 
+pub const FormatOptions = struct {
+    name_profile: name_profile.Profile = .legacy_raw,
+};
+
 pub const FormatResult = union(enum) {
     complete,
     pool_created: struct {
@@ -64,12 +70,22 @@ pub const FormatResult = union(enum) {
 };
 
 pub fn inspectFormat(io: Io, allocator: std.mem.Allocator, path: []const u8, label: []const u8) !FormatPlan {
+    return inspectFormatOptions(io, allocator, path, label, .{});
+}
+
+pub fn inspectFormatOptions(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    label: []const u8,
+    options: FormatOptions,
+) !FormatPlan {
     _ = try @import("v3/member_format.zig").Label.init(label);
     const stat = try Io.Dir.cwd().statFile(io, path, .{});
     return switch (stat.kind) {
-        .file => inspectRegularFormat(io, allocator, path, label),
+        .file => inspectRegularFormat(io, allocator, path, label, options),
         .block_device => if (comptime builtin.os.tag == .linux)
-            inspectBlockFormat(io, allocator, path, label)
+            inspectBlockFormat(io, allocator, path, label, options)
         else
             error.BlockDeviceNotImplemented,
         else => error.UnsupportedTargetType,
@@ -83,6 +99,17 @@ pub fn formatNewFile(
     size: u64,
     label: []const u8,
 ) !FormatResult {
+    return formatNewFileOptions(io, allocator, path, size, label, .{});
+}
+
+pub fn formatNewFileOptions(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    size: u64,
+    label: []const u8,
+    options: FormatOptions,
+) !FormatResult {
     if (size < 3 * member_alignment or size % member_alignment != 0) return error.InvalidTargetSize;
     _ = try @import("v3/member_format.zig").Label.init(label);
     var storage = try storage_api.Storage.createFile(io, Io.Dir.cwd(), path, size);
@@ -90,7 +117,7 @@ pub fn formatNewFile(
     var storage_owned = true;
     defer if (storage_owned) storage.close(io) catch {};
     storage_owned = false;
-    return provision(io, allocator, &storage, label);
+    return provision(io, allocator, &storage, label, options);
 }
 
 pub fn applyFormat(
@@ -128,7 +155,7 @@ pub fn applyFormat(
             const scan = try scanStorage(&storage, io, allocator);
             if (!std.mem.eql(u8, &scan.digest, &plan.data_digest)) return error.TargetChanged;
             storage_owned = false;
-            return provision(io, allocator, &storage, plan.label);
+            return provision(io, allocator, &storage, plan.label, .{ .name_profile = plan.name_profile });
         },
         .block_device => {
             if (comptime builtin.os.tag != .linux) return error.BlockDeviceNotImplemented;
@@ -146,7 +173,7 @@ pub fn applyFormat(
             const scan = try scanStorage(&opened.storage, io, allocator);
             if (!std.mem.eql(u8, &scan.digest, &plan.data_digest)) return error.TargetChanged;
             storage_owned = false;
-            return provision(io, allocator, &opened.storage, plan.label);
+            return provision(io, allocator, &opened.storage, plan.label, .{ .name_profile = plan.name_profile });
         },
     }
 }
@@ -221,7 +248,13 @@ fn openBlockVolumeInto(
     return volume_api.Volume.openPoolInto(result, io, allocator, set, writable);
 }
 
-fn inspectRegularFormat(io: Io, allocator: std.mem.Allocator, path: []const u8, label: []const u8) !FormatPlan {
+fn inspectRegularFormat(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    label: []const u8,
+    options: FormatOptions,
+) !FormatPlan {
     const file = try Io.Dir.cwd().openFile(io, path, .{
         .mode = .read_only,
         .lock = .shared,
@@ -239,6 +272,7 @@ fn inspectRegularFormat(io: Io, allocator: std.mem.Allocator, path: []const u8, 
     var plan: FormatPlan = .{
         .path = path,
         .label = label,
+        .name_profile = options.name_profile,
         .canonical_path_digest = try canonicalPathDigest(io, path),
         .kind = .regular_file,
         .capacity_bytes = capacity,
@@ -257,7 +291,13 @@ fn inspectRegularFormat(io: Io, allocator: std.mem.Allocator, path: []const u8, 
     return plan;
 }
 
-fn inspectBlockFormat(io: Io, allocator: std.mem.Allocator, path: []const u8, label: []const u8) !FormatPlan {
+fn inspectBlockFormat(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    label: []const u8,
+    options: FormatOptions,
+) !FormatPlan {
     var opened = try linux_block.openStorage(io, allocator, path, false);
     defer opened.storage.close(io) catch {};
     const info = opened.info;
@@ -265,6 +305,7 @@ fn inspectBlockFormat(io: Io, allocator: std.mem.Allocator, path: []const u8, la
     var plan: FormatPlan = .{
         .path = path,
         .label = label,
+        .name_profile = options.name_profile,
         .canonical_path_digest = try canonicalPathDigest(io, path),
         .kind = .block_device,
         .capacity_bytes = info.capacity_bytes,
@@ -289,7 +330,13 @@ fn inspectBlockFormat(io: Io, allocator: std.mem.Allocator, path: []const u8, la
     return plan;
 }
 
-fn provision(io: Io, allocator: std.mem.Allocator, storage: *storage_api.Storage, label: []const u8) !FormatResult {
+fn provision(
+    io: Io,
+    allocator: std.mem.Allocator,
+    storage: *storage_api.Storage,
+    label: []const u8,
+    options: FormatOptions,
+) !FormatResult {
     var storages = [_]storage_api.Storage{storage.*};
     const outcome = try pool_provision.create(io, allocator, &storages, .{
         .protection = .unprotected,
@@ -300,7 +347,9 @@ fn provision(io: Io, allocator: std.mem.Allocator, storage: *storage_api.Storage
             var provisioned = value;
             defer provisioned.deinit();
             const set_id = provisioned.genesis.topology.set_id;
-            volume_api.Volume.initializePool(io, &provisioned, label) catch |cause| {
+            volume_api.Volume.initializePoolOptions(io, &provisioned, label, .{
+                .name_profile = options.name_profile,
+            }) catch |cause| {
                 return .{ .pool_created = .{ .set_id = set_id, .cause = cause } };
             };
             return .complete;
@@ -358,6 +407,10 @@ fn computeToken(plan: *const FormatPlan) [32]u8 {
     }
     hasher.update(&values);
     hasher.update(&plan.data_digest);
+    if (plan.name_profile != .legacy_raw) {
+        hasher.update("zettide-name-profile\x00");
+        hashSlice(&hasher, plan.name_profile.name());
+    }
     if (plan.kind == .regular_file) {
         var timestamps: [24]u8 = undefined;
         std.mem.writeInt(i96, timestamps[0..12], plan.identity.regular_file.mtime_ns, .little);

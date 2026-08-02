@@ -10,12 +10,17 @@ image="$tmp/image with spaces.ddv"
 info=$("$exe" info "$image")
 [[ "$info" == *"Label: CLI Test"* ]]
 [[ "$info" == *"Capacity: 1.00MiB"* ]]
+[[ "$info" == *"Name profile: legacy-raw"* ]]
 [[ "$info" == *"Encrypted: no"* ]]
 "$exe" check "$image" | grep -q '^Filesystem traversal succeeded:'
 
 default_image="$tmp/default-label.ddv"
 "$exe" create "$default_image" --size 1MiB >/dev/null
 "$exe" info "$default_image" | grep -q '^Label: Zettide$'
+
+portable_image="$tmp/portable.ddv"
+"$exe" create "$portable_image" --size 1MiB --name-profile portable-v1 >/dev/null
+"$exe" info "$portable_image" | grep -q '^Name profile: portable-v1$'
 
 if "$exe" create "$image" --size 1MiB >/dev/null 2>&1; then
     echo "duplicate create unexpectedly succeeded" >&2
@@ -27,6 +32,10 @@ if "$exe" create "$tmp/bad.ddv" --size nonsense >/dev/null 2>&1; then
 fi
 if "$exe" create "$tmp/missing.ddv" >/dev/null 2>&1; then
     echo "missing size unexpectedly succeeded" >&2
+    exit 1
+fi
+if "$exe" create "$tmp/unknown-profile.ddv" --size 1MiB --name-profile unknown >/dev/null 2>&1; then
+    echo "unknown name profile unexpectedly succeeded" >&2
     exit 1
 fi
 
@@ -41,8 +50,23 @@ plan=$("$exe" format "$existing" --label "Existing Test")
 [[ "$plan" == *"Type: regular_file"* ]]
 [[ "$plan" == *"Contains data: no"* ]]
 token=$(printf '%s\n' "$plan" | grep '^Confirm token: ' | cut -d' ' -f3)
+if "$exe" format "$existing" --label "Existing Test" --name-profile portable-v1 --confirm "$token" >/dev/null 2>&1; then
+    echo "format accepted a confirmation for another name profile" >&2
+    exit 1
+fi
 "$exe" format "$existing" --label "Existing Test" --confirm "$token"
 "$exe" info "$existing" | grep -q '^Label: Existing Test$'
+
+portable_formatted="$tmp/portable-formatted.ddv"
+"$exe" format "$portable_formatted" --size 8MiB --name-profile portable-v1 >/dev/null
+"$exe" info "$portable_formatted" | grep -q '^Name profile: portable-v1$'
+
+portable_existing="$tmp/portable-existing.ddv"
+truncate -s 8MiB "$portable_existing"
+portable_plan=$("$exe" format "$portable_existing" --name-profile portable-v1)
+portable_token=$(printf '%s\n' "$portable_plan" | grep '^Confirm token: ' | cut -d' ' -f3)
+"$exe" format "$portable_existing" --name-profile portable-v1 --confirm "$portable_token" >/dev/null
+"$exe" info "$portable_existing" | grep -q '^Name profile: portable-v1$'
 
 changed="$tmp/changed.ddv"
 truncate -s 8MiB "$changed"

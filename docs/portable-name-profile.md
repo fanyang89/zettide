@@ -2,10 +2,11 @@
 
 ## Status
 
-`portable-v1` currently exists as a pure component preparation API in
-`src/name_profile.zig`. It is not yet persisted in container headers or enforced
-by `Volume`, FUSE, WinFsp, or macFUSE. Existing images retain their byte-exact,
-case-sensitive namespace behavior.
+`portable-v1` is persisted in v2.1 container headers when selected with
+`--name-profile portable-v1`. Existing images and newly created images without
+that option use the v2.0 `legacy-raw` profile and retain byte-exact,
+case-sensitive namespace behavior. `portable-v1` is not yet enforced by
+`Volume`, FUSE, WinFsp, or macFUSE.
 
 ## Stable Contract
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
+const name_profile = @import("name_profile.zig");
 
 pub const header_size: usize = 4096;
 pub const header_a_offset: u64 = 0;
@@ -12,14 +13,18 @@ pub const default_prog_size: u32 = 512;
 pub const default_chunk_size: u32 = 1024 * 1024;
 pub const virtual_file_max: u64 = std.math.maxInt(i64);
 pub const feature_object_store: u32 = 1 << 0;
+pub const feature_name_profile: u32 = 1 << 1;
 pub const supported_features: u32 = feature_object_store;
+pub const supported_feature_mask: u32 = supported_features | feature_name_profile;
 pub const object_format_version: u32 = 1;
 pub const max_label_len: usize = 127;
 pub const min_volume_size: u64 = 256 * 1024;
 
 const magic = [8]u8{ 'L', 'F', 'S', 'D', 'R', 'V', '2', 0 };
 const format_major: u16 = 2;
-const format_minor: u16 = 0;
+const format_minor_legacy: u16 = 0;
+const format_minor_name_profile: u16 = 1;
+const format_minor_current: u16 = format_minor_name_profile;
 const checksum_offset = header_size - @sizeOf(u32);
 
 pub const State = enum(u8) {
@@ -30,7 +35,8 @@ pub const State = enum(u8) {
 pub const Header = struct {
     sequence: u64,
     state: State,
-    features: u32 = supported_features,
+    features: u32 = feature_object_store,
+    name_profile: name_profile.Profile = .legacy_raw,
     uuid: [16]u8,
     created_ns: i64,
     logical_size: u64,
@@ -49,6 +55,15 @@ pub const Header = struct {
     label_len: u8 = 0,
 
     pub fn init(io: Io, logical_size: u64, label: []const u8) !Header {
+        return initWithNameProfile(io, logical_size, label, .legacy_raw);
+    }
+
+    pub fn initWithNameProfile(
+        io: Io,
+        logical_size: u64,
+        label: []const u8,
+        profile: name_profile.Profile,
+    ) !Header {
         if (logical_size < min_volume_size or logical_size % default_block_size != 0)
             return error.InvalidVolumeSize;
         const count = logical_size / default_block_size;
@@ -59,6 +74,8 @@ pub const Header = struct {
         var result: Header = .{
             .sequence = 1,
             .state = .creating,
+            .features = featuresForNameProfile(profile),
+            .name_profile = profile,
             .uuid = undefined,
             .created_ns = @intCast(Io.Clock.real.now(io).nanoseconds),
             .logical_size = logical_size,
@@ -78,7 +95,7 @@ pub const Header = struct {
         var bytes: [header_size]u8 = @splat(0);
         @memcpy(bytes[0..magic.len], &magic);
         putInt(u16, &bytes, 8, format_major);
-        putInt(u16, &bytes, 10, format_minor);
+        putInt(u16, &bytes, 10, formatMinorForNameProfile(header.name_profile));
         putInt(u32, &bytes, 12, header_size);
         putInt(u64, &bytes, 16, header.sequence);
         bytes[24] = @intFromEnum(header.state);
@@ -99,25 +116,38 @@ pub const Header = struct {
         putInt(u64, &bytes, 232, header.user_file_max);
         putInt(u32, &bytes, 240, header.object_version);
         putInt(u32, &bytes, 244, header.chunk_size);
+        if (header.name_profile != .legacy_raw) {
+            putInt(u16, &bytes, 248, header.name_profile.persistedId());
+            putInt(u16, &bytes, 250, header.name_profile.persistedVersion());
+        }
         putInt(u32, &bytes, checksum_offset, checksum(bytes[0..checksum_offset]));
         return bytes;
     }
 
     pub fn decode(bytes: *const [header_size]u8) !Header {
         if (!std.mem.eql(u8, bytes[0..magic.len], &magic)) return error.InvalidMagic;
-        if (getInt(u16, bytes, 8) != format_major) return error.UnsupportedFormat;
-        if (getInt(u16, bytes, 10) > format_minor) return error.UnsupportedFormat;
         if (getInt(u32, bytes, 12) != header_size) return error.InvalidHeader;
         if (getInt(u32, bytes, checksum_offset) != checksum(bytes[0..checksum_offset]))
             return error.InvalidChecksum;
+        if (getInt(u16, bytes, 8) != format_major) return error.UnsupportedFormat;
+        const format_minor = getInt(u16, bytes, 10);
+        if (format_minor > format_minor_current) return error.UnsupportedFormat;
 
         const label_len = bytes[100];
         if (label_len > max_label_len) return error.InvalidHeader;
         const state = std.enums.fromInt(State, bytes[24]) orelse return error.InvalidHeader;
+        const features = getInt(u32, bytes, 28);
+        const profile: name_profile.Profile = if (format_minor == format_minor_legacy)
+            .legacy_raw
+        else if (features & feature_name_profile != 0)
+            try .fromPersisted(getInt(u16, bytes, 248), getInt(u16, bytes, 250))
+        else
+            return error.InvalidHeader;
         var result: Header = .{
             .sequence = getInt(u64, bytes, 16),
             .state = state,
-            .features = getInt(u32, bytes, 28),
+            .features = features,
+            .name_profile = profile,
             .uuid = bytes[32..48].*,
             .created_ns = getInt(i64, bytes, 48),
             .logical_size = getInt(u64, bytes, 56),
@@ -140,7 +170,8 @@ pub const Header = struct {
     }
 
     pub fn validate(header: Header) !void {
-        if (header.features != supported_features) return error.UnsupportedFeatures;
+        if (header.features != featuresForNameProfile(header.name_profile))
+            return error.UnsupportedFeatures;
         if (header.payload_start < payload_offset or header.payload_start % header_size != 0)
             return error.InvalidHeader;
         if (header.block_size == 0 or header.logical_size % header.block_size != 0)
@@ -164,18 +195,34 @@ pub const Header = struct {
     }
 };
 
+fn featuresForNameProfile(profile: name_profile.Profile) u32 {
+    return switch (profile) {
+        .legacy_raw => feature_object_store,
+        .portable_v1 => supported_feature_mask,
+    };
+}
+
+fn formatMinorForNameProfile(profile: name_profile.Profile) u16 {
+    return switch (profile) {
+        .legacy_raw => format_minor_legacy,
+        .portable_v1 => format_minor_name_profile,
+    };
+}
+
 pub fn read(file: File, io: Io) !Header {
     var a_bytes: [header_size]u8 = undefined;
     var b_bytes: [header_size]u8 = undefined;
     const a_read = try file.readPositionalAll(io, &a_bytes, header_a_offset);
     const b_read = try file.readPositionalAll(io, &b_bytes, header_b_offset);
-    const a = if (a_read == header_size) Header.decode(&a_bytes) catch null else null;
-    const b = if (b_read == header_size) Header.decode(&b_bytes) catch null else null;
-
-    const selected = if (a) |a_header|
-        if (b) |b_header| if (b_header.sequence > a_header.sequence) b_header else a_header else a_header
-    else if (b) |b_header|
-        b_header
+    const a = decodeCandidate(&a_bytes, a_read);
+    const b = decodeCandidate(&b_bytes, b_read);
+    const selected = if (a.sequence()) |a_sequence|
+        if (b.sequence()) |b_sequence|
+            if (b_sequence > a_sequence) try b.resolve() else try a.resolve()
+        else
+            try a.resolve()
+    else if (b.sequence() != null)
+        try b.resolve()
     else
         return error.NoValidHeader;
 
@@ -184,6 +231,46 @@ pub fn read(file: File, io: Io) !Header {
         return error.InvalidHeader;
     if (try file.length(io) < expected_len) return error.TruncatedContainer;
     return selected;
+}
+
+const HeaderCandidate = union(enum) {
+    valid: Header,
+    unsupported: struct {
+        sequence: u64,
+        cause: anyerror,
+    },
+    invalid,
+
+    fn sequence(candidate: HeaderCandidate) ?u64 {
+        return switch (candidate) {
+            .valid => |header| header.sequence,
+            .unsupported => |failure| failure.sequence,
+            .invalid => null,
+        };
+    }
+
+    fn resolve(candidate: HeaderCandidate) !Header {
+        return switch (candidate) {
+            .valid => |header| header,
+            .unsupported => |failure| failure.cause,
+            .invalid => error.NoValidHeader,
+        };
+    }
+};
+
+fn decodeCandidate(bytes: *const [header_size]u8, bytes_read: usize) HeaderCandidate {
+    if (bytes_read != header_size) return .invalid;
+    const header = Header.decode(bytes) catch |err| return switch (err) {
+        error.UnsupportedFormat,
+        error.UnsupportedFeatures,
+        error.UnsupportedNameProfile,
+        => .{ .unsupported = .{
+            .sequence = getInt(u64, bytes, 16),
+            .cause = err,
+        } },
+        else => .invalid,
+    };
+    return .{ .valid = header };
 }
 
 pub fn write(file: File, io: Io, offset: u64, header: Header) !void {
@@ -212,8 +299,47 @@ test "header round trip" {
     try std.testing.expectEqual(header.logical_size, decoded.logical_size);
     try std.testing.expectEqual(virtual_file_max, decoded.user_file_max);
     try std.testing.expectEqual(default_chunk_size, decoded.chunk_size);
+    try std.testing.expectEqual(name_profile.Profile.legacy_raw, decoded.name_profile);
     try std.testing.expectEqualStrings("Workspace", decoded.labelSlice());
     try std.testing.expectEqualSlices(u8, &header.uuid, &decoded.uuid);
+}
+
+test "portable name profile uses the versioned header extension" {
+    const header = try Header.initWithNameProfile(
+        std.testing.io,
+        1024 * 1024,
+        "Portable",
+        .portable_v1,
+    );
+    const bytes = header.encode();
+    try std.testing.expectEqual(format_minor_name_profile, getInt(u16, &bytes, 10));
+    try std.testing.expectEqual(supported_feature_mask, getInt(u32, &bytes, 28));
+    try std.testing.expectEqual(@as(u16, 1), getInt(u16, &bytes, 248));
+    try std.testing.expectEqual(@as(u16, 1), getInt(u16, &bytes, 250));
+    const decoded = try Header.decode(&bytes);
+    try std.testing.expectEqual(name_profile.Profile.portable_v1, decoded.name_profile);
+}
+
+test "legacy headers retain the v2.0 encoding" {
+    const header = try Header.init(std.testing.io, 1024 * 1024, "Legacy");
+    const bytes = header.encode();
+    try std.testing.expectEqual(format_minor_legacy, getInt(u16, &bytes, 10));
+    try std.testing.expectEqual(feature_object_store, getInt(u32, &bytes, 28));
+    try std.testing.expectEqual(@as(u16, 0), getInt(u16, &bytes, 248));
+    try std.testing.expectEqual(@as(u16, 0), getInt(u16, &bytes, 250));
+}
+
+test "header rejects unknown name profile versions" {
+    const header = try Header.initWithNameProfile(
+        std.testing.io,
+        1024 * 1024,
+        "Future",
+        .portable_v1,
+    );
+    var bytes = header.encode();
+    putInt(u16, &bytes, 250, 2);
+    putInt(u32, &bytes, checksum_offset, checksum(bytes[0..checksum_offset]));
+    try std.testing.expectError(error.UnsupportedNameProfile, Header.decode(&bytes));
 }
 
 test "header checksum detects corruption" {
@@ -245,6 +371,28 @@ test "reader falls back to the valid header copy" {
     try std.testing.expectEqualStrings("Redundant", selected.labelSlice());
 }
 
+test "reader rejects a newer unsupported header copy" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "newer.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var legacy = try Header.init(std.testing.io, 1024 * 1024, "Legacy");
+    legacy.state = .ready;
+    try file.setLength(std.testing.io, legacy.payload_start + legacy.logical_size);
+    try write(file, std.testing.io, header_a_offset, legacy);
+
+    var portable = try Header.initWithNameProfile(std.testing.io, 1024 * 1024, "Portable", .portable_v1);
+    portable.state = .ready;
+    portable.sequence = legacy.sequence + 1;
+    var bytes = portable.encode();
+    putInt(u16, &bytes, 250, 2);
+    putInt(u32, &bytes, checksum_offset, checksum(bytes[0..checksum_offset]));
+    try file.writePositionalAll(std.testing.io, &bytes, header_b_offset);
+
+    try std.testing.expectError(error.UnsupportedNameProfile, read(file, std.testing.io));
+}
+
 test "header rejects invalid geometry and labels" {
     try std.testing.expectError(error.InvalidVolumeSize, Header.init(std.testing.io, min_volume_size - 1, "small"));
     try std.testing.expectError(error.InvalidVolumeSize, Header.init(std.testing.io, min_volume_size + 1, "unaligned"));
@@ -266,7 +414,7 @@ test "header rejects unknown features and truncated containers" {
     const bytes = header.encode();
     try std.testing.expectError(error.UnsupportedFeatures, Header.decode(&bytes));
 
-    header.features = supported_features;
+    header.features = feature_object_store;
     try write(file, std.testing.io, header_a_offset, header);
     try write(file, std.testing.io, header_b_offset, header);
     try file.setLength(std.testing.io, header.payload_start + header.logical_size - 1);

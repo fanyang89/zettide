@@ -6,6 +6,44 @@ const c = @cImport({
     @cInclude("utf8proc.h");
 });
 
+pub const Profile = enum {
+    legacy_raw,
+    portable_v1,
+
+    pub fn parse(value: []const u8) !Profile {
+        if (std.mem.eql(u8, value, "legacy-raw")) return .legacy_raw;
+        if (std.mem.eql(u8, value, "portable-v1")) return .portable_v1;
+        return error.InvalidNameProfile;
+    }
+
+    pub fn name(self: Profile) []const u8 {
+        return switch (self) {
+            .legacy_raw => "legacy-raw",
+            .portable_v1 => "portable-v1",
+        };
+    }
+
+    pub fn persistedId(self: Profile) u16 {
+        return switch (self) {
+            .legacy_raw => 0,
+            .portable_v1 => 1,
+        };
+    }
+
+    pub fn persistedVersion(self: Profile) u16 {
+        return switch (self) {
+            .legacy_raw => 0,
+            .portable_v1 => 1,
+        };
+    }
+
+    pub fn fromPersisted(id: u16, version: u16) !Profile {
+        if (id == 0 and version == 0) return .legacy_raw;
+        if (id == 1 and version == 1) return .portable_v1;
+        return error.UnsupportedNameProfile;
+    }
+};
+
 pub const portable_v1_unicode_version = "17.0.0";
 pub const portable_v1_utf8proc_version = "2.11.3";
 pub const max_utf8_bytes: usize = 255;
@@ -121,6 +159,18 @@ fn expectSamePortableKey(left: []const u8, right: []const u8) !void {
 test "portable v1 uses pinned Unicode data" {
     try std.testing.expectEqualStrings(portable_v1_unicode_version, unicodeVersion());
     try std.testing.expectEqualStrings(portable_v1_utf8proc_version, utf8procVersion());
+}
+
+test "profile names and persisted identifiers round trip" {
+    for ([_]Profile{ .legacy_raw, .portable_v1 }) |profile| {
+        try std.testing.expectEqual(profile, try Profile.parse(profile.name()));
+        try std.testing.expectEqual(
+            profile,
+            try Profile.fromPersisted(profile.persistedId(), profile.persistedVersion()),
+        );
+    }
+    try std.testing.expectError(error.InvalidNameProfile, Profile.parse("portable"));
+    try std.testing.expectError(error.UnsupportedNameProfile, Profile.fromPersisted(1, 2));
 }
 
 test "portable v1 normalizes spelling and folds lookup keys" {

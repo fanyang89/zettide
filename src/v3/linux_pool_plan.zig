@@ -2,10 +2,12 @@ const std = @import("std");
 const linux_block = @import("linux_block_device.zig");
 const pool_policy = @import("pool_policy.zig");
 const storage_api = @import("storage.zig");
+const name_profile = @import("../name_profile.zig");
 
 pub const Options = struct {
     protection: pool_policy.Protection,
     label: []const u8,
+    name_profile: name_profile.Profile = .legacy_raw,
 };
 
 pub const Plan = struct {
@@ -107,6 +109,10 @@ fn computeToken(devices: []const linux_block.DeviceInfo, contains_data: []const 
     plan_header[9] = @intCast(devices.len);
     hasher.update(&plan_header);
     hasher.update(options.label);
+    if (options.name_profile != .legacy_raw) {
+        hasher.update("zettide-name-profile\x00");
+        hasher.update(options.name_profile.name());
+    }
     for (devices, contains_data) |device, has_data| {
         var bytes: [29]u8 = undefined;
         std.mem.writeInt(u32, bytes[0..4], device.id.major, .little);
@@ -156,6 +162,15 @@ test "plan token binds device order geometry and options" {
         u8,
         &computeToken(&devices, &contains_data, options),
         &computeToken(&devices, &contains_data, .{ .protection = .replicated, .label = "pool" }),
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &computeToken(&devices, &contains_data, options),
+        &computeToken(&devices, &contains_data, .{
+            .protection = .unprotected,
+            .label = "pool",
+            .name_profile = .portable_v1,
+        }),
     ));
     var changed = devices;
     changed[0].disk_sequence += 1;
