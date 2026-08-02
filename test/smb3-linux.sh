@@ -18,9 +18,18 @@ skip_or_fail() {
 [[ "$target_kind" == native ]] || skip_or_fail "native Linux target is required"
 [[ $(uname -s) == Linux ]] || skip_or_fail "Linux is required"
 [[ -r /dev/fuse && -w /dev/fuse ]] || skip_or_fail "/dev/fuse is unavailable"
-for command in fusermount3 mountpoint ps python3 setsid smbd smbclient testparm timeout; do
+for command in fusermount3 mountpoint ps python3 setsid smbd smbclient testparm; do
     command -v "$command" >/dev/null || skip_or_fail "$command is unavailable"
 done
+timeout_command=
+for candidate in "$(command -v timeout 2>/dev/null || true)" /usr/bin/timeout; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    if "$candidate" --kill-after=1s 0.01s true >/dev/null 2>&1; then
+        timeout_command=$candidate
+        break
+    fi
+done
+[[ -n "$timeout_command" ]] || skip_or_fail "GNU-compatible timeout is unavailable"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/zettide-smb3.XXXXXX")
 image="$tmp/image.ddv"
@@ -52,7 +61,7 @@ cleanup() {
     if [[ -n "$smbd_pid" ]]; then
         stop_smbd >/dev/null 2>&1
     fi
-    if mountpoint -q "$mount_dir"; then timeout --kill-after=1s 5s "$exe" unmount "$mount_dir" >/dev/null 2>&1; fi
+    if mountpoint -q "$mount_dir"; then "$timeout_command" --kill-after=1s 5s "$exe" unmount "$mount_dir" >/dev/null 2>&1; fi
     if [[ -n "$mount_pid" ]]; then
         kill -TERM "$mount_pid" 2>/dev/null
         if ! wait_for_exit "$mount_pid"; then kill -KILL "$mount_pid" 2>/dev/null; fi
@@ -179,7 +188,7 @@ start_mount() {
 }
 
 stop_mount() {
-    timeout --kill-after=1s 5s "$exe" unmount "$mount_dir" >/dev/null
+    "$timeout_command" --kill-after=1s 5s "$exe" unmount "$mount_dir" >/dev/null
     if ! wait_for_exit "$mount_pid"; then
         kill -KILL "$mount_pid" 2>/dev/null || true
         wait "$mount_pid" 2>/dev/null || true
