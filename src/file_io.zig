@@ -40,6 +40,7 @@ pub fn init(
 
 fn fallbackAllowed(err: anyerror) bool {
     return switch (err) {
+        error.ArgumentsInvalid,
         error.PermissionDenied,
         error.SystemOutdated,
         error.UnsupportedIoUringOperations,
@@ -57,6 +58,7 @@ test "automatic file IO only falls back for unavailable io_uring" {
     try std.testing.expect(fallbackAllowed(error.PermissionDenied));
     try std.testing.expect(fallbackAllowed(error.SystemOutdated));
     try std.testing.expect(fallbackAllowed(error.UnsupportedIoUringOperations));
+    try std.testing.expect(fallbackAllowed(error.ArgumentsInvalid));
     try std.testing.expect(!fallbackAllowed(error.SystemResources));
     try std.testing.expect(!fallbackAllowed(error.ProcessFdQuotaExceeded));
 }
@@ -71,6 +73,7 @@ test "automatic file IO prefers io_uring when available" {
     var automatic = try init(std.testing.allocator, file, .auto);
     defer automatic.deinit();
     var forced = linux_file_io.init(std.testing.allocator, file) catch |err| switch (err) {
+        error.ArgumentsInvalid,
         error.PermissionDenied,
         error.SystemOutdated,
         error.UnsupportedIoUringOperations,

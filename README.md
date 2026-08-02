@@ -38,7 +38,7 @@ reconciliation are not implemented yet.
 - Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
 - Optional Linux SMB3 feasibility tests: Samba server and client tools
 - Linux file-backed Volumes use io_uring writeback with a synchronous POSIX foreground lane
-- Linux raw-disk Pools: io_uring enabled by the kernel and execution sandbox
+- Linux raw-disk Pools use io_uring when available, with an automatic POSIX fallback
 - Windows: WinFsp developer package and runtime for mounting support
 
 ## Build

@@ -169,6 +169,7 @@ pub const Storage = struct {
         }
     }
 
+    /// The owner must ensure no operation is active or waiting before close.
     pub fn close(self: *Storage, io: Io) !void {
         switch (self.backend) {
             .file => |backend| {

@@ -1,5 +1,5 @@
 const std = @import("std");
-const linux_uring_storage = @import("linux_uring_storage.zig");
+const linux_raw_storage = @import("linux_raw_storage.zig");
 const storage_api = @import("storage.zig");
 
 const Io = std.Io;
@@ -62,6 +62,8 @@ pub const OpenedStorage = struct {
     info: DeviceInfo,
 };
 
+pub const TransportMode = linux_raw_storage.Mode;
+
 pub fn inspect(io: Io, allocator: std.mem.Allocator, path: []const u8) !DeviceInfo {
     const file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer file.close(io);
@@ -74,7 +76,17 @@ pub fn openStorage(
     path: []const u8,
     writable: bool,
 ) !OpenedStorage {
-    return openStorageOptions(io, allocator, path, writable, writable);
+    return openStorageMode(io, allocator, path, writable, .auto);
+}
+
+pub fn openStorageMode(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    writable: bool,
+    transport: TransportMode,
+) !OpenedStorage {
+    return openStorageOptionsMode(io, allocator, path, writable, writable, transport);
 }
 
 pub fn openStorageOptions(
@@ -83,6 +95,17 @@ pub fn openStorageOptions(
     path: []const u8,
     writable: bool,
     exclusive: bool,
+) !OpenedStorage {
+    return openStorageOptionsMode(io, allocator, path, writable, exclusive, .auto);
+}
+
+pub fn openStorageOptionsMode(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    writable: bool,
+    exclusive: bool,
+    transport: TransportMode,
 ) !OpenedStorage {
     const inspected = try inspect(io, allocator, path);
     if ((writable and !inspected.preflightEligible()) or
@@ -114,7 +137,7 @@ pub fn openStorageOptions(
     if ((writable and !opened.preflightEligible()) or
         (!writable and exclusive and !opened.preflightReadable())) return error.DeviceNotEligible;
 
-    const storage = try linux_uring_storage.initOwned(
+    const storage = try linux_raw_storage.initOwned(
         allocator,
         file,
         opened.capacity_bytes,
@@ -124,6 +147,8 @@ pub fn openStorageOptions(
             .minor = opened.id.minor,
             .disk_sequence = opened.disk_sequence,
         },
+        writable,
+        transport,
     );
     return .{
         .storage = storage,
@@ -346,5 +371,5 @@ test "inspection rejects non-block devices" {
 }
 
 test {
-    _ = linux_uring_storage;
+    _ = linux_raw_storage;
 }
