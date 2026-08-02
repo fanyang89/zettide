@@ -36,6 +36,7 @@ reconciliation are not implemented yet.
 - Zig 0.16.0
 - Linux: libfuse3 development files for mounting support
 - Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
+- Optional Linux SMB3 feasibility tests: Samba server and client tools
 - Linux raw-disk Pools: io_uring enabled by the kernel and execution sandbox
 - Windows: WinFsp developer package and runtime for mounting support
 
@@ -70,6 +71,7 @@ zig build test-spdk-daemon -Dspdk=true
 zig build test-spdk-storage
 zig build test-fuse -Dfuse-tests=required
 zig build test-dufs -Dfuse-tests=required
+zig build test-smb3-linux -Dsmb3-tests=required
 zig build test-posix-baseline -Dfuse-tests=required
 zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
 zig build test-libfuse -Dexternal-tests=required
@@ -110,6 +112,13 @@ declared Zettide semantics. `test-fsx` runs deterministic 10,000-operation
 buffered and mmap I/O workloads with two seeds. Set `ZETTIDE_FSX_OPS=100000`
 for a longer stress run. These gates have the same Linux FUSE requirements as `test-fuse`
 and are not part of the default `test` or `ci` targets.
+
+`test-smb3-linux` starts an isolated Samba instance on a temporary high port
+over a private Zettide FUSE mount. It requires authenticated, signed, encrypted
+SMB3 and verifies write, rename, read-only access, unmount, and persistence. The
+gate does not install a product SMB service or modify the system Samba
+configuration. Its current scope and exclusions are documented in
+`docs/smb3-profile.md`.
 
 The privileged and nightly gates use pinned upstream suites prepared by an
 explicit networked step. Test execution itself never downloads dependencies:

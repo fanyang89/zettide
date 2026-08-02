@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const FuseTestMode = enum { off, auto, required };
+const Smb3TestMode = enum { off, auto, required };
 const ExternalTestMode = enum { off, auto, required };
 const PrivilegedTestMode = enum { off, auto, required };
 const BlockTestMode = enum { off, auto, required };
@@ -9,6 +10,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const fuse_test_mode = b.option(FuseTestMode, "fuse-tests", "FUSE tests: off, auto, or required") orelse .auto;
+    const smb3_test_mode = b.option(Smb3TestMode, "smb3-tests", "Linux SMB3 tests: off, auto, or required") orelse .auto;
     const external_test_mode = b.option(ExternalTestMode, "external-tests", "External tests: off, auto, or required") orelse .auto;
     const privileged_test_mode = b.option(PrivilegedTestMode, "privileged-tests", "Privileged tests: off, auto, or required") orelse .auto;
     const block_test_mode = b.option(BlockTestMode, "block-tests", "Linux block device tests: off, auto, or required") orelse .off;
@@ -125,6 +127,23 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) dufs_test_cmd.addArtifactArg(createSignalMaskExec(b, target, optimize));
     const dufs_step = b.step("test-dufs", "Run the managed dufs integration test");
     dufs_step.dependOn(&dufs_test_cmd.step);
+
+    const host_target = b.graph.host.result;
+    const smb3_native_target = target.result.os.tag == .linux and
+        host_target.os.tag == .linux and
+        target.result.cpu.arch == host_target.cpu.arch and
+        target.result.abi == host_target.abi;
+    const smb3_test_cmd = b.addSystemCommand(&.{ "bash", "test/smb3-linux.sh" });
+    smb3_test_cmd.addArg(@tagName(smb3_test_mode));
+    if (smb3_native_target) {
+        smb3_test_cmd.addArtifactArg(exe);
+        smb3_test_cmd.addArg("native");
+    } else {
+        smb3_test_cmd.addArg("-");
+        smb3_test_cmd.addArg("cross");
+    }
+    const smb3_step = b.step("test-smb3-linux", "Run the Linux FUSE-to-Samba SMB3 feasibility gate");
+    smb3_step.dependOn(&smb3_test_cmd.step);
 
     const posix_probe = if (target.result.os.tag == .linux) createPosixProbe(b, target, optimize) else null;
     const posix_test_cmd = b.addSystemCommand(&.{ "bash", "test/posix.sh" });

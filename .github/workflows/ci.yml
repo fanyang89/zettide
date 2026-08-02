@@ -36,8 +36,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - name: Install FUSE
-        run: sudo apt-get update && sudo apt-get install -y e2fsprogs fuse3 libfuse3-dev util-linux
+      - name: Install FUSE and Samba
+        run: sudo apt-get update && sudo apt-get install -y e2fsprogs fuse3 libfuse3-dev samba smbclient util-linux
       - name: Install dufs
         run: cargo install dufs --version 0.46.0 --locked
       - name: Verify FUSE capability
@@ -48,3 +48,5 @@ jobs:
         run: zig build test-linux-block -Dblock-tests=required -Doptimize=${{ matrix.optimize }}
       - name: Run dufs integration gate
         run: zig build test-dufs -Dfuse-tests=required -Doptimize=${{ matrix.optimize }}
+      - name: Run SMB3 mount-export feasibility gate
+        run: zig build test-smb3-linux -Dsmb3-tests=required -Doptimize=${{ matrix.optimize }}
