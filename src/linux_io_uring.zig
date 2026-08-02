@@ -60,6 +60,78 @@ pub const Engine = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
+        return self.readAtLocked(buffer, offset);
+    }
+
+    pub fn readManyAt(self: *Engine, io: std.Io, reads: anytype, results: anytype) !void {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        for (reads) |read| {
+            if (read.buffer.len > max_request_len) return error.RequestTooLarge;
+            _ = std.math.add(u64, read.offset, read.buffer.len) catch return error.OffsetOverflow;
+        }
+        for (results) |*result| result.* = .{};
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+
+        var index: usize = 0;
+        while (index < reads.len) {
+            const count = @min(reads.len - index, queue_entries);
+            var tokens: [queue_entries]u64 = undefined;
+            var lengths: [queue_entries]usize = undefined;
+            var amounts: [queue_entries]usize = @splat(0);
+            var errors: [queue_entries]?anyerror = @splat(null);
+            var seen: [queue_entries]bool = @splat(false);
+            for (reads[index..][0..count], 0..) |read, batch_index| {
+                try self.requireActive();
+                const token = self.nextToken();
+                const sqe = self.ring.read(token, 0, .{ .buffer = read.buffer }, read.offset) catch |err| {
+                    self.fail();
+                    return err;
+                };
+                sqe.flags |= linux.IOSQE_FIXED_FILE;
+                tokens[batch_index] = token;
+                lengths[batch_index] = read.buffer.len;
+            }
+            try self.submitBatch(count);
+            var tracker: BatchTracker = .{
+                .tokens = tokens[0..count],
+                .lengths = lengths[0..count],
+                .amounts = amounts[0..count],
+                .errors = errors[0..count],
+                .seen = seen[0..count],
+            };
+            for (0..count) |_| {
+                const completion = self.copyCompletion() catch |err| {
+                    self.failAfterDrain();
+                    return err;
+                };
+                tracker.record(completion) catch return self.invalidCompletion();
+            }
+            for (reads[index..][0..count], results[index..][0..count], amounts[0..count], errors[0..count]) |read, *result, amount, maybe_error| {
+                if (maybe_error) |err| {
+                    if (err == error.OperationInterrupted) {
+                        result.amount = self.readAtLocked(read.buffer, read.offset) catch |retry_err| {
+                            if (!self.active) return retry_err;
+                            result.failure = retry_err;
+                            continue;
+                        };
+                    } else result.failure = err;
+                    continue;
+                }
+                result.amount = amount;
+                if (amount < read.buffer.len) {
+                    result.amount += self.readAtLocked(read.buffer[amount..], read.offset + amount) catch |err| {
+                        if (!self.active) return err;
+                        result.failure = err;
+                        continue;
+                    };
+                }
+            }
+            index += count;
+        }
+    }
+
+    fn readAtLocked(self: *Engine, buffer: []u8, offset: u64) !usize {
         var index: usize = 0;
         while (index < buffer.len) {
             try self.requireActive();
@@ -392,4 +464,23 @@ test "borrowed-fd engine supports partial and exact reads and metrics reset" {
     try std.testing.expectEqual(stats.submitted_sqes, stats.completions);
     engine.resetStats(std.testing.io);
     try std.testing.expectEqual(Stats{}, engine.getStats(std.testing.io));
+
+    const TestRead = struct { buffer: []u8, offset: u64 };
+    const TestResult = struct { amount: usize = 0, failure: ?anyerror = null };
+    var batch_bytes: [4][1]u8 = undefined;
+    var reads: [4]TestRead = undefined;
+    for (&reads, 0..) |*read, index| read.* = .{
+        .buffer = &batch_bytes[index],
+        .offset = index,
+    };
+    var results: [reads.len]TestResult = undefined;
+    try engine.readManyAt(std.testing.io, &reads, &results);
+    try std.testing.expectEqualStrings("abc\x00", std.mem.sliceAsBytes(&batch_bytes));
+    for (results) |result| {
+        try std.testing.expectEqual(@as(usize, 1), result.amount);
+        try std.testing.expectEqual(@as(?anyerror, null), result.failure);
+    }
+    const batch_stats = engine.getStats(std.testing.io);
+    try std.testing.expectEqual(@as(u64, reads.len), batch_stats.submitted_sqes);
+    try std.testing.expectEqual(@as(u64, reads.len), batch_stats.max_inflight);
 }

@@ -157,14 +157,28 @@ pub fn openStorageOptionsMode(
 }
 
 pub fn hasData(storage: *storage_api.Storage, io: Io, allocator: std.mem.Allocator) !bool {
-    const buffer = try allocator.alloc(u8, 1024 * 1024);
+    const chunk_size = 1024 * 1024;
+    const batch_depth = 8;
+    const buffer = try allocator.alloc(u8, chunk_size * batch_depth);
     defer allocator.free(buffer);
     var offset: u64 = 0;
     while (offset < storage.capacity()) {
-        const amount: usize = @intCast(@min(@as(u64, buffer.len), storage.capacity() - offset));
-        if (try storage.readAt(io, buffer[0..amount], offset) != amount) return error.TruncatedDevice;
-        if (!std.mem.allEqual(u8, buffer[0..amount], 0)) return true;
-        offset += amount;
+        var reads: [batch_depth]storage_api.Read = undefined;
+        var results: [batch_depth]storage_api.ReadResult = undefined;
+        var count: usize = 0;
+        var batch_offset = offset;
+        while (count < batch_depth and batch_offset < storage.capacity()) : (count += 1) {
+            const amount: usize = @intCast(@min(@as(u64, chunk_size), storage.capacity() - batch_offset));
+            reads[count] = .{ .buffer = buffer[count * chunk_size ..][0..amount], .offset = batch_offset };
+            batch_offset += amount;
+        }
+        try storage.readManyAt(io, reads[0..count], results[0..count]);
+        for (reads[0..count], results[0..count]) |read, result| {
+            if (result.failure) |err| return err;
+            if (result.amount != read.buffer.len) return error.TruncatedDevice;
+            if (!std.mem.allEqual(u8, read.buffer, 0)) return true;
+        }
+        offset = batch_offset;
     }
     return false;
 }

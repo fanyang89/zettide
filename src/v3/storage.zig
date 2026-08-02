@@ -9,6 +9,16 @@ pub const Kind = enum {
     spdk_bdev,
 };
 
+pub const Read = struct {
+    buffer: []u8,
+    offset: u64,
+};
+
+pub const ReadResult = struct {
+    amount: usize = 0,
+    failure: ?anyerror = null,
+};
+
 /// Owned durable random-access storage used by a v3 member.
 pub const Storage = struct {
     backend: Backend,
@@ -19,6 +29,7 @@ pub const Storage = struct {
     pub const VTable = struct {
         same_identity: *const fn (context: *anyopaque, other_context: *anyopaque) bool,
         read_at: *const fn (context: *anyopaque, io: Io, buffer: []u8, offset: u64) anyerror!usize,
+        read_many_at: ?*const fn (context: *anyopaque, io: Io, reads: []const Read, results: []ReadResult) anyerror!void = null,
         write_all_at: *const fn (context: *anyopaque, io: Io, bytes: []const u8, offset: u64) anyerror!void,
         sync: *const fn (context: *anyopaque, io: Io) anyerror!void,
         close: *const fn (context: *anyopaque, io: Io) anyerror!void,
@@ -155,6 +166,22 @@ pub const Storage = struct {
         };
     }
 
+    pub fn readManyAt(self: *Storage, io: Io, reads: []const Read, results: []ReadResult) !void {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        for (results) |*result| result.* = .{};
+        if (self.backend == .custom) {
+            const backend = self.backend.custom;
+            if (backend.vtable.read_many_at) |read_many|
+                return read_many(backend.context, io, reads, results);
+        }
+        for (reads, results) |read, *result| {
+            result.amount = self.readAt(io, read.buffer, read.offset) catch |err| {
+                result.failure = err;
+                continue;
+            };
+        }
+    }
+
     pub fn writeAllAt(self: *Storage, io: Io, bytes: []const u8, offset: u64) !void {
         switch (self.backend) {
             .file => |backend| try backend.file.writePositionalAll(io, bytes, offset),
@@ -214,6 +241,18 @@ test "file storage reports capacity and supports positional IO" {
     var actual: [4]u8 = undefined;
     try std.testing.expectEqual(actual.len, try storage.readAt(std.testing.io, &actual, 2048));
     try std.testing.expectEqualStrings("data", &actual);
+    var first: [2]u8 = undefined;
+    var second: [2]u8 = undefined;
+    const reads = [_]Read{
+        .{ .buffer = &first, .offset = 2048 },
+        .{ .buffer = &second, .offset = 2050 },
+    };
+    var results: [reads.len]ReadResult = undefined;
+    try storage.readManyAt(std.testing.io, &reads, &results);
+    try std.testing.expectEqual(@as(usize, 2), results[0].amount);
+    try std.testing.expectEqual(@as(usize, 2), results[1].amount);
+    try std.testing.expectEqualStrings("da", &first);
+    try std.testing.expectEqualStrings("ta", &second);
 }
 
 test "custom storage delegates operations and preserves identity" {

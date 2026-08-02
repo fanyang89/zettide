@@ -94,6 +94,34 @@ fn readAt(context_ptr: *anyopaque, io: std.Io, buffer: []u8, offset: u64) !usize
         context.file.readPositionalAll(io, buffer, offset) catch |err| return mapOperationError(err);
 }
 
+fn readManyAt(
+    context_ptr: *anyopaque,
+    io: std.Io,
+    reads: []const storage_api.Read,
+    results: []storage_api.ReadResult,
+) !void {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    context.mutex.lock(io) catch |err| return mapOperationError(err);
+    defer context.mutex.unlock(io);
+    if (reads.len != results.len) return error.InvalidReadBatch;
+    for (reads) |read| try validateRange(context, read.offset, read.buffer.len);
+
+    if (context.engine) |*engine| {
+        engine.readManyAt(io, reads, results) catch |err| return mapOperationError(err);
+        for (results) |*result| {
+            if (result.failure) |err| result.failure = mapOperationError(err);
+        }
+        return;
+    }
+    for (results) |*result| result.* = .{};
+    for (reads, results) |read, *result| {
+        result.amount = context.file.readPositionalAll(io, read.buffer, read.offset) catch |err| {
+            result.failure = mapOperationError(err);
+            continue;
+        };
+    }
+}
+
 fn writeAllAt(context_ptr: *anyopaque, io: std.Io, bytes: []const u8, offset: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.mutex.lock(io) catch |err| return mapOperationError(err);
@@ -162,6 +190,7 @@ fn mapOperationError(err: anyerror) anyerror {
 const storage_vtable: storage_api.Storage.VTable = .{
     .same_identity = sameIdentity,
     .read_at = readAt,
+    .read_many_at = readManyAt,
     .write_all_at = writeAllAt,
     .sync = sync,
     .close = close,
@@ -252,6 +281,17 @@ test "forced io_uring raw storage uses shared engine when available" {
     var actual: [expected.len]u8 = undefined;
     try std.testing.expectEqual(actual.len, try storage.readAt(std.testing.io, &actual, 512));
     try std.testing.expectEqualStrings(expected, &actual);
+    var first: [4]u8 = undefined;
+    var second: [4]u8 = undefined;
+    const reads = [_]storage_api.Read{
+        .{ .buffer = &first, .offset = 512 },
+        .{ .buffer = &second, .offset = 516 },
+    };
+    var results: [reads.len]storage_api.ReadResult = undefined;
+    try storage.readManyAt(std.testing.io, &reads, &results);
+    try std.testing.expectEqualStrings(expected[0..4], &first);
+    try std.testing.expectEqualStrings(expected[4..8], &second);
+    for (results) |result| try std.testing.expectEqual(@as(usize, 4), result.amount);
 
     try storage.close(std.testing.io);
     storage_open = false;
