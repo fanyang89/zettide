@@ -30,6 +30,11 @@ const ChunkData = struct {
     stored_length: u32,
 };
 
+const ChunkHeader = struct {
+    length: u32,
+    crc: u32,
+};
+
 pub const WriteResult = struct {
     amount: usize,
     head: format.ObjectHead,
@@ -603,11 +608,28 @@ pub const Store = struct {
         offset: u32,
     ) !void {
         const version = try self.findChunkVersion(id, index, generation) orelse return;
-        const chunk = try self.readChunkVersionAlloc(id, version, format.chunk_size, 0);
-        defer std.heap.c_allocator.free(chunk.bytes);
-        if (offset >= chunk.stored_length) return;
-        const amount = @min(buffer.len, chunk.stored_length - offset);
-        @memcpy(buffer[0..amount], chunk.bytes[offset..][0..amount]);
+        var path_buffer: [max_path_bytes:0]u8 = @splat(0);
+        var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+        try checkLfs(c.lfs_file_open(self.lfs, &file, try self.chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
+        defer _ = c.lfs_file_close(self.lfs, &file);
+        const header = try readChunkHeader(self.lfs, &file, version, format.chunk_size);
+        const length = header.length;
+        if (offset == 0 and buffer.len >= length) {
+            const amount = c.lfs_file_read(self.lfs, &file, buffer.ptr, length);
+            try checkLfs(amount);
+            if (amount != length or std.hash.crc.Crc32Iscsi.hash(buffer[0..length]) != header.crc)
+                return error.CorruptFilesystem;
+            return;
+        }
+        const bytes = try std.heap.c_allocator.alloc(u8, length);
+        defer std.heap.c_allocator.free(bytes);
+        const amount = c.lfs_file_read(self.lfs, &file, bytes.ptr, length);
+        try checkLfs(amount);
+        if (amount != length or std.hash.crc.Crc32Iscsi.hash(bytes) != header.crc)
+            return error.CorruptFilesystem;
+        if (offset >= length) return;
+        const copied = @min(buffer.len, length - offset);
+        @memcpy(buffer[0..copied], bytes[offset..][0..copied]);
     }
 
     fn writeChunk(
@@ -762,22 +784,14 @@ pub const Store = struct {
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         try checkLfs(c.lfs_file_open(self.lfs, &file, try self.chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
         defer _ = c.lfs_file_close(self.lfs, &file);
-        var header: [chunk_header_size]u8 = undefined;
-        const header_amount = c.lfs_file_read(self.lfs, &file, &header, header.len);
-        try checkLfs(header_amount);
-        if (header_amount != header.len or !std.mem.eql(u8, header[0..8], &chunk_magic))
-            return error.CorruptFilesystem;
-        if (std.mem.readInt(u64, header[8..16], .little) != version.generation)
-            return error.CorruptFilesystem;
-        const length = std.mem.readInt(u32, header[16..20], .little);
-        if (length > maximum) return error.CorruptFilesystem;
+        const header = try readChunkHeader(self.lfs, &file, version, maximum);
+        const length = header.length;
         const bytes = try std.heap.c_allocator.alloc(u8, @max(length, minimum));
         errdefer std.heap.c_allocator.free(bytes);
         @memset(bytes, 0);
         const amount = c.lfs_file_read(self.lfs, &file, bytes.ptr, length);
         try checkLfs(amount);
-        if (amount != length or std.hash.crc.Crc32Iscsi.hash(bytes[0..length]) !=
-            std.mem.readInt(u32, header[20..24], .little))
+        if (amount != length or std.hash.crc.Crc32Iscsi.hash(bytes[0..length]) != header.crc)
             return error.CorruptFilesystem;
         return .{ .bytes = bytes, .stored_length = length };
     }
@@ -787,15 +801,7 @@ pub const Store = struct {
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         try checkLfs(c.lfs_file_open(self.lfs, &file, try self.chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
         defer _ = c.lfs_file_close(self.lfs, &file);
-        var header: [chunk_header_size]u8 = undefined;
-        const amount = c.lfs_file_read(self.lfs, &file, &header, header.len);
-        try checkLfs(amount);
-        if (amount != header.len or !std.mem.eql(u8, header[0..8], &chunk_magic) or
-            std.mem.readInt(u64, header[8..16], .little) != version.generation)
-            return error.CorruptFilesystem;
-        const length = std.mem.readInt(u32, header[16..20], .little);
-        if (length > maximum) return error.CorruptFilesystem;
-        return length;
+        return (try readChunkHeader(self.lfs, &file, version, maximum)).length;
     }
 
     fn writeChunkVersion(self: Store, id: format.ObjectId, version: ChunkVersion, data: []const u8) !void {
@@ -1209,6 +1215,23 @@ fn writeToOpenFile(lfs: *c.lfs_t, file: *c.lfs_file_t, data: []const u8) !void {
     const amount = c.lfs_file_write(lfs, file, data.ptr, @intCast(data.len));
     try checkLfs(amount);
     if (amount != data.len) return error.InputOutput;
+}
+
+fn readChunkHeader(
+    lfs: *c.lfs_t,
+    file: *c.lfs_file_t,
+    version: ChunkVersion,
+    maximum: u32,
+) !ChunkHeader {
+    var bytes: [chunk_header_size]u8 = undefined;
+    const amount = c.lfs_file_read(lfs, file, &bytes, bytes.len);
+    try checkLfs(amount);
+    if (amount != bytes.len or !std.mem.eql(u8, bytes[0..8], &chunk_magic) or
+        std.mem.readInt(u64, bytes[8..16], .little) != version.generation)
+        return error.CorruptFilesystem;
+    const length = std.mem.readInt(u32, bytes[16..20], .little);
+    if (length > maximum) return error.CorruptFilesystem;
+    return .{ .length = length, .crc = std.mem.readInt(u32, bytes[20..24], .little) };
 }
 
 fn adjustAllocated(current: u64, change: ChunkChange) !u64 {

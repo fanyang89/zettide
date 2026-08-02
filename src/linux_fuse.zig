@@ -47,6 +47,7 @@ const MountState = struct {
     node_index: std.AutoHashMapUnmanaged(c.fuse_ino_t, *Inode) = .empty,
     dentries: ?*Dentry = null,
     open_files: ?*FuseFileHandle = null,
+    reply_buffer: std.ArrayList(u8) = .empty,
     writeback_cache: bool = false,
 
     fn init(volume: *volume_mod.Volume) !MountState {
@@ -92,6 +93,7 @@ const MountState = struct {
         }
         self.nodes = null;
         self.node_index.deinit(std.heap.c_allocator);
+        self.reply_buffer.deinit(std.heap.c_allocator);
     }
 
     fn find(self: *MountState, id: c.fuse_ino_t) ?*Inode {
@@ -940,10 +942,11 @@ fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.stru
 fn read(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
     _ = id;
     if (offset < 0) return replyError(req, c.EINVAL);
-    const buffer = std.heap.c_allocator.alloc(u8, size) catch return replyError(req, c.ENOMEM);
-    defer std.heap.c_allocator.free(buffer);
+    const state = stateFor(req);
+    state.reply_buffer.resize(std.heap.c_allocator, size) catch return replyError(req, c.ENOMEM);
+    const buffer = state.reply_buffer.items;
     const handle = fuseFileHandle(fi.?);
-    const amount = stateFor(req).volume.readFile(&handle.file, buffer, @intCast(offset)) catch |err|
+    const amount = state.volume.readFile(&handle.file, buffer, @intCast(offset)) catch |err|
         return replyError(req, errnoValue(err));
     _ = c.fuse_reply_buf(req, buffer.ptr, amount);
 }
@@ -1043,8 +1046,8 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
     updateDirectoryAccessTime(state, handle) catch {};
     state.volume.seekDirectory(&handle.directory, @intCast(offset)) catch |err|
         return replyError(req, errnoValue(err));
-    const buffer = std.heap.c_allocator.alloc(u8, size) catch return replyError(req, c.ENOMEM);
-    defer std.heap.c_allocator.free(buffer);
+    state.reply_buffer.resize(std.heap.c_allocator, size) catch return replyError(req, c.ENOMEM);
+    const buffer = state.reply_buffer.items;
     var used: usize = 0;
     while (true) {
         var info: lfs.struct_lfs_info = undefined;
