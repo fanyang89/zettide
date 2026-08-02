@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 const File = Io.File;
 const container = @import("container.zig");
+const redo_runtime = @import("redo_runtime.zig");
 
 pub const c = @cImport({
     @cDefine("_FORTIFY_SOURCE", "0");
@@ -28,6 +29,7 @@ pub const FileBlockDevice = struct {
     fault: ?*FaultController = null,
     dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
+    redo: ?redo_runtime.Runtime = null,
 
     pub fn init(io: Io, file: File, header: container.Header) FileBlockDevice {
         return .{
@@ -41,6 +43,7 @@ pub const FileBlockDevice = struct {
 
     pub fn read(self: *FileBlockDevice, block: u32, offset: u32, buffer: []u8) !void {
         if (self.fault) |fault| if (fault.action(.read) == .before) return error.InjectedFault;
+        if (self.redo) |*redo| return redo.read(block, offset, buffer);
         const file_offset = try self.position(block, offset, buffer.len);
         const amount = try self.file.readPositionalAll(self.io, buffer, file_offset);
         if (amount != buffer.len) return error.UnexpectedEndOfFile;
@@ -55,11 +58,17 @@ pub const FileBlockDevice = struct {
             return error.InjectedFault;
         }
         const write_data = if (action == .partial) data[0 .. data.len / 2] else data;
-        self.file.writePositionalAll(self.io, write_data, file_offset) catch |err| {
-            self.freezeWrites();
-            return err;
-        };
-        self.dirty.store(true, .release);
+        if (self.redo) |*redo|
+            redo.program(block, offset, write_data) catch |err| {
+                self.freezeWrites();
+                return err;
+            }
+        else
+            self.file.writePositionalAll(self.io, write_data, file_offset) catch |err| {
+                self.freezeWrites();
+                return err;
+            };
+        if (self.redo == null) self.dirty.store(true, .release);
         if (action == .partial or action == .after) {
             self.freezeWrites();
             return error.InjectedFault;
@@ -68,7 +77,56 @@ pub const FileBlockDevice = struct {
 
     pub fn sync(self: *FileBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
+        if (self.redo) |*redo| return redo.logicalSync();
         if (!self.dirty.load(.acquire)) return;
+        try self.durableSync();
+        self.dirty.store(false, .release);
+    }
+
+    pub fn enableRedo(self: *FileBlockDevice, allocator: std.mem.Allocator, header: container.Header) !void {
+        if (self.redo != null) return error.RedoAlreadyEnabled;
+        self.redo = try redo_runtime.Runtime.init(allocator, self.io, self.file, header);
+    }
+
+    pub fn deinit(self: *FileBlockDevice) void {
+        if (self.redo) |*redo| {
+            redo.deinit();
+            self.redo = null;
+        }
+    }
+
+    pub fn beginTransaction(self: *FileBlockDevice) !void {
+        if (self.isWriteFrozen()) return error.WriteFrozen;
+        const redo = &(self.redo orelse return);
+        if (try redo.needsCheckpoint()) try redo.checkpoint(self.redoSync());
+        try redo.begin();
+    }
+
+    pub fn commitTransaction(self: *FileBlockDevice) !void {
+        if (self.isWriteFrozen()) return error.WriteFrozen;
+        if (self.redo) |*redo| redo.commit(self.redoSync()) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
+    }
+
+    pub fn abortTransaction(self: *FileBlockDevice) void {
+        if (self.redo) |*redo| redo.abort();
+    }
+
+    pub fn checkpointRedo(self: *FileBlockDevice) !void {
+        if (self.isWriteFrozen()) return error.WriteFrozen;
+        if (self.redo) |*redo| redo.checkpoint(self.redoSync()) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
+    }
+
+    pub fn isJournaled(self: *const FileBlockDevice) bool {
+        return self.redo != null;
+    }
+
+    fn durableSync(self: *FileBlockDevice) !void {
         const action = if (self.fault) |fault| fault.action(.sync) else .none;
         if (action == .before) {
             self.freezeWrites();
@@ -78,11 +136,19 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return err;
         };
-        self.dirty.store(false, .release);
         if (action == .after) {
             self.freezeWrites();
             return error.InjectedFault;
         }
+    }
+
+    fn redoSync(self: *FileBlockDevice) redo_runtime.DurableSync {
+        return .{ .context = self, .runFn = redoSyncCallback };
+    }
+
+    fn redoSyncCallback(raw: *anyopaque) !void {
+        const self: *FileBlockDevice = @ptrCast(@alignCast(raw));
+        try self.durableSync();
     }
 
     pub fn isWriteFrozen(self: *const FileBlockDevice) bool {
@@ -256,6 +322,36 @@ test "block device reports a truncated payload" {
     var device = FileBlockDevice.init(std.testing.io, file, header);
     var buffer: [4]u8 = undefined;
     try std.testing.expectError(error.UnexpectedEndOfFile, device.read(0, 0, &buffer));
+}
+
+test "journaled block device syncs once per committed transaction" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "journaled.ddv", .{ .read = true });
+    defer file.close(std.testing.io);
+
+    var header = try container.Header.init(std.testing.io, 1024 * 1024, "JournaledBlock");
+    try header.enableRedoJournal(256 * 1024, 8);
+    header.state = .ready;
+    try file.setLength(std.testing.io, try container.requiredFileSize(header));
+    var device = FileBlockDevice.init(std.testing.io, file, header);
+    defer device.deinit();
+    try device.enableRedo(std.testing.allocator, header);
+    var fault: FaultController = .{};
+    device.fault = &fault;
+
+    try device.beginTransaction();
+    try device.program(4, 32, "transaction");
+    try device.sync();
+    try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
+    try device.commitTransaction();
+    try std.testing.expectEqual(@as(u64, 1), fault.sync_count);
+
+    var actual: [11]u8 = undefined;
+    try device.read(4, 32, &actual);
+    try std.testing.expectEqualStrings("transaction", &actual);
+    try device.checkpointRedo();
+    try std.testing.expectEqual(@as(u64, 3), fault.sync_count);
 }
 
 test "lookahead size is aligned and bounded" {
