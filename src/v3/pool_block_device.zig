@@ -7,6 +7,12 @@ const ReplicaEndpoint = @import("replica_endpoint.zig").ReplicaEndpoint;
 const c = block_device.c;
 const max_replica_count = 3;
 
+const ReplicaOperation = union(enum) {
+    read: struct { offset: u64, buffer: []u8 },
+    write: struct { offset: u64, data: []const u8 },
+    sync,
+};
+
 pub const PoolBlockDevice = struct {
     io: std.Io,
     replicas: [max_replica_count]ReplicaEndpoint,
@@ -69,15 +75,15 @@ pub const PoolBlockDevice = struct {
         if (buffer.len > container.default_block_size) return error.OutOfBounds;
 
         var copies: [max_replica_count][container.default_block_size]u8 = undefined;
-        var readable: [max_replica_count]bool = @splat(false);
-        for (self.replicas[0..self.replica_count], 0..) |replica, index| {
-            replica.readData(data_offset, copies[index][0..buffer.len]) catch continue;
-            readable[index] = true;
-        }
+        var operations: [max_replica_count]ReplicaOperation = undefined;
+        for (operations[0..self.replica_count], 0..) |*operation, index|
+            operation.* = .{ .read = .{ .offset = data_offset, .buffer = copies[index][0..buffer.len] } };
+        var errors: [max_replica_count]?anyerror = @splat(null);
+        try self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]);
         for (0..self.replica_count) |left| {
-            if (!readable[left]) continue;
+            if (errors[left] != null) continue;
             for (left + 1..self.replica_count) |right| {
-                if (readable[right] and std.mem.eql(
+                if (errors[right] == null and std.mem.eql(
                     u8,
                     copies[left][0..buffer.len],
                     copies[right][0..buffer.len],
@@ -93,13 +99,15 @@ pub const PoolBlockDevice = struct {
     pub fn program(self: *PoolBlockDevice, block: u32, offset: u32, data: []const u8) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         const data_offset = try self.position(block, offset, data.len);
-        var first_error: ?anyerror = null;
-        for (self.replicas[0..self.replica_count]) |replica| {
-            replica.writeData(data_offset, data) catch |err| if (first_error == null) {
-                first_error = err;
-            };
-        }
-        if (first_error) |err| {
+        var operations: [max_replica_count]ReplicaOperation = undefined;
+        for (operations[0..self.replica_count]) |*operation|
+            operation.* = .{ .write = .{ .offset = data_offset, .data = data } };
+        var errors: [max_replica_count]?anyerror = @splat(null);
+        self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
+        if (firstReplicaError(errors[0..self.replica_count])) |err| {
             self.freezeWrites();
             return err;
         }
@@ -109,13 +117,13 @@ pub const PoolBlockDevice = struct {
     pub fn sync(self: *PoolBlockDevice) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         if (!self.dirty.load(.acquire)) return;
-        var first_error: ?anyerror = null;
-        for (self.replicas[0..self.replica_count]) |replica| {
-            replica.sync() catch |err| if (first_error == null) {
-                first_error = err;
-            };
-        }
-        if (first_error) |err| {
+        var operations: [max_replica_count]ReplicaOperation = @splat(.sync);
+        var errors: [max_replica_count]?anyerror = @splat(null);
+        self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
+        if (firstReplicaError(errors[0..self.replica_count])) |err| {
             self.freezeWrites();
             return err;
         }
@@ -276,6 +284,22 @@ pub const PoolBlockDevice = struct {
         self.write_frozen.store(true, .release);
     }
 
+    fn runReplicaOperations(
+        self: *PoolBlockDevice,
+        operations: []const ReplicaOperation,
+        errors: []?anyerror,
+    ) !void {
+        std.debug.assert(operations.len == self.replica_count);
+        std.debug.assert(errors.len == self.replica_count);
+        var group: std.Io.Group = .init;
+        defer group.cancel(self.io);
+        for (self.replicas[0..self.replica_count], operations, errors) |replica, operation, *result| {
+            group.concurrent(self.io, runReplicaOperation, .{ replica, operation, result }) catch
+                try runReplicaOperation(replica, operation, result);
+        }
+        try group.await(self.io);
+    }
+
     fn position(self: *const PoolBlockDevice, block: u32, offset: u32, len: usize) !u64 {
         if (block >= self.block_count or offset > self.block_size) return error.OutOfBounds;
         if (len > self.block_size - offset) return error.OutOfBounds;
@@ -322,6 +346,29 @@ pub const PoolBlockDevice = struct {
         return 0;
     }
 };
+
+fn runReplicaOperation(
+    replica: ReplicaEndpoint,
+    operation: ReplicaOperation,
+    result: *?anyerror,
+) std.Io.Cancelable!void {
+    switch (operation) {
+        .read => |read| replica.readData(read.offset, read.buffer) catch |err| {
+            result.* = err;
+        },
+        .write => |write| replica.writeData(write.offset, write.data) catch |err| {
+            result.* = err;
+        },
+        .sync => replica.sync() catch |err| {
+            result.* = err;
+        },
+    }
+}
+
+fn firstReplicaError(errors: []const ?anyerror) ?anyerror {
+    for (errors) |maybe_error| if (maybe_error) |err| return err;
+    return null;
+}
 
 fn readReplicaHeader(replica: ReplicaEndpoint) !container.Header {
     var a_bytes: [container.header_size]u8 = undefined;
@@ -373,6 +420,63 @@ fn volumeIdentity(source: container.Header) [container.header_size]u8 {
 fn lookaheadSize(block_count: u32) u32 {
     const bytes = std.math.divCeil(u32, block_count, 8) catch unreachable;
     return @max(8, @min(4096, std.mem.alignForward(u32, bytes, 8)));
+}
+
+const ConcurrentReplicaProbe = struct {
+    io: std.Io,
+    entered: *std.atomic.Value(u32),
+    all_entered: *std.Io.Event,
+
+    const vtable: ReplicaEndpoint.VTable = .{
+        .read_metadata = read,
+        .read_data = read,
+        .write_data = write,
+        .write_metadata_durable = write,
+        .sync = sync,
+    };
+
+    fn fromContext(context: *anyopaque) *ConcurrentReplicaProbe {
+        return @ptrCast(@alignCast(context));
+    }
+
+    fn read(context: *anyopaque, offset: u64, buffer: []u8) anyerror!void {
+        _ = context;
+        _ = offset;
+        @memset(buffer, 0);
+    }
+
+    fn write(context: *anyopaque, offset: u64, data: []const u8) anyerror!void {
+        _ = offset;
+        _ = data;
+        const self = fromContext(context);
+        if (self.entered.fetchAdd(1, .acq_rel) + 1 == max_replica_count)
+            self.all_entered.set(self.io);
+        self.all_entered.waitUncancelable(self.io);
+    }
+
+    fn sync(context: *anyopaque) anyerror!void {
+        _ = context;
+    }
+};
+
+test "replicated writes run concurrently" {
+    var entered: std.atomic.Value(u32) = .init(0);
+    var all_entered: std.Io.Event = .unset;
+    var probes: [max_replica_count]ConcurrentReplicaProbe = undefined;
+    var replicas: [max_replica_count]ReplicaEndpoint = undefined;
+    for (&probes, &replicas) |*probe, *replica| {
+        probe.* = .{ .io = std.testing.io, .entered = &entered, .all_entered = &all_entered };
+        replica.* = .init(probe, .{
+            .logical_capacity = 1024 * 1024,
+            .data_length = 1024 * 1024,
+        }, &ConcurrentReplicaProbe.vtable);
+    }
+    const layout = try pool_layout.Layout.init(.replicated, 1, 1, container.default_block_size);
+    const header = try container.Header.init(std.testing.io, 1024 * 1024, "concurrent");
+    var device = try PoolBlockDevice.init(std.testing.io, &replicas, layout, header);
+
+    try device.program(0, 0, "data");
+    try std.testing.expectEqual(@as(u32, max_replica_count), entered.load(.acquire));
 }
 
 test "replicated reads require two matching members" {
