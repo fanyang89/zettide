@@ -138,6 +138,25 @@ test "co-located reads fall back to older chunks but not corrupt exact chunks" {
     const store: zettide.object_store.Store = .{ .io = volume.io, .lfs = &volume.lfs };
     const head = try store.readHead(file.object_id);
     var id_buffer: [32]u8 = undefined;
+    var older_path: [160:0]u8 = @splat(0);
+    const older = try std.fmt.bufPrint(
+        older_path[0..160],
+        "/system/objects/{s}/{x:0>16}-{x:0>16}",
+        .{
+            zettide.object_format.formatObjectId(file.object_id, &id_buffer),
+            @as(u64, 0),
+            head.data_generation - 1,
+        },
+    );
+    older_path[older.len] = 0;
+    var raw_file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+    try zettide.volume.checkLfs(c.lfs_file_open(&volume.lfs, &raw_file, &older_path, c.LFS_O_RDWR));
+    try zettide.volume.checkLfs(c.lfs_file_seek(&volume.lfs, &raw_file, 24 + 4, c.LFS_SEEK_SET));
+    try zettide.volume.checkLfs(c.lfs_file_write(&volume.lfs, &raw_file, "!", 1));
+    try zettide.volume.checkLfs(c.lfs_file_close(&volume.lfs, &raw_file));
+    var partial: [1]u8 = undefined;
+    try std.testing.expectError(error.CorruptFilesystem, volume.readFile(&file, &partial, 0));
+
     var exact_path: [160:0]u8 = @splat(0);
     const exact = try std.fmt.bufPrint(
         exact_path[0..160],
@@ -149,7 +168,7 @@ test "co-located reads fall back to older chunks but not corrupt exact chunks" {
         },
     );
     exact_path[exact.len] = 0;
-    var raw_file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
+    raw_file = std.mem.zeroes(c.lfs_file_t);
     try zettide.volume.checkLfs(c.lfs_file_open(
         &volume.lfs,
         &raw_file,

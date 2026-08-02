@@ -13,6 +13,7 @@ const Operation = enum {
     open,
     stat,
     read_readonly,
+    read_partial,
     read_writable_relatime,
     write_overwrite,
     rename,
@@ -24,6 +25,7 @@ const Operation = enum {
         if (std.mem.eql(u8, value, "open")) return .open;
         if (std.mem.eql(u8, value, "stat")) return .stat;
         if (std.mem.eql(u8, value, "read-readonly")) return .read_readonly;
+        if (std.mem.eql(u8, value, "read-partial")) return .read_partial;
         if (std.mem.eql(u8, value, "read-writable-relatime")) return .read_writable_relatime;
         if (std.mem.eql(u8, value, "write-overwrite")) return .write_overwrite;
         if (std.mem.eql(u8, value, "rename")) return .rename;
@@ -37,6 +39,7 @@ const all_operations = [_]Operation{
     .open,
     .stat,
     .read_readonly,
+    .read_partial,
     .read_writable_relatime,
     .write_overwrite,
     .rename,
@@ -142,7 +145,7 @@ const CaseState = struct {
         switch (self.operation) {
             .create, .remove => {},
             .open, .stat, .rename => try self.createClosedFile("/subject"),
-            .read_readonly => {
+            .read_readonly, .read_partial => {
                 try self.volume.openFile(&self.handle, "/data", c.LFS_O_RDONLY, 0, 0, 0);
                 self.handle_open = true;
             },
@@ -199,8 +202,9 @@ const CaseState = struct {
                 const info = try self.volume.stat("/subject");
                 std.mem.doNotOptimizeAway(info.size);
             },
-            .read_readonly, .read_writable_relatime => {
-                const amount = try self.volume.readFile(&self.handle, self.read_buffer, 0);
+            .read_readonly, .read_partial, .read_writable_relatime => {
+                const offset = if (self.operation == .read_partial) zettide.object_format.chunk_size / 2 else 0;
+                const amount = try self.volume.readFile(&self.handle, self.read_buffer, offset);
                 if (amount != self.read_buffer.len) return error.ShortRead;
                 std.mem.doNotOptimizeAway(self.read_buffer);
             },
@@ -319,9 +323,15 @@ fn runOperation(
     const image_path = try std.fmt.bufPrint(&image_path_buffer, "{s}/image.ddv", .{workspace.path()});
     try Volume.create(io, image_path, config.image_size, "FsOpsBenchmark");
 
-    if (operation == .read_readonly) try populateReadOnlyImage(allocator, io, image_path, config.block_size);
+    const read_only = operation == .read_readonly or operation == .read_partial;
+    if (read_only) try populateReadOnlyImage(
+        allocator,
+        io,
+        image_path,
+        if (operation == .read_partial) zettide.object_format.chunk_size else config.block_size,
+    );
 
-    var volume = try Volume.open(io, image_path, operation != .read_readonly);
+    var volume = try Volume.open(io, image_path, !read_only);
     defer volume.deinit();
     try volume.mount();
 
@@ -454,7 +464,7 @@ fn usage(writer: *Io.Writer) !void {
         \\
         \\Options:
         \\  --operation NAME   all, create, open, stat, read-readonly,
-        \\                     read-writable-relatime, write-overwrite,
+        \\                     read-partial, read-writable-relatime, write-overwrite,
         \\                     rename, or remove
         \\  --iterations N     measured operations per workload (default: 100)
         \\  --warmup N         warmup operations per workload (default: 5)

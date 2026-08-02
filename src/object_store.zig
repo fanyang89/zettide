@@ -648,23 +648,19 @@ pub const Store = struct {
         }
         defer _ = c.lfs_file_close(self.lfs, &file);
         const header = try readChunkHeader(self.lfs, &file, version, format.chunk_size);
-        const length = header.length;
-        if (offset == 0 and buffer.len >= length) {
-            const amount = c.lfs_file_read(self.lfs, &file, buffer.ptr, length);
+        const length: usize = header.length;
+        const chunk_offset: usize = offset;
+        const prefix = @min(chunk_offset, length);
+        var crc = try readPayloadCrc(self.lfs, &file, prefix, 0);
+        const copied = if (chunk_offset < length) @min(buffer.len, length - chunk_offset) else 0;
+        if (copied != 0) {
+            const amount = c.lfs_file_read(self.lfs, &file, buffer.ptr, @intCast(copied));
             try checkLfs(amount);
-            if (amount != length or google_crc32c.value(buffer[0..length]) != header.crc)
-                return error.CorruptFilesystem;
-            @memset(buffer[length..], 0);
-            return;
+            if (amount != copied) return error.CorruptFilesystem;
+            crc = google_crc32c.extend(crc, buffer[0..copied]);
         }
-        const bytes = try std.heap.c_allocator.alloc(u8, length);
-        defer std.heap.c_allocator.free(bytes);
-        const amount = c.lfs_file_read(self.lfs, &file, bytes.ptr, length);
-        try checkLfs(amount);
-        if (amount != length or google_crc32c.value(bytes) != header.crc)
-            return error.CorruptFilesystem;
-        const copied = if (offset < length) @min(buffer.len, length - offset) else 0;
-        if (copied != 0) @memcpy(buffer[0..copied], bytes[offset..][0..copied]);
+        crc = try readPayloadCrc(self.lfs, &file, length - prefix - copied, crc);
+        if (crc != header.crc) return error.CorruptFilesystem;
         @memset(buffer[copied..], 0);
     }
 
@@ -1239,6 +1235,21 @@ fn readExact(lfs: *c.lfs_t, path: [*:0]const u8, buffer: []u8) !void {
     const amount = c.lfs_file_read(lfs, &file, buffer.ptr, @intCast(buffer.len));
     try checkLfs(amount);
     if (amount != buffer.len) return error.InvalidObjectFormat;
+}
+
+fn readPayloadCrc(lfs: *c.lfs_t, file: *c.lfs_file_t, length: usize, initial: u32) !u32 {
+    var crc = initial;
+    var remaining = length;
+    var buffer: [16 * 1024]u8 = undefined;
+    while (remaining != 0) {
+        const part = @min(remaining, buffer.len);
+        const amount = c.lfs_file_read(lfs, file, &buffer, @intCast(part));
+        try checkLfs(amount);
+        if (amount != part) return error.CorruptFilesystem;
+        crc = google_crc32c.extend(crc, buffer[0..part]);
+        remaining -= part;
+    }
+    return crc;
 }
 
 fn writeExact(lfs: *c.lfs_t, path: [*:0]const u8, data: []const u8) !void {
