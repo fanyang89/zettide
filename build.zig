@@ -16,10 +16,11 @@ pub fn build(b: *std.Build) void {
     const block_test_mode = b.option(BlockTestMode, "block-tests", "Linux block device tests: off, auto, or required") orelse .off;
     const enable_spdk = b.option(bool, "spdk", "Link the Linux endpoint daemon with SPDK") orelse false;
     const crc32c_dependency = b.dependency("crc32c", .{});
+    const libdeflate_dependency = b.dependency("libdeflate", .{});
     if (enable_spdk and target.result.os.tag != .linux) @panic("SPDK support requires Linux");
 
-    const portable_core = createCoreModule(b, target, optimize, false, crc32c_dependency);
-    const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux, crc32c_dependency);
+    const portable_core = createCoreModule(b, target, optimize, false, crc32c_dependency, libdeflate_dependency);
+    const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux, crc32c_dependency, libdeflate_dependency);
     if (enable_spdk) configureSpdk(app_core);
     const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
@@ -269,11 +270,11 @@ pub fn build(b: *std.Build) void {
         .os_tag = .windows,
         .abi = .gnu,
     });
-    const windows_core = createCoreModule(b, windows_target, optimize, false, crc32c_dependency);
+    const windows_core = createCoreModule(b, windows_target, optimize, false, crc32c_dependency, libdeflate_dependency);
     const windows_exe = createExecutable(b, "zettide-windows-check", windows_target, optimize, windows_core, false);
     const windows_name_tests = createNameProfileCrossTest(b, windows_target, optimize, windows_core);
     const macos_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
-    const macos_core = createCoreModule(b, macos_target, optimize, false, crc32c_dependency);
+    const macos_core = createCoreModule(b, macos_target, optimize, false, crc32c_dependency, libdeflate_dependency);
     const macos_name_tests = createNameProfileCrossTest(b, macos_target, optimize, macos_core);
     cross_step.dependOn(&windows_exe.step);
     cross_step.dependOn(&windows_name_tests.step);
@@ -314,6 +315,7 @@ fn createCoreModule(
     optimize: std.builtin.OptimizeMode,
     with_fuse: bool,
     crc32c_dependency: *std.Build.Dependency,
+    libdeflate_dependency: *std.Build.Dependency,
 ) *std.Build.Module {
     const core = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -325,6 +327,7 @@ fn createCoreModule(
     core.addIncludePath(b.path("vendor/utf8proc"));
     core.addIncludePath(b.path("src"));
     core.addCMacro("LFS_THREADSAFE", "1");
+    core.addCMacro("LFS_CRC_BUFFER_SIZE", "256");
     core.addCMacro("UTF8PROC_STATIC", "1");
     core.addCSourceFiles(.{
         .files = &.{
@@ -333,6 +336,7 @@ fn createCoreModule(
         },
         .flags = &.{ "-std=c99", "-DLFS_THREADSAFE", "-DUTF8PROC_STATIC" },
     });
+    addLibdeflateCrc(core, libdeflate_dependency, target);
     const crc32c = b.createModule(.{
         .root_source_file = b.path("src/crc32c.zig"),
         .target = target,
@@ -351,6 +355,31 @@ fn createCoreModule(
         });
     }
     return core;
+}
+
+fn addLibdeflateCrc(
+    module: *std.Build.Module,
+    dependency: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+) void {
+    module.addIncludePath(dependency.path(""));
+    module.addIncludePath(dependency.path("lib"));
+    module.addCSourceFile(.{
+        .file = dependency.path("lib/crc32.c"),
+        .flags = if (target.result.os.tag == .windows)
+            &.{ "-std=c11", "-DLIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_VPCLMULQDQ" }
+        else
+            &.{"-std=c11"},
+    });
+    const cpu_features_source = switch (target.result.cpu.arch) {
+        .x86, .x86_64 => "lib/x86/cpu_features.c",
+        .arm, .aarch64, .aarch64_be => "lib/arm/cpu_features.c",
+        else => return,
+    };
+    module.addCSourceFile(.{
+        .file = dependency.path(cpu_features_source),
+        .flags = &.{"-std=c11"},
+    });
 }
 
 fn addCrc32c(

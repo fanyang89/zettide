@@ -8,12 +8,14 @@ pub const c = @cImport({
     @cInclude("lfs.h");
 });
 
+const libdeflate = @cImport({
+    @cInclude("libdeflate.h");
+});
+
 pub export fn lfs_crc(initial: u32, raw: ?*const anyopaque, size: usize) callconv(.c) u32 {
     if (size == 0) return initial;
-    const bytes = @as([*]const u8, @ptrCast(raw.?))[0..size];
-    var crc: std.hash.crc.Crc32Jamcrc = .{ .crc = initial };
-    crc.update(bytes);
-    return crc.final();
+    // littlefs stores the raw register; libdeflate complements both ends.
+    return ~libdeflate.libdeflate_crc32(~initial, raw.?, size);
 }
 
 pub const FileBlockDevice = struct {
@@ -270,4 +272,18 @@ test "littlefs CRC preserves raw streaming state" {
     try std.testing.expectEqual(@as(u32, 0x5dd2af4d), lfs_crc(0x12345678, "abc".ptr, 3));
     try std.testing.expectEqual(@as(u32, 0x2dfd2d88), lfs_crc(0, "123456789".ptr, 9));
     try std.testing.expectEqual(@as(u32, 0x12345678), lfs_crc(0x12345678, null, 0));
+}
+
+test "littlefs CRC matches the reference for arbitrary states and lengths" {
+    var bytes: [1024]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate(index *% 37 +% index / 7);
+    const initials = [_]u32{ 0, 1, 0x12345678, 0xffffffff };
+    const lengths = [_]usize{ 1, 3, 4, 7, 8, 15, 16, 31, 64, 255, 256, 511, 512, 1024 };
+    for (initials) |initial| {
+        for (lengths) |length| {
+            var reference: std.hash.crc.Crc32Jamcrc = .{ .crc = initial };
+            reference.update(bytes[0..length]);
+            try std.testing.expectEqual(reference.final(), lfs_crc(initial, bytes[0..length].ptr, length));
+        }
+    }
 }

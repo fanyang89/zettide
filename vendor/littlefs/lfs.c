@@ -152,13 +152,17 @@ static int lfs_bd_cmp(lfs_t *lfs,
     return LFS_CMP_EQ;
 }
 
+#ifndef LFS_CRC_BUFFER_SIZE
+#define LFS_CRC_BUFFER_SIZE 8
+#endif
+
 static int lfs_bd_crc(lfs_t *lfs,
         const lfs_cache_t *pcache, lfs_cache_t *rcache, lfs_size_t hint,
         lfs_block_t block, lfs_off_t off, lfs_size_t size, uint32_t *crc) {
     lfs_size_t diff = 0;
 
     for (lfs_off_t i = 0; i < size; i += diff) {
-        uint8_t dat[8];
+        uint8_t dat[LFS_CRC_BUFFER_SIZE];
         diff = lfs_min(size-i, sizeof(dat));
         int err = lfs_bd_read(lfs,
                 pcache, rcache, hint-i,
@@ -6546,4 +6550,3 @@ int lfs_migrate(lfs_t *lfs, const struct lfs_config *cfg) {
     return err;
 }
 #endif
-
