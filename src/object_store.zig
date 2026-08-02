@@ -22,6 +22,11 @@ const ChunkChange = struct {
     new_size: u32,
 };
 
+const ChunkData = struct {
+    bytes: []u8,
+    stored_length: u32,
+};
+
 pub const WriteResult = struct {
     amount: usize,
     head: format.ObjectHead,
@@ -559,13 +564,11 @@ pub const Store = struct {
         offset: u32,
     ) !void {
         const version = try self.findChunkVersion(id, index, generation) orelse return;
-        const chunk = try std.heap.c_allocator.alloc(u8, format.chunk_size);
-        defer std.heap.c_allocator.free(chunk);
-        @memset(chunk, 0);
-        const length = try self.readChunkVersion(id, version, chunk);
-        if (offset >= length) return;
-        const amount = @min(buffer.len, length - offset);
-        @memcpy(buffer[0..amount], chunk[offset..][0..amount]);
+        const chunk = try self.readChunkVersionAlloc(id, version, format.chunk_size, 0);
+        defer std.heap.c_allocator.free(chunk.bytes);
+        if (offset >= chunk.stored_length) return;
+        const amount = @min(buffer.len, chunk.stored_length - offset);
+        @memcpy(buffer[0..amount], chunk.bytes[offset..][0..amount]);
     }
 
     fn writeChunk(
@@ -577,17 +580,19 @@ pub const Store = struct {
         data: []const u8,
         offset: u32,
     ) !ChunkChange {
-        const chunk = try std.heap.c_allocator.alloc(u8, format.chunk_size);
-        defer std.heap.c_allocator.free(chunk);
-        @memset(chunk, 0);
-        const old_size = if (try self.findChunkVersion(id, index, old_generation)) |version|
-            try self.readChunkVersion(id, version, chunk)
-        else
-            0;
-        const new_size: u32 = @intCast(@max(@as(usize, old_size), @as(usize, offset) + data.len));
-        @memcpy(chunk[offset..][0..data.len], data);
-        try self.writeChunkVersion(id, .{ .index = index, .generation = new_generation }, chunk[0..new_size]);
-        return .{ .old_size = old_size, .new_size = new_size };
+        const write_end: u32 = @intCast(@as(usize, offset) + data.len);
+        const chunk = if (try self.findChunkVersion(id, index, old_generation)) |version|
+            try self.readChunkVersionAlloc(id, version, format.chunk_size, write_end)
+        else value: {
+            const bytes = try std.heap.c_allocator.alloc(u8, write_end);
+            @memset(bytes, 0);
+            break :value ChunkData{ .bytes = bytes, .stored_length = 0 };
+        };
+        defer std.heap.c_allocator.free(chunk.bytes);
+        const new_size = @max(chunk.stored_length, write_end);
+        @memcpy(chunk.bytes[offset..][0..data.len], data);
+        try self.writeChunkVersion(id, .{ .index = index, .generation = new_generation }, chunk.bytes[0..new_size]);
+        return .{ .old_size = chunk.stored_length, .new_size = new_size };
     }
 
     fn truncateChunks(
@@ -603,20 +608,23 @@ pub const Store = struct {
         var iterator = indices.keyIterator();
         while (iterator.next()) |index| {
             const version = try self.findChunkVersion(head.object_id, index.*, head.data_generation) orelse continue;
-            const chunk = try std.heap.c_allocator.alloc(u8, head.stored_chunk_size);
-            defer std.heap.c_allocator.free(chunk);
-            @memset(chunk, 0);
-            const old_size = try self.readChunkVersion(head.object_id, version, chunk);
+            const chunk = try self.readChunkVersionAlloc(
+                head.object_id,
+                version,
+                head.stored_chunk_size,
+                0,
+            );
+            defer std.heap.c_allocator.free(chunk.bytes);
             const start = std.math.mul(u64, index.*, head.stored_chunk_size) catch return error.CorruptFilesystem;
-            const new_size: u32 = if (start >= size) 0 else @intCast(@min(@as(u64, old_size), size - start));
-            if (new_size == old_size) continue;
+            const new_size: u32 = if (start >= size) 0 else @intCast(@min(@as(u64, chunk.stored_length), size - start));
+            if (new_size == chunk.stored_length) continue;
             try self.writeChunkVersion(
                 head.object_id,
                 .{ .index = index.*, .generation = generation },
-                chunk[0..new_size],
+                chunk.bytes[0..new_size],
             );
             head.allocated_bytes = try adjustAllocated(head.allocated_bytes, .{
-                .old_size = old_size,
+                .old_size = chunk.stored_length,
                 .new_size = new_size,
             });
             try touched.put(index.*, {});
@@ -677,7 +685,14 @@ pub const Store = struct {
         }
     }
 
-    fn readChunkVersion(self: Store, id: format.ObjectId, version: ChunkVersion, buffer: []u8) !u32 {
+    fn readChunkVersionAlloc(
+        self: Store,
+        id: format.ObjectId,
+        version: ChunkVersion,
+        maximum: u32,
+        minimum: u32,
+    ) !ChunkData {
+        if (minimum > maximum) return error.CorruptFilesystem;
         var path_buffer: [max_path_bytes:0]u8 = @splat(0);
         var file: c.lfs_file_t = std.mem.zeroes(c.lfs_file_t);
         try checkLfs(c.lfs_file_open(self.lfs, &file, try chunkVersionPath(id, version, &path_buffer), c.LFS_O_RDONLY));
@@ -690,13 +705,16 @@ pub const Store = struct {
         if (std.mem.readInt(u64, header[8..16], .little) != version.generation)
             return error.CorruptFilesystem;
         const length = std.mem.readInt(u32, header[16..20], .little);
-        if (length > buffer.len) return error.CorruptFilesystem;
-        const amount = c.lfs_file_read(self.lfs, &file, buffer.ptr, length);
+        if (length > maximum) return error.CorruptFilesystem;
+        const bytes = try std.heap.c_allocator.alloc(u8, @max(length, minimum));
+        errdefer std.heap.c_allocator.free(bytes);
+        @memset(bytes, 0);
+        const amount = c.lfs_file_read(self.lfs, &file, bytes.ptr, length);
         try checkLfs(amount);
-        if (amount != length or std.hash.crc.Crc32Iscsi.hash(buffer[0..length]) !=
+        if (amount != length or std.hash.crc.Crc32Iscsi.hash(bytes[0..length]) !=
             std.mem.readInt(u32, header[20..24], .little))
             return error.CorruptFilesystem;
-        return length;
+        return .{ .bytes = bytes, .stored_length = length };
     }
 
     fn readChunkLength(self: Store, id: format.ObjectId, version: ChunkVersion, maximum: u32) !u32 {
