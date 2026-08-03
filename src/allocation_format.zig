@@ -7,6 +7,7 @@ pub const format_version: u16 = 1;
 pub const header_size: usize = 64;
 pub const entry_size: usize = 96;
 pub const checksum_size = std.crypto.hash.sha2.Sha256.digest_length;
+pub const max_entries_per_page: usize = (4096 - header_size - checksum_size) / entry_size;
 
 const magic = "ZCAWAL\x00\x00";
 const checksum_seed: [checksum_size]u8 = @splat(0);
@@ -34,6 +35,7 @@ pub const Entry = struct {
     base_generation: u64 = 0,
     owner_epoch: u64 = 0,
     transition_generation: u64 = 0,
+    claim_epoch: u64 = 0,
 
     pub fn free(extent_index: u64) Entry {
         return .{ .state = .free, .kind = .none, .extent_index = extent_index };
@@ -51,7 +53,8 @@ pub const Entry = struct {
                     !allZero(&self.owner_incarnation) or
                     self.base_generation != 0 or
                     self.owner_epoch != 0 or
-                    self.transition_generation != 0)
+                    self.transition_generation != 0 or
+                    self.claim_epoch != 0)
                 {
                     return error.InvalidFreeEntry;
                 }
@@ -60,6 +63,7 @@ pub const Entry = struct {
                 if (self.kind == .none or
                     !identity_present or
                     self.owner_epoch == 0 or
+                    self.claim_epoch == 0 or
                     self.base_generation == std.math.maxInt(u64) or
                     self.transition_generation != 0)
                 {
@@ -70,6 +74,7 @@ pub const Entry = struct {
                 if (self.kind == .none or
                     !identity_present or
                     self.owner_epoch == 0 or
+                    self.claim_epoch == 0 or
                     self.transition_generation <= self.base_generation)
                 {
                     return error.InvalidLiveEntry;
@@ -79,6 +84,7 @@ pub const Entry = struct {
                 if (self.kind == .none or
                     !identity_present or
                     self.owner_epoch == 0 or
+                    self.claim_epoch == 0 or
                     self.transition_generation <= self.base_generation)
                 {
                     return error.InvalidRetiredEntry;
@@ -114,6 +120,7 @@ pub fn validateTransition(previous: Entry, next: Entry) !void {
 
 pub const View = struct {
     bytes: []const u8,
+    volume_id: [16]u8,
     page_index: u64,
     generation: u64,
     first_extent: u64,
@@ -134,12 +141,14 @@ pub fn entriesPerPage(logical_block_size: u32) !u32 {
 pub fn encodePage(
     allocator: std.mem.Allocator,
     logical_block_size: u32,
+    volume_id: [16]u8,
     page_index: u64,
     generation: u64,
     total_extent_count: u64,
     entries: []const Entry,
 ) !store.OwnedBytes {
-    const page_range = try pageRange(logical_block_size, page_index, total_extent_count);
+    if (allZero(&volume_id)) return error.InvalidVolumeId;
+    const page_range = try rangeForPage(logical_block_size, page_index, total_extent_count);
     if (entries.len != page_range.count) return error.InvalidEntryCount;
 
     const bytes = try allocator.alloc(u8, logical_block_size);
@@ -153,6 +162,7 @@ pub fn encodePage(
     putInt(u64, bytes, 24, generation);
     putInt(u64, bytes, 32, page_range.first_extent);
     putInt(u32, bytes, 40, @intCast(entries.len));
+    @memcpy(bytes[44..60], &volume_id);
     for (entries, 0..) |entry, index| {
         const expected = std.math.add(u64, page_range.first_extent, index) catch
             return error.ExtentIndexOverflow;
@@ -166,16 +176,19 @@ pub fn encodePage(
 
 pub fn decodePage(
     bytes: []const u8,
+    expected_volume_id: [16]u8,
     expected_page_index: u64,
     total_extent_count: u64,
 ) !View {
+    if (allZero(&expected_volume_id)) return error.InvalidVolumeId;
     const view = try decodeInternal(bytes);
-    const page_range = try pageRange(
+    const page_range = try rangeForPage(
         @intCast(bytes.len),
         expected_page_index,
         total_extent_count,
     );
-    if (view.page_index != expected_page_index or
+    if (!std.mem.eql(u8, &view.volume_id, &expected_volume_id) or
+        view.page_index != expected_page_index or
         view.first_extent != page_range.first_extent or
         view.entry_count != page_range.count)
     {
@@ -193,7 +206,8 @@ fn decodeInternal(bytes: []const u8) !View {
     if (getInt(u16, bytes, 10) != 0 or
         getInt(u16, bytes, 12) != header_size or
         getInt(u16, bytes, 14) != entry_size or
-        !allZero(bytes[44..header_size]))
+        allZero(bytes[44..60]) or
+        !allZero(bytes[60..header_size]))
     {
         return error.NonCanonicalEncoding;
     }
@@ -213,6 +227,7 @@ fn decodeInternal(bytes: []const u8) !View {
     }
     return .{
         .bytes = bytes,
+        .volume_id = bytes[44..60].*,
         .page_index = getInt(u64, bytes, 16),
         .generation = getInt(u64, bytes, 24),
         .first_extent = first_extent,
@@ -220,12 +235,12 @@ fn decodeInternal(bytes: []const u8) !View {
     };
 }
 
-const PageRange = struct {
+pub const PageRange = struct {
     first_extent: u64,
     count: u32,
 };
 
-fn pageRange(
+pub fn rangeForPage(
     logical_block_size: u32,
     page_index: u64,
     total_extent_count: u64,
@@ -247,7 +262,8 @@ fn sameAllocation(previous: Entry, next: Entry) !void {
         !std.mem.eql(u8, &previous.owner_id, &next.owner_id) or
         !std.mem.eql(u8, &previous.owner_incarnation, &next.owner_incarnation) or
         previous.base_generation != next.base_generation or
-        previous.owner_epoch != next.owner_epoch)
+        previous.owner_epoch != next.owner_epoch or
+        previous.claim_epoch != next.claim_epoch)
     {
         return error.AllocationIdentityChanged;
     }
@@ -263,13 +279,11 @@ fn encodeEntry(output: []u8, entry: Entry) void {
     putInt(u64, output, 64, entry.base_generation);
     putInt(u64, output, 72, entry.owner_epoch);
     putInt(u64, output, 80, entry.transition_generation);
+    putInt(u64, output, 88, entry.claim_epoch);
 }
 
 fn decodeEntry(input: []const u8) !Entry {
-    if (getInt(u16, input, 2) != 0 or
-        getInt(u32, input, 4) != 0 or
-        getInt(u64, input, 88) != 0)
-    {
+    if (getInt(u16, input, 2) != 0 or getInt(u32, input, 4) != 0) {
         return error.NonCanonicalEncoding;
     }
     const entry = Entry{
@@ -282,6 +296,7 @@ fn decodeEntry(input: []const u8) !Entry {
         .base_generation = getInt(u64, input, 64),
         .owner_epoch = getInt(u64, input, 72),
         .transition_generation = getInt(u64, input, 80),
+        .claim_epoch = getInt(u64, input, 88),
     };
     try entry.validate();
     return entry;
@@ -340,19 +355,22 @@ test "allocator pages round trip for both logical block sizes" {
                 .owner_incarnation = patternedId(33),
                 .base_generation = 8,
                 .owner_epoch = 3,
+                .claim_epoch = 4,
             },
         };
         const total_extent_count = first_extent + 2;
+        const volume_id = patternedId(100);
         var encoded = try encodePage(
             std.testing.allocator,
             block_size,
+            volume_id,
             5,
             7,
             total_extent_count,
             &entries,
         );
         defer encoded.deinit();
-        const view = try decodePage(encoded.bytes, 5, total_extent_count);
+        const view = try decodePage(encoded.bytes, volume_id, 5, total_extent_count);
         try std.testing.expectEqual(@as(u64, 5), view.page_index);
         try std.testing.expectEqual(@as(u64, 7), view.generation);
         try std.testing.expectEqual(@as(u32, 2), view.entry_count);
@@ -362,15 +380,16 @@ test "allocator pages round trip for both logical block sizes" {
 }
 
 test "allocator page rejects corruption and noncanonical padding" {
+    const volume_id = patternedId(100);
     const entries = [_]Entry{Entry.free(0)};
-    var encoded = try encodePage(std.testing.allocator, 512, 0, 0, 1, &entries);
+    var encoded = try encodePage(std.testing.allocator, 512, volume_id, 0, 0, 1, &entries);
     defer encoded.deinit();
     encoded.bytes[100] = 1;
-    try std.testing.expectError(error.ChecksumMismatch, decodePage(encoded.bytes, 0, 1));
+    try std.testing.expectError(error.ChecksumMismatch, decodePage(encoded.bytes, volume_id, 0, 1));
     encoded.bytes[100] = 0;
     encoded.bytes[200] = 1;
     seal(encoded.bytes);
-    try std.testing.expectError(error.NonCanonicalEncoding, decodePage(encoded.bytes, 0, 1));
+    try std.testing.expectError(error.NonCanonicalEncoding, decodePage(encoded.bytes, volume_id, 0, 1));
 }
 
 test "allocator entry state requires complete ownership" {
@@ -383,26 +402,45 @@ test "allocator entry state requires complete ownership" {
     entry.owner_id = patternedId(17);
     entry.owner_incarnation = patternedId(33);
     entry.owner_epoch = 1;
+    entry.claim_epoch = 2;
     try entry.validate();
 }
 
 test "allocator page position determines its complete extent range" {
+    const volume_id = patternedId(100);
     const capacity = try entriesPerPage(512);
     var first_entries: [4]Entry = undefined;
     for (&first_entries, 0..) |*entry, index| entry.* = Entry.free(index);
-    var encoded = try encodePage(std.testing.allocator, 512, 0, 0, capacity + 1, &first_entries);
+    var encoded = try encodePage(
+        std.testing.allocator,
+        512,
+        volume_id,
+        0,
+        0,
+        capacity + 1,
+        &first_entries,
+    );
     defer encoded.deinit();
     try std.testing.expectError(
         error.AllocatorPagePositionMismatch,
-        decodePage(encoded.bytes, 1, capacity + 1),
+        decodePage(encoded.bytes, volume_id, 1, capacity + 1),
     );
     try std.testing.expectError(
         error.InvalidEntryCount,
-        encodePage(std.testing.allocator, 512, 0, 0, capacity + 1, first_entries[0..3]),
+        encodePage(
+            std.testing.allocator,
+            512,
+            volume_id,
+            0,
+            0,
+            capacity + 1,
+            first_entries[0..3],
+        ),
     );
 }
 
 test "allocator page v1 encoding matches the golden vector" {
+    const volume_id = patternedId(100);
     const entries = [_]Entry{.{
         .state = .claimed,
         .kind = .data,
@@ -412,8 +450,9 @@ test "allocator page v1 encoding matches the golden vector" {
         .owner_incarnation = patternedId(33),
         .base_generation = 8,
         .owner_epoch = 3,
+        .claim_epoch = 4,
     }};
-    var encoded = try encodePage(std.testing.allocator, 512, 0, 7, 1, &entries);
+    var encoded = try encodePage(std.testing.allocator, 512, volume_id, 0, 7, 1, &entries);
     defer encoded.deinit();
     var expected: [512]u8 = @splat(0);
     @memcpy(expected[0..8], "ZCAWAL\x00\x00");
@@ -422,6 +461,7 @@ test "allocator page v1 encoding matches the golden vector" {
     expected[15] = 96;
     expected[31] = 7;
     expected[43] = 1;
+    @memcpy(expected[44..60], &volume_id);
     expected[64] = 1;
     expected[65] = 2;
     @memcpy(expected[80..96], &patternedId(1));
@@ -429,14 +469,15 @@ test "allocator page v1 encoding matches the golden vector" {
     @memcpy(expected[112..128], &patternedId(33));
     expected[135] = 8;
     expected[143] = 3;
+    expected[159] = 4;
     @memcpy(expected[480..512], &[_]u8{
-        0xb2, 0x53, 0x58, 0xe1, 0x62, 0x71, 0x0d, 0xc8,
-        0xd6, 0x11, 0x11, 0xc4, 0x10, 0x89, 0x66, 0x32,
-        0xd9, 0x0b, 0x89, 0x3d, 0xaf, 0xc1, 0xeb, 0x07,
-        0xa7, 0xbf, 0x84, 0xf5, 0xf4, 0x2a, 0x77, 0xbb,
+        0xb1, 0xd9, 0x86, 0x23, 0xad, 0x01, 0x95, 0xe9,
+        0x18, 0x6e, 0x89, 0xc1, 0x2f, 0x0f, 0x71, 0xab,
+        0xd1, 0x1f, 0x6c, 0xed, 0xf4, 0x76, 0x0a, 0x15,
+        0xaf, 0x6d, 0x38, 0xd4, 0x96, 0x4a, 0x37, 0xf5,
     });
     try std.testing.expectEqualSlices(u8, &expected, encoded.bytes);
-    _ = try decodePage(&expected, 0, 1);
+    _ = try decodePage(&expected, volume_id, 0, 1);
 }
 
 test "allocator transitions preserve ownership and advance generations" {
@@ -449,6 +490,7 @@ test "allocator transitions preserve ownership and advance generations" {
         .owner_incarnation = patternedId(33),
         .base_generation = 8,
         .owner_epoch = 2,
+        .claim_epoch = 3,
     };
     var live = claimed;
     live.state = .live;

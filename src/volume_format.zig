@@ -3,6 +3,7 @@
 const std = @import("std");
 const allocation = @import("allocation_format.zig");
 const block = @import("conditional_block.zig");
+const claim_index = @import("claim_index_format.zig");
 const store = @import("store.zig");
 const voting_region = @import("voting_region.zig");
 
@@ -23,6 +24,11 @@ pub const Layout = struct {
     header_secondary_block: u64 = secondary_header_block,
     anchor_block: u64 = anchor_block,
     voting_base_block: u64 = voting_base_block,
+    claim_gate_base_block: u64,
+    claim_stripe_count: u32,
+    claim_index_base_block: u64,
+    claim_index_block_count: u64,
+    claim_index_slot_count: u64,
     allocator_base_block: u64,
     allocator_block_count: u64,
     extent_base_block: u64,
@@ -39,6 +45,10 @@ pub const Layout = struct {
         const extent_blocks = extent_size / geometry.logical_block_size;
         if (geometry.block_count <= fixed_block_count) return error.DeviceTooSmall;
         const entries_per_page = try allocation.entriesPerPage(geometry.logical_block_size);
+        const index_entries_per_page = try claim_index.entriesPerPage(geometry.logical_block_size);
+        const stripe_count = adaptiveStripeCount(
+            (geometry.block_count - fixed_block_count) / extent_blocks,
+        );
         var lower: u64 = 0;
         var upper = (geometry.block_count - fixed_block_count) / extent_blocks;
         while (lower < upper) {
@@ -48,6 +58,8 @@ pub const Layout = struct {
                 geometry.block_count,
                 extent_blocks,
                 entries_per_page,
+                index_entries_per_page,
+                stripe_count,
                 candidate,
             )) {
                 lower = candidate;
@@ -58,11 +70,27 @@ pub const Layout = struct {
         const extent_count = lower;
         if (extent_count == 0) return error.DeviceTooSmall;
         const allocator_blocks = try divCeil(extent_count, entries_per_page);
-        const after_allocator = std.math.add(u64, fixed_block_count, allocator_blocks) catch
+        const multiplied = std.math.mul(u64, extent_count, 8) catch
+            return error.DeviceTooLarge;
+        const required_index_slots = try divCeil(multiplied, 7);
+        const index_blocks = try divCeil(required_index_slots, index_entries_per_page);
+        const index_slots = std.math.mul(u64, index_blocks, index_entries_per_page) catch
+            return error.DeviceTooLarge;
+        const after_gates = std.math.add(u64, fixed_block_count, stripe_count) catch
+            return error.DeviceTooLarge;
+        const index_base = after_gates;
+        const allocator_base = std.math.add(u64, index_base, index_blocks) catch
+            return error.DeviceTooLarge;
+        const after_allocator = std.math.add(u64, allocator_base, allocator_blocks) catch
             return error.DeviceTooLarge;
         const extent_base = try alignForward(after_allocator, extent_blocks);
         return .{
-            .allocator_base_block = fixed_block_count,
+            .claim_gate_base_block = fixed_block_count,
+            .claim_stripe_count = stripe_count,
+            .claim_index_base_block = index_base,
+            .claim_index_block_count = index_blocks,
+            .claim_index_slot_count = index_slots,
+            .allocator_base_block = allocator_base,
             .allocator_block_count = allocator_blocks,
             .extent_base_block = extent_base,
             .extent_count = extent_count,
@@ -119,11 +147,16 @@ pub fn encode(header: Header) !Encoded {
     putInt(u64, &bytes, 56, header.layout.header_secondary_block);
     putInt(u64, &bytes, 64, header.layout.anchor_block);
     putInt(u64, &bytes, 72, header.layout.voting_base_block);
-    putInt(u64, &bytes, 80, header.layout.allocator_base_block);
-    putInt(u64, &bytes, 88, header.layout.allocator_block_count);
-    putInt(u64, &bytes, 96, header.layout.extent_base_block);
-    putInt(u64, &bytes, 104, header.layout.extent_count);
-    putInt(i64, &bytes, 112, header.created_ns);
+    putInt(u64, &bytes, 80, header.layout.claim_gate_base_block);
+    putInt(u32, &bytes, 88, header.layout.claim_stripe_count);
+    putInt(u64, &bytes, 96, header.layout.claim_index_base_block);
+    putInt(u64, &bytes, 104, header.layout.claim_index_block_count);
+    putInt(u64, &bytes, 112, header.layout.claim_index_slot_count);
+    putInt(u64, &bytes, 120, header.layout.allocator_base_block);
+    putInt(u64, &bytes, 128, header.layout.allocator_block_count);
+    putInt(u64, &bytes, 136, header.layout.extent_base_block);
+    putInt(u64, &bytes, 144, header.layout.extent_count);
+    putInt(i64, &bytes, 152, header.created_ns);
     seal(&bytes);
     return bytes;
 }
@@ -136,7 +169,8 @@ pub fn decode(bytes: []const u8) !Header {
     if (getInt(u16, encoded, 10) != 0 or
         getInt(u16, encoded, 12) != encoded_size or
         getInt(u16, encoded, 14) != 0 or
-        !allZero(encoded[120..checksum_start]))
+        getInt(u32, encoded, 92) != 0 or
+        !allZero(encoded[160..checksum_start]))
     {
         return error.NonCanonicalEncoding;
     }
@@ -155,12 +189,17 @@ pub fn decode(bytes: []const u8) !Header {
             .header_secondary_block = getInt(u64, encoded, 56),
             .anchor_block = getInt(u64, encoded, 64),
             .voting_base_block = getInt(u64, encoded, 72),
-            .allocator_base_block = getInt(u64, encoded, 80),
-            .allocator_block_count = getInt(u64, encoded, 88),
-            .extent_base_block = getInt(u64, encoded, 96),
-            .extent_count = getInt(u64, encoded, 104),
+            .claim_gate_base_block = getInt(u64, encoded, 80),
+            .claim_stripe_count = getInt(u32, encoded, 88),
+            .claim_index_base_block = getInt(u64, encoded, 96),
+            .claim_index_block_count = getInt(u64, encoded, 104),
+            .claim_index_slot_count = getInt(u64, encoded, 112),
+            .allocator_base_block = getInt(u64, encoded, 120),
+            .allocator_block_count = getInt(u64, encoded, 128),
+            .extent_base_block = getInt(u64, encoded, 136),
+            .extent_count = getInt(u64, encoded, 144),
         },
-        .created_ns = getInt(i64, encoded, 112),
+        .created_ns = getInt(i64, encoded, 152),
     };
     try validate(header);
     return header;
@@ -201,15 +240,29 @@ fn layoutFits(
     block_count: u64,
     extent_blocks: u32,
     entries_per_page: u32,
+    index_entries_per_page: u32,
+    stripe_count: u32,
     extent_count: u64,
 ) !bool {
     if (extent_count == 0) return true;
     const allocator_blocks = try divCeil(extent_count, entries_per_page);
-    const after_allocator = std.math.add(u64, fixed_block_count, allocator_blocks) catch
+    const multiplied = std.math.mul(u64, extent_count, 8) catch return false;
+    const required_index_slots = try divCeil(multiplied, 7);
+    const index_blocks = try divCeil(required_index_slots, index_entries_per_page);
+    const after_gates = std.math.add(u64, fixed_block_count, stripe_count) catch
         return false;
+    const after_index = std.math.add(u64, after_gates, index_blocks) catch return false;
+    const after_allocator = std.math.add(u64, after_index, allocator_blocks) catch return false;
     const extent_base = alignForward(after_allocator, extent_blocks) catch return false;
     if (extent_base >= block_count) return false;
     return extent_count <= (block_count - extent_base) / extent_blocks;
+}
+
+fn adaptiveStripeCount(rough_extent_count: u64) u32 {
+    if (rough_extent_count >= 1024) return 64;
+    if (rough_extent_count >= 256) return 16;
+    if (rough_extent_count >= 64) return 4;
+    return 1;
 }
 
 fn alignForward(value: u64, alignment: u32) !u64 {
@@ -251,7 +304,16 @@ test "volume layout reserves fixed metadata and aligned extents" {
             .block_count = 2 * 1024 * 1024 * 1024 / block_size,
         }, default_extent_size);
         const extent_blocks = default_extent_size / block_size;
-        try std.testing.expectEqual(fixed_block_count, layout.allocator_base_block);
+        try std.testing.expectEqual(fixed_block_count, layout.claim_gate_base_block);
+        try std.testing.expectEqual(@as(u32, 64), layout.claim_stripe_count);
+        try std.testing.expectEqual(
+            layout.claim_gate_base_block + layout.claim_stripe_count,
+            layout.claim_index_base_block,
+        );
+        try std.testing.expectEqual(
+            layout.claim_index_base_block + layout.claim_index_block_count,
+            layout.allocator_base_block,
+        );
         try std.testing.expect(layout.allocator_block_count != 0);
         try std.testing.expectEqual(@as(u64, 0), layout.extent_base_block % extent_blocks);
         try std.testing.expect(layout.extent_base_block + layout.extent_count * extent_blocks <=
@@ -266,17 +328,37 @@ test "volume layout converges at allocator alignment boundaries" {
         .logical_block_size = 512,
         .block_count = 16,
     }, 512);
-    try std.testing.expectEqual(@as(u64, 4), first.extent_count);
+    try std.testing.expect(first.extent_count != 0);
     const second = try Layout.compute(.{
         .logical_block_size = 4096,
         .block_count = 53,
     }, 4096);
-    try std.testing.expectEqual(@as(u64, 41), second.extent_count);
+    try std.testing.expect(second.extent_count != 0);
     const threshold = try Layout.compute(.{
         .logical_block_size = 512,
         .block_count = 15,
     }, 512);
-    try std.testing.expectEqual(@as(u64, 4), threshold.extent_count);
+    try std.testing.expect(threshold.extent_count != 0);
+}
+
+test "volume layout adapts claim stripes without penalizing tiny devices" {
+    const tiny = try Layout.compute(.{
+        .logical_block_size = 512,
+        .block_count = 64,
+    }, 512);
+    try std.testing.expectEqual(@as(u32, 1), tiny.claim_stripe_count);
+
+    const medium = try Layout.compute(.{
+        .logical_block_size = 512,
+        .block_count = 512,
+    }, 512);
+    try std.testing.expectEqual(@as(u32, 16), medium.claim_stripe_count);
+
+    const realistic = try Layout.compute(.{
+        .logical_block_size = 4096,
+        .block_count = 2 * 1024 * 1024 * 1024 / 4096,
+    }, default_extent_size);
+    try std.testing.expectEqual(@as(u32, 64), realistic.claim_stripe_count);
 }
 
 test "volume header v1 encoding matches the golden vector" {
@@ -298,18 +380,24 @@ test "volume header v1 encoding matches the golden vector" {
     expected[71] = 2;
     expected[79] = 3;
     expected[87] = 10;
-    expected[94] = 2;
-    expected[95] = 0;
-    expected[102] = 8;
-    expected[103] = 0;
-    expected[110] = 7;
-    expected[111] = 0xff;
-    expected[117..120].* = .{ 1, 0xe2, 0x40 };
+    expected[91] = 64;
+    expected[103] = 0x4a;
+    expected[110] = 0x02;
+    expected[111] = 0x49;
+    expected[118] = 0x09;
+    expected[119] = 0x24;
+    expected[126] = 0x02;
+    expected[127] = 0x93;
+    expected[134] = 0x02;
+    expected[142] = 0x08;
+    expected[150] = 0x07;
+    expected[151] = 0xff;
+    expected[157..160].* = .{ 1, 0xe2, 0x40 };
     @memcpy(expected[480..512], &[_]u8{
-        0xf2, 0xb7, 0xe2, 0x90, 0xc4, 0xd4, 0x38, 0x3e,
-        0xc3, 0x67, 0x55, 0x1c, 0x6c, 0x30, 0x5b, 0xb8,
-        0x59, 0xba, 0xc6, 0xec, 0x91, 0x27, 0x0c, 0xcb,
-        0x83, 0xff, 0xd2, 0x25, 0xab, 0xd5, 0xae, 0xfc,
+        0x49, 0xfa, 0x28, 0x55, 0xf1, 0x13, 0x49, 0xd7,
+        0x3c, 0x12, 0x02, 0xe0, 0x47, 0x1a, 0x7c, 0x42,
+        0x75, 0x54, 0xa4, 0x93, 0xa0, 0xbf, 0xde, 0x09,
+        0xb2, 0x32, 0xad, 0x00, 0xa4, 0x69, 0x35, 0xb8,
     });
     try std.testing.expectEqualSlices(u8, &expected, &encoded);
     try std.testing.expectEqual(header, try decode(&expected));

@@ -106,17 +106,45 @@ to cache synchronization.
 
 The volume header is a canonical 512-byte envelope embedded in one physical
 logical block. Blocks 0 and 1 hold immutable header copies, block 2 is the
-publication anchor, and blocks 3 through 9 are the voting region. Full-block
-allocator pages begin at block 10. The extent arena starts at the next extent
-boundary; version 1 defaults to 1 MiB extents and records its exact geometry in
-the header.
+publication anchor, and blocks 3 through 9 are the voting region. Persistent
+claim gates, the global claim index, and full-block allocator pages follow in
+that order. The extent arena starts at the next extent boundary; version 1
+defaults to 1 MiB extents and records its exact geometry in the header.
 
-Each allocator page is bound to one page index and the corresponding complete,
-non-overlapping range of volume extents. Its monotonically changing generation
-and all entries participate in the checksum and full-block CAW. Extents move
-through `free`, `claimed`, `live`, and `retired`; claim identity, owner identity,
-owner incarnation, base generation, and owner epoch remain stable until a
-retired extent is proven safe to return to `free`.
+Each claim ID hashes to one persistent gate block. A gate contains one
+recoverable operation descriptor and serializes claims and releases only in
+that stripe; unrelated stripes remain independent. Tiny volumes use one or a
+small number of gates, while volumes with at least 1024 rough extents reserve
+64 stripes. Every cross-block allocator or index mutation is first described
+and stabilized in its gate. A successful target mutation is stabilized before
+the gate advances or returns to idle.
+
+The claim index is one volume-wide, linearly probed hash table rather than
+fixed-capacity per-stripe buckets. Its slots are shared by all claim IDs and
+are provisioned for at most seven-eighths active load. Empty, bound, and
+tombstone records are canonical. The gate remains active while a release
+tombstones its index record and then returns the retired extent to free, so an
+absent index record never permits the same claim ID to race onto another
+allocator page before the old extent is durably free.
+
+Each allocator page is bound to the volume ID, one page index, and the
+corresponding complete, non-overlapping range of volume extents. Its
+monotonically changing generation and all entries participate in the checksum
+and full-block CAW. Extents move through `free`, `claimed`, `live`, and
+`retired`; claim identity, owner identity, owner incarnation, base generation,
+owner epoch, and an allocator-generated claim epoch remain stable until a
+retired extent is proven safe to return to `free`. The claim epoch changes when
+a released claim ID is allocated again, preventing a delayed release token
+from freeing its successor.
+
+Allocator, claim-index, and claim-gate blocks use monotonically increasing
+generations. When a CAW is indeterminate and the expected block is still
+visible, recovery may issue a logically unchanged generation-bump CAW and
+stabilize it. Either the delayed mutation or the fence can win the old compare,
+but not both. Recovery never changes an extent candidate, index slot, or gate
+phase until the old command is observed or durably fenced.
+Mount recovery scans the fixed gate region and helps every active descriptor to
+completion; it does not need a whole-index or whole-allocator reconstruction.
 
 An S3 backend can create immutable objects with `If-None-Match: *` and replace
 a fixed anchor object with `If-Match`. ETags remain opaque version tokens.
