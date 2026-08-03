@@ -104,6 +104,20 @@ or fencing proves that the old command cannot arrive.
 The complete SCSI backend will own append allocation and map prepare/stabilize
 to cache synchronization.
 
+The volume header is a canonical 512-byte envelope embedded in one physical
+logical block. Blocks 0 and 1 hold immutable header copies, block 2 is the
+publication anchor, and blocks 3 through 9 are the voting region. Full-block
+allocator pages begin at block 10. The extent arena starts at the next extent
+boundary; version 1 defaults to 1 MiB extents and records its exact geometry in
+the header.
+
+Each allocator page is bound to one page index and the corresponding complete,
+non-overlapping range of volume extents. Its monotonically changing generation
+and all entries participate in the checksum and full-block CAW. Extents move
+through `free`, `claimed`, `live`, and `retired`; claim identity, owner identity,
+owner incarnation, base generation, and owner epoch remain stable until a
+retired extent is proven safe to return to `free`.
+
 An S3 backend can create immutable objects with `If-None-Match: *` and replace
 a fixed anchor object with `If-Match`. ETags remain opaque version tokens.
 Every backend runs the same contract scenarios in addition to its protocol

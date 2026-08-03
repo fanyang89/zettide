@@ -3,6 +3,7 @@
 const builtin = @import("builtin");
 
 pub const store = @import("store.zig");
+pub const allocation_format = @import("allocation_format.zig");
 pub const anchor = @import("anchor.zig");
 pub const commit = @import("commit.zig");
 pub const conditional_block = @import("conditional_block.zig");
@@ -20,9 +21,11 @@ pub const tree = @import("tree.zig");
 pub const voting = @import("voting.zig");
 pub const voting_protocol = @import("voting_protocol.zig");
 pub const voting_region = @import("voting_region.zig");
+pub const volume_format = @import("volume_format.zig");
 
 test {
     _ = store;
+    _ = allocation_format;
     _ = anchor;
     _ = commit;
     _ = conditional_block;
@@ -40,4 +43,5 @@ test {
     _ = voting;
     _ = voting_protocol;
     _ = voting_region;
+    _ = volume_format;
 }
