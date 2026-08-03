@@ -112,9 +112,12 @@ fn patternedId(seed: u8) [16]u8 {
 
 fn initialAnchor() cawfs.store.Anchor {
     return cawfs.anchor.encode(.{
+        .revision = 0,
         .generation = 0,
         .transaction_id = @splat(0),
         .head = null,
+        .mode = .active,
+        .mode_epoch = 1,
     });
 }
 
@@ -123,9 +126,12 @@ fn nextAnchor(
     head: cawfs.store.ObjectRef,
 ) cawfs.store.Anchor {
     return cawfs.anchor.encode(.{
+        .revision = 1,
         .generation = 1,
         .transaction_id = transaction_id,
         .head = head,
+        .mode = .active,
+        .mode_epoch = 1,
     });
 }
 
@@ -449,7 +455,7 @@ test "non-applied indeterminate publication cannot stabilize" {
     try std.testing.expectError(error.PublicationRequiresResolution, batch.stabilize());
 }
 
-test "publish rejects noncanonical anchor generation and transaction before CAW" {
+test "publish rejects noncanonical anchor state before CAW" {
     var fixture = try Fixture.init(std.testing.allocator, 4096);
     defer fixture.deinit();
     const store = fixture.backend.conditionalStore();
@@ -469,9 +475,12 @@ test "publish rejects noncanonical anchor generation and transaction before CAW"
     );
     snapshot.version.bytes[cawfs.store.anchor_size] = 0;
     const wrong_generation = cawfs.anchor.encode(.{
+        .revision = 2,
         .generation = 2,
         .transaction_id = txn_a,
         .head = head,
+        .mode = .active,
+        .mode_epoch = 1,
     });
     try std.testing.expectError(
         error.InvalidAnchorGeneration,
@@ -481,6 +490,32 @@ test "publish rejects noncanonical anchor generation and transaction before CAW"
     try std.testing.expectError(
         error.InvalidAnchorTransaction,
         batch.publish(snapshot.version.bytes, &wrong_transaction),
+    );
+    const wrong_revision = cawfs.anchor.encode(.{
+        .revision = 2,
+        .generation = 1,
+        .transaction_id = txn_a,
+        .head = head,
+        .mode = .active,
+        .mode_epoch = 1,
+    });
+    try std.testing.expectError(
+        error.InvalidAnchorRevision,
+        batch.publish(snapshot.version.bytes, &wrong_revision),
+    );
+    const wrong_mode = cawfs.anchor.encode(.{
+        .revision = 2,
+        .generation = 1,
+        .transaction_id = txn_a,
+        .head = head,
+        .mode = .quiescing,
+        .mode_epoch = 2,
+        .control_operation_id = txn_a,
+        .control_ref = head,
+    });
+    try std.testing.expectError(
+        error.InvalidAnchorMode,
+        batch.publish(snapshot.version.bytes, &wrong_mode),
     );
     try std.testing.expectEqual(before, fixture.model.cawCount());
 }
@@ -762,9 +797,12 @@ test "an earlier publication stabilizes through a durable descendant" {
     const commit_b = try batch_b.putImmutable(&record_b);
     try batch_b.prepare();
     const anchor_b = cawfs.anchor.encode(.{
+        .revision = 2,
         .generation = 2,
         .transaction_id = txn_b,
         .head = commit_b,
+        .mode = .active,
+        .mode_epoch = 1,
     });
     try std.testing.expectEqual(
         cawfs.store.PublishResult.committed,
@@ -821,9 +859,12 @@ test "stabilization rejects malformed descendant ancestry" {
     const commit_b = try batch_b.putImmutable(&malformed_record_b);
     try batch_b.prepare();
     const anchor_b = cawfs.anchor.encode(.{
+        .revision = 2,
         .generation = 2,
         .transaction_id = txn_b,
         .head = commit_b,
+        .mode = .active,
+        .mode_epoch = 1,
     });
     try std.testing.expectEqual(
         cawfs.store.PublishResult.committed,

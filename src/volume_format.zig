@@ -8,7 +8,7 @@ const store = @import("store.zig");
 const voting_region = @import("voting_region.zig");
 
 pub const encoded_size = 512;
-pub const format_version: u16 = 1;
+pub const format_version: u16 = 2;
 pub const default_extent_size: u32 = 1024 * 1024;
 
 const magic = "ZCAWVH\x00\x00";
@@ -361,7 +361,7 @@ test "volume layout adapts claim stripes without penalizing tiny devices" {
     try std.testing.expectEqual(@as(u32, 64), realistic.claim_stripe_count);
 }
 
-test "volume header v1 encoding matches the golden vector" {
+test "volume header v2 encoding matches the golden vector" {
     const header = try Header.init(testId(), 123456, .{
         .logical_block_size = 512,
         .block_count = 4 * 1024 * 1024,
@@ -369,7 +369,7 @@ test "volume header v1 encoding matches the golden vector" {
     const encoded = try encode(header);
     var expected: Encoded = @splat(0);
     @memcpy(expected[0..8], "ZCAWVH\x00\x00");
-    expected[9] = 1;
+    expected[9] = 2;
     expected[12] = 2;
     @memcpy(expected[16..32], &testId());
     expected[34] = 2;
@@ -394,10 +394,10 @@ test "volume header v1 encoding matches the golden vector" {
     expected[151] = 0xff;
     expected[157..160].* = .{ 1, 0xe2, 0x40 };
     @memcpy(expected[480..512], &[_]u8{
-        0x49, 0xfa, 0x28, 0x55, 0xf1, 0x13, 0x49, 0xd7,
-        0x3c, 0x12, 0x02, 0xe0, 0x47, 0x1a, 0x7c, 0x42,
-        0x75, 0x54, 0xa4, 0x93, 0xa0, 0xbf, 0xde, 0x09,
-        0xb2, 0x32, 0xad, 0x00, 0xa4, 0x69, 0x35, 0xb8,
+        0x8c, 0x11, 0x94, 0x77, 0x1b, 0x76, 0x7a, 0x48,
+        0x6f, 0x23, 0x9c, 0xaf, 0x66, 0x2a, 0x25, 0x40,
+        0xe0, 0x04, 0xa2, 0xef, 0x6a, 0xc3, 0xb3, 0xd8,
+        0x42, 0x01, 0xa3, 0xbc, 0x06, 0x23, 0x68, 0x3f,
     });
     try std.testing.expectEqualSlices(u8, &expected, &encoded);
     try std.testing.expectEqual(header, try decode(&expected));
@@ -422,6 +422,9 @@ test "volume header rejects corruption and physical padding" {
     }, default_extent_size);
     var physical = try encodePhysical(std.testing.allocator, header);
     defer physical.deinit();
+    physical.bytes[9] = format_version - 1;
+    try std.testing.expectError(error.UnsupportedFormatVersion, decodePhysical(physical.bytes));
+    physical.bytes[9] = format_version;
     physical.bytes[100] ^= 1;
     try std.testing.expectError(error.ChecksumMismatch, decodePhysical(physical.bytes));
     physical.bytes[100] ^= 1;

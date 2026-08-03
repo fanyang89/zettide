@@ -74,8 +74,9 @@ pub const ScsiStore = struct {
     /// formatting operation, not transaction publication.
     pub fn formatAnchor(self: *ScsiStore, initial: *const store_mod.Anchor) !AnchorFormatResult {
         const state = try anchor_format.decode(initial);
-        if (state.generation != 0 or state.head != null or
-            !allZero(&state.transaction_id))
+        if (state.revision != 0 or state.generation != 0 or state.head != null or
+            !allZero(&state.transaction_id) or state.mode != .active or
+            state.mode_epoch != 1)
         {
             return error.InvalidInitialAnchor;
         }
@@ -185,6 +186,9 @@ pub const ScsiStore = struct {
         const logical = try validatePhysicalAnchor(base_version, self.header.volume_id);
         const base_state = try anchor_format.decode(&logical);
         try validateAnchorState(base_state);
+        if (base_state.mode != .active) return error.VolumeNotActive;
+        const publication_revision = std.math.add(u64, base_state.revision, 1) catch
+            return error.RevisionOverflow;
         const publication_generation = std.math.add(u64, base_state.generation, 1) catch
             return error.GenerationOverflow;
         var base = try store_mod.OwnedBytes.dupe(allocator, base_version);
@@ -195,7 +199,10 @@ pub const ScsiStore = struct {
             .store = self,
             .transaction_id = transaction_id,
             .base_version = base,
+            .base_revision = base_state.revision,
             .base_generation = base_state.generation,
+            .base_mode_epoch = base_state.mode_epoch,
+            .publication_revision = publication_revision,
             .publication_generation = publication_generation,
             .reset_epoch = self.conditional_transport.resetEpoch(),
         };
@@ -266,7 +273,10 @@ const ScsiWriteBatch = struct {
     store: *ScsiStore,
     transaction_id: store_mod.TransactionId,
     base_version: store_mod.OwnedBytes,
+    base_revision: u64,
     base_generation: u64,
+    base_mode_epoch: u64,
+    publication_revision: u64,
     publication_generation: u64,
     reset_epoch: u64,
     objects: std.ArrayList(StagedObject) = .empty,
@@ -436,12 +446,17 @@ const ScsiWriteBatch = struct {
         const expected = try validatePhysicalAnchor(expected_version, self.store.header.volume_id);
         const previous = try anchor_format.decode(&expected);
         try validateAnchorState(previous);
+        if (previous.mode != .active) return error.VolumeNotActive;
+        if (previous.revision != self.base_revision) return error.BatchBaseVersionMismatch;
         if (previous.generation != self.base_generation) return error.BatchBaseVersionMismatch;
         const next = try anchor_format.decode(next_anchor);
         try validateAnchorState(next);
+        if (next.mode != .active or next.mode_epoch != self.base_mode_epoch)
+            return error.InvalidAnchorMode;
         const expected_generation = std.math.add(u64, previous.generation, 1) catch
             return error.GenerationOverflow;
         if (next.generation != expected_generation) return error.InvalidAnchorGeneration;
+        if (next.revision != self.publication_revision) return error.InvalidAnchorRevision;
         if (!std.mem.eql(u8, &next.transaction_id, &self.transaction_id))
             return error.InvalidAnchorTransaction;
         if (next.head == null) return error.InvalidAnchorState;
@@ -494,6 +509,8 @@ const ScsiWriteBatch = struct {
             self.backing_allocator,
             .{
                 .base_generation = self.base_generation,
+                .base_revision = self.base_revision,
+                .base_mode_epoch = self.base_mode_epoch,
                 .transaction_id = self.transaction_id,
             },
             .{},
@@ -541,12 +558,7 @@ fn validatePhysicalAnchor(physical: []const u8, volume_id: [16]u8) !store_mod.An
 }
 
 fn validateAnchorState(state: anchor_format.State) !void {
-    if (state.generation == 0) {
-        if (state.head != null or !allZero(&state.transaction_id))
-            return error.InvalidAnchorState;
-    } else if (state.head == null or allZero(&state.transaction_id)) {
-        return error.InvalidAnchorState;
-    }
+    anchor_format.validate(state) catch return error.InvalidAnchorState;
 }
 
 fn makeClaimId(

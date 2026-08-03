@@ -30,6 +30,12 @@ anchor publication. Overwrite, multi-extent files, mutable `.data` allocations,
 orphan reclaim and garbage collection, and general POSIX data semantics are not
 implemented. Writable ownership and takeover still require external fencing.
 
+Version 2 volumes use an anchor revision separate from filesystem generation
+and persist an `active`, `quiescing`, `maintenance`, or `blocked` service mode.
+Normal transactions are accepted only in `active` mode and cannot alter the
+mode epoch. The administrative transition API and destructive garbage
+collection are not implemented yet.
+
 ## Development
 
 The project requires Zig 0.16.0 and Task 3.48.0.

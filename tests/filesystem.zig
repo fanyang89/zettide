@@ -33,9 +33,12 @@ const file_options = filesystem.CreateFileOptions{
 
 fn initialAnchor() cawfs.store.Anchor {
     return cawfs.anchor.encode(.{
+        .revision = 0,
         .generation = 0,
         .transaction_id = @splat(0),
         .head = null,
+        .mode = .active,
+        .mode_epoch = 1,
     });
 }
 

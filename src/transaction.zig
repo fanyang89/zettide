@@ -26,6 +26,8 @@ pub const Error = error{
     InvalidAnchorState,
     InvalidState,
     GenerationOverflow,
+    RevisionOverflow,
+    VolumeNotActive,
 };
 
 /// A Transaction has one caller and follows Zig's move-only convention. It
@@ -34,7 +36,9 @@ pub const Transaction = struct {
     store: store_mod.ConditionalStore,
     allocator: std.mem.Allocator,
     transaction_id: store_mod.TransactionId,
+    base_revision: u64,
     base_generation: u64,
+    base_mode_epoch: u64,
     base_head: ?store_mod.ObjectRef,
     version: store_mod.OwnedBytes,
     batch: store_mod.WriteBatch,
@@ -50,7 +54,7 @@ pub const Transaction = struct {
         var snapshot = try store.readAnchor(allocator);
         errdefer snapshot.deinit();
         const base = try anchor.decode(&snapshot.anchor);
-        if ((base.generation == 0) != (base.head == null)) return error.InvalidAnchorState;
+        if (base.mode != .active) return error.VolumeNotActive;
         if (base.head) |head| {
             var bytes = try store.loadImmutable(head, allocator);
             defer bytes.deinit();
@@ -66,7 +70,9 @@ pub const Transaction = struct {
             .store = store,
             .allocator = allocator,
             .transaction_id = transaction_id,
+            .base_revision = base.revision,
             .base_generation = base.generation,
+            .base_mode_epoch = base.mode_epoch,
             .base_head = base.head,
             .version = snapshot.version,
             .batch = batch,
@@ -110,6 +116,8 @@ pub const Transaction = struct {
 
         const generation = std.math.add(u64, self.base_generation, 1) catch
             return error.GenerationOverflow;
+        const revision = std.math.add(u64, self.base_revision, 1) catch
+            return error.RevisionOverflow;
         const encoded = commit_mod.encode(.{
             .generation = generation,
             .transaction_id = self.transaction_id,
@@ -121,9 +129,12 @@ pub const Transaction = struct {
         self.prepared_commit = commit_ref;
 
         const next = anchor.encode(.{
+            .revision = revision,
             .generation = generation,
             .transaction_id = self.transaction_id,
             .head = commit_ref,
+            .mode = .active,
+            .mode_epoch = self.base_mode_epoch,
         });
         const result = try self.batch.publish(self.version.bytes, &next);
         switch (result) {
@@ -152,7 +163,9 @@ pub const Transaction = struct {
             else => return error.InvalidState,
         };
         const attempt: resolution.Attempt = .{
+            .base_revision = self.base_revision,
             .base_generation = self.base_generation,
+            .base_mode_epoch = self.base_mode_epoch,
             .transaction_id = self.transaction_id,
         };
         const result = if (terminal)

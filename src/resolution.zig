@@ -6,7 +6,9 @@ const commit = @import("commit.zig");
 const store_mod = @import("store.zig");
 
 pub const Attempt = struct {
+    base_revision: u64,
     base_generation: u64,
+    base_mode_epoch: u64,
     transaction_id: store_mod.TransactionId,
 };
 
@@ -29,6 +31,10 @@ pub const Error = error{
     TransactionGenerationMismatch,
     BrokenAncestry,
     AncestryTooDeep,
+    InvalidAnchorState,
+    InvalidAttempt,
+    RevisionOverflow,
+    ModeEpochRegression,
 };
 
 /// Resolves whether one specific publish request entered the current commit
@@ -60,6 +66,9 @@ fn resolveInternal(
     options: Options,
     request_may_be_in_flight: bool,
 ) !Resolution {
+    if (attempt.base_revision < attempt.base_generation or attempt.base_mode_epoch == 0)
+        return error.InvalidAttempt;
+    if (attempt.base_revision == std.math.maxInt(u64)) return error.RevisionOverflow;
     const attempted_generation = std.math.add(u64, attempt.base_generation, 1) catch
         return error.GenerationOverflow;
     var snapshot = try store.readAnchor(allocator);
@@ -67,8 +76,16 @@ fn resolveInternal(
     const current = try anchor.decode(&snapshot.anchor);
 
     if (current.generation < attempt.base_generation) return .not_committed;
-    if (current.generation == attempt.base_generation)
+    if (current.generation == attempt.base_generation) {
+        if (current.revision != attempt.base_revision) return .not_committed;
+        if (current.mode_epoch != attempt.base_mode_epoch) return .not_committed;
         return if (request_may_be_in_flight) .pending else .not_committed;
+    }
+    const generation_delta = current.generation - attempt.base_generation;
+    const minimum_revision = std.math.add(u64, attempt.base_revision, generation_delta) catch
+        return error.RevisionOverflow;
+    if (current.revision < minimum_revision) return error.InvalidAnchorState;
+    if (current.mode_epoch < attempt.base_mode_epoch) return error.ModeEpochRegression;
 
     const distance = current.generation - attempted_generation + 1;
     const max_depth = std.math.cast(u64, options.max_depth) orelse std.math.maxInt(u64);

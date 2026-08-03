@@ -12,12 +12,23 @@ Backends expose version tokens and object references as opaque values. The
 transaction layer never interprets physical LBAs, SCSI status, object-store
 keys, ETags, or protocol-specific errors.
 
-The logical anchor is a fixed 512-byte envelope. The SCSI backend stores its
-meaningful prefix in a checksummed physical-block record that also contains the
-volume ID, and uses that complete 512- or 4096-byte block as its opaque version
-token. Every published envelope includes a monotonically increasing generation
-and transaction identifier, so a physical anchor value is never reused or
-accepted on another volume.
+The logical anchor is a fixed 512-byte envelope. Version 2 separates a
+monotonically increasing anchor revision from filesystem commit generation and
+also records the service mode, mode epoch, and optional maintenance operation
+and control-object reference. The SCSI backend stores the meaningful prefix in
+a checksummed physical-block record that also contains the volume ID, and uses
+that complete 512- or 4096-byte block as its opaque version token. Every
+filesystem publication increments both revision and generation. A future
+maintenance transition will increment revision without inventing a filesystem
+commit. Physical anchor values are never reused or accepted on another volume.
+
+The service modes are `active`, `quiescing`, `maintenance`, and `blocked`.
+Normal transactions may begin and publish only in `active`, must preserve the
+mode epoch, and cannot attach maintenance control state. A revision change at
+the same filesystem generation fences an older expected physical anchor and
+therefore resolves its publication as not committed. This slice defines and
+enforces the format boundary; the administrative transition API is not yet
+implemented.
 
 The contract distinguishes a definite conflict from an indeterminate outcome.
 Indeterminate publication is resolved using the transaction identifier and the
@@ -41,11 +52,12 @@ when no other writer advances it.
 
 ## Transaction Coordination
 
-The transaction coordinator snapshots one base anchor and creates its write
-batch with that exact opaque version token. It stages immutable objects, writes
-the commit record last, prepares the batch, conditionally publishes the next
-anchor, and stabilizes a definite winner. The published root must either belong
-to the transaction's batch or already be loadable from the store.
+The transaction coordinator snapshots one active base anchor and creates its
+write batch with that exact opaque version token. It stages immutable objects,
+writes the commit record last, prepares the batch, conditionally publishes the
+next anchor revision and filesystem generation, and stabilizes a definite
+winner. The published root must either belong to the transaction's batch or
+already be loadable from the store.
 
 A transaction is single-use. Conflicts and confirmed non-publications are
 terminal. An indeterminate publication must be resolved before stabilization.
@@ -145,7 +157,7 @@ over one complete image.
 The model shares one visible image, stable image, crash operation, durability
 barrier, and separate delayed-command queues between its two transport views.
 
-The volume header is a canonical 512-byte envelope embedded in one physical
+The version 2 volume header is a canonical 512-byte envelope embedded in one physical
 logical block. Blocks 0 and 1 hold immutable header copies, block 2 is the
 publication anchor, and blocks 3 through 9 are the voting region. Persistent
 claim gates, the global claim index, and full-block allocator pages follow in

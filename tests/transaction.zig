@@ -11,9 +11,12 @@ const txn_b: TransactionId = .{ 0xb2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 
 fn initialAnchor() cawfs.store.Anchor {
     return cawfs.anchor.encode(.{
+        .revision = 0,
         .generation = 0,
         .transaction_id = @splat(0),
         .head = null,
+        .mode = .active,
+        .mode_epoch = 1,
     });
 }
 
@@ -34,6 +37,7 @@ test "transaction publishes and stabilizes an immutable root" {
     var snapshot = try store.readAnchor(std.testing.allocator);
     defer snapshot.deinit();
     const current = try cawfs.anchor.decode(&snapshot.anchor);
+    try std.testing.expectEqual(@as(u64, 1), current.revision);
     try std.testing.expectEqual(@as(u64, 1), current.generation);
     try std.testing.expectEqual(txn_a, current.transaction_id);
     try std.testing.expect(cawfs.store.ObjectRef.eql(transaction.candidateCommitRef().?, current.head.?));
@@ -223,14 +227,17 @@ test "transaction rejects an unavailable root" {
 
 test "transaction rejects invalid anchor semantics and terminal reuse" {
     const invalid = cawfs.anchor.encode(.{
+        .revision = 1,
         .generation = 1,
         .transaction_id = txn_a,
         .head = null,
+        .mode = .active,
+        .mode_epoch = 1,
     });
     var invalid_model = ModelStore.init(std.testing.allocator, invalid);
     defer invalid_model.deinit();
     try std.testing.expectError(
-        error.InvalidAnchorState,
+        error.InvalidGenerationState,
         Transaction.begin(invalid_model.conditionalStore(), std.testing.allocator, txn_b),
     );
 
@@ -252,9 +259,12 @@ test "transaction rejects invalid anchor semantics and terminal reuse" {
 
 test "transaction validates the current head commit" {
     const missing = cawfs.anchor.encode(.{
+        .revision = 2,
         .generation = 1,
         .transaction_id = txn_a,
         .head = .{},
+        .mode = .active,
+        .mode_epoch = 1,
     });
     var model = ModelStore.init(std.testing.allocator, missing);
     defer model.deinit();
@@ -283,9 +293,12 @@ test "transaction rejects a head with an impossible parent" {
     const head = try batch.putImmutable(&encoded);
     try batch.prepare();
     const invalid = cawfs.anchor.encode(.{
+        .revision = 2,
         .generation = 2,
         .transaction_id = txn_a,
         .head = head,
+        .mode = .active,
+        .mode_epoch = 1,
     });
     try std.testing.expectEqual(
         cawfs.store.PublishResult.committed,
@@ -296,5 +309,46 @@ test "transaction rejects a head with an impossible parent" {
     try std.testing.expectError(
         error.InvalidAnchorState,
         Transaction.begin(store, std.testing.allocator, txn_b),
+    );
+}
+
+test "maintenance revision fences old publications and blocks transactions" {
+    var model = ModelStore.init(std.testing.allocator, initialAnchor());
+    defer model.deinit();
+    const store = model.conditionalStore();
+    var previous = try store.readAnchor(std.testing.allocator);
+    defer previous.deinit();
+    var batch = try store.beginBatch(std.testing.allocator, txn_a, previous.version.bytes);
+    defer batch.deinit();
+    const control = try batch.putImmutable("maintenance intent");
+    try batch.prepare();
+    const quiescing = cawfs.anchor.encode(.{
+        .revision = 1,
+        .generation = 0,
+        .transaction_id = @splat(0),
+        .head = null,
+        .mode = .quiescing,
+        .mode_epoch = 2,
+        .control_operation_id = txn_a,
+        .control_ref = control,
+    });
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.committed,
+        try batch.publish(previous.version.bytes, &quiescing),
+    );
+    try batch.stabilize();
+
+    try std.testing.expectError(
+        error.VolumeNotActive,
+        Transaction.begin(store, std.testing.allocator, txn_b),
+    );
+    try std.testing.expectEqual(
+        cawfs.resolution.Resolution.not_committed,
+        try cawfs.resolution.resolve(
+            store,
+            std.testing.allocator,
+            .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_b },
+            .{},
+        ),
     );
 }

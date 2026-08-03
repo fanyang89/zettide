@@ -57,7 +57,10 @@ pub const WriteWholeFileOptions = struct {
 /// must outlive the Snapshot. Read methods own no resources after returning.
 pub const Snapshot = struct {
     store: store_mod.ConditionalStore,
+    anchor_revision: u64,
     generation: u64,
+    mode: anchor_mod.Mode,
+    mode_epoch: u64,
     commit_ref: store_mod.ObjectRef,
     root_ref: store_mod.ObjectRef,
     root: format_mod.FilesystemRoot,
@@ -175,7 +178,6 @@ pub fn open(
     defer anchor_snapshot.deinit();
     const anchor = try anchor_mod.decode(&anchor_snapshot.anchor);
     if (anchor.generation == 0 and anchor.head == null) return error.Unformatted;
-    if ((anchor.generation == 0) != (anchor.head == null)) return error.InvalidAnchorState;
     const commit_ref = anchor.head.?;
 
     var commit_bytes = try store.loadImmutable(commit_ref, allocator);
@@ -199,7 +201,10 @@ pub fn open(
 
     const partial = Snapshot{
         .store = store,
+        .anchor_revision = anchor.revision,
         .generation = anchor.generation,
+        .mode = anchor.mode,
+        .mode_epoch = anchor.mode_epoch,
         .commit_ref = commit_ref,
         .root_ref = commit.root,
         .root = root,
@@ -269,7 +274,9 @@ pub const Mutator = struct {
         snapshot: Snapshot,
     ) Error!Mutator {
         if (!transaction.store.sameBackend(snapshot.store) or
-            transaction.base_generation != snapshot.generation)
+            transaction.base_revision != snapshot.anchor_revision or
+            transaction.base_generation != snapshot.generation or
+            transaction.base_mode_epoch != snapshot.mode_epoch)
         {
             return error.StaleSnapshot;
         }
