@@ -4,6 +4,7 @@ ZETTIDE_EXTERNAL_ROOT=${ZETTIDE_EXTERNAL_ROOT:-${DEVDRIVE_EXTERNAL_ROOT:-}}
 ZETTIDE_KEEP_TEST_ARTIFACTS=${ZETTIDE_KEEP_TEST_ARTIFACTS:-${DEVDRIVE_KEEP_TEST_ARTIFACTS:-0}}
 ZETTIDE_TEST_LOG_DIR=${ZETTIDE_TEST_LOG_DIR:-${DEVDRIVE_TEST_LOG_DIR:-}}
 ZETTIDE_ALLOW_OTHER=${ZETTIDE_ALLOW_OTHER:-${DEVDRIVE_ALLOW_OTHER:-0}}
+ZETTIDE_MOUNT_METRICS=${ZETTIDE_MOUNT_METRICS:-0}
 
 external_skip_or_fail() {
     local reason=$1
@@ -20,7 +21,7 @@ external_require_root() {
     if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
         local environment=(env "PATH=$PATH")
         local name
-        for name in ZETTIDE_EXTERNAL_ROOT ZETTIDE_KEEP_TEST_ARTIFACTS ZETTIDE_TEST_LOG_DIR; do
+        for name in ZETTIDE_EXTERNAL_ROOT ZETTIDE_KEEP_TEST_ARTIFACTS ZETTIDE_TEST_LOG_DIR ZETTIDE_MOUNT_METRICS; do
             if [[ -v $name ]]; then
                 environment+=("$name=${!name}")
             fi
@@ -148,6 +149,7 @@ external_start_mount() {
     : >"$external_mount_log"
     local mount_args=(mount "$external_image" "$external_mount_dir")
     [[ $ZETTIDE_ALLOW_OTHER != 1 ]] || mount_args+=(--allow-other)
+    [[ $ZETTIDE_MOUNT_METRICS != 1 ]] || mount_args+=(--metrics)
     "$external_exe" "${mount_args[@]}" >"$external_mount_log" 2>&1 &
     external_mount_pid=$!
     local attempt

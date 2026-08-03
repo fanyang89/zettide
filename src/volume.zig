@@ -26,6 +26,13 @@ pub const MountOptions = struct {
     journal_durability: block_device.Durability = .{ .writeback = .{} },
 };
 
+pub const PipelineMetrics = struct {
+    logical_write_calls: u64,
+    logical_write_bytes: u64,
+    journaled: bool,
+    block_device: block_device.PipelineMetrics,
+};
+
 pub const Volume = struct {
     const Backing = enum { file, pool };
 
@@ -57,6 +64,8 @@ pub const Volume = struct {
     pool_device: pool_block_device.PoolBlockDevice = undefined,
     crypto_context: ?*volume_crypto.Context = null,
     crypto_allocator: ?std.mem.Allocator = null,
+    logical_write_calls: std.atomic.Value(u64) = .init(0),
+    logical_write_bytes: std.atomic.Value(u64) = .init(0),
 
     pub const RedoJournalOptions = struct {
         length: u64,
@@ -336,6 +345,8 @@ pub const Volume = struct {
         result.pool_device = undefined;
         result.crypto_context = crypto_context;
         result.crypto_allocator = if (crypto_context != null) allocator else null;
+        result.logical_write_calls = .init(0);
+        result.logical_write_bytes = .init(0);
     }
 
     pub fn inspectPoolHeader(io: Io, set: *pool_member_set.PoolMemberSet) !container.Header {
@@ -430,6 +441,8 @@ pub const Volume = struct {
         result.pool_device = undefined;
         result.crypto_context = null;
         result.crypto_allocator = null;
+        result.logical_write_calls = .init(0);
+        result.logical_write_bytes = .init(0);
     }
 
     pub fn setFallbackOwner(self: *Volume, uid: u32, gid: u32) void {
@@ -586,6 +599,15 @@ pub const Volume = struct {
         self.closed = true;
 
         if (first_error) |err| return err;
+    }
+
+    pub fn pipelineMetrics(self: *const Volume) PipelineMetrics {
+        return .{
+            .logical_write_calls = self.logical_write_calls.load(.acquire),
+            .logical_write_bytes = self.logical_write_bytes.load(.acquire),
+            .journaled = self.backing == .file and self.device.isJournaled(),
+            .block_device = if (self.backing == .file) self.device.pipelineMetrics() else .{},
+        };
     }
 
     pub fn deinit(self: *Volume) void {
@@ -1481,6 +1503,8 @@ pub const Volume = struct {
         try self.replaceReservation(head, result.head);
         self.updateOpenMetadata(handle.object_id, result.head.metadata);
         try mutation.commit();
+        _ = self.logical_write_calls.fetchAdd(1, .monotonic);
+        _ = self.logical_write_bytes.fetchAdd(result.amount, .monotonic);
         return result.amount;
     }
 
@@ -2408,6 +2432,15 @@ test "create, write, reopen, and check volume" {
     var file: FileHandle = undefined;
     try volume.openFile(&file, "/hello", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 1000, 1000);
     try std.testing.expectEqual(@as(usize, 5), try volume.writeFile(&file, "hello", 0));
+    const metrics = volume.pipelineMetrics();
+    try std.testing.expectEqual(@as(u64, 1), metrics.logical_write_calls);
+    try std.testing.expectEqual(@as(u64, 5), metrics.logical_write_bytes);
+    try std.testing.expect(!metrics.journaled);
+    try std.testing.expect(metrics.block_device.littlefs_program_bytes >= 5);
+    try std.testing.expectEqual(
+        metrics.block_device.littlefs_program_bytes,
+        metrics.block_device.backing_write_bytes,
+    );
     try volume.syncFile(&file);
     try volume.closeFile(&file);
 

@@ -511,10 +511,13 @@ fn deviceCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
 fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len < 2) return error.InvalidArguments;
     var allow_other = false;
+    var metrics = false;
     var access_time: zettide.volume.AccessTimePolicy = .relatime;
     for (args[2..]) |option| {
         if (std.mem.eql(u8, option, "--allow-other")) {
             allow_other = true;
+        } else if (std.mem.eql(u8, option, "--metrics")) {
+            metrics = true;
         } else if (std.mem.eql(u8, option, "--noatime")) {
             access_time = .noatime;
         } else {
@@ -539,7 +542,36 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
             .update_access_time = access_time == .relatime,
         },
     );
+    if (metrics) {
+        try volume.sync();
+        try printPipelineMetrics(stdout, volume.pipelineMetrics());
+        try stdout.flush();
+    }
     try volume.close();
+}
+
+fn printPipelineMetrics(writer: *Io.Writer, metrics: zettide.volume.PipelineMetrics) !void {
+    const block = metrics.block_device;
+    try writer.print(
+        "pipeline_metrics logical_write_calls={} logical_write_bytes={} journaled={} littlefs_program_calls={} littlefs_program_bytes={} direct_program_bytes={} redo_transactions={} redo_flushes={} redo_record_bytes={} redo_anchor_bytes={} checkpoints={} checkpoint_home_bytes={} backing_write_bytes={} logical_sync_calls={} backing_sync_calls={}\n",
+        .{
+            metrics.logical_write_calls,
+            metrics.logical_write_bytes,
+            metrics.journaled,
+            block.littlefs_program_calls,
+            block.littlefs_program_bytes,
+            block.direct_program_bytes,
+            block.redo_transactions,
+            block.redo_flushes,
+            block.redo_record_bytes,
+            block.redo_anchor_bytes,
+            block.checkpoints,
+            block.checkpoint_home_bytes,
+            block.backing_write_bytes,
+            block.logical_sync_calls,
+            block.backing_sync_calls,
+        },
+    );
 }
 
 fn unmountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -771,7 +803,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide create <container> --size <size> [--label <label>] [--name-profile <profile>]
         \\  zettide info <container>
         \\  zettide check <container>
-        \\  zettide mount <container> <mountpoint> [--allow-other] [--noatime]
+        \\  zettide mount <container> <mountpoint> [--allow-other] [--metrics] [--noatime]
         \\  zettide unmount <mountpoint>
         \\  zettide device inspect <device>
         \\  zettide pool inspect --device <device>... [--name-profile <profile>]

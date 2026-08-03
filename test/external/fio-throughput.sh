@@ -5,6 +5,7 @@ mode=$1
 exe=$2
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_dir/common.sh"
+ZETTIDE_MOUNT_METRICS=1
 
 external_suite=fio-throughput
 external_mode=$mode

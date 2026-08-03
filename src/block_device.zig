@@ -3,6 +3,7 @@ const Io = std.Io;
 const File = Io.File;
 const container = @import("container.zig");
 const file_io = @import("file_io.zig");
+const redo_journal = @import("redo_journal.zig");
 const redo_runtime = @import("redo_runtime.zig");
 
 pub const Durability = union(enum) {
@@ -20,6 +21,53 @@ pub const FileIoStats = file_io.Stats;
 pub const WritebackState = struct {
     accepted_epoch: u64,
     durable_epoch: u64,
+};
+
+pub const PipelineMetrics = struct {
+    littlefs_program_calls: u64 = 0,
+    littlefs_program_bytes: u64 = 0,
+    direct_program_bytes: u64 = 0,
+    redo_transactions: u64 = 0,
+    redo_flushes: u64 = 0,
+    redo_record_bytes: u64 = 0,
+    redo_anchor_bytes: u64 = 0,
+    checkpoints: u64 = 0,
+    checkpoint_home_bytes: u64 = 0,
+    backing_write_bytes: u64 = 0,
+    logical_sync_calls: u64 = 0,
+    backing_sync_calls: u64 = 0,
+};
+
+const AtomicPipelineMetrics = struct {
+    littlefs_program_calls: std.atomic.Value(u64) = .init(0),
+    littlefs_program_bytes: std.atomic.Value(u64) = .init(0),
+    direct_program_bytes: std.atomic.Value(u64) = .init(0),
+    redo_transactions: std.atomic.Value(u64) = .init(0),
+    redo_flushes: std.atomic.Value(u64) = .init(0),
+    redo_record_bytes: std.atomic.Value(u64) = .init(0),
+    redo_anchor_bytes: std.atomic.Value(u64) = .init(0),
+    checkpoints: std.atomic.Value(u64) = .init(0),
+    checkpoint_home_bytes: std.atomic.Value(u64) = .init(0),
+    backing_write_bytes: std.atomic.Value(u64) = .init(0),
+    logical_sync_calls: std.atomic.Value(u64) = .init(0),
+    backing_sync_calls: std.atomic.Value(u64) = .init(0),
+
+    fn snapshot(self: *const AtomicPipelineMetrics) PipelineMetrics {
+        return .{
+            .littlefs_program_calls = self.littlefs_program_calls.load(.acquire),
+            .littlefs_program_bytes = self.littlefs_program_bytes.load(.acquire),
+            .direct_program_bytes = self.direct_program_bytes.load(.acquire),
+            .redo_transactions = self.redo_transactions.load(.acquire),
+            .redo_flushes = self.redo_flushes.load(.acquire),
+            .redo_record_bytes = self.redo_record_bytes.load(.acquire),
+            .redo_anchor_bytes = self.redo_anchor_bytes.load(.acquire),
+            .checkpoints = self.checkpoints.load(.acquire),
+            .checkpoint_home_bytes = self.checkpoint_home_bytes.load(.acquire),
+            .backing_write_bytes = self.backing_write_bytes.load(.acquire),
+            .logical_sync_calls = self.logical_sync_calls.load(.acquire),
+            .backing_sync_calls = self.backing_sync_calls.load(.acquire),
+        };
+    }
 };
 
 const FlushResult = anyerror!void;
@@ -65,6 +113,7 @@ pub const FileBlockDevice = struct {
     writeback_error: ?anyerror = null,
     accepted_epoch: std.atomic.Value(u64) = .init(0),
     durable_epoch: std.atomic.Value(u64) = .init(0),
+    pipeline_metrics: AtomicPipelineMetrics = .{},
 
     pub fn init(io: Io, file: File, header: container.Header) FileBlockDevice {
         var backend = file_io.FileIo.posix(file);
@@ -115,6 +164,12 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return err;
         };
+        _ = self.pipeline_metrics.littlefs_program_calls.fetchAdd(1, .monotonic);
+        _ = self.pipeline_metrics.littlefs_program_bytes.fetchAdd(write_data.len, .monotonic);
+        if (self.redo == null) {
+            _ = self.pipeline_metrics.direct_program_bytes.fetchAdd(write_data.len, .monotonic);
+            _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(write_data.len, .monotonic);
+        }
         if (self.redo == null) self.dirty.store(true, .release);
         if (action == .partial or action == .after) {
             self.freezeWrites();
@@ -123,6 +178,7 @@ pub const FileBlockDevice = struct {
     }
 
     pub fn sync(self: *FileBlockDevice) !void {
+        _ = self.pipeline_metrics.logical_sync_calls.fetchAdd(1, .monotonic);
         try self.checkWritebackError();
         if (self.isWriteFrozen()) return error.WriteFrozen;
         if (self.redo) |*redo| {
@@ -299,6 +355,7 @@ pub const FileBlockDevice = struct {
                         self.freezeWrites();
                         return err;
                     };
+                    self.recordFlushMetrics(&prepared);
                     try self.redo_mutex.lock(self.io);
                     redo.completeFlush(prepared.flush) catch |err| {
                         self.redo_mutex.unlock(self.io);
@@ -377,6 +434,10 @@ pub const FileBlockDevice = struct {
 
     pub fn resetFileIoStats(self: *FileBlockDevice) void {
         self.file_io.resetStats(self.io);
+    }
+
+    pub fn pipelineMetrics(self: *const FileBlockDevice) PipelineMetrics {
+        return self.pipeline_metrics.snapshot();
     }
 
     pub fn writebackState(self: *const FileBlockDevice) WritebackState {
@@ -523,6 +584,7 @@ pub const FileBlockDevice = struct {
         self.redo_mutex.unlock(self.io);
 
         try prepared.execute(self.io, self.file_io.borrow(), self.redoSync());
+        self.recordFlushMetrics(&prepared);
         try self.redo_mutex.lock(self.io);
         redo.completeFlush(prepared.flush) catch |err| {
             self.redo_mutex.unlock(self.io);
@@ -558,6 +620,7 @@ pub const FileBlockDevice = struct {
             self.redo_mutex.unlock(self.io);
             return err;
         };
+        self.recordCheckpointMetrics(&prepared);
         self.redo_mutex.lockUncancelable(self.io);
         redo.completeCheckpoint(prepared.checkpoint) catch |err| {
             self.freezeWrites();
@@ -597,6 +660,7 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return err;
         };
+        _ = self.pipeline_metrics.backing_sync_calls.fetchAdd(1, .monotonic);
         if (action == .after) {
             self.freezeWrites();
             return error.InjectedFault;
@@ -610,6 +674,32 @@ pub const FileBlockDevice = struct {
     fn redoSyncCallback(raw: *anyopaque) !void {
         const self: *FileBlockDevice = @ptrCast(@alignCast(raw));
         try self.durableSync();
+    }
+
+    fn recordFlushMetrics(self: *FileBlockDevice, prepared: *const redo_runtime.PreparedFlush) void {
+        const record_bytes = writeBytes(prepared.writes.items);
+        _ = self.pipeline_metrics.redo_transactions.fetchAdd(prepared.records.items.len, .monotonic);
+        _ = self.pipeline_metrics.redo_flushes.fetchAdd(1, .monotonic);
+        _ = self.pipeline_metrics.redo_record_bytes.fetchAdd(record_bytes, .monotonic);
+        _ = self.pipeline_metrics.redo_anchor_bytes.fetchAdd(prepared.anchor_bytes.len, .monotonic);
+        _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(
+            record_bytes + prepared.anchor_bytes.len,
+            .monotonic,
+        );
+    }
+
+    fn recordCheckpointMetrics(
+        self: *FileBlockDevice,
+        prepared: *const redo_runtime.PreparedCheckpoint,
+    ) void {
+        const home_bytes = writeBytes(prepared.writes);
+        _ = self.pipeline_metrics.checkpoints.fetchAdd(1, .monotonic);
+        _ = self.pipeline_metrics.checkpoint_home_bytes.fetchAdd(home_bytes, .monotonic);
+        _ = self.pipeline_metrics.redo_anchor_bytes.fetchAdd(prepared.anchor_bytes.len, .monotonic);
+        _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(
+            home_bytes + prepared.anchor_bytes.len,
+            .monotonic,
+        );
     }
 
     pub fn isWriteFrozen(self: *const FileBlockDevice) bool {
@@ -688,6 +778,12 @@ pub const FileBlockDevice = struct {
         return 0;
     }
 };
+
+fn writeBytes(writes: []const file_io.Write) u64 {
+    var total: u64 = 0;
+    for (writes) |write| total += write.bytes.len;
+    return total;
+}
 
 pub const FaultController = struct {
     mutex: std.atomic.Mutex = .unlocked,
@@ -777,6 +873,14 @@ test "block device enforces payload boundaries" {
     const data = [_]u8{ 1, 2, 3, 4 };
     const last_offset = header.block_size - @as(u32, data.len);
     try device.program(header.block_count - 1, last_offset, &data);
+    try device.sync();
+    const metrics = device.pipelineMetrics();
+    try std.testing.expectEqual(@as(u64, 1), metrics.littlefs_program_calls);
+    try std.testing.expectEqual(@as(u64, data.len), metrics.littlefs_program_bytes);
+    try std.testing.expectEqual(@as(u64, data.len), metrics.direct_program_bytes);
+    try std.testing.expectEqual(@as(u64, data.len), metrics.backing_write_bytes);
+    try std.testing.expectEqual(@as(u64, 1), metrics.logical_sync_calls);
+    try std.testing.expectEqual(@as(u64, 1), metrics.backing_sync_calls);
     var actual: [data.len]u8 = undefined;
     try device.read(header.block_count - 1, last_offset, &actual);
     try std.testing.expectEqualSlices(u8, &data, &actual);
@@ -822,12 +926,39 @@ test "journaled block device syncs once per committed transaction" {
     try std.testing.expectEqual(@as(u64, 0), fault.syncCalls());
     try device.commitTransaction();
     try std.testing.expectEqual(@as(u64, 1), fault.syncCalls());
+    const committed = device.pipelineMetrics();
+    const record_bytes = try redo_journal.encodedSize(1);
+    try std.testing.expectEqual(@as(u64, 1), committed.littlefs_program_calls);
+    try std.testing.expectEqual(@as(u64, 11), committed.littlefs_program_bytes);
+    try std.testing.expectEqual(@as(u64, 0), committed.direct_program_bytes);
+    try std.testing.expectEqual(@as(u64, 1), committed.redo_transactions);
+    try std.testing.expectEqual(@as(u64, 1), committed.redo_flushes);
+    try std.testing.expectEqual(record_bytes, committed.redo_record_bytes);
+    try std.testing.expectEqual(@as(u64, redo_journal.anchor_size), committed.redo_anchor_bytes);
+    try std.testing.expectEqual(
+        record_bytes + redo_journal.anchor_size,
+        committed.backing_write_bytes,
+    );
+    try std.testing.expectEqual(@as(u64, 1), committed.logical_sync_calls);
+    try std.testing.expectEqual(@as(u64, 1), committed.backing_sync_calls);
 
     var actual: [11]u8 = undefined;
     try device.read(4, 32, &actual);
     try std.testing.expectEqualStrings("transaction", &actual);
     try device.checkpointRedo();
     try std.testing.expectEqual(@as(u64, 3), fault.syncCalls());
+    const checkpointed = device.pipelineMetrics();
+    try std.testing.expectEqual(@as(u64, 1), checkpointed.checkpoints);
+    try std.testing.expectEqual(@as(u64, header.block_size), checkpointed.checkpoint_home_bytes);
+    try std.testing.expectEqual(
+        @as(u64, 2 * redo_journal.anchor_size),
+        checkpointed.redo_anchor_bytes,
+    );
+    try std.testing.expectEqual(
+        record_bytes + 2 * redo_journal.anchor_size + header.block_size,
+        checkpointed.backing_write_bytes,
+    );
+    try std.testing.expectEqual(@as(u64, 3), checkpointed.backing_sync_calls);
 }
 
 test "journaled block device checkpoints low space on explicit sync" {
