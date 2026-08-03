@@ -18,17 +18,33 @@ also records the service mode, mode epoch, and optional maintenance operation
 and control-object reference. The SCSI backend stores the meaningful prefix in
 a checksummed physical-block record that also contains the volume ID, and uses
 that complete 512- or 4096-byte block as its opaque version token. Every
-filesystem publication increments both revision and generation. A future
-maintenance transition will increment revision without inventing a filesystem
-commit. Physical anchor values are never reused or accepted on another volume.
+filesystem publication increments both revision and generation. A maintenance
+transition increments revision without inventing a filesystem commit. Physical
+anchor values are never reused or accepted on another volume.
 
 The service modes are `active`, `quiescing`, `maintenance`, and `blocked`.
 Normal transactions may begin and publish only in `active`, must preserve the
-mode epoch, and cannot attach maintenance control state. A revision change at
-the same filesystem generation fences an older expected physical anchor and
-therefore resolves its publication as not committed. This slice defines and
-enforces the format boundary; the administrative transition API is not yet
-implemented.
+mode epoch, and must preserve the latest maintenance control reference. A
+revision change at the same filesystem generation fences an older expected
+physical anchor and therefore resolves its publication as not committed.
+
+The maintenance coordinator permits `active -> quiescing -> maintenance ->
+active`. An in-progress operation may instead move from `quiescing` or
+`maintenance` to terminal `blocked`. Entering `quiescing` starts a globally
+unique operation and increments the mode epoch; later steps retain that
+operation and epoch. Every step writes a checksummed immutable control record
+containing the resulting revision, unchanged filesystem generation, operation
+ID, previous and next mode, and prior control reference. Returning to `active`
+clears the current operation ID but retains the control reference, and normal
+filesystem commits carry it forward.
+
+Indeterminate control publication is resolved against this control-record
+ancestry. An unchanged base remains pending until backend reset proves the old
+request terminated, while a matching record remains discoverable after later
+mode transitions or filesystem commits. Missing, malformed, or inconsistent
+ancestry fails closed. The coordinator records service state only; it does not
+authorize maintenance, collect SAN fence evidence, or enable destructive
+garbage collection.
 
 The contract distinguishes a definite conflict from an indeterminate outcome.
 Indeterminate publication is resolved using the transaction identifier and the

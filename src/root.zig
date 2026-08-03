@@ -15,6 +15,7 @@ pub const filesystem = @import("filesystem.zig");
 pub const filesystem_format = @import("filesystem_format.zig");
 pub const immutable_extent = @import("immutable_extent.zig");
 pub const linux_sg_io = if (builtin.os.tag == .linux) @import("linux_sg_io.zig") else struct {};
+pub const maintenance = @import("maintenance.zig");
 pub const model_conditional_block = @import("model_conditional_block.zig");
 pub const model_block_device = @import("model_block_device.zig");
 pub const model_data_block = @import("model_data_block.zig");
@@ -45,6 +46,7 @@ test {
     _ = filesystem_format;
     _ = immutable_extent;
     _ = linux_sg_io;
+    _ = maintenance;
     _ = model_conditional_block;
     _ = model_block_device;
     _ = model_data_block;

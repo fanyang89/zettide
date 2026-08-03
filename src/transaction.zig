@@ -3,6 +3,7 @@
 const std = @import("std");
 const anchor = @import("anchor.zig");
 const commit_mod = @import("commit.zig");
+const maintenance = @import("maintenance.zig");
 const resolution = @import("resolution.zig");
 const store_mod = @import("store.zig");
 
@@ -56,6 +57,7 @@ pub const Transaction = struct {
         errdefer snapshot.deinit();
         const base = try anchor.decode(&snapshot.anchor);
         if (base.mode != .active) return error.VolumeNotActive;
+        try maintenance.validateAnchorState(store, allocator, base);
         if (base.head) |head| {
             var bytes = try store.loadImmutable(head, allocator);
             defer bytes.deinit();

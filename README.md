@@ -33,8 +33,11 @@ implemented. Writable ownership and takeover still require external fencing.
 Version 2 volumes use an anchor revision separate from filesystem generation
 and persist an `active`, `quiescing`, `maintenance`, or `blocked` service mode.
 Normal transactions are accepted only in `active` mode and cannot alter the
-mode epoch. The administrative transition API and destructive garbage
-collection are not implemented yet.
+mode epoch. The maintenance coordinator durably publishes
+`active -> quiescing -> maintenance -> active`, can block an in-progress
+operation, and resolves ambiguous updates through immutable control ancestry.
+External fence evidence and destructive garbage collection are not implemented
+yet.
 
 ## Development
 

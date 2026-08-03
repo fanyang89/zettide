@@ -259,7 +259,7 @@ test "transaction rejects invalid anchor semantics and terminal reuse" {
 
 test "transaction validates the current head commit" {
     const missing = cawfs.anchor.encode(.{
-        .revision = 2,
+        .revision = 1,
         .generation = 1,
         .transaction_id = txn_a,
         .head = .{},
@@ -357,30 +357,22 @@ test "normal transaction preserves control ancestry" {
     var model = ModelStore.init(std.testing.allocator, initialAnchor());
     defer model.deinit();
     const store = model.conditionalStore();
+    for ([_]cawfs.anchor.Mode{ .quiescing, .maintenance, .active }) |mode| {
+        var transition = try cawfs.maintenance.Transition.begin(
+            store,
+            std.testing.allocator,
+            txn_a,
+            mode,
+        );
+        defer transition.deinit();
+        try std.testing.expectEqual(
+            cawfs.maintenance.Outcome.committed,
+            try transition.commit(),
+        );
+    }
     var previous = try store.readAnchor(std.testing.allocator);
     defer previous.deinit();
-    var control_batch = try store.beginControlBatch(
-        std.testing.allocator,
-        txn_a,
-        previous.version.bytes,
-    );
-    defer control_batch.deinit();
-    const control = try control_batch.putImmutable("completed maintenance");
-    try control_batch.prepare();
-    const active = cawfs.anchor.encode(.{
-        .revision = 1,
-        .generation = 0,
-        .transaction_id = @splat(0),
-        .head = null,
-        .mode = .active,
-        .mode_epoch = 2,
-        .control_ref = control,
-    });
-    try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
-        try control_batch.publish(previous.version.bytes, &active),
-    );
-    try control_batch.stabilize();
+    const control = (try cawfs.anchor.decode(&previous.anchor)).control_ref.?;
 
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_b);
     defer transaction.deinit();

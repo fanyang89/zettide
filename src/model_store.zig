@@ -297,7 +297,8 @@ const ModelBatch = struct {
 
         spinLock(&self.store.mutex);
         defer self.store.mutex.unlock();
-        if (self.store_epoch != self.store.epoch) return error.InvalidState;
+        if (self.store_epoch != self.store.epoch and !self.publish_applied)
+            return error.InvalidState;
         if (self.store.fail_next_stabilize) {
             self.store.fail_next_stabilize = false;
             return error.InjectedStabilizeFailure;

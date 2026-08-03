@@ -7,6 +7,7 @@ const conditional_block = @import("conditional_block.zig");
 const data_block = @import("data_block.zig");
 const extent_allocator = @import("extent_allocator.zig");
 const immutable_extent = @import("immutable_extent.zig");
+const maintenance = @import("maintenance.zig");
 const resolution_mod = @import("resolution.zig");
 const store_mod = @import("store.zig");
 const volume_format = @import("volume_format.zig");
@@ -223,6 +224,8 @@ pub const ScsiStore = struct {
             .base_revision = base_state.revision,
             .base_generation = base_state.generation,
             .base_mode_epoch = base_state.mode_epoch,
+            .base_mode = base_state.mode,
+            .base_control_ref = base_state.control_ref,
             .publication_revision = publication_revision,
             .publication_generation = publication_generation,
             .reset_epoch = self.conditional_transport.resetEpoch(),
@@ -300,6 +303,8 @@ const ScsiWriteBatch = struct {
     base_revision: u64,
     base_generation: u64,
     base_mode_epoch: u64,
+    base_mode: anchor_format.Mode,
+    base_control_ref: ?store_mod.ObjectRef,
     publication_revision: u64,
     publication_generation: u64,
     reset_epoch: u64,
@@ -307,6 +312,7 @@ const ScsiWriteBatch = struct {
     state: BatchState = .staging,
     publication_may_have_run: bool = false,
     publication_replacement: ?store_mod.OwnedBytes = null,
+    publication_mode: ?anchor_format.Mode = null,
 
     fn putImmutable(context: *anyopaque, bytes: []const u8) !store_mod.ObjectRef {
         const self: *ScsiWriteBatch = @ptrCast(@alignCast(context));
@@ -470,13 +476,13 @@ const ScsiWriteBatch = struct {
         const expected = try validatePhysicalAnchor(expected_version, self.store.header.volume_id);
         const previous = try anchor_format.decode(&expected);
         try validateAnchorState(previous);
-        if (previous.mode != .active) return error.VolumeNotActive;
         if (previous.revision != self.base_revision) return error.BatchBaseVersionMismatch;
         if (previous.generation != self.base_generation) return error.BatchBaseVersionMismatch;
         const next = try anchor_format.decode(next_anchor);
         try validateAnchorState(next);
         switch (self.purpose) {
             .transaction => {
+                if (previous.mode != .active) return error.VolumeNotActive;
                 if (next.mode != .active or next.mode_epoch != self.base_mode_epoch)
                     return error.InvalidAnchorMode;
                 const expected_generation = std.math.add(u64, previous.generation, 1) catch
@@ -511,6 +517,7 @@ const ScsiWriteBatch = struct {
                 self.state = .finished;
                 self.publication_may_have_run = true;
                 self.publication_replacement = replacement;
+                self.publication_mode = next.mode;
                 break :result .committed;
             },
             .miscompare => result: {
@@ -522,6 +529,7 @@ const ScsiWriteBatch = struct {
                 self.state = .finished;
                 self.publication_may_have_run = true;
                 self.publication_replacement = replacement;
+                self.publication_mode = next.mode;
                 break :result .indeterminate;
             },
         };
@@ -531,28 +539,61 @@ const ScsiWriteBatch = struct {
         const self: *ScsiWriteBatch = @ptrCast(@alignCast(context));
         if (self.state != .finished or !self.publication_may_have_run)
             return error.InvalidState;
-        try self.checkEpoch();
+        const reset = self.reset_epoch != self.store.conditional_transport.resetEpoch();
+        if (reset and self.purpose != .control) return error.DeviceReset;
         try self.store.conditional_transport.stabilize();
-        try self.checkEpoch();
+        if (!reset) try self.checkEpoch();
 
         var observed = try self.store.allocatePhysicalAnchor(self.backing_allocator);
         defer observed.deinit();
         try self.store.conditional_transport.readBlock(self.store.header.layout.anchor_block, observed.bytes);
-        try self.checkEpoch();
+        if (!reset) try self.checkEpoch();
         if (std.mem.eql(u8, observed.bytes, self.publication_replacement.?.bytes)) return;
 
-        const result = try resolution_mod.resolve(
-            self.store.conditionalStore(),
-            self.backing_allocator,
-            .{
-                .base_generation = self.base_generation,
-                .base_revision = self.base_revision,
-                .base_mode_epoch = self.base_mode_epoch,
-                .transaction_id = self.transaction_id,
+        const result = switch (self.purpose) {
+            .transaction => try resolution_mod.resolve(
+                self.store.conditionalStore(),
+                self.backing_allocator,
+                .{
+                    .base_generation = self.base_generation,
+                    .base_revision = self.base_revision,
+                    .base_mode_epoch = self.base_mode_epoch,
+                    .transaction_id = self.transaction_id,
+                },
+                .{},
+            ),
+            .control => control: {
+                const attempt: maintenance.Attempt = .{
+                    .base_revision = self.base_revision,
+                    .base_generation = self.base_generation,
+                    .base_mode_epoch = self.base_mode_epoch,
+                    .base_control_ref = self.base_control_ref,
+                    .operation_id = self.transaction_id,
+                    .previous_mode = self.base_mode,
+                    .mode = self.publication_mode.?,
+                };
+                const control_result = if (reset)
+                    try maintenance.resolveTerminal(
+                        self.store.conditionalStore(),
+                        self.backing_allocator,
+                        attempt,
+                        .{},
+                    )
+                else
+                    try maintenance.resolvePublication(
+                        self.store.conditionalStore(),
+                        self.backing_allocator,
+                        attempt,
+                        .{},
+                    );
+                break :control switch (control_result) {
+                    .committed => resolution_mod.Resolution.committed,
+                    .not_committed => .not_committed,
+                    .pending => .pending,
+                };
             },
-            .{},
-        );
-        try self.checkEpoch();
+        };
+        if (!reset) try self.checkEpoch();
         if (result != .committed) return error.PublicationRequiresResolution;
     }
 

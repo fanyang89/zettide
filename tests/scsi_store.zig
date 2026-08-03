@@ -915,3 +915,93 @@ test "transaction and tree reopen through the SCSI extent store" {
     defer value.deinit();
     try std.testing.expectEqualStrings("two", value.bytes);
 }
+
+test "maintenance transitions persist through the SCSI extent store" {
+    var fixture = try Fixture.init(std.testing.allocator, 512);
+    defer fixture.deinit();
+    const store = fixture.backend.conditionalStore();
+
+    for ([_]cawfs.anchor.Mode{ .quiescing, .maintenance, .active }) |mode| {
+        var transition = try cawfs.maintenance.Transition.begin(
+            store,
+            std.testing.allocator,
+            txn_a,
+            mode,
+        );
+        defer transition.deinit();
+        try std.testing.expectEqual(
+            cawfs.maintenance.Outcome.committed,
+            try transition.commit(),
+        );
+    }
+
+    fixture.model.crash();
+    var reopened = try fixture.reopened();
+    const reopened_store = reopened.conditionalStore();
+    var snapshot = try reopened_store.readAnchor(std.testing.allocator);
+    defer snapshot.deinit();
+    const state = try cawfs.anchor.decode(&snapshot.anchor);
+    try std.testing.expectEqual(@as(u64, 3), state.revision);
+    try std.testing.expectEqual(@as(u64, 0), state.generation);
+    try std.testing.expectEqual(cawfs.anchor.Mode.active, state.mode);
+    try std.testing.expectEqual(@as(u64, 2), state.mode_epoch);
+    var control = try reopened_store.loadImmutable(state.control_ref.?, std.testing.allocator);
+    defer control.deinit();
+    const record = try cawfs.maintenance.decode(control.bytes);
+    try std.testing.expectEqual(cawfs.anchor.Mode.maintenance, record.previous_mode);
+    try std.testing.expectEqual(cawfs.anchor.Mode.active, record.mode);
+}
+
+test "SCSI maintenance stabilization resolves a durable descendant after reset" {
+    var fixture = try Fixture.init(std.testing.allocator, 512);
+    defer fixture.deinit();
+    const store = fixture.backend.conditionalStore();
+    var snapshot = try store.readAnchor(std.testing.allocator);
+    defer snapshot.deinit();
+    var quiescing = try store.beginControlBatch(
+        std.testing.allocator,
+        txn_a,
+        snapshot.version.bytes,
+    );
+    defer quiescing.deinit();
+    const encoded = cawfs.maintenance.encode(.{
+        .revision = 1,
+        .generation = 0,
+        .mode_epoch = 2,
+        .operation_id = txn_a,
+        .previous_mode = .active,
+        .mode = .quiescing,
+        .parent = null,
+    });
+    const control_ref = try quiescing.putImmutable(&encoded);
+    try quiescing.prepare();
+    fixture.model.injectNextCawFault(.indeterminate_after_write);
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.indeterminate,
+        try quiescing.publish(snapshot.version.bytes, &cawfs.anchor.encode(.{
+            .revision = 1,
+            .generation = 0,
+            .transaction_id = @splat(0),
+            .head = null,
+            .mode = .quiescing,
+            .mode_epoch = 2,
+            .control_operation_id = txn_a,
+            .control_ref = control_ref,
+        })),
+    );
+
+    var maintenance = try cawfs.maintenance.Transition.begin(
+        store,
+        std.testing.allocator,
+        txn_a,
+        .maintenance,
+    );
+    defer maintenance.deinit();
+    try std.testing.expectEqual(
+        cawfs.maintenance.Outcome.committed,
+        try maintenance.commit(),
+    );
+    fixture.model.crash();
+
+    try quiescing.stabilize();
+}
