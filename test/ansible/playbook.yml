@@ -1,65 +1,4 @@
 ---
-- name: Stage the current Zettide working tree
-  hosts: localhost
-  gather_facts: false
-  become: false
-
-  vars:
-    zettide_controller_root: "{{ playbook_dir }}/../.."
-
-  tasks:
-    - name: Read the source revision
-      ansible.builtin.command:
-        argv:
-          - git
-          - rev-parse
-          - HEAD
-      args:
-        chdir: "{{ zettide_controller_root }}"
-      changed_when: false
-      register: zettide_source_revision
-
-    - name: Read the source working tree status
-      ansible.builtin.command:
-        argv:
-          - git
-          - status
-          - --short
-      args:
-        chdir: "{{ zettide_controller_root }}"
-      changed_when: false
-      register: zettide_source_status
-
-    - name: Create the controller staging directory
-      ansible.builtin.tempfile:
-        state: directory
-        prefix: zettide-ansible-
-      register: zettide_controller_staging
-
-    - name: Archive the current controller working tree
-      ansible.builtin.command:
-        argv:
-          - tar
-          - --exclude=.git
-          - --exclude=.venv
-          - --exclude=.zig-cache
-          - --exclude=zig-out
-          - --exclude=test/external/.prepared
-          - --exclude=test-results
-          - --exclude=test/ansible/inventory.ini
-          - -C
-          - "{{ zettide_controller_root }}"
-          - -czf
-          - "{{ zettide_controller_staging.path }}/source.tar.gz"
-          - .
-      changed_when: true
-
-    - name: Hash the staged source archive
-      ansible.builtin.stat:
-        path: "{{ zettide_controller_staging.path }}/source.tar.gz"
-        checksum_algorithm: sha256
-      register: zettide_source_archive
-
 - name: Run the Zettide Tier 1 suite on remote Linux hosts
   hosts: zettide_test
   gather_facts: true
@@ -169,6 +108,73 @@
         - util-linux
 
   pre_tasks:
+    - name: Read the source revision
+      ansible.builtin.command:
+        argv:
+          - git
+          - rev-parse
+          - HEAD
+      args:
+        chdir: "{{ zettide_controller_root }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+      register: zettide_source_revision
+
+    - name: Read the source working tree status
+      ansible.builtin.command:
+        argv:
+          - git
+          - status
+          - --short
+      args:
+        chdir: "{{ zettide_controller_root }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+      register: zettide_source_status
+
+    - name: Create the controller staging directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: zettide-ansible-
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: zettide_controller_staging
+
+    - name: Archive the current controller working tree
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --exclude=.git
+          - --exclude=.venv
+          - --exclude=.zig-cache
+          - --exclude=zig-out
+          - --exclude=test/external/.prepared
+          - --exclude=test-results
+          - --exclude=test/ansible/inventory.ini
+          - -C
+          - "{{ zettide_controller_root }}"
+          - -czf
+          - "{{ zettide_controller_staging.path }}/source.tar.gz"
+          - .
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: true
+
+    - name: Hash the staged source archive
+      ansible.builtin.stat:
+        path: "{{ zettide_controller_staging.path }}/source.tar.gz"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: zettide_source_archive
+
     - name: Require a supported target family
       ansible.builtin.assert:
         that:
@@ -251,7 +257,7 @@
 
         - name: Extract the current working tree
           ansible.builtin.unarchive:
-            src: "{{ hostvars.localhost.zettide_controller_staging.path }}/source.tar.gz"
+            src: "{{ zettide_controller_staging.path }}/source.tar.gz"
             dest: "{{ zettide_remote_workspace.path }}"
 
         - name: Record the test manifest
@@ -268,9 +274,9 @@
               distribution: "{{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
               architecture: "{{ ansible_facts.architecture }}"
               kernel: "{{ ansible_facts.kernel }}"
-              source_revision: "{{ hostvars.localhost.zettide_source_revision.stdout }}"
-              source_status: "{{ hostvars.localhost.zettide_source_status.stdout_lines }}"
-              source_archive_sha256: "{{ hostvars.localhost.zettide_source_archive.stat.checksum }}"
+              source_revision: "{{ zettide_source_revision.stdout }}"
+              source_status: "{{ zettide_source_status.stdout_lines }}"
+              source_archive_sha256: "{{ zettide_source_archive.stat.checksum }}"
               zig_version: "{{ zettide_remote_zig.stdout }}"
               fio_version: "{{ zettide_remote_fio.stdout | default('not-recorded') }}"
               io_targets: "{{ zettide_io_targets | default([]) }}"
@@ -331,7 +337,7 @@
         - name: Fetch remote test results
           ansible.builtin.fetch:
             src: "{{ zettide_remote_workspace.path }}/results.tar.gz"
-            dest: "{{ zettide_results_root }}/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}-{{ hostvars.localhost.zettide_source_revision.stdout[:12] }}.tar.gz"
+            dest: "{{ zettide_results_root }}/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}-{{ zettide_source_revision.stdout[:12] }}.tar.gz"
             flat: true
           when: zettide_archive_results.rc == 0
 
@@ -341,13 +347,10 @@
             state: absent
           when: not zettide_keep_remote_workspace | bool
 
-- name: Remove the controller staging directory
-  hosts: localhost
-  gather_facts: false
-  become: false
-
-  tasks:
-    - name: Remove the controller staging directory
-      ansible.builtin.file:
-        path: "{{ hostvars.localhost.zettide_controller_staging.path }}"
-        state: absent
+        - name: Remove the controller staging directory
+          ansible.builtin.file:
+            path: "{{ zettide_controller_staging.path }}"
+            state: absent
+          delegate_to: localhost
+          become: false
+          run_once: true
