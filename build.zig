@@ -424,10 +424,7 @@ fn addLibdeflateCrc(
     module.addIncludePath(dependency.path("lib"));
     module.addCSourceFile(.{
         .file = dependency.path("lib/crc32.c"),
-        .flags = if (target.result.os.tag == .windows)
-            &.{ "-std=c11", "-DLIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_VPCLMULQDQ" }
-        else
-            &.{"-std=c11"},
+        .flags = &.{ "-std=c11", "-DLIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_VPCLMULQDQ" },
     });
     const cpu_features_source = switch (target.result.cpu.arch) {
         .x86, .x86_64 => "lib/x86/cpu_features.c",
