@@ -34,7 +34,7 @@
     state: directory
     mode: "0755"
 
-- name: Run fio verification | {{ zettide_optimize }} | {{ zettide_io_target.name }}
+- name: Run fio workload | {{ zettide_optimize }} | {{ zettide_io_target.name }}
   ansible.builtin.command:
     argv:
       - flock
@@ -42,7 +42,7 @@
       - /var/lock/zettide-io-verify.lock
       - "{{ zettide_zig }}"
       - build
-      - test-fio
+      - "{{ 'test-fio-throughput' if zettide_test_profile == 'throughput' else 'test-fio' }}"
       - -Dexternal-tests=required
       - -Doptimize={{ zettide_optimize }}
   args:
@@ -57,17 +57,17 @@
   failed_when: false
   register: zettide_io_verify
 
-- name: Record fio verification | {{ zettide_optimize }} | {{ zettide_io_target.name }}
+- name: Record fio workload | {{ zettide_optimize }} | {{ zettide_io_target.name }}
   ansible.builtin.copy:
     content: |-
       rc={{ zettide_io_verify.rc | default(1) }}
       target={{ zettide_io_target.tmpdir }}
       {{ zettide_io_verify.stdout | default('') }}
       {{ zettide_io_verify.stderr | default(zettide_io_verify.msg | default('')) }}
-    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_io_target.name }}/io-verify.log"
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_io_target.name }}/{{ 'throughput' if zettide_test_profile == 'throughput' else 'io-verify' }}.log"
     mode: "0644"
 
-- name: Record failed IO verification target | {{ zettide_optimize }} | {{ zettide_io_target.name }}
+- name: Record failed fio target | {{ zettide_optimize }} | {{ zettide_io_target.name }}
   ansible.builtin.set_fact:
     zettide_io_failures: "{{ zettide_io_failures + [zettide_io_target.name] }}"
   when: (zettide_io_verify.rc | default(1)) != 0

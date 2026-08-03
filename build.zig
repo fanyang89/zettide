@@ -274,6 +274,12 @@ pub fn build(b: *std.Build) void {
     const fio_step = b.step("test-fio", "Verify file data before and after a clean remount with fio");
     fio_step.dependOn(&fio_test_cmd.step);
 
+    const fio_throughput_cmd = b.addSystemCommand(&.{ "bash", "test/external/fio-throughput.sh" });
+    fio_throughput_cmd.addArg(@tagName(external_test_mode));
+    fio_throughput_cmd.addArtifactArg(exe);
+    const fio_throughput_step = b.step("test-fio-throughput", "Measure host and Zettide sequential throughput");
+    fio_throughput_step.dependOn(&fio_throughput_cmd.step);
+
     const external_step = b.step("test-external", "Run vendored external filesystem tests");
     external_step.dependOn(libfuse_step);
     external_step.dependOn(fsx_step);

@@ -38,7 +38,10 @@
 
 - name: Run IO verification targets | {{ zettide_optimize }}
   ansible.builtin.include_tasks: run-io-target.yml
-  loop: "{{ zettide_io_targets | default([{'name': 'default', 'tmpdir': '/tmp'}]) }}"
+  loop: >-
+    {{ zettide_throughput_targets | default([{'name': 'default', 'tmpdir': '/tmp'}])
+       if zettide_test_profile == 'throughput'
+       else zettide_io_targets | default([{'name': 'default', 'tmpdir': '/tmp'}]) }}
   loop_control:
     loop_var: zettide_io_target
     label: "{{ zettide_io_target.name }}"
