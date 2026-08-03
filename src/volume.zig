@@ -755,10 +755,8 @@ pub const Volume = struct {
         defer self.object_transaction_mutex.unlock(self.io);
         var mutation = try self.beginStateMutation();
         defer mutation.deinit();
-        var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
-        const parent = try self.directoryPathUnlocked(parent_identity, &parent_buffer);
         var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
-        const path = try joinPathComponent(&path_buffer, parent, name);
+        const path = try self.childPathUnlocked(parent_identity, name, &path_buffer);
         const result = try self.statUnlocked(path);
         try mutation.commit();
         return result;
@@ -825,6 +823,29 @@ pub const Volume = struct {
     pub fn makeDirectory(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        _ = try self.makeDirectoryUnlocked(path, mode, uid, gid);
+    }
+
+    pub fn makeDirectoryAt(
+        self: *Volume,
+        parent_identity: object_format.ObjectId,
+        name: []const u8,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) !NodeInfo {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        return self.makeDirectoryUnlocked(
+            try self.childPathUnlocked(parent_identity, name, &path_buffer),
+            mode,
+            uid,
+            gid,
+        );
+    }
+
+    fn makeDirectoryUnlocked(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !NodeInfo {
         var mutation = try self.beginMutation();
         defer mutation.deinit();
         const inherited = try self.inheritCreateMetadata(path, mode, gid, true);
@@ -867,16 +888,54 @@ pub const Volume = struct {
         );
         errdefer _ = self.directory_index.remove(identity);
         try mutation.commit();
+        return .{
+            .size = 0,
+            .allocated_bytes = 0,
+            .metadata = directory_metadata,
+            .object_id = null,
+            .identity = identity,
+            .nlink = 2,
+        };
     }
 
     pub fn makeSymlink(self: *Volume, path: [*:0]const u8, target: []const u8, uid: u32, gid: u32) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        _ = try self.makeSymlinkUnlocked(path, target, uid, gid);
+    }
+
+    pub fn makeSymlinkAt(
+        self: *Volume,
+        parent_identity: object_format.ObjectId,
+        name: []const u8,
+        target: []const u8,
+        uid: u32,
+        gid: u32,
+    ) !NodeInfo {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        return self.makeSymlinkUnlocked(
+            try self.childPathUnlocked(parent_identity, name, &path_buffer),
+            target,
+            uid,
+            gid,
+        );
+    }
+
+    fn makeSymlinkUnlocked(
+        self: *Volume,
+        path: [*:0]const u8,
+        target: []const u8,
+        uid: u32,
+        gid: u32,
+    ) !NodeInfo {
         var mutation = try self.beginMutation();
         defer mutation.deinit();
         const inherited = try self.inheritCreateMetadata(path, 0o120777, gid, false);
-        try self.createSpecial(path, target, .symlink, .symlink, inherited.mode, uid, inherited.gid);
+        const result = try self.createSpecial(path, target, .symlink, .symlink, inherited.mode, uid, inherited.gid);
         try mutation.commit();
+        return result;
     }
 
     pub fn makeFifo(self: *Volume, path: [*:0]const u8, mode: u32, uid: u32, gid: u32) !void {
@@ -885,7 +944,7 @@ pub const Volume = struct {
         var mutation = try self.beginMutation();
         defer mutation.deinit();
         const inherited = try self.inheritCreateMetadata(path, mode, gid, false);
-        try self.createSpecial(path, "", .fifo, .fifo, inherited.mode, uid, inherited.gid);
+        _ = try self.createSpecial(path, "", .fifo, .fifo, inherited.mode, uid, inherited.gid);
         try mutation.commit();
     }
 
@@ -902,6 +961,42 @@ pub const Volume = struct {
             error.IsDirectory => return error.PermissionDenied,
             else => return err,
         };
+        const result = try self.linkObjectRefUnlocked(object_ref, new_path);
+        try mutation.commit();
+        return result;
+    }
+
+    pub fn linkObjectAt(
+        self: *Volume,
+        object_id: object_format.ObjectId,
+        parent_identity: object_format.ObjectId,
+        name: []const u8,
+    ) !NodeInfo {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
+        const head = try self.store().readHead(object_id);
+        const kind: object_format.RefKind = switch (head.metadata.kind) {
+            .file => .file,
+            .symlink => .symlink,
+            .fifo => .fifo,
+            .directory => return error.PermissionDenied,
+        };
+        var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const result = try self.linkObjectRefUnlocked(
+            .{ .kind = kind, .object_id = object_id },
+            try self.childPathUnlocked(parent_identity, name, &path_buffer),
+        );
+        try mutation.commit();
+        return result;
+    }
+
+    fn linkObjectRefUnlocked(
+        self: *Volume,
+        object_ref: object_format.ObjectRef,
+        new_path: [*:0]const u8,
+    ) !NodeInfo {
         const count = self.link_counts.getPtr(object_ref.object_id) orelse
             return error.CorruptFilesystem;
         if (count.* == std.math.maxInt(u64)) return error.TooManyLinks;
@@ -928,13 +1023,27 @@ pub const Volume = struct {
             .identity = object_ref.object_id,
             .nlink = count.*,
         };
-        try mutation.commit();
         return result;
     }
 
     pub fn remove(self: *Volume, path: [*:0]const u8) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.removeUnlocked(path);
+    }
+
+    pub fn removeAt(
+        self: *Volume,
+        parent_identity: object_format.ObjectId,
+        name: []const u8,
+    ) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        try self.removeUnlocked(try self.childPathUnlocked(parent_identity, name, &path_buffer));
+    }
+
+    fn removeUnlocked(self: *Volume, path: [*:0]const u8) !void {
         var mutation = try self.beginMutation();
         defer mutation.deinit();
         var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
@@ -1005,6 +1114,33 @@ pub const Volume = struct {
         if (std.mem.eql(u8, std.mem.span(old_path), std.mem.span(new_path))) return .same_object;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        return self.renameWithOptionsUnlocked(old_path, new_path, no_replace);
+    }
+
+    pub fn renameAt(
+        self: *Volume,
+        old_parent_identity: object_format.ObjectId,
+        old_name: []const u8,
+        new_parent_identity: object_format.ObjectId,
+        new_name: []const u8,
+        no_replace: bool,
+    ) !RenameResult {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var old_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        var new_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const old_path = try self.childPathUnlocked(old_parent_identity, old_name, &old_buffer);
+        const new_path = try self.childPathUnlocked(new_parent_identity, new_name, &new_buffer);
+        if (std.mem.eql(u8, std.mem.span(old_path), std.mem.span(new_path))) return .same_object;
+        return self.renameWithOptionsUnlocked(old_path, new_path, no_replace);
+    }
+
+    fn renameWithOptionsUnlocked(
+        self: *Volume,
+        old_path: [*:0]const u8,
+        new_path: [*:0]const u8,
+        no_replace: bool,
+    ) !RenameResult {
         var mutation = try self.beginMutation();
         defer mutation.deinit();
         var old_buffer: [object_store.max_path_bytes:0]u8 = undefined;
@@ -1127,6 +1263,41 @@ pub const Volume = struct {
     pub fn openFile(self: *Volume, handle: *FileHandle, path: [*:0]const u8, flags: c_int, mode: u32, uid: u32, gid: u32) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
+        try self.openFileUnlocked(handle, path, flags, mode, uid, gid);
+    }
+
+    pub fn openFileAt(
+        self: *Volume,
+        handle: *FileHandle,
+        parent_identity: object_format.ObjectId,
+        name: []const u8,
+        flags: c_int,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        try self.openFileUnlocked(
+            handle,
+            try self.childPathUnlocked(parent_identity, name, &path_buffer),
+            flags,
+            mode,
+            uid,
+            gid,
+        );
+    }
+
+    fn openFileUnlocked(
+        self: *Volume,
+        handle: *FileHandle,
+        path: [*:0]const u8,
+        flags: c_int,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    ) !void {
         try self.ensureReadable();
         const existing_ref = self.store().readRef(path) catch |err| switch (err) {
             error.FileNotFound => null,
@@ -1406,12 +1577,68 @@ pub const Volume = struct {
         handle.info = info;
     }
 
+    pub fn openDirectoryIdentity(
+        self: *Volume,
+        handle: *DirectoryHandle,
+        identity: object_format.ObjectId,
+    ) !void {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginStateMutation();
+        defer mutation.deinit();
+        var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const path = try self.directoryPathUnlocked(identity, &path_buffer);
+        const info = try self.statUnlocked(path);
+        if (info.metadata.kind != .directory or !std.mem.eql(u8, &info.identity, &identity))
+            return error.CorruptFilesystem;
+        var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
+        try checkLfs(c.lfs_dir_open(
+            &self.lfs,
+            &handle.dir,
+            try object_store.Store.translateUserPath(path, &translated_buffer),
+        ));
+        handle.open = true;
+        handle.info = info;
+        try mutation.commit();
+    }
+
     pub fn readDirectory(self: *Volume, handle: *DirectoryHandle, info: *c.struct_lfs_info) !bool {
         var view = try self.beginView();
         defer view.deinit();
         const result = c.lfs_dir_read(&self.lfs, &handle.dir, info);
         try checkLfs(result);
         return result > 0;
+    }
+
+    pub fn readDirectoryEntry(
+        self: *Volume,
+        handle: *DirectoryHandle,
+        entry: *DirectoryEntry,
+    ) !bool {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginStateMutation();
+        defer mutation.deinit();
+        while (true) {
+            var raw: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(&self.lfs, &handle.dir, &raw);
+            try checkLfs(result);
+            if (result == 0) {
+                try mutation.commit();
+                return false;
+            }
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&raw.name)));
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+            const path = try self.childPathUnlocked(handle.info.identity, name, &path_buffer);
+            const info = try self.statUnlocked(path);
+            const offset = c.lfs_dir_tell(&self.lfs, &handle.dir);
+            try checkLfs(offset);
+            entry.* = .{ .name = @splat(0), .info = info, .next_cookie = @intCast(offset) };
+            @memcpy(entry.name[0..name.len], name);
+            try mutation.commit();
+            return true;
+        }
     }
 
     pub fn seekDirectory(self: *Volume, handle: *DirectoryHandle, offset: u32) !void {
@@ -1629,6 +1856,24 @@ pub const Volume = struct {
         return buffer;
     }
 
+    fn childPathUnlocked(
+        self: *const Volume,
+        parent_identity: object_format.ObjectId,
+        name: []const u8,
+        buffer: *[object_store.max_path_bytes:0]u8,
+    ) ![*:0]const u8 {
+        if (name.len == 0 or name.len >= directory_name_capacity or
+            std.mem.indexOfScalar(u8, name, '/') != null or
+            std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, ".."))
+            return error.InvalidArgument;
+        var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        return joinPathComponent(
+            buffer,
+            try self.directoryPathUnlocked(parent_identity, &parent_buffer),
+            name,
+        );
+    }
+
     fn directoryIdentity(self: *Volume, translated: [*:0]const u8) !object_format.ObjectId {
         return self.directoryIdentityOptions(
             translated,
@@ -1713,7 +1958,7 @@ pub const Volume = struct {
         mode: u32,
         uid: u32,
         gid: u32,
-    ) !void {
+    ) !NodeInfo {
         try self.ensureGrowthCapacity();
         const created = try self.store().createObject(ref_kind, metadata.Metadata.init(
             self.io,
@@ -1730,10 +1975,21 @@ pub const Volume = struct {
             _ = self.link_counts.remove(created.object_id);
             self.store().removeObject(created.object_id) catch {};
         }
-        if (contents.len != 0) _ = try self.store().write(created.object_id, contents, 0);
+        const head = if (contents.len != 0)
+            (try self.store().write(created.object_id, contents, 0)).head
+        else
+            try self.store().readHead(created.object_id);
         try self.store().publishRef(path, created, true);
         self.link_counts.getPtr(created.object_id).?.* = 1;
         self.updateParentTimes(path) catch {};
+        return .{
+            .size = head.logical_size,
+            .allocated_bytes = head.allocated_bytes,
+            .metadata = head.metadata,
+            .object_id = created.object_id,
+            .identity = created.object_id,
+            .nlink = 1,
+        };
     }
 
     fn inheritCreateMetadata(
@@ -2036,6 +2292,16 @@ pub const DirectoryHandle = struct {
     dir: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t),
     info: NodeInfo = undefined,
     open: bool = false,
+};
+
+pub const DirectoryEntry = struct {
+    name: [directory_name_capacity:0]u8,
+    info: NodeInfo,
+    next_cookie: u32,
+
+    pub fn nameSlice(self: *const DirectoryEntry) []const u8 {
+        return std.mem.sliceTo(&self.name, 0);
+    }
 };
 
 pub const CheckResult = struct {

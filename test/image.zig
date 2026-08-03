@@ -856,6 +856,69 @@ test "directory identity replacement makes the replaced handle stale" {
     try std.testing.expectError(error.FileNotFound, volume.statDirectoryIdentity(target_identity));
 }
 
+test "identity based namespace operations do not require caller paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    const root = try volume.rootDirectoryIdentity();
+    const parent = try volume.makeDirectoryAt(root, "parent", 0o40755, 10, 20);
+    const child = try volume.makeDirectoryAt(parent.identity, "child", 0o40755, 10, 20);
+    var file: FileHandle = undefined;
+    try volume.openFileAt(
+        &file,
+        child.identity,
+        "file",
+        c.LFS_O_CREAT | c.LFS_O_RDWR,
+        0o100644,
+        10,
+        20,
+    );
+    _ = try volume.writeFile(&file, "identity data", 0);
+    const file_identity = file.object_id;
+    try volume.closeFile(&file);
+    const hard_link = try volume.linkObjectAt(file_identity, parent.identity, "hard");
+    try std.testing.expectEqualSlices(u8, &file_identity, &hard_link.identity);
+    try std.testing.expectEqual(@as(u64, 2), hard_link.nlink);
+    const symlink = try volume.makeSymlinkAt(child.identity, "link", "file", 10, 20);
+    try std.testing.expectEqual(zettide.metadata.Kind.symlink, symlink.metadata.kind);
+
+    var directory: DirectoryHandle = .{};
+    try volume.openDirectoryIdentity(&directory, child.identity);
+    var saw_file = false;
+    var saw_link = false;
+    while (true) {
+        var entry: zettide.volume.DirectoryEntry = undefined;
+        if (!try volume.readDirectoryEntry(&directory, &entry)) break;
+        const name = entry.nameSlice();
+        saw_file = saw_file or std.mem.eql(u8, name, "file");
+        saw_link = saw_link or std.mem.eql(u8, name, "link");
+        try std.testing.expect(entry.next_cookie > 0);
+    }
+    try volume.closeDirectory(&directory);
+    try std.testing.expect(saw_file);
+    try std.testing.expect(saw_link);
+
+    try std.testing.expectEqual(
+        zettide.volume.RenameResult.renamed,
+        try volume.renameAt(child.identity, "file", parent.identity, "moved", false),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &file_identity,
+        &(try volume.lookupAt(parent.identity, "moved")).identity,
+    );
+    try volume.removeAt(child.identity, "link");
+    try volume.removeAt(parent.identity, "moved");
+    try volume.removeAt(parent.identity, "hard");
+    try volume.removeAt(parent.identity, "child");
+    try volume.removeAt(root, "parent");
+}
+
 test "directories from old images receive a compatible persistent identity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
