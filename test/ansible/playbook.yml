@@ -99,6 +99,7 @@
         - gcc
         - git
         - kmod
+        - perf
         - pkgconf-pkg-config
         - sysstat
         - util-linux

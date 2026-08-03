@@ -72,6 +72,7 @@ The throughput profile compares a direct-I/O host filesystem baseline with
 cold-cache Zettide sequential reads and writes. Each phase runs for 15 seconds
 after a two-second ramp. Zettide is tested with one stream and four streams,
 and the profile records fio JSON, wall time, pidstat, and iostat output.
+On Red Hat family hosts it also records a `perf` profile for each Zettide phase.
 
 Configure `zettide_throughput_targets` in the ignored inventory and run:
 

@@ -32,6 +32,7 @@ multi_size=${ZETTIDE_THROUGHPUT_MULTI_SIZE:-512M}
 runtime=${ZETTIDE_THROUGHPUT_RUNTIME:-15}
 ramp_time=${ZETTIDE_THROUGHPUT_RAMP_TIME:-2}
 monitor_pids=()
+perf_data=
 mkdir -p "$fio_log_dir"
 
 drop_caches() {
@@ -95,6 +96,12 @@ start_monitors() {
     timeout 180s pidstat -dru -p "$external_mount_pid" 1 \
         >"$fio_log_dir/zettide-$phase-pidstat.log" &
     monitor_pids+=("$!")
+    if command -v perf >/dev/null; then
+        perf_data="$fio_log_dir/zettide-$phase-perf.data"
+        perf record --quiet --frequency 99 --call-graph fp \
+            --pid "$external_mount_pid" --output "$perf_data" -- sleep 180 &
+        monitor_pids+=("$!")
+    fi
 }
 
 stop_monitors() {
@@ -104,6 +111,11 @@ stop_monitors() {
         wait "$pid" 2>/dev/null || true
     done
     monitor_pids=()
+    if [[ -n "$perf_data" && -s "$perf_data" ]]; then
+        perf report --stdio --no-children --sort dso,symbol \
+            --input "$perf_data" >"${perf_data%.data}-report.txt" || true
+    fi
+    perf_data=
 }
 
 echo "Running direct host filesystem baseline"
