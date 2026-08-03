@@ -24,7 +24,6 @@ const ChunkVersion = struct {
 const ChunkChange = struct {
     old_size: u32,
     new_size: u32,
-    replaced_existing: bool,
 };
 
 const ChunkData = struct {
@@ -379,7 +378,6 @@ pub const Store = struct {
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
         const first_touched = offset / head.stored_chunk_size;
         const last_touched = (end - 1) / head.stored_chunk_size;
-        var replaced_existing = false;
         var consumed: usize = 0;
         while (consumed < data.len) {
             const position = offset + consumed;
@@ -395,7 +393,6 @@ pub const Store = struct {
                 chunk_offset,
             );
             head.allocated_bytes = try adjustAllocated(head.allocated_bytes, change);
-            replaced_existing = replaced_existing or change.replaced_existing;
             consumed += part;
         }
 
@@ -407,8 +404,7 @@ pub const Store = struct {
         head.metadata.mtime_ns = now;
         head.metadata.ctime_ns = now;
         try self.writeHead(head);
-        if (replaced_existing)
-            self.pruneChunkVersionRange(id, first_touched, last_touched, generation) catch {};
+        self.pruneChunkVersionRange(id, first_touched, last_touched, generation) catch {};
         self.invalidateCachedObject(id);
         return .{ .amount = data.len, .head = head };
     }
@@ -820,11 +816,7 @@ pub const Store = struct {
             .generation = new_generation,
             .layout = layout,
         }, chunk.bytes[0..new_size]);
-        return .{
-            .old_size = chunk.stored_length,
-            .new_size = new_size,
-            .replaced_existing = old_version != null,
-        };
+        return .{ .old_size = chunk.stored_length, .new_size = new_size };
     }
 
     fn truncateChunks(
@@ -858,7 +850,6 @@ pub const Store = struct {
             head.allocated_bytes = try adjustAllocated(head.allocated_bytes, .{
                 .old_size = chunk.stored_length,
                 .new_size = new_size,
-                .replaced_existing = true,
             });
             try touched.put(index.*, {});
         }
