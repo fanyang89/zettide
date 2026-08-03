@@ -78,10 +78,23 @@ Insertion and split control flow is adapted from xitdb's `SortedMap` at commit
 <https://github.com/fanyang89/xitdb>; licensing details are in
 `THIRD_PARTY.md`.
 
-## Planned Backends
+## Storage Backends
 
-The SCSI backend uses one logical-block COMPARE AND WRITE for anchor updates.
-It owns append allocation and maps prepare/stabilize to cache synchronization.
+The SCSI conditional-block transport uses READ(16), one-logical-block COMPARE
+AND WRITE, and SYNCHRONIZE CACHE(16). Initialization obtains geometry with READ
+CAPACITY(16), confirms opcode support, and requires a nonzero maximum compare
+and write length from the Block Limits VPD page. Reads and cache synchronization
+may be retried within a fixed attempt budget; COMPARE AND WRITE is issued once.
+
+The Linux executor uses synchronous `SG_IO` on a block device. It rejects SCSI
+generic character devices because they have a separate retry policy. The block
+node's capacity and logical sector size must exactly match the SCSI LUN, which
+rejects partitions and sliced mappings whose passthrough LBAs would bypass the
+block mapping. A post-dispatch timeout, path failure, or ambiguous status is an
+indeterminate CAW result rather than permission to resend the command.
+
+The complete SCSI backend will own append allocation and map prepare/stabilize
+to cache synchronization.
 
 An S3 backend can create immutable objects with `If-None-Match: *` and replace
 a fixed anchor object with `If-Match`. ETags remain opaque version tokens.
