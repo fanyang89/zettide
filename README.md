@@ -18,9 +18,10 @@ A future object-store backend can map the same contract to conditional writes
 such as Amazon S3 `If-Match` without exposing LBAs, CDBs, ETags, or HTTP status
 codes to the transaction engine.
 
-The project does not embed filesystem semantics. Zettide supplies the FUSE and
-POSIX-facing layer, with littlefs retained as its local single-writer backend
-and this engine used for shared writable mounts.
+CAWFS owns the minimal persistent metadata model for shared writable volumes:
+an immutable filesystem root references inode, directory-entry, and extent
+B+trees. Zettide remains responsible for FUSE and POSIX policy, while littlefs
+remains its local single-writer backend.
 
 ## Development
 

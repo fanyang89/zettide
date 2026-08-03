@@ -73,6 +73,10 @@ pub const ConditionalStore = struct {
         ) anyerror!WriteBatch,
     };
 
+    pub fn sameBackend(self: ConditionalStore, other: ConditionalStore) bool {
+        return self.context == other.context and self.vtable == other.vtable;
+    }
+
     pub fn readAnchor(self: ConditionalStore, allocator: std.mem.Allocator) !AnchorSnapshot {
         return self.vtable.read_anchor(self.context, allocator);
     }

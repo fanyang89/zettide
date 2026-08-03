@@ -254,6 +254,22 @@ loss of the LUN stops both voting and filesystem service.
 
 ## Filesystem Semantics
 
-Filesystem semantics live above this repository. Zettide will adapt its FUSE
-layer to a backend-neutral filesystem interface. Existing littlefs volumes stay
-single-writer; shared writable volumes use this engine.
+CAWFS owns the minimal persistent metadata model for shared writable volumes.
+Each filesystem root references three immutable B+trees: inode records keyed by
+inode ID, directory entries keyed by parent inode ID and raw component name, and
+extent mappings keyed by inode ID and logical offset. Inode 1 is always the root
+directory. Directory values repeat their parent and identify a child inode whose
+kind must match; empty files have zero logical and allocated size and no extent
+mappings.
+
+Formatting and filesystem mutation use one tree mutator per transaction so
+later updates can read pages staged earlier in the same batch. They stage a new
+filesystem root but do not publish it. The transaction coordinator remains the
+only publication boundary and exposes conflict, indeterminate resolution, and
+stabilization directly to its caller; the filesystem layer does not retry or
+hide outcomes.
+
+Zettide remains responsible for FUSE behavior and POSIX policy above this
+metadata core. Existing littlefs volumes stay single-writer; shared writable
+volumes use CAWFS. File data, deletion, rename, symlinks, Unicode policy,
+garbage collection, clocks, and fencing are outside the current metadata core.
