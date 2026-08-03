@@ -266,6 +266,25 @@ test "anchor indeterminate outcomes are not retried inside publish" {
     }
 }
 
+test "non-applied indeterminate publication cannot stabilize" {
+    var fixture = try Fixture.init(std.testing.allocator, 512);
+    defer fixture.deinit();
+    const store = fixture.backend.conditionalStore();
+    var snapshot = try store.readAnchor(std.testing.allocator);
+    defer snapshot.deinit();
+    var batch = try store.beginBatch(std.testing.allocator, txn_a, snapshot.version.bytes);
+    defer batch.deinit();
+    const head = try batch.putImmutable("not published");
+    try batch.prepare();
+    const next = nextAnchor(txn_a, head);
+    fixture.model.injectNextCawFault(.indeterminate_no_write);
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.indeterminate,
+        try batch.publish(snapshot.version.bytes, &next),
+    );
+    try std.testing.expectError(error.PublicationRequiresResolution, batch.stabilize());
+}
+
 test "publish rejects noncanonical anchor generation and transaction before CAW" {
     var fixture = try Fixture.init(std.testing.allocator, 4096);
     defer fixture.deinit();
@@ -343,6 +362,29 @@ test "publication reset requires commit resolution instead of false stabilizatio
 
     fixture.model.crash();
     try std.testing.expect(batch.publicationTerminated());
+    try std.testing.expectError(error.DeviceReset, batch.stabilize());
+    var recovered = try store.readAnchor(std.testing.allocator);
+    defer recovered.deinit();
+    try std.testing.expectEqual(@as(u64, 0), (try cawfs.anchor.decode(&recovered.anchor)).generation);
+}
+
+test "publication reset racing its barrier cannot stabilize" {
+    var fixture = try Fixture.init(std.testing.allocator, 512);
+    defer fixture.deinit();
+    const store = fixture.backend.conditionalStore();
+    var snapshot = try store.readAnchor(std.testing.allocator);
+    defer snapshot.deinit();
+    var batch = try store.beginBatch(std.testing.allocator, txn_a, snapshot.version.bytes);
+    defer batch.deinit();
+    const head = try batch.putImmutable("reset publication");
+    try batch.prepare();
+    const next = nextAnchor(txn_a, head);
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.committed,
+        try batch.publish(snapshot.version.bytes, &next),
+    );
+
+    fixture.model.injectResetBeforeNextStabilize();
     try std.testing.expectError(error.DeviceReset, batch.stabilize());
     var recovered = try store.readAnchor(std.testing.allocator);
     defer recovered.deinit();
@@ -514,6 +556,118 @@ test "publication durability barrier can be retried without another CAW" {
     var recovered = try reopened.conditionalStore().readAnchor(std.testing.allocator);
     defer recovered.deinit();
     try std.testing.expectEqual(@as(u64, 1), (try cawfs.anchor.decode(&recovered.anchor)).generation);
+}
+
+test "an earlier publication stabilizes through a durable descendant" {
+    var fixture = try Fixture.init(std.testing.allocator, 512);
+    defer fixture.deinit();
+    const store = fixture.backend.conditionalStore();
+
+    var snapshot_a = try store.readAnchor(std.testing.allocator);
+    defer snapshot_a.deinit();
+    var batch_a = try store.beginBatch(std.testing.allocator, txn_a, snapshot_a.version.bytes);
+    defer batch_a.deinit();
+    const root_a = try batch_a.putImmutable("root A");
+    const record_a = cawfs.commit.encode(.{
+        .generation = 1,
+        .transaction_id = txn_a,
+        .parent = null,
+        .root = root_a,
+    });
+    const commit_a = try batch_a.putImmutable(&record_a);
+    try batch_a.prepare();
+    const anchor_a = nextAnchor(txn_a, commit_a);
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.committed,
+        try batch_a.publish(snapshot_a.version.bytes, &anchor_a),
+    );
+    fixture.model.injectNextStabilizeFailure();
+    try std.testing.expectError(error.InjectedStabilizeFailure, batch_a.stabilize());
+
+    var snapshot_b = try store.readAnchor(std.testing.allocator);
+    defer snapshot_b.deinit();
+    var batch_b = try store.beginBatch(std.testing.allocator, txn_b, snapshot_b.version.bytes);
+    defer batch_b.deinit();
+    const root_b = try batch_b.putImmutable("root B");
+    const record_b = cawfs.commit.encode(.{
+        .generation = 2,
+        .transaction_id = txn_b,
+        .parent = commit_a,
+        .root = root_b,
+    });
+    const commit_b = try batch_b.putImmutable(&record_b);
+    try batch_b.prepare();
+    const anchor_b = cawfs.anchor.encode(.{
+        .generation = 2,
+        .transaction_id = txn_b,
+        .head = commit_b,
+    });
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.committed,
+        try batch_b.publish(snapshot_b.version.bytes, &anchor_b),
+    );
+    try batch_b.stabilize();
+    try batch_a.stabilize();
+
+    fixture.model.crash();
+    var reopened = try fixture.reopened();
+    var recovered = try reopened.conditionalStore().readAnchor(std.testing.allocator);
+    defer recovered.deinit();
+    const recovered_state = try cawfs.anchor.decode(&recovered.anchor);
+    try std.testing.expectEqual(@as(u64, 2), recovered_state.generation);
+    try std.testing.expectEqual(txn_b, recovered_state.transaction_id);
+    try std.testing.expect(cawfs.store.ObjectRef.eql(commit_b, recovered_state.head.?));
+}
+
+test "stabilization rejects malformed descendant ancestry" {
+    var fixture = try Fixture.init(std.testing.allocator, 512);
+    defer fixture.deinit();
+    const store = fixture.backend.conditionalStore();
+
+    var snapshot_a = try store.readAnchor(std.testing.allocator);
+    defer snapshot_a.deinit();
+    var batch_a = try store.beginBatch(std.testing.allocator, txn_a, snapshot_a.version.bytes);
+    defer batch_a.deinit();
+    const root_a = try batch_a.putImmutable("root A");
+    const record_a = cawfs.commit.encode(.{
+        .generation = 1,
+        .transaction_id = txn_a,
+        .parent = null,
+        .root = root_a,
+    });
+    const commit_a = try batch_a.putImmutable(&record_a);
+    try batch_a.prepare();
+    const anchor_a = nextAnchor(txn_a, commit_a);
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.committed,
+        try batch_a.publish(snapshot_a.version.bytes, &anchor_a),
+    );
+
+    var snapshot_b = try store.readAnchor(std.testing.allocator);
+    defer snapshot_b.deinit();
+    var batch_b = try store.beginBatch(std.testing.allocator, txn_b, snapshot_b.version.bytes);
+    defer batch_b.deinit();
+    const root_b = try batch_b.putImmutable("root B");
+    const malformed_record_b = cawfs.commit.encode(.{
+        .generation = 3,
+        .transaction_id = txn_b,
+        .parent = commit_a,
+        .root = root_b,
+    });
+    const commit_b = try batch_b.putImmutable(&malformed_record_b);
+    try batch_b.prepare();
+    const anchor_b = cawfs.anchor.encode(.{
+        .generation = 2,
+        .transaction_id = txn_b,
+        .head = commit_b,
+    });
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.committed,
+        try batch_b.publish(snapshot_b.version.bytes, &anchor_b),
+    );
+    try batch_b.stabilize();
+
+    try std.testing.expectError(error.CommitGenerationMismatch, batch_a.stabilize());
 }
 
 test "transaction and tree reopen through the SCSI extent store" {

@@ -7,6 +7,7 @@ const conditional_block = @import("conditional_block.zig");
 const data_block = @import("data_block.zig");
 const extent_allocator = @import("extent_allocator.zig");
 const immutable_extent = @import("immutable_extent.zig");
+const resolution_mod = @import("resolution.zig");
 const store_mod = @import("store.zig");
 const volume_format = @import("volume_format.zig");
 
@@ -479,17 +480,26 @@ const ScsiWriteBatch = struct {
         if (self.state != .finished or !self.publication_may_have_run)
             return error.InvalidState;
         try self.checkEpoch();
-        const replacement = &self.publication_replacement.?.bytes;
+        try self.store.conditional_transport.stabilize();
+        try self.checkEpoch();
+
         var observed = try self.store.allocatePhysicalAnchor(self.backing_allocator);
         defer observed.deinit();
         try self.store.conditional_transport.readBlock(self.store.header.layout.anchor_block, observed.bytes);
-        if (!std.mem.eql(u8, observed.bytes, replacement.*))
-            return error.PublicationRequiresResolution;
-        try self.store.conditional_transport.stabilize();
         try self.checkEpoch();
-        try self.store.conditional_transport.readBlock(self.store.header.layout.anchor_block, observed.bytes);
-        if (!std.mem.eql(u8, observed.bytes, replacement.*))
-            return error.PublicationRequiresResolution;
+        if (std.mem.eql(u8, observed.bytes, self.publication_replacement.?.bytes)) return;
+
+        const result = try resolution_mod.resolve(
+            self.store.conditionalStore(),
+            self.backing_allocator,
+            .{
+                .base_generation = self.base_generation,
+                .transaction_id = self.transaction_id,
+            },
+            .{},
+        );
+        try self.checkEpoch();
+        if (result != .committed) return error.PublicationRequiresResolution;
     }
 
     fn deinitErased(context: *anyopaque) void {
