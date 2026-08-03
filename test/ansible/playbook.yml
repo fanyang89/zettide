@@ -100,6 +100,7 @@
         - git
         - kmod
         - pkgconf-pkg-config
+        - sysstat
         - util-linux
       Debian:
         - build-essential
@@ -109,6 +110,7 @@
         - kmod
         - libfuse3-dev
         - pkg-config
+        - sysstat
         - util-linux
 
   pre_tasks:

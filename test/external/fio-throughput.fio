@@ -9,9 +9,11 @@ bs=1m
 fallocate=none
 overwrite=1
 allow_file_create=${FIO_ALLOW_FILE_CREATE}
-end_fsync=${FIO_END_FSYNC}
 invalidate=1
 group_reporting=1
+time_based=1
+runtime=${FIO_RUNTIME}
+ramp_time=${FIO_RAMP_TIME}
 
 [sequential-1]
 filename=sequential-1.bin

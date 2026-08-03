@@ -68,9 +68,10 @@ Each run uses a host-wide lock and stores a timestamped result archive under
 
 ## Throughput
 
-The throughput profile compares an 8 GiB direct-I/O host filesystem baseline
-with cold-cache Zettide sequential reads and durable writes. Zettide is tested
-with one stream and four streams; each write phase performs one final sync.
+The throughput profile compares a direct-I/O host filesystem baseline with
+cold-cache Zettide sequential reads and writes. Each phase runs for 15 seconds
+after a two-second ramp. Zettide is tested with one stream and four streams,
+and the profile records fio JSON, wall time, pidstat, and iostat output.
 
 Configure `zettide_throughput_targets` in the ignored inventory and run:
 
@@ -78,5 +79,5 @@ Configure `zettide_throughput_targets` in the ignored inventory and run:
 uv run ansible-playbook test/ansible/throughput.yml --limit zettide-tier1
 ```
 
-The benchmark creates sparse 24 GiB temporary images inside the configured
+The benchmark creates sparse 8 GiB temporary images inside the configured
 directories. It never writes raw block devices.
