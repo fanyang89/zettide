@@ -41,7 +41,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/nfs_backend.zig"),
             .target = target,
             .optimize = optimize,
+            .pic = true,
             .link_libc = true,
+            .link_libcpp = true,
             .imports = &.{.{ .name = "zettide", .module = portable_core }},
         });
         const nfs_backend_library = b.addLibrary(.{
@@ -49,6 +51,7 @@ pub fn build(b: *std.Build) void {
             .linkage = .static,
             .root_module = nfs_backend_module,
         });
+        nfs_backend_library.bundle_compiler_rt = true;
         b.installArtifact(nfs_backend_library);
         b.getInstallStep().dependOn(&b.addInstallHeaderFile(
             b.path("src/nfs_backend.h"),

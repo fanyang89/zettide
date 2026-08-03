@@ -21,6 +21,8 @@ const Status = enum(c_int) {
     permission_denied = 12,
     directory_not_empty = 13,
     too_many_links = 14,
+    file_too_large = 15,
+    name_too_long = 16,
 };
 
 const Export = struct {
@@ -669,8 +671,10 @@ fn statusFor(err: anyerror, stale_context: bool) c_int {
         error.NotDirectory => .not_directory,
         error.IsDirectory => .is_directory,
         error.PathAlreadyExists => .exists,
-        error.ReadOnlyVolume => .read_only,
+        error.ReadOnlyVolume, error.AccessDenied => .read_only,
         error.NoSpaceLeft => .no_space,
+        error.FileTooLarge => .file_too_large,
+        error.NameTooLong => .name_too_long,
         error.InputOutput, error.CorruptFilesystem, error.VolumeRequiresReopen => .input_output,
         error.OperationNotSupported => .not_supported,
         error.PermissionDenied => .permission_denied,

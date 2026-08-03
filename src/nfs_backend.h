@@ -38,6 +38,8 @@ enum zettide_nfs_status {
     ZETTIDE_NFS_PERMISSION_DENIED = 12,
     ZETTIDE_NFS_DIRECTORY_NOT_EMPTY = 13,
     ZETTIDE_NFS_TOO_MANY_LINKS = 14,
+    ZETTIDE_NFS_FILE_TOO_LARGE = 15,
+    ZETTIDE_NFS_NAME_TOO_LONG = 16,
 };
 
 enum zettide_nfs_node_kind {
