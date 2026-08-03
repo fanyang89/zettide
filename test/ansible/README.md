@@ -35,6 +35,33 @@ uv run ansible-playbook test/ansible/playbook.yml
 
 Use `--limit HOST` for one target and `--ask-become-pass` when passwordless
 privilege escalation is unavailable. Result archives are fetched to
-`test-results/ansible/HOST.tar.gz`, including command output and external suite
-logs. The remote temporary workspace is removed after log collection unless
+`test-results/ansible/HOST-TIMESTAMP-COMMIT.tar.gz`, including command output
+and external suite logs. The remote temporary workspace is removed unless
 `-e zettide_keep_remote_workspace=true` is set.
+
+## IO verification
+
+The focused IO profile builds ReleaseSafe once, then runs deterministic fio
+CRC32C verification on each configured filesystem target. It verifies data on
+the live mount, runs `zettide check`, remounts, and performs a verify-only pass.
+It does not overwrite raw block devices.
+
+Configure target directories in the ignored inventory:
+
+```ini
+[zettide_test]
+zettide-tier1 ansible_host=100.83.174.20 ansible_user=fanmi
+
+[zettide_test:vars]
+zettide_zig=zig
+zettide_io_targets=[{"name":"pm883","tmpdir":"/mnt/pm883-1"},{"name":"optane","tmpdir":"/mnt/optane"}]
+```
+
+Run the focused profile:
+
+```sh
+uv run ansible-playbook test/ansible/io-verify.yml --limit zettide-tier1
+```
+
+Each run uses a host-wide lock and stores a timestamped result archive under
+`test-results/ansible/`.

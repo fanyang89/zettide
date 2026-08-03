@@ -1,0 +1,52 @@
+---
+- name: Create IO verification result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}"
+    state: directory
+    mode: "0755"
+
+- name: Build Zettide | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+  failed_when: false
+  register: zettide_io_build
+
+- name: Record Zettide build | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_io_build.rc }}
+      {{ zettide_io_build.stdout }}
+      {{ zettide_io_build.stderr }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/build.log"
+    mode: "0644"
+
+- name: Require Zettide build | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_io_build.rc == 0
+    fail_msg: "{{ zettide_optimize }} build failed."
+
+- name: Initialize IO verification failures | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_io_failures: []
+
+- name: Run IO verification targets | {{ zettide_optimize }}
+  ansible.builtin.include_tasks: run-io-target.yml
+  loop: "{{ zettide_io_targets | default([{'name': 'default', 'tmpdir': '/tmp'}]) }}"
+  loop_control:
+    loop_var: zettide_io_target
+    label: "{{ zettide_io_target.name }}"
+
+- name: Require all IO verification targets | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_io_failures | length == 0
+    fail_msg: >-
+      {{ zettide_optimize }} IO verification failed for:
+      {{ zettide_io_failures | join(', ') }}.

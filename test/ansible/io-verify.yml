@@ -1,0 +1,7 @@
+---
+- name: Run the ReleaseSafe Zettide IO verification profile
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: io-verify
+    zettide_optimize_modes_override:
+      - ReleaseSafe

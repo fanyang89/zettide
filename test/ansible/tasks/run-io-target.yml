@@ -1,0 +1,73 @@
+---
+- name: Check IO target directory | {{ zettide_io_target.name }}
+  ansible.builtin.stat:
+    path: "{{ zettide_io_target.tmpdir }}"
+  register: zettide_io_target_directory
+
+- name: Require IO target directory | {{ zettide_io_target.name }}
+  ansible.builtin.assert:
+    that:
+      - zettide_io_target_directory.stat.exists
+      - zettide_io_target_directory.stat.isdir
+      - zettide_io_target_directory.stat.writeable
+    fail_msg: "IO target {{ zettide_io_target.tmpdir }} must be a writable directory."
+
+- name: Read IO target free space | {{ zettide_io_target.name }}
+  ansible.builtin.command:
+    argv:
+      - df
+      - --output=avail
+      - -B1
+      - "{{ zettide_io_target.tmpdir }}"
+  changed_when: false
+  register: zettide_io_target_space
+
+- name: Require IO target free space | {{ zettide_io_target.name }}
+  ansible.builtin.assert:
+    that:
+      - zettide_io_target_space.stdout_lines[-1] | int >= zettide_io_minimum_free_bytes | int
+    fail_msg: "IO target {{ zettide_io_target.tmpdir }} requires at least 4 GiB free."
+
+- name: Create IO target result directory | {{ zettide_io_target.name }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_io_target.name }}"
+    state: directory
+    mode: "0755"
+
+- name: Run fio verification | {{ zettide_optimize }} | {{ zettide_io_target.name }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-io-verify.lock
+      - "{{ zettide_zig }}"
+      - build
+      - test-fio
+      - -Dexternal-tests=required
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    TMPDIR: "{{ zettide_io_target.tmpdir }}"
+    ZETTIDE_KEEP_TEST_ARTIFACTS: "{{ '1' if zettide_keep_test_artifacts | bool else '0' }}"
+    ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_io_target.name }}"
+  async: "{{ zettide_io_timeout }}"
+  poll: 15
+  changed_when: false
+  failed_when: false
+  register: zettide_io_verify
+
+- name: Record fio verification | {{ zettide_optimize }} | {{ zettide_io_target.name }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_io_verify.rc | default(1) }}
+      target={{ zettide_io_target.tmpdir }}
+      {{ zettide_io_verify.stdout | default('') }}
+      {{ zettide_io_verify.stderr | default(zettide_io_verify.msg | default('')) }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_io_target.name }}/io-verify.log"
+    mode: "0644"
+
+- name: Record failed IO verification target | {{ zettide_optimize }} | {{ zettide_io_target.name }}
+  ansible.builtin.set_fact:
+    zettide_io_failures: "{{ zettide_io_failures + [zettide_io_target.name] }}"
+  when: (zettide_io_verify.rc | default(1)) != 0

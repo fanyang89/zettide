@@ -8,6 +8,28 @@
     zettide_controller_root: "{{ playbook_dir }}/../.."
 
   tasks:
+    - name: Read the source revision
+      ansible.builtin.command:
+        argv:
+          - git
+          - rev-parse
+          - HEAD
+      args:
+        chdir: "{{ zettide_controller_root }}"
+      changed_when: false
+      register: zettide_source_revision
+
+    - name: Read the source working tree status
+      ansible.builtin.command:
+        argv:
+          - git
+          - status
+          - --short
+      args:
+        chdir: "{{ zettide_controller_root }}"
+      changed_when: false
+      register: zettide_source_status
+
     - name: Create the controller staging directory
       ansible.builtin.tempfile:
         state: directory
@@ -24,12 +46,19 @@
           - --exclude=zig-out
           - --exclude=test/external/.prepared
           - --exclude=test-results
+          - --exclude=test/ansible/inventory.ini
           - -C
           - "{{ zettide_controller_root }}"
           - -czf
           - "{{ zettide_controller_staging.path }}/source.tar.gz"
           - .
       changed_when: true
+
+    - name: Hash the staged source archive
+      ansible.builtin.stat:
+        path: "{{ zettide_controller_staging.path }}/source.tar.gz"
+        checksum_algorithm: sha256
+      register: zettide_source_archive
 
 - name: Run the Zettide Tier 1 suite on remote Linux hosts
   hosts: zettide_test
@@ -38,13 +67,15 @@
 
   vars:
     zettide_controller_root: "{{ playbook_dir }}/../.."
-    zettide_optimize_modes:
-      - Debug
-      - ReleaseSafe
+    zettide_test_profile: "{{ zettide_test_profile_override | default('tier1') }}"
+    zettide_optimize_modes: "{{ zettide_optimize_modes_override | default(['Debug', 'ReleaseSafe']) }}"
     zettide_zig: zig
     zettide_zig_version: 0.16.0
     zettide_results_root: "{{ zettide_controller_root }}/test-results/ansible"
     zettide_keep_remote_workspace: false
+    zettide_keep_test_artifacts: false
+    zettide_io_timeout: 5400
+    zettide_io_minimum_free_bytes: 4294967296
     zettide_packages:
       RedHat:
         - acl
@@ -117,6 +148,25 @@
         - uuid-runtime
         - xfsprogs
         - xfslibs-dev
+    zettide_io_packages:
+      RedHat:
+        - fio
+        - fuse3
+        - fuse3-devel
+        - gcc
+        - git
+        - kmod
+        - pkgconf-pkg-config
+        - util-linux
+      Debian:
+        - build-essential
+        - fio
+        - fuse3
+        - git
+        - kmod
+        - libfuse3-dev
+        - pkg-config
+        - util-linux
 
   pre_tasks:
     - name: Require a supported target family
@@ -125,6 +175,12 @@
           - ansible_facts.os_family in zettide_packages
         fail_msg: "Supported target families are RedHat and Debian."
 
+    - name: Require a supported test profile
+      ansible.builtin.assert:
+        that:
+          - zettide_test_profile in ['tier1', 'io-verify']
+        fail_msg: "Supported test profiles are tier1 and io-verify."
+
   tasks:
     - name: Create the remote workspace
       ansible.builtin.tempfile:
@@ -132,11 +188,20 @@
         prefix: zettide-test-
       register: zettide_remote_workspace
 
+    - name: Create the remote result directory
+      ansible.builtin.file:
+        path: "{{ zettide_remote_workspace.path }}/test-results"
+        state: directory
+        mode: "0755"
+
     - name: Run the remote test lifecycle
       block:
         - name: Install test dependencies
           ansible.builtin.package:
-            name: "{{ zettide_packages[ansible_facts.os_family] }}"
+            name: >-
+              {{ zettide_io_packages[ansible_facts.os_family]
+                 if zettide_test_profile == 'io-verify'
+                 else zettide_packages[ansible_facts.os_family] }}
             state: present
 
         - name: Load FUSE and loop device modules
@@ -175,16 +240,41 @@
               - zettide_remote_zig.stdout == zettide_zig_version
             fail_msg: "Remote Zig must be {{ zettide_zig_version }}, found {{ zettide_remote_zig.stdout }}."
 
+        - name: Read the remote fio version
+          ansible.builtin.command:
+            argv:
+              - fio
+              - --version
+          changed_when: false
+          register: zettide_remote_fio
+          when: zettide_test_profile == 'io-verify'
+
         - name: Extract the current working tree
           ansible.builtin.unarchive:
             src: "{{ hostvars.localhost.zettide_controller_staging.path }}/source.tar.gz"
             dest: "{{ zettide_remote_workspace.path }}"
 
-        - name: Create the remote result directory
-          ansible.builtin.file:
-            path: "{{ zettide_remote_workspace.path }}/test-results"
-            state: directory
-            mode: "0755"
+        - name: Record the test manifest
+          ansible.builtin.copy:
+            content: "{{ zettide_test_manifest | to_nice_json }}\n"
+            dest: "{{ zettide_remote_workspace.path }}/test-results/manifest.json"
+            mode: "0644"
+          vars:
+            zettide_test_manifest:
+              profile: "{{ zettide_test_profile }}"
+              optimize_modes: "{{ zettide_optimize_modes }}"
+              inventory_host: "{{ inventory_hostname }}"
+              remote_host: "{{ ansible_host | default(inventory_hostname) }}"
+              distribution: "{{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+              architecture: "{{ ansible_facts.architecture }}"
+              kernel: "{{ ansible_facts.kernel }}"
+              source_revision: "{{ hostvars.localhost.zettide_source_revision.stdout }}"
+              source_status: "{{ hostvars.localhost.zettide_source_status.stdout_lines }}"
+              source_archive_sha256: "{{ hostvars.localhost.zettide_source_archive.stat.checksum }}"
+              zig_version: "{{ zettide_remote_zig.stdout }}"
+              fio_version: "{{ zettide_remote_fio.stdout | default('not-recorded') }}"
+              io_targets: "{{ zettide_io_targets | default([]) }}"
+              started_utc: "{{ ansible_date_time.iso8601 }}"
 
         - name: Prepare pinned external suites
           ansible.builtin.command:
@@ -198,6 +288,7 @@
           changed_when: true
           failed_when: false
           register: zettide_prepare
+          when: zettide_test_profile == 'tier1'
 
         - name: Record external suite preparation
           ansible.builtin.copy:
@@ -207,15 +298,18 @@
               {{ zettide_prepare.stderr }}
             dest: "{{ zettide_remote_workspace.path }}/test-results/prepare.log"
             mode: "0644"
+          when: zettide_test_profile == 'tier1'
 
         - name: Require prepared external suites
           ansible.builtin.assert:
             that:
               - zettide_prepare.rc == 0
             fail_msg: "Pinned external suite preparation failed; inspect prepare.log."
+          when: zettide_test_profile == 'tier1'
 
         - name: Run each optimization mode
-          ansible.builtin.include_tasks: tasks/run-mode.yml
+          ansible.builtin.include_tasks:
+            file: "{{ 'tasks/run-io-verify.yml' if zettide_test_profile == 'io-verify' else 'tasks/run-mode.yml' }}"
           loop: "{{ zettide_optimize_modes }}"
           loop_control:
             loop_var: zettide_optimize
@@ -237,7 +331,7 @@
         - name: Fetch remote test results
           ansible.builtin.fetch:
             src: "{{ zettide_remote_workspace.path }}/results.tar.gz"
-            dest: "{{ zettide_results_root }}/{{ inventory_hostname }}.tar.gz"
+            dest: "{{ zettide_results_root }}/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}-{{ hostvars.localhost.zettide_source_revision.stdout[:12] }}.tar.gz"
             flat: true
           when: zettide_archive_results.rc == 0
 
