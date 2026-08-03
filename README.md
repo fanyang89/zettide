@@ -200,6 +200,8 @@ zettide serve dufs workspace.ddv -- -A -b 127.0.0.1 -p 5000
 Mounts use relatime by default. Pass `--noatime` to disable automatic
 access-time updates.
 Pass `--metrics` to print write-pipeline counters after unmount.
+`create --redo-journal-size <size>` appends a redo journal to a file-backed
+container; the journal must fit two maximum-size transactions.
 
 `format` creates a single-member unprotected v3 target. For a new regular file,
 `--size` is required and specifies the total backing-file length. The length

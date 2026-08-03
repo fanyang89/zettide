@@ -585,6 +585,7 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len == 0) return error.MissingContainerPath;
     const path = args[0];
     var size: ?u64 = null;
+    var redo_journal_size: ?u64 = null;
     var label: []const u8 = "Zettide";
     var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var index: usize = 1;
@@ -594,6 +595,10 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             size = try zettide.size.parse(args[index]);
+        } else if (std.mem.eql(u8, option, "--redo-journal-size")) {
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            redo_journal_size = try zettide.size.parse(args[index]);
         } else if (std.mem.eql(u8, option, "--label")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -611,6 +616,10 @@ fn createCommand(io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     const logical_size = size orelse return error.MissingSize;
     try zettide.volume.Volume.createOptions(io, path, logical_size, label, .{
         .name_profile = name_profile,
+        .redo_journal = if (redo_journal_size) |journal_size| .{
+            .length = journal_size,
+            .max_transaction_blocks = zettide.redo_journal.max_blocks_per_transaction,
+        } else null,
     });
     try stdout.print("Created {s} ({Bi:.2})\n", .{ path, logical_size });
 }
@@ -800,7 +809,7 @@ fn usage(writer: *Io.Writer) !void {
         \\Usage:
         \\  zettide key generate <path>
         \\  zettide format <file|device> [--size <size>] [--label <label>] [--name-profile <profile>] [--encrypt (--key-file <path>|--passphrase)] [--confirm <token>]
-        \\  zettide create <container> --size <size> [--label <label>] [--name-profile <profile>]
+        \\  zettide create <container> --size <size> [--label <label>] [--name-profile <profile>] [--redo-journal-size <size>]
         \\  zettide info <container>
         \\  zettide check <container>
         \\  zettide mount <container> <mountpoint> [--allow-other] [--metrics] [--noatime]
