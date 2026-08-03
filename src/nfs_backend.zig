@@ -1,0 +1,766 @@
+const std = @import("std");
+const zettide = @import("zettide");
+
+const allocator = std.heap.c_allocator;
+const nfs_handle = zettide.volume.nfs_handle;
+const volume_mod = zettide.volume;
+
+const Status = enum(c_int) {
+    ok = 0,
+    invalid_argument = 1,
+    no_entry = 2,
+    stale = 3,
+    not_directory = 4,
+    is_directory = 5,
+    exists = 6,
+    read_only = 7,
+    no_space = 8,
+    input_output = 9,
+    not_supported = 10,
+    internal = 11,
+    permission_denied = 12,
+    directory_not_empty = 13,
+    too_many_links = 14,
+};
+
+const Export = struct {
+    threaded: std.Io.Threaded,
+    volume: volume_mod.Volume,
+    mutex: std.Io.Mutex = .init,
+
+    fn io(self: *Export) std.Io {
+        return self.threaded.io();
+    }
+
+    fn lock(self: *Export) !void {
+        try self.mutex.lock(self.io());
+    }
+
+    fn unlock(self: *Export) void {
+        self.mutex.unlock(self.io());
+    }
+};
+
+const Directory = struct {
+    export_handle: *Export,
+    handle: volume_mod.DirectoryHandle,
+};
+
+const Handle = extern struct {
+    bytes: [nfs_handle.encoded_size]u8,
+};
+
+const Attributes = extern struct {
+    kind: u8,
+    reserved: [3]u8,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    size: u64,
+    allocated_bytes: u64,
+    nlink: u64,
+    atime_ns: i64,
+    mtime_ns: i64,
+    ctime_ns: i64,
+    birthtime_ns: i64,
+};
+
+const DirectoryEntry = extern struct {
+    name: [256]u8,
+    next_cookie: u32,
+    handle: Handle,
+    attributes: Attributes,
+};
+
+pub export fn zettide_nfs_export_open(
+    target: ?[*:0]const u8,
+    writable: bool,
+    out_export: ?**Export,
+) callconv(.c) c_int {
+    const target_value = target orelse return status(.invalid_argument);
+    const output = out_export orelse return status(.invalid_argument);
+    const self = allocator.create(Export) catch return status(.internal);
+    self.threaded = .init(allocator, .{ .environ = .empty });
+    zettide.target.openVolumeIntoOptions(
+        &self.volume,
+        self.threaded.io(),
+        allocator,
+        std.mem.span(target_value),
+        writable,
+        .{},
+    ) catch |err| {
+        self.threaded.deinit();
+        allocator.destroy(self);
+        return statusFor(err, false);
+    };
+    self.volume.mount() catch |err| {
+        self.volume.deinit();
+        self.threaded.deinit();
+        allocator.destroy(self);
+        return statusFor(err, false);
+    };
+    self.mutex = .init;
+    output.* = self;
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_export_close(export_handle: ?*Export) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    const result = self.volume.close();
+    self.unlock();
+    self.threaded.deinit();
+    allocator.destroy(self);
+    result catch |err| return statusFor(err, false);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_root(
+    export_handle: ?*Export,
+    out_handle: ?*Handle,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const output_handle = out_handle orelse return status(.invalid_argument);
+    const output_attributes = out_attributes orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const identity = self.volume.rootDirectoryIdentity() catch |err| return statusFor(err, false);
+    const info = self.volume.statDirectoryIdentity(identity) catch |err| return statusFor(err, false);
+    fillResult(self, info, output_handle, output_attributes);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_lookup(
+    export_handle: ?*Export,
+    parent: ?*const Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+    out_handle: ?*Handle,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const parent_value = parent orelse return status(.invalid_argument);
+    const name_value = name orelse return status(.invalid_argument);
+    const output_handle = out_handle orelse return status(.invalid_argument);
+    const output_attributes = out_attributes orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
+    if (decoded.kind != .directory) return status(.not_directory);
+    const info = self.volume.lookupAt(decoded.identity, name_value[0..name_length]) catch |err|
+        return statusFor(err, false);
+    fillResult(self, info, output_handle, output_attributes);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_getattr(
+    export_handle: ?*Export,
+    handle: ?*const Handle,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const handle_value = handle orelse return status(.invalid_argument);
+    const output = out_attributes orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    const info = self.volume.statIdentity(decoded) catch |err| return statusFor(err, true);
+    output.* = attributes(info);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_read(
+    export_handle: ?*Export,
+    handle: ?*const Handle,
+    offset: u64,
+    buffer: ?*anyopaque,
+    buffer_length: usize,
+    out_read: ?*usize,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const handle_value = handle orelse return status(.invalid_argument);
+    const output = out_read orelse return status(.invalid_argument);
+    if (buffer_length != 0 and buffer == null) return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    if (decoded.kind == .directory) return status(.is_directory);
+    if (decoded.kind != .file) return status(.invalid_argument);
+    if (buffer_length == 0) {
+        output.* = 0;
+        return status(.ok);
+    }
+    var file: volume_mod.FileHandle = undefined;
+    self.volume.openObject(&file, decoded.identity, volume_mod.c.LFS_O_RDONLY) catch |err|
+        return statusFor(err, true);
+    defer self.volume.closeFile(&file) catch {};
+    const bytes = @as([*]u8, @ptrCast(buffer.?))[0..buffer_length];
+    output.* = self.volume.readFile(&file, bytes, offset) catch |err| return statusFor(err, true);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_create(
+    export_handle: ?*Export,
+    parent: ?*const Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    out_handle: ?*Handle,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const parent_value = parent orelse return status(.invalid_argument);
+    const name_value = name orelse return status(.invalid_argument);
+    const output_handle = out_handle orelse return status(.invalid_argument);
+    const output_attributes = out_attributes orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
+    if (decoded_parent.kind != .directory) return status(.not_directory);
+    var file: volume_mod.FileHandle = undefined;
+    self.volume.openFileAt(
+        &file,
+        decoded_parent.identity,
+        name_value[0..name_length],
+        volume_mod.c.LFS_O_CREAT | volume_mod.c.LFS_O_EXCL | volume_mod.c.LFS_O_RDWR,
+        mode,
+        uid,
+        gid,
+    ) catch |err| return statusFor(err, false);
+    const info = self.volume.statFile(&file) catch |err| {
+        self.volume.closeFile(&file) catch {};
+        return statusFor(err, false);
+    };
+    self.volume.closeFile(&file) catch |err| return statusFor(err, false);
+    fillResult(self, info, output_handle, output_attributes);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_write(
+    export_handle: ?*Export,
+    handle: ?*const Handle,
+    offset: u64,
+    data: ?*const anyopaque,
+    data_length: usize,
+    out_written: ?*usize,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const handle_value = handle orelse return status(.invalid_argument);
+    const output = out_written orelse return status(.invalid_argument);
+    if (data_length != 0 and data == null) return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    if (decoded.kind == .directory) return status(.is_directory);
+    if (decoded.kind != .file) return status(.invalid_argument);
+    if (data_length == 0) {
+        output.* = 0;
+        return status(.ok);
+    }
+    var file: volume_mod.FileHandle = undefined;
+    self.volume.openObject(&file, decoded.identity, volume_mod.c.LFS_O_RDWR) catch |err|
+        return statusFor(err, true);
+    defer self.volume.closeFile(&file) catch {};
+    const bytes = @as([*]const u8, @ptrCast(data.?))[0..data_length];
+    output.* = self.volume.writeFile(&file, bytes, offset) catch |err| return statusFor(err, true);
+    self.volume.syncFile(&file) catch |err| return statusFor(err, false);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_sync(export_handle: ?*Export) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    self.volume.sync() catch |err| return statusFor(err, false);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_mkdir(
+    export_handle: ?*Export,
+    parent: ?*const Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    out_handle: ?*Handle,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const parent_value = parent orelse return status(.invalid_argument);
+    const name_value = name orelse return status(.invalid_argument);
+    const output_handle = out_handle orelse return status(.invalid_argument);
+    const output_attributes = out_attributes orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
+    if (decoded_parent.kind != .directory) return status(.not_directory);
+    const info = self.volume.makeDirectoryAt(
+        decoded_parent.identity,
+        name_value[0..name_length],
+        mode,
+        uid,
+        gid,
+    ) catch |err| return statusFor(err, false);
+    fillResult(self, info, output_handle, output_attributes);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_symlink(
+    export_handle: ?*Export,
+    parent: ?*const Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+    target: ?[*]const u8,
+    target_length: usize,
+    uid: u32,
+    gid: u32,
+    out_handle: ?*Handle,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const parent_value = parent orelse return status(.invalid_argument);
+    const name_value = name orelse return status(.invalid_argument);
+    const target_value = target orelse return status(.invalid_argument);
+    const output_handle = out_handle orelse return status(.invalid_argument);
+    const output_attributes = out_attributes orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
+    if (decoded_parent.kind != .directory) return status(.not_directory);
+    const info = self.volume.makeSymlinkAt(
+        decoded_parent.identity,
+        name_value[0..name_length],
+        target_value[0..target_length],
+        uid,
+        gid,
+    ) catch |err| return statusFor(err, false);
+    fillResult(self, info, output_handle, output_attributes);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_readlink(
+    export_handle: ?*Export,
+    handle: ?*const Handle,
+    buffer: ?*anyopaque,
+    buffer_length: usize,
+    out_read: ?*usize,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const handle_value = handle orelse return status(.invalid_argument);
+    const output = out_read orelse return status(.invalid_argument);
+    if (buffer_length != 0 and buffer == null) return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    if (decoded.kind != .symlink) return status(.invalid_argument);
+    if (buffer_length == 0) {
+        output.* = 0;
+        return status(.ok);
+    }
+    const bytes = @as([*]u8, @ptrCast(buffer.?))[0..buffer_length];
+    output.* = self.volume.readObject(decoded.identity, bytes, 0) catch |err| return statusFor(err, true);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_link(
+    export_handle: ?*Export,
+    source: ?*const Handle,
+    parent: ?*const Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+    out_handle: ?*Handle,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const source_value = source orelse return status(.invalid_argument);
+    const parent_value = parent orelse return status(.invalid_argument);
+    const name_value = name orelse return status(.invalid_argument);
+    const output_handle = out_handle orelse return status(.invalid_argument);
+    const output_attributes = out_attributes orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded_source = decodeExisting(self, source_value) catch |err| return statusFor(err, true);
+    if (decoded_source.kind == .directory) return status(.is_directory);
+    const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
+    if (decoded_parent.kind != .directory) return status(.not_directory);
+    const info = self.volume.linkObjectAt(
+        decoded_source.identity,
+        decoded_parent.identity,
+        name_value[0..name_length],
+    ) catch |err| return statusFor(err, false);
+    fillResult(self, info, output_handle, output_attributes);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_remove(
+    export_handle: ?*Export,
+    parent: ?*const Handle,
+    name: ?[*]const u8,
+    name_length: usize,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const parent_value = parent orelse return status(.invalid_argument);
+    const name_value = name orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
+    if (decoded_parent.kind != .directory) return status(.not_directory);
+    self.volume.removeAt(decoded_parent.identity, name_value[0..name_length]) catch |err|
+        return statusFor(err, false);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_rename(
+    export_handle: ?*Export,
+    old_parent: ?*const Handle,
+    old_name: ?[*]const u8,
+    old_name_length: usize,
+    new_parent: ?*const Handle,
+    new_name: ?[*]const u8,
+    new_name_length: usize,
+    no_replace: bool,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const old_parent_value = old_parent orelse return status(.invalid_argument);
+    const old_name_value = old_name orelse return status(.invalid_argument);
+    const new_parent_value = new_parent orelse return status(.invalid_argument);
+    const new_name_value = new_name orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded_old_parent = decodeExisting(self, old_parent_value) catch |err| return statusFor(err, true);
+    const decoded_new_parent = decodeExisting(self, new_parent_value) catch |err| return statusFor(err, true);
+    if (decoded_old_parent.kind != .directory or decoded_new_parent.kind != .directory)
+        return status(.not_directory);
+    _ = self.volume.renameAt(
+        decoded_old_parent.identity,
+        old_name_value[0..old_name_length],
+        decoded_new_parent.identity,
+        new_name_value[0..new_name_length],
+        no_replace,
+    ) catch |err| return statusFor(err, false);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_directory_open(
+    export_handle: ?*Export,
+    handle: ?*const Handle,
+    cookie: u32,
+    out_directory: ?**Directory,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const handle_value = handle orelse return status(.invalid_argument);
+    const output = out_directory orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    if (decoded.kind != .directory) return status(.not_directory);
+    const directory = allocator.create(Directory) catch return status(.internal);
+    directory.* = .{ .export_handle = self, .handle = .{} };
+    self.volume.openDirectoryIdentity(&directory.handle, decoded.identity) catch |err| {
+        allocator.destroy(directory);
+        return statusFor(err, true);
+    };
+    if (cookie != 0) self.volume.seekDirectory(&directory.handle, cookie) catch |err| {
+        self.volume.closeDirectory(&directory.handle) catch {};
+        allocator.destroy(directory);
+        return statusFor(err, false);
+    };
+    output.* = directory;
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_directory_read(
+    directory: ?*Directory,
+    out_entry: ?*DirectoryEntry,
+    out_has_entry: ?*bool,
+) callconv(.c) c_int {
+    const self = directory orelse return status(.invalid_argument);
+    const output = out_entry orelse return status(.invalid_argument);
+    const has_entry = out_has_entry orelse return status(.invalid_argument);
+    self.export_handle.lock() catch return status(.internal);
+    defer self.export_handle.unlock();
+    var entry: volume_mod.DirectoryEntry = undefined;
+    has_entry.* = self.export_handle.volume.readDirectoryEntry(&self.handle, &entry) catch |err|
+        return statusFor(err, false);
+    if (!has_entry.*) return status(.ok);
+    output.* = .{
+        .name = @splat(0),
+        .next_cookie = entry.next_cookie,
+        .handle = undefined,
+        .attributes = attributes(entry.info),
+    };
+    const name = entry.nameSlice();
+    @memcpy(output.name[0..name.len], name);
+    output.handle.bytes = nfs_handle.encode(self.export_handle.volume.volumeUuid(), .{
+        .kind = entry.info.metadata.kind,
+        .identity = entry.info.identity,
+    });
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_directory_close(directory: ?*Directory) callconv(.c) c_int {
+    const self = directory orelse return status(.invalid_argument);
+    self.export_handle.lock() catch return status(.internal);
+    const result = self.export_handle.volume.closeDirectory(&self.handle);
+    self.export_handle.unlock();
+    allocator.destroy(self);
+    result catch |err| return statusFor(err, false);
+    return status(.ok);
+}
+
+fn decodeExisting(self: *Export, handle: *const Handle) !nfs_handle.Handle {
+    const decoded = nfs_handle.decode(self.volume.volumeUuid(), &handle.bytes) catch
+        return error.StaleFileHandle;
+    _ = self.volume.statIdentity(decoded) catch |err| switch (err) {
+        error.FileNotFound => return error.StaleFileHandle,
+        else => return err,
+    };
+    return decoded;
+}
+
+fn fillResult(self: *Export, info: volume_mod.NodeInfo, handle: *Handle, attrs: *Attributes) void {
+    handle.bytes = nfs_handle.encode(self.volume.volumeUuid(), .{
+        .kind = info.metadata.kind,
+        .identity = info.identity,
+    });
+    attrs.* = attributes(info);
+}
+
+fn attributes(info: volume_mod.NodeInfo) Attributes {
+    return .{
+        .kind = @intFromEnum(info.metadata.kind),
+        .reserved = @splat(0),
+        .mode = info.metadata.mode,
+        .uid = info.metadata.uid,
+        .gid = info.metadata.gid,
+        .size = info.size,
+        .allocated_bytes = info.allocated_bytes,
+        .nlink = info.nlink,
+        .atime_ns = info.metadata.atime_ns,
+        .mtime_ns = info.metadata.mtime_ns,
+        .ctime_ns = info.metadata.ctime_ns,
+        .birthtime_ns = info.metadata.birthtime_ns,
+    };
+}
+
+fn status(value: Status) c_int {
+    return @intFromEnum(value);
+}
+
+fn statusFor(err: anyerror, stale_context: bool) c_int {
+    const value: Status = switch (err) {
+        error.InvalidArgument, error.InvalidFileHandle, error.ForeignVolume => if (stale_context) .stale else .invalid_argument,
+        error.StaleFileHandle => .stale,
+        error.FileNotFound => if (stale_context) .stale else .no_entry,
+        error.NotDirectory => .not_directory,
+        error.IsDirectory => .is_directory,
+        error.PathAlreadyExists => .exists,
+        error.ReadOnlyVolume => .read_only,
+        error.NoSpaceLeft => .no_space,
+        error.InputOutput, error.CorruptFilesystem, error.VolumeRequiresReopen => .input_output,
+        error.OperationNotSupported => .not_supported,
+        error.PermissionDenied => .permission_denied,
+        error.DirectoryNotEmpty => .directory_not_empty,
+        error.TooManyLinks => .too_many_links,
+        else => .internal,
+    };
+    return status(value);
+}
+
+test "direct NFS backend resolves and reads stable handles" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    const suffix = "/nfs-backend.ddv";
+    @memcpy(path_buffer[root_length .. root_length + suffix.len], suffix);
+    const path = path_buffer[0 .. root_length + suffix.len];
+    try volume_mod.Volume.create(std.testing.io, path, 1024 * 1024, "NfsBackend");
+    {
+        var volume = try volume_mod.Volume.open(std.testing.io, path, true);
+        defer volume.deinit();
+        try volume.mount();
+        try volume.makeDirectory("/directory", 0o40755, 10, 20);
+        var file: volume_mod.FileHandle = undefined;
+        try volume.openFile(&file, "/payload", volume_mod.c.LFS_O_CREAT | volume_mod.c.LFS_O_RDWR, 0o100644, 10, 20);
+        _ = try volume.writeFile(&file, "direct backend", 0);
+        try volume.closeFile(&file);
+    }
+
+    const path_z = try std.testing.allocator.dupeZ(u8, path);
+    defer std.testing.allocator.free(path_z);
+    var export_handle: *Export = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_open(path_z, true, &export_handle));
+    var export_open = true;
+    defer if (export_open) {
+        _ = zettide_nfs_export_close(export_handle);
+    };
+
+    var root_handle: Handle = undefined;
+    var root_attributes: Attributes = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &root_handle, &root_attributes));
+    try std.testing.expectEqual(@intFromEnum(zettide.metadata.Kind.directory), root_attributes.kind);
+
+    var file_handle: Handle = undefined;
+    var file_attributes: Attributes = undefined;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_lookup(export_handle, &root_handle, "payload", "payload".len, &file_handle, &file_attributes),
+    );
+    try std.testing.expectEqual(@as(u64, "direct backend".len), file_attributes.size);
+    var contents: [32]u8 = undefined;
+    var bytes_read: usize = 0;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_read(export_handle, &file_handle, 0, &contents, contents.len, &bytes_read),
+    );
+    try std.testing.expectEqualStrings("direct backend", contents[0..bytes_read]);
+
+    var created_handle: Handle = undefined;
+    var created_attributes: Attributes = undefined;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_create(
+            export_handle,
+            &root_handle,
+            "created",
+            "created".len,
+            0o100644,
+            10,
+            20,
+            &created_handle,
+            &created_attributes,
+        ),
+    );
+    var bytes_written: usize = 0;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_write(
+            export_handle,
+            &created_handle,
+            0,
+            "written through ABI",
+            "written through ABI".len,
+            &bytes_written,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, "written through ABI".len), bytes_written);
+    try std.testing.expectEqual(status(.ok), zettide_nfs_getattr(export_handle, &created_handle, &created_attributes));
+    try std.testing.expectEqual(@as(u64, "written through ABI".len), created_attributes.size);
+
+    var linked_handle: Handle = undefined;
+    var linked_attributes: Attributes = undefined;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_link(
+            export_handle,
+            &created_handle,
+            &root_handle,
+            "hard",
+            "hard".len,
+            &linked_handle,
+            &linked_attributes,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 2), linked_attributes.nlink);
+
+    var symlink_handle: Handle = undefined;
+    var symlink_attributes: Attributes = undefined;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_symlink(
+            export_handle,
+            &root_handle,
+            "symbolic",
+            "symbolic".len,
+            "created",
+            "created".len,
+            10,
+            20,
+            &symlink_handle,
+            &symlink_attributes,
+        ),
+    );
+    var target_buffer: [32]u8 = undefined;
+    var target_length: usize = 0;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_readlink(
+            export_handle,
+            &symlink_handle,
+            &target_buffer,
+            target_buffer.len,
+            &target_length,
+        ),
+    );
+    try std.testing.expectEqualStrings("created", target_buffer[0..target_length]);
+
+    var new_directory_handle: Handle = undefined;
+    var new_directory_attributes: Attributes = undefined;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_mkdir(
+            export_handle,
+            &root_handle,
+            "new-directory",
+            "new-directory".len,
+            0o40755,
+            10,
+            20,
+            &new_directory_handle,
+            &new_directory_attributes,
+        ),
+    );
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_rename(
+            export_handle,
+            &root_handle,
+            "created",
+            "created".len,
+            &new_directory_handle,
+            "moved",
+            "moved".len,
+            false,
+        ),
+    );
+    try std.testing.expectEqual(status(.ok), zettide_nfs_remove(export_handle, &root_handle, "hard", "hard".len));
+    try std.testing.expectEqual(status(.ok), zettide_nfs_remove(export_handle, &root_handle, "symbolic", "symbolic".len));
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_remove(export_handle, &new_directory_handle, "moved", "moved".len),
+    );
+    try std.testing.expectEqual(status(.stale), zettide_nfs_getattr(export_handle, &created_handle, &created_attributes));
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_remove(export_handle, &root_handle, "new-directory", "new-directory".len),
+    );
+    try std.testing.expectEqual(status(.ok), zettide_nfs_sync(export_handle));
+
+    var directory: *Directory = undefined;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_directory_open(export_handle, &root_handle, 0, &directory),
+    );
+    var directory_open = true;
+    defer if (directory_open) {
+        _ = zettide_nfs_directory_close(directory);
+    };
+    var found_payload = false;
+    while (true) {
+        var entry: DirectoryEntry = undefined;
+        var has_entry = false;
+        try std.testing.expectEqual(status(.ok), zettide_nfs_directory_read(directory, &entry, &has_entry));
+        if (!has_entry) break;
+        found_payload = found_payload or std.mem.eql(u8, std.mem.sliceTo(&entry.name, 0), "payload");
+    }
+    try std.testing.expect(found_payload);
+    try std.testing.expectEqual(status(.ok), zettide_nfs_directory_close(directory));
+    directory_open = false;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
+    export_open = false;
+}

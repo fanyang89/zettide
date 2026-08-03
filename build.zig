@@ -36,6 +36,48 @@ pub fn build(b: *std.Build) void {
     const unit_step = b.step("test-unit", "Run deterministic unit tests");
     unit_step.dependOn(&run_core_tests.step);
 
+    if (target.result.os.tag == .linux) {
+        const nfs_backend_module = b.createModule(.{
+            .root_source_file = b.path("src/nfs_backend.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zettide", .module = portable_core }},
+        });
+        const nfs_backend_library = b.addLibrary(.{
+            .name = "zettide-nfs-backend",
+            .linkage = .static,
+            .root_module = nfs_backend_module,
+        });
+        b.installArtifact(nfs_backend_library);
+        b.getInstallStep().dependOn(&b.addInstallHeaderFile(
+            b.path("src/nfs_backend.h"),
+            "zettide/nfs_backend.h",
+        ).step);
+        const nfs_backend_tests = b.addTest(.{ .root_module = nfs_backend_module });
+        const run_nfs_backend_tests = b.addRunArtifact(nfs_backend_tests);
+        const nfs_backend_c_test = b.addExecutable(.{
+            .name = "zettide-nfs-backend-abi-test",
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        nfs_backend_c_test.root_module.addIncludePath(b.path("src"));
+        nfs_backend_c_test.root_module.addCSourceFile(.{
+            .file = b.path("test/nfs_backend_abi.c"),
+            .flags = &.{"-std=c11"},
+        });
+        nfs_backend_c_test.root_module.linkLibrary(nfs_backend_library);
+        const run_nfs_backend_c_test = b.addRunArtifact(nfs_backend_c_test);
+        const nfs_backend_step = b.step("test-nfs-backend", "Run direct NFS backend ABI tests");
+        nfs_backend_step.dependOn(&run_nfs_backend_tests.step);
+        nfs_backend_step.dependOn(&run_nfs_backend_c_test.step);
+        unit_step.dependOn(&run_nfs_backend_tests.step);
+        unit_step.dependOn(&run_nfs_backend_c_test.step);
+    }
+
     const zbench_dependency = b.dependency("zbench", .{
         .target = target,
         .optimize = optimize,
