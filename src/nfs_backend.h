@@ -12,6 +12,13 @@ extern "C" {
 #define ZETTIDE_NFS_HANDLE_SIZE 44
 #define ZETTIDE_NFS_NAME_CAPACITY 256
 
+#define ZETTIDE_NFS_SET_MODE (UINT64_C(1) << 0)
+#define ZETTIDE_NFS_SET_UID (UINT64_C(1) << 1)
+#define ZETTIDE_NFS_SET_GID (UINT64_C(1) << 2)
+#define ZETTIDE_NFS_SET_SIZE (UINT64_C(1) << 3)
+#define ZETTIDE_NFS_SET_ATIME (UINT64_C(1) << 4)
+#define ZETTIDE_NFS_SET_MTIME (UINT64_C(1) << 5)
+
 struct zettide_nfs_export;
 struct zettide_nfs_directory;
 
@@ -66,6 +73,17 @@ struct zettide_nfs_directory_entry {
     struct zettide_nfs_attributes attributes;
 };
 
+struct zettide_nfs_set_attributes {
+    uint64_t mask;
+    uint64_t size;
+    int64_t atime_ns;
+    int64_t mtime_ns;
+    uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t reserved;
+};
+
 int zettide_nfs_export_open(
     const char *target,
     bool writable,
@@ -82,9 +100,19 @@ int zettide_nfs_lookup(
     size_t name_length,
     struct zettide_nfs_handle *out_handle,
     struct zettide_nfs_attributes *out_attributes);
+int zettide_nfs_lookup_parent(
+    struct zettide_nfs_export *export_handle,
+    const struct zettide_nfs_handle *directory,
+    struct zettide_nfs_handle *out_handle,
+    struct zettide_nfs_attributes *out_attributes);
 int zettide_nfs_getattr(
     struct zettide_nfs_export *export_handle,
     const struct zettide_nfs_handle *handle,
+    struct zettide_nfs_attributes *out_attributes);
+int zettide_nfs_setattr(
+    struct zettide_nfs_export *export_handle,
+    const struct zettide_nfs_handle *handle,
+    const struct zettide_nfs_set_attributes *attributes,
     struct zettide_nfs_attributes *out_attributes);
 int zettide_nfs_read(
     struct zettide_nfs_export *export_handle,

@@ -72,6 +72,25 @@ const DirectoryEntry = extern struct {
     attributes: Attributes,
 };
 
+const SetAttributes = extern struct {
+    mask: u64,
+    size: u64,
+    atime_ns: i64,
+    mtime_ns: i64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    reserved: u32,
+};
+
+const set_mode: u64 = 1 << 0;
+const set_uid: u64 = 1 << 1;
+const set_gid: u64 = 1 << 2;
+const set_size: u64 = 1 << 3;
+const set_atime: u64 = 1 << 4;
+const set_mtime: u64 = 1 << 5;
+const set_mask = set_mode | set_uid | set_gid | set_size | set_atime | set_mtime;
+
 pub export fn zettide_nfs_export_open(
     target: ?[*:0]const u8,
     writable: bool,
@@ -154,6 +173,28 @@ pub export fn zettide_nfs_lookup(
     return status(.ok);
 }
 
+pub export fn zettide_nfs_lookup_parent(
+    export_handle: ?*Export,
+    directory: ?*const Handle,
+    out_handle: ?*Handle,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const directory_value = directory orelse return status(.invalid_argument);
+    const output_handle = out_handle orelse return status(.invalid_argument);
+    const output_attributes = out_attributes orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded = decodeExisting(self, directory_value) catch |err| return statusFor(err, true);
+    if (decoded.kind != .directory) return status(.not_directory);
+    const parent_identity = self.volume.parentDirectoryIdentity(decoded.identity) catch |err|
+        return statusFor(err, true);
+    const info = self.volume.statDirectoryIdentity(parent_identity) catch |err|
+        return statusFor(err, true);
+    fillResult(self, info, output_handle, output_attributes);
+    return status(.ok);
+}
+
 pub export fn zettide_nfs_getattr(
     export_handle: ?*Export,
     handle: ?*const Handle,
@@ -165,6 +206,51 @@ pub export fn zettide_nfs_getattr(
     self.lock() catch return status(.internal);
     defer self.unlock();
     const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    const info = self.volume.statIdentity(decoded) catch |err| return statusFor(err, true);
+    output.* = attributes(info);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_setattr(
+    export_handle: ?*Export,
+    handle: ?*const Handle,
+    set_attributes: ?*const SetAttributes,
+    out_attributes: ?*Attributes,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const handle_value = handle orelse return status(.invalid_argument);
+    const changes = set_attributes orelse return status(.invalid_argument);
+    const output = out_attributes orelse return status(.invalid_argument);
+    if (changes.mask & ~set_mask != 0) return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+
+    if (changes.mask & set_size != 0) {
+        if (decoded.kind != .file) return status(.invalid_argument);
+        var file: volume_mod.FileHandle = undefined;
+        self.volume.openObject(&file, decoded.identity, volume_mod.c.LFS_O_RDWR) catch |err|
+            return statusFor(err, true);
+        self.volume.truncateFile(&file, changes.size) catch |err| {
+            self.volume.closeFile(&file) catch {};
+            return statusFor(err, false);
+        };
+        self.volume.closeFile(&file) catch |err| return statusFor(err, false);
+    }
+
+    if (changes.mask & (set_mode | set_uid | set_gid | set_atime | set_mtime) != 0) {
+        const current = self.volume.statIdentity(decoded) catch |err| return statusFor(err, true);
+        var value = current.metadata;
+        if (changes.mask & set_mode != 0)
+            value.mode = (value.mode & ~@as(u32, 0o7777)) | (changes.mode & 0o7777);
+        if (changes.mask & set_uid != 0) value.uid = changes.uid;
+        if (changes.mask & set_gid != 0) value.gid = changes.gid;
+        if (changes.mask & set_atime != 0) value.atime_ns = changes.atime_ns;
+        if (changes.mask & set_mtime != 0) value.mtime_ns = changes.mtime_ns;
+        value.ctime_ns = @intCast(std.Io.Clock.real.now(self.io()).nanoseconds);
+        _ = self.volume.setMetadataIdentity(decoded, value) catch |err| return statusFor(err, true);
+    }
+
     const info = self.volume.statIdentity(decoded) catch |err| return statusFor(err, true);
     output.* = attributes(info);
     return status(.ok);
@@ -226,7 +312,7 @@ pub export fn zettide_nfs_create(
         decoded_parent.identity,
         name_value[0..name_length],
         volume_mod.c.LFS_O_CREAT | volume_mod.c.LFS_O_EXCL | volume_mod.c.LFS_O_RDWR,
-        mode,
+        0o100000 | (mode & 0o7777),
         uid,
         gid,
     ) catch |err| return statusFor(err, false);
@@ -301,7 +387,7 @@ pub export fn zettide_nfs_mkdir(
     const info = self.volume.makeDirectoryAt(
         decoded_parent.identity,
         name_value[0..name_length],
-        mode,
+        0o40000 | (mode & 0o7777),
         uid,
         gid,
     ) catch |err| return statusFor(err, false);
@@ -629,7 +715,7 @@ test "direct NFS backend resolves and reads stable handles" {
             &root_handle,
             "created",
             "created".len,
-            0o100644,
+            0o644,
             10,
             20,
             &created_handle,
@@ -651,6 +737,28 @@ test "direct NFS backend resolves and reads stable handles" {
     try std.testing.expectEqual(@as(usize, "written through ABI".len), bytes_written);
     try std.testing.expectEqual(status(.ok), zettide_nfs_getattr(export_handle, &created_handle, &created_attributes));
     try std.testing.expectEqual(@as(u64, "written through ABI".len), created_attributes.size);
+    const changed_atime: i64 = 1_000_000_000;
+    const changed_mtime: i64 = 2_000_000_000;
+    const changes: SetAttributes = .{
+        .mask = set_mode | set_uid | set_gid | set_size | set_atime | set_mtime,
+        .size = 7,
+        .atime_ns = changed_atime,
+        .mtime_ns = changed_mtime,
+        .mode = 0o600,
+        .uid = 30,
+        .gid = 40,
+        .reserved = 0,
+    };
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_setattr(export_handle, &created_handle, &changes, &created_attributes),
+    );
+    try std.testing.expectEqual(@as(u64, 7), created_attributes.size);
+    try std.testing.expectEqual(@as(u32, 0o100600), created_attributes.mode);
+    try std.testing.expectEqual(@as(u32, 30), created_attributes.uid);
+    try std.testing.expectEqual(@as(u32, 40), created_attributes.gid);
+    try std.testing.expectEqual(changed_atime, created_attributes.atime_ns);
+    try std.testing.expectEqual(changed_mtime, created_attributes.mtime_ns);
 
     var linked_handle: Handle = undefined;
     var linked_attributes: Attributes = undefined;
@@ -708,13 +816,45 @@ test "direct NFS backend resolves and reads stable handles" {
             &root_handle,
             "new-directory",
             "new-directory".len,
-            0o40755,
+            0o755,
             10,
             20,
             &new_directory_handle,
             &new_directory_attributes,
         ),
     );
+    var parent_handle: Handle = undefined;
+    var parent_attributes: Attributes = undefined;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_lookup_parent(
+            export_handle,
+            &new_directory_handle,
+            &parent_handle,
+            &parent_attributes,
+        ),
+    );
+    try std.testing.expectEqualSlices(u8, &root_handle.bytes, &parent_handle.bytes);
+    const directory_changes: SetAttributes = .{
+        .mask = set_mode,
+        .size = 0,
+        .atime_ns = 0,
+        .mtime_ns = 0,
+        .mode = 0o700,
+        .uid = 0,
+        .gid = 0,
+        .reserved = 0,
+    };
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_setattr(
+            export_handle,
+            &new_directory_handle,
+            &directory_changes,
+            &new_directory_attributes,
+        ),
+    );
+    try std.testing.expectEqual(@as(u32, 0o40700), new_directory_attributes.mode);
     try std.testing.expectEqual(
         status(.ok),
         zettide_nfs_rename(

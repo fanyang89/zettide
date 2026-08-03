@@ -453,6 +453,45 @@ pub const Volume = struct {
         return info;
     }
 
+    pub fn setMetadataIdentity(
+        self: *Volume,
+        handle: nfs_handle.Handle,
+        value: metadata.Metadata,
+    ) !NodeInfo {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        try self.ensureWritesAllowed();
+        var mutation = try self.beginMutation();
+        defer mutation.deinit();
+
+        const info = if (handle.kind == .directory) value: {
+            var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+            const path = try self.directoryPathUnlocked(handle.identity, &path_buffer);
+            const current = try self.statUnlocked(path);
+            if (current.metadata.kind != handle.kind or
+                !std.mem.eql(u8, &current.identity, &handle.identity) or
+                value.kind != handle.kind)
+                return error.FileNotFound;
+            var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
+            const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
+            try self.setDirectoryMetadataTranslated(translated, value.encode());
+            var updated = current;
+            updated.metadata = value;
+            break :value updated;
+        } else value: {
+            const current = try self.statObjectUnlocked(handle.identity);
+            if (current.metadata.kind != handle.kind or value.kind != handle.kind)
+                return error.FileNotFound;
+            try self.store().updateMetadata(handle.identity, value);
+            self.updateOpenMetadata(handle.identity, value);
+            var updated = current;
+            updated.metadata = value;
+            break :value updated;
+        };
+        try mutation.commit();
+        return info;
+    }
+
     pub fn mount(self: *Volume) !void {
         return self.mountOptions(.{});
     }
