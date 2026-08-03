@@ -76,6 +76,24 @@ stop_mount() {
     return 1
 }
 
+check_after_crash() {
+    local check_log="$tmp/check.log"
+
+    for _ in $(seq 1 100); do
+        if "$exe" check "$image" >/dev/null 2>"$check_log"; then
+            return 0
+        fi
+        if ! grep -q '^error: WouldBlock$' "$check_log"; then
+            cat "$check_log" >&2
+            return 1
+        fi
+        sleep 0.05
+    done
+    cat "$check_log" >&2
+    echo "image lock remained held after FUSE crash" >&2
+    return 1
+}
+
 run_durability_crash() {
     local mode=$1
     local path=$2
@@ -105,7 +123,7 @@ run_durability_crash() {
         echo "dead FUSE process left a disconnected mount" >&2
         exit 1
     fi
-    "$exe" check "$image" >/dev/null
+    check_after_crash
     start_mount
     "$durability_probe" verify "$mode" "$path"
     stop_mount
