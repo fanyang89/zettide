@@ -117,6 +117,29 @@ test "transaction remains pending until another writer wins" {
     try std.testing.expectEqual(cawfs.transaction.Status.not_committed, uncertain.status());
 }
 
+test "reset terminates an indeterminate publication that did not run" {
+    var model = ModelStore.init(std.testing.allocator, initialAnchor());
+    defer model.deinit();
+    var transaction = try Transaction.begin(
+        model.conditionalStore(),
+        std.testing.allocator,
+        txn_a,
+    );
+    defer transaction.deinit();
+    const root = try transaction.putImmutable("root-a");
+    model.injectNextPublishFault(.indeterminate_before);
+    try std.testing.expectEqual(
+        cawfs.transaction.Outcome.indeterminate,
+        try transaction.commit(root),
+    );
+
+    model.crash();
+    try std.testing.expectEqual(
+        cawfs.resolution.Resolution.not_committed,
+        try transaction.resolve(.{}),
+    );
+}
+
 test "transaction retries stabilization without republishing" {
     var model = ModelStore.init(std.testing.allocator, initialAnchor());
     defer model.deinit();
@@ -248,7 +271,7 @@ test "transaction rejects a head with an impossible parent" {
     const store = model.conditionalStore();
     var previous = try store.readAnchor(std.testing.allocator);
     defer previous.deinit();
-    var batch = try store.beginBatch(std.testing.allocator, txn_a);
+    var batch = try store.beginBatch(std.testing.allocator, txn_a, previous.version.bytes);
     defer batch.deinit();
     const root = try batch.putImmutable("root-a");
     const encoded = cawfs.commit.encode(.{

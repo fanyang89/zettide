@@ -121,8 +121,10 @@ pub const ModelStore = struct {
         context: *anyopaque,
         allocator: std.mem.Allocator,
         transaction_id: TransactionId,
+        base_version: []const u8,
     ) !WriteBatch {
         const self: *ModelStore = @ptrCast(@alignCast(context));
+        if (base_version.len != 32) return error.InvalidVersionToken;
         const batch = try allocator.create(ModelBatch);
 
         spinLock(&self.mutex);
@@ -131,6 +133,7 @@ pub const ModelStore = struct {
             .store = self,
             .transaction_id = transaction_id,
             .store_epoch = self.epoch,
+            .base_version = base_version[0..32].*,
         };
         self.active_batches += 1;
         self.mutex.unlock();
@@ -171,6 +174,7 @@ pub const ModelStore = struct {
         .prepare = ModelBatch.prepare,
         .publish = ModelBatch.publish,
         .stabilize = ModelBatch.stabilize,
+        .publication_terminated = ModelBatch.publicationTerminated,
         .deinit = ModelBatch.deinitErased,
     };
 };
@@ -191,6 +195,7 @@ const ModelBatch = struct {
     store: *ModelStore,
     transaction_id: TransactionId,
     store_epoch: u64,
+    base_version: [32]u8,
     staged: std.ArrayList(StagedObject) = .empty,
     state: BatchState = .staging,
     publish_applied: bool = false,
@@ -246,6 +251,8 @@ const ModelBatch = struct {
         const self: *ModelBatch = @ptrCast(@alignCast(context));
         if (self.state != .prepared) return error.InvalidState;
         if (expected_version.len != 32) return error.InvalidVersionToken;
+        if (!std.mem.eql(u8, expected_version, &self.base_version))
+            return error.BatchBaseVersionMismatch;
 
         spinLock(&self.store.mutex);
         defer self.store.mutex.unlock();
@@ -287,6 +294,13 @@ const ModelBatch = struct {
         }
 
         self.store.stable_anchor = self.store.visible_anchor;
+    }
+
+    fn publicationTerminated(context: *anyopaque) bool {
+        const self: *ModelBatch = @ptrCast(@alignCast(context));
+        spinLock(&self.store.mutex);
+        defer self.store.mutex.unlock();
+        return self.store_epoch != self.store.epoch;
     }
 
     fn deinitErased(context: *anyopaque) void {

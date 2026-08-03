@@ -34,6 +34,7 @@ const head_start = transaction_id_end;
 const head_end = head_start + store.object_ref_size;
 const checksum_start = head_end;
 const checksum_end = checksum_start + std.crypto.hash.sha2.Sha256.digest_length;
+pub const encoded_size = checksum_end;
 const has_head: u16 = 1 << 0;
 const known_flags = has_head;
 

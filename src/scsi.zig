@@ -146,7 +146,12 @@ pub const ScsiConditionalBlock = struct {
     }
 
     pub fn transport(self: *ScsiConditionalBlock) block.ConditionalBlockTransport {
-        return .{ .context = self, .vtable = &vtable, .geometry = self.geometry };
+        return .{
+            .context = self,
+            .vtable = &vtable,
+            .geometry = self.geometry,
+            .device_identity = self.executor.context,
+        };
     }
 
     fn readBlock(context: *anyopaque, block_index: u64, output: []u8) !void {
@@ -475,6 +480,7 @@ test "SCSI transport probes geometry and retries only safe commands" {
     var mock = Mock{ .read_failures = 1, .sync_failures = 1 };
     var scsi = try ScsiConditionalBlock.init(mock.executor(), .{});
     const transport = scsi.transport();
+    try std.testing.expect(transport.deviceIdentity() == @as(*anyopaque, @ptrCast(&mock)));
     try std.testing.expectEqual(block.Geometry{
         .logical_block_size = 512,
         .block_count = 8,

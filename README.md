@@ -12,7 +12,8 @@ The transaction layer targets a backend-neutral contract:
 - explicit conflict and indeterminate outcomes;
 - durable completion before acknowledging a commit.
 
-The first production backend will map that contract to SCSI COMPARE AND WRITE.
+A first append-only backend slice maps that contract to immutable SCSI extents
+and COMPARE AND WRITE publication.
 A future object-store backend can map the same contract to conditional writes
 such as Amazon S3 `If-Match` without exposing LBAs, CDBs, ETags, or HTTP status
 codes to the transaction engine.

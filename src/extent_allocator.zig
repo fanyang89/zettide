@@ -74,6 +74,7 @@ pub const PendingTransition = struct {
     expected_page_generation: u64 = 0,
     expected: allocation.Entry,
     replacement: allocation.Entry,
+    reset_epoch: u64 = 0,
 };
 
 pub const TransitionOutcome = union(enum) {
@@ -174,7 +175,7 @@ pub const ExtentAllocator = struct {
         header: volume_format.Header,
         options: Options,
     ) !ExtentAllocator {
-        try transport.geometry.validate();
+        try transport.validate();
         try volume_format.validate(header);
         if (!std.meta.eql(transport.geometry, header.geometry())) return error.GeometryMismatch;
         if (options.max_contention_retries == 0) return error.InvalidRetryCount;
@@ -365,18 +366,18 @@ pub const ExtentAllocator = struct {
             if (gate.view.descriptor.operation != .idle) {
                 try self.transport.stabilize();
                 const recovered = try self.runActiveGate(stripe);
-                if (recovered == .pending) return .{ .pending = pendingRelease(retired) };
+                if (recovered == .pending) return .{ .pending = pendingRelease(retired, self.transport.resetEpoch()) };
                 continue;
             }
             const descriptor = descriptorForRelease(retired.entry);
             switch (try self.changeGate(&gate, descriptor)) {
                 .completed => {},
                 .retry => continue,
-                .pending => return .{ .pending = pendingRelease(retired) },
+                .pending => return .{ .pending = pendingRelease(retired, self.transport.resetEpoch()) },
             }
             return switch (try self.runRelease(stripe, operationIdentity(descriptor))) {
                 .completed => .completed,
-                .pending => .{ .pending = pendingRelease(retired) },
+                .pending => .{ .pending = pendingRelease(retired, self.transport.resetEpoch()) },
                 .retry => continue,
             };
         }
@@ -397,20 +398,29 @@ pub const ExtentAllocator = struct {
         }
         if (pending.extent_index >= self.header.layout.extent_count)
             return error.ExtentOutOfRange;
-        var snapshot = try self.readPage(self.pageIndex(pending.extent_index));
-        defer snapshot.deinit();
-        const current = try snapshot.view.entry(self.entryIndex(pending.extent_index));
-        if (std.meta.eql(current, pending.replacement)) {
-            try self.transport.stabilize();
-            return .completed;
+        var retries: usize = 0;
+        while (retries < self.options.max_contention_retries) : (retries += 1) {
+            const reset = pending.reset_epoch != self.transport.resetEpoch();
+            var snapshot = try self.readPage(self.pageIndex(pending.extent_index));
+            defer snapshot.deinit();
+            const current = try snapshot.view.entry(self.entryIndex(pending.extent_index));
+            if (std.meta.eql(current, pending.replacement)) {
+                if (try self.stabilizeAndMatches(
+                    self.pageBlock(snapshot.view.page_index),
+                    snapshot.physical.bytes,
+                )) return .completed;
+                continue;
+            }
+            if (reset and std.meta.eql(current, pending.expected)) return .not_completed;
+            if (snapshot.view.generation == pending.expected_page_generation and
+                std.meta.eql(current, pending.expected))
+            {
+                return .pending;
+            }
+            if (std.meta.eql(current, pending.expected)) return .not_completed;
+            return error.AllocationStateChanged;
         }
-        if (snapshot.view.generation == pending.expected_page_generation and
-            std.meta.eql(current, pending.expected))
-        {
-            return .pending;
-        }
-        if (std.meta.eql(current, pending.expected)) return .not_completed;
-        return error.AllocationStateChanged;
+        return error.AllocationContention;
     }
 
     pub fn extentFirstBlock(self: ExtentAllocator, extent_index: u64) !u64 {
@@ -420,6 +430,14 @@ pub const ExtentAllocator = struct {
             return error.ExtentOutOfRange;
         return std.math.add(u64, self.header.layout.extent_base_block, offset) catch
             return error.ExtentOutOfRange;
+    }
+
+    /// Reads and validates the current persistent entry for one extent.
+    pub fn readEntry(self: ExtentAllocator, extent_index: u64) !allocation.Entry {
+        if (extent_index >= self.header.layout.extent_count) return error.ExtentOutOfRange;
+        var snapshot = try self.readPage(self.pageIndex(extent_index));
+        defer snapshot.deinit();
+        return snapshot.view.entry(self.entryIndex(extent_index));
     }
 
     const FormatBlockKind = enum { gate, index, allocator };
@@ -435,25 +453,54 @@ pub const ExtentAllocator = struct {
         var current = try self.allocatePhysical();
         defer current.deinit();
         try self.transport.readBlock(block_index, current.bytes);
-        if (std.mem.eql(u8, current.bytes, desired)) return .unchanged;
+        if (std.mem.eql(u8, current.bytes, desired)) {
+            return if (try self.stabilizeAndMatches(block_index, desired))
+                .unchanged
+            else
+                .pending;
+        }
         if (!allZero(current.bytes)) {
             try self.validateFormattedBlock(kind, position, current.bytes);
-            return .unchanged;
+            return if (try self.stabilizeAndMatches(block_index, current.bytes))
+                .unchanged
+            else
+                .pending;
         }
-        switch (try self.transport.compareAndWrite(block_index, current.bytes, desired)) {
-            .written => return .changed,
+        const operation_epoch = self.transport.resetEpoch();
+        switch (try self.transport.compareAndWriteAtEpoch(
+            operation_epoch,
+            block_index,
+            current.bytes,
+            desired,
+        )) {
+            .written => return if (try self.stabilizeAndMatches(block_index, desired))
+                .changed
+            else
+                .pending,
             .miscompare => {
                 try self.transport.readBlock(block_index, current.bytes);
-                if (std.mem.eql(u8, current.bytes, desired)) return .changed;
+                if (std.mem.eql(u8, current.bytes, desired)) return if (try self.stabilizeAndMatches(
+                    block_index,
+                    desired,
+                )) .changed else .pending;
                 try self.validateFormattedBlock(kind, position, current.bytes);
-                return .unchanged;
+                return if (try self.stabilizeAndMatches(block_index, current.bytes))
+                    .unchanged
+                else
+                    .pending;
             },
             .indeterminate => {
                 try self.transport.readBlock(block_index, current.bytes);
-                if (std.mem.eql(u8, current.bytes, desired)) return .changed;
+                if (std.mem.eql(u8, current.bytes, desired)) return if (try self.stabilizeAndMatches(
+                    block_index,
+                    desired,
+                )) .changed else .pending;
                 if (allZero(current.bytes)) return .pending;
                 try self.validateFormattedBlock(kind, position, current.bytes);
-                return .changed;
+                return if (try self.stabilizeAndMatches(block_index, current.bytes))
+                    .changed
+                else
+                    .pending;
             },
         }
     }
@@ -570,6 +617,7 @@ pub const ExtentAllocator = struct {
                         allocation.Entry.free(descriptor.extent_index),
                         desired,
                         descriptor.target_page_generation,
+                        null,
                     )) {
                         .completed => {},
                         .pending => return .pending,
@@ -768,6 +816,7 @@ pub const ExtentAllocator = struct {
                         expected,
                         allocation.Entry.free(descriptor.extent_index),
                         descriptor.target_page_generation,
+                        null,
                     )) {
                         .completed => return self.clearGate(&gate),
                         .pending => return .pending,
@@ -804,15 +853,20 @@ pub const ExtentAllocator = struct {
             defer page.deinit();
             const current = try page.view.entry(self.entryIndex(expected.extent_index));
             if (std.meta.eql(current, replacement)) {
-                try self.transport.stabilize();
-                return .completed;
+                if (try self.stabilizeAndMatches(
+                    self.pageBlock(page.view.page_index),
+                    page.physical.bytes,
+                )) return .completed;
+                continue;
             }
             if (!std.meta.eql(current, expected)) return error.AllocationStateChanged;
+            var pending_epoch: u64 = 0;
             switch (try self.changeAllocatorEntry(
                 expected.extent_index,
                 expected,
                 replacement,
                 page.view.generation,
+                &pending_epoch,
             )) {
                 .completed => return .completed,
                 .retry => continue,
@@ -822,6 +876,7 @@ pub const ExtentAllocator = struct {
                     .expected_page_generation = page.view.generation,
                     .expected = expected,
                     .replacement = replacement,
+                    .reset_epoch = pending_epoch,
                 } },
             }
         }
@@ -889,14 +944,17 @@ pub const ExtentAllocator = struct {
         expected: allocation.Entry,
         replacement: allocation.Entry,
         expected_generation: u64,
+        pending_epoch: ?*u64,
     ) !StepResult {
         var page = try self.readPage(self.pageIndex(extent_index));
         defer page.deinit();
         const slot = self.entryIndex(extent_index);
         const current = try page.view.entry(slot);
         if (std.meta.eql(current, replacement)) {
-            try self.transport.stabilize();
-            return .completed;
+            return if (try self.stabilizeAndMatches(
+                self.pageBlock(page.view.page_index),
+                page.physical.bytes,
+            )) .completed else .retry;
         }
         if (page.view.generation != expected_generation) {
             try self.transport.stabilize();
@@ -911,6 +969,7 @@ pub const ExtentAllocator = struct {
             desired.bytes,
             .allocator,
             page.view.page_index,
+            pending_epoch,
         );
     }
 
@@ -927,8 +986,10 @@ pub const ExtentAllocator = struct {
         const slot = self.indexEntry(global_slot);
         const current = try page.view.entry(slot);
         if (std.meta.eql(current, replacement)) {
-            try self.transport.stabilize();
-            return .completed;
+            return if (try self.stabilizeAndMatches(
+                self.indexBlock(page_index),
+                page.physical.bytes,
+            )) .completed else .retry;
         }
         if (page.view.generation != expected_generation) {
             try self.transport.stabilize();
@@ -943,6 +1004,7 @@ pub const ExtentAllocator = struct {
             desired.bytes,
             .index,
             page_index,
+            null,
         );
     }
 
@@ -953,11 +1015,20 @@ pub const ExtentAllocator = struct {
         replacement: []const u8,
         kind: FormatBlockKind,
         position: u64,
+        pending_epoch: ?*u64,
     ) !StepResult {
-        switch (try self.transport.compareAndWrite(block_index, expected, replacement)) {
+        const operation_epoch = self.transport.resetEpoch();
+        switch (try self.transport.compareAndWriteAtEpoch(
+            operation_epoch,
+            block_index,
+            expected,
+            replacement,
+        )) {
             .written => {
-                try self.transport.stabilize();
-                return .completed;
+                return if (try self.stabilizeAndMatches(block_index, replacement))
+                    .completed
+                else
+                    .retry;
             },
             .miscompare => return .retry,
             .indeterminate => {
@@ -965,14 +1036,22 @@ pub const ExtentAllocator = struct {
                 defer observed.deinit();
                 try self.transport.readBlock(block_index, observed.bytes);
                 if (std.mem.eql(u8, observed.bytes, replacement)) {
-                    try self.transport.stabilize();
-                    return .completed;
+                    return if (try self.stabilizeAndMatches(block_index, replacement))
+                        .completed
+                    else
+                        .retry;
                 }
                 if (!std.mem.eql(u8, observed.bytes, expected)) {
                     try self.transport.stabilize();
                     return .retry;
                 }
-                return self.fenceBlock(block_index, kind, position, observed.bytes);
+                return self.fenceBlock(
+                    block_index,
+                    kind,
+                    position,
+                    observed.bytes,
+                    pending_epoch,
+                );
             },
         }
     }
@@ -983,6 +1062,7 @@ pub const ExtentAllocator = struct {
         kind: FormatBlockKind,
         position: u64,
         expected: []const u8,
+        pending_epoch: ?*u64,
     ) !StepResult {
         var replacement = switch (kind) {
             .allocator => blk: {
@@ -1028,13 +1108,22 @@ pub const ExtentAllocator = struct {
             .gate => unreachable,
         };
         defer replacement.deinit();
-        switch (try self.transport.compareAndWrite(block_index, expected, replacement.bytes)) {
+        const operation_epoch = self.transport.resetEpoch();
+        switch (try self.transport.compareAndWriteAtEpoch(
+            operation_epoch,
+            block_index,
+            expected,
+            replacement.bytes,
+        )) {
             .written => {
                 try self.transport.stabilize();
                 return .retry;
             },
             .miscompare => return .retry,
-            .indeterminate => return .pending,
+            .indeterminate => {
+                if (pending_epoch) |epoch| epoch.* = operation_epoch;
+                return .pending;
+            },
         }
     }
 
@@ -1056,22 +1145,28 @@ pub const ExtentAllocator = struct {
         );
         defer replacement.deinit();
         const block_index = self.gateBlock(snapshot.view.stripe_index);
-        switch (try self.transport.compareAndWrite(
+        const operation_epoch = self.transport.resetEpoch();
+        switch (try self.transport.compareAndWriteAtEpoch(
+            operation_epoch,
             block_index,
             snapshot.physical.bytes,
             replacement.bytes,
         )) {
             .written => {
-                try self.transport.stabilize();
-                return .completed;
+                return if (try self.stabilizeAndMatches(block_index, replacement.bytes))
+                    .completed
+                else
+                    .retry;
             },
             .miscompare => return .retry,
             .indeterminate => {
                 var observed = try self.readGate(snapshot.view.stripe_index);
                 defer observed.deinit();
                 if (std.meta.eql(observed.view.descriptor, descriptor)) {
-                    try self.transport.stabilize();
-                    return .completed;
+                    return if (try self.stabilizeAndMatches(block_index, replacement.bytes))
+                        .completed
+                    else
+                        .retry;
                 }
                 if (observed.view.generation != snapshot.view.generation or
                     !std.meta.eql(observed.view.descriptor, snapshot.view.descriptor))
@@ -1089,7 +1184,9 @@ pub const ExtentAllocator = struct {
                     snapshot.view.descriptor,
                 );
                 defer fence.deinit();
-                switch (try self.transport.compareAndWrite(
+                const fence_epoch = self.transport.resetEpoch();
+                switch (try self.transport.compareAndWriteAtEpoch(
+                    fence_epoch,
                     block_index,
                     observed.physical.bytes,
                     fence.bytes,
@@ -1200,6 +1297,18 @@ pub const ExtentAllocator = struct {
             .allocator = self.allocator,
             .bytes = try self.allocator.alloc(u8, self.header.logical_block_size),
         };
+    }
+
+    fn stabilizeAndMatches(
+        self: ExtentAllocator,
+        block_index: u64,
+        expected: []const u8,
+    ) !bool {
+        try self.transport.stabilize();
+        var observed = try self.allocatePhysical();
+        defer observed.deinit();
+        try self.transport.readBlock(block_index, observed.bytes);
+        return std.mem.eql(u8, observed.bytes, expected);
     }
 
     fn validateClaim(self: ExtentAllocator, claim_value: Claim) !void {
@@ -1393,13 +1502,14 @@ fn entryMatchesDescriptor(entry: allocation.Entry, descriptor: gate_format.Descr
         entry.owner_epoch == descriptor.owner_epoch and entry.claim_epoch == descriptor.claim_epoch;
 }
 
-fn pendingRelease(retired: Claim) PendingTransition {
+fn pendingRelease(retired: Claim, reset_epoch: u64) PendingTransition {
     return .{
         .operation = .release,
         .volume_id = retired.volume_id,
         .extent_index = retired.extentIndex(),
         .expected = retired.entry,
         .replacement = allocation.Entry.free(retired.extentIndex()),
+        .reset_epoch = reset_epoch,
     };
 }
 
@@ -1458,7 +1568,7 @@ test "allocator retries the format durability barrier" {
     );
     model.injectNextStabilizeFailure();
     try std.testing.expectError(error.InjectedStabilizeFailure, allocator.format());
-    try std.testing.expectEqual(FormatResult.already_formatted, try allocator.format());
+    try std.testing.expectEqual(FormatResult.formatted, try allocator.format());
     model.crash();
     try std.testing.expectEqual(FormatResult.already_formatted, try allocator.format());
 }
@@ -1537,6 +1647,64 @@ test "claim recovers an indeterminate allocator CAW with a durable fence" {
     model.crash();
     const recovered = (try allocator.claim(testRequest(1))).claimed;
     try std.testing.expectEqual(claimed.entry, recovered.entry);
+}
+
+test "reset invalidates an unresolved allocator transition token" {
+    const geometry = block.Geometry{ .logical_block_size = 512, .block_count = 128 };
+    var model = try model_block.ModelConditionalBlock.init(std.testing.allocator, geometry);
+    defer model.deinit();
+    const allocator = try ExtentAllocator.init(
+        std.testing.allocator,
+        model.transport(),
+        try testHeader(geometry),
+        .{},
+    );
+    _ = try allocator.format();
+    const claimed = (try allocator.claim(testRequest(1))).claimed;
+    var page = try allocator.readPage(allocator.pageIndex(claimed.extentIndex()));
+    defer page.deinit();
+    var replacement = claimed.entry;
+    replacement.state = .live;
+    replacement.transition_generation = 1;
+    const pending = PendingTransition{
+        .volume_id = claimed.volume_id,
+        .extent_index = claimed.extentIndex(),
+        .expected_page_generation = page.view.generation,
+        .expected = claimed.entry,
+        .replacement = replacement,
+        .reset_epoch = model.transport().resetEpoch(),
+    };
+
+    model.crash();
+    try std.testing.expectEqual(
+        TransitionResolution.not_completed,
+        try allocator.resolveTransition(pending),
+    );
+    try std.testing.expectEqual(
+        TransitionOutcome.completed,
+        try allocator.activate(claimed, 1),
+    );
+}
+
+test "allocator verifies a replacement after reset races its barrier" {
+    const geometry = block.Geometry{ .logical_block_size = 512, .block_count = 128 };
+    var model = try model_block.ModelConditionalBlock.init(std.testing.allocator, geometry);
+    defer model.deinit();
+    const allocator = try ExtentAllocator.init(
+        std.testing.allocator,
+        model.transport(),
+        try testHeader(geometry),
+        .{},
+    );
+    _ = try allocator.format();
+    const claimed = (try allocator.claim(testRequest(1))).claimed;
+    model.injectResetBeforeNextStabilize();
+    try std.testing.expectEqual(TransitionOutcome.completed, try allocator.activate(claimed, 1));
+
+    model.crash();
+    const entry = try allocator.readEntry(claimed.extentIndex());
+    try std.testing.expectEqual(allocation.State.live, entry.state);
+    try std.testing.expectEqual(@as(u64, 1), entry.transition_generation);
 }
 
 test "claim fences indeterminate gate and index CAWs" {

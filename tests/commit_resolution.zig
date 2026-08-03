@@ -35,7 +35,11 @@ fn publishCommit(
     const store = model.conditionalStore();
     var previous = try store.readAnchor(std.testing.allocator);
     defer previous.deinit();
-    var batch = try store.beginBatch(std.testing.allocator, transaction_id);
+    var batch = try store.beginBatch(
+        std.testing.allocator,
+        transaction_id,
+        previous.version.bytes,
+    );
     defer batch.deinit();
     const encoded = cawfs.commit.encode(.{
         .generation = generation,
@@ -154,7 +158,7 @@ test "resolution rejects a malformed commit object" {
     const store = model.conditionalStore();
     var previous = try store.readAnchor(std.testing.allocator);
     defer previous.deinit();
-    var batch = try store.beginBatch(std.testing.allocator, txn_b);
+    var batch = try store.beginBatch(std.testing.allocator, txn_b, previous.version.bytes);
     defer batch.deinit();
     const head = try batch.putImmutable("not-a-commit");
     try batch.prepare();
@@ -186,7 +190,7 @@ test "resolution validates the current anchor against its commit" {
     const store = model.conditionalStore();
     var previous = try store.readAnchor(std.testing.allocator);
     defer previous.deinit();
-    var batch = try store.beginBatch(std.testing.allocator, txn_b);
+    var batch = try store.beginBatch(std.testing.allocator, txn_b, previous.version.bytes);
     defer batch.deinit();
     const encoded = cawfs.commit.encode(.{
         .generation = 1,

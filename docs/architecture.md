@@ -12,11 +12,12 @@ Backends expose version tokens and object references as opaque values. The
 transaction layer never interprets physical LBAs, SCSI status, object-store
 keys, ETags, or protocol-specific errors.
 
-The logical anchor is a fixed 512-byte envelope. A SCSI backend may embed it in
-a larger logical block and use that complete physical block as its opaque
-version token. Every published envelope includes a monotonically increasing
-generation and transaction identifier, so a physical anchor value is never
-reused.
+The logical anchor is a fixed 512-byte envelope. The SCSI backend stores its
+meaningful prefix in a checksummed physical-block record that also contains the
+volume ID, and uses that complete 512- or 4096-byte block as its opaque version
+token. Every published envelope includes a monotonically increasing generation
+and transaction identifier, so a physical anchor value is never reused or
+accepted on another volume.
 
 The contract distinguishes a definite conflict from an indeterminate outcome.
 Indeterminate publication is resolved using the transaction identifier and the
@@ -40,17 +41,20 @@ when no other writer advances it.
 
 ## Transaction Coordination
 
-The transaction coordinator snapshots one base anchor and owns one write batch.
-It stages immutable objects, writes the commit record last, prepares the batch,
-conditionally publishes the next anchor, and stabilizes a definite winner. The
-published root must either belong to the transaction's batch or already be
-loadable from the store.
+The transaction coordinator snapshots one base anchor and creates its write
+batch with that exact opaque version token. It stages immutable objects, writes
+the commit record last, prepares the batch, conditionally publishes the next
+anchor, and stabilizes a definite winner. The published root must either belong
+to the transaction's batch or already be loadable from the store.
 
 A transaction is single-use. Conflicts and confirmed non-publications are
 terminal. An indeterminate publication must be resolved before stabilization.
-If publication succeeds but stabilization fails, only stabilization is retried;
-the logical transaction is never republished. After backend recovery, terminal
-resolution can detect that an unstable publication was rolled back.
+If publication succeeds but stabilization fails, the logical transaction is
+never republished. Stabilization first verifies that the replacement remains
+visible. An in-process device reset invalidates the batch, and terminal
+resolution determines whether the unstable publication was rolled back. Reset
+also proves that an indeterminate command from the older transport epoch can no
+longer arrive, so resolution may classify an unchanged base as not committed.
 
 ## Immutable Tree
 
@@ -101,8 +105,45 @@ ordinary write has no expected-value guard and may overwrite a later write, so
 the affected owner and range must stop issuing dependent writes until recovery
 or fencing proves that the old command cannot arrive.
 
-The complete SCSI backend will own append allocation and map prepare/stabilize
-to cache synchronization.
+The first SCSI store slice is append-only and places exactly one immutable
+object in each claimed extent. An object reference canonically encodes the
+extent index, allocator claim epoch, claim ID, and payload SHA-256. The extent
+header repeats that identity, binds it to the volume ID, records the payload
+length, and is checksummed; the remainder of the extent is zero padding. Loads
+require a matching `live` immutable allocation entry and verify the volume,
+header, payload digest, and padding. Objects remain unobservable while their
+allocation is only `claimed`.
+
+Prepare writes each complete extent with ordinary block I/O, including its
+zero padding, and then crosses a data durability barrier. Only afterward does
+it activate each allocation with allocator CAW. An indeterminate ordinary
+write permanently poisons that batch because a delayed write cannot be safely
+retried or fenced by content; its claim remains allocated. A definite
+durability-barrier failure resets every known-complete extent to the staged
+phase, so retry rewrites the same complete claimed extents before crossing a
+new barrier. A device reset invalidates the old batch instead of allowing it to
+activate data whose visible write may have been rolled back.
+
+The publication backend exposes the volume-bound, checksummed physical anchor
+block as the opaque version token. Each batch captures that exact base token
+and generation before claiming extents. Claim IDs include the volume, base
+generation, transaction, sequence, and payload digest; allocator activation is
+recorded at base generation plus one. Publication rejects another base token,
+requires that same next generation and the batch transaction ID, issues exactly
+one full-block CAW, and maps its three outcomes directly to committed, conflict,
+or indeterminate.
+Conflict and failure can therefore leave durable live orphan extents. This
+slice intentionally has no reclaim, garbage collection, packing, or
+multi-extent objects.
+
+The SCSI store constructor requires the allocator, ordinary transport, and
+conditional transport to expose the same device identity as well as matching
+the volume-header geometry. Geometry equality alone does not prove storage
+identity. The unified Linux construction uses the Linux block-device executor
+as both transport identities, and the unified model device provides both views
+over one complete image.
+The model shares one visible image, stable image, crash operation, durability
+barrier, and separate delayed-command queues between its two transport views.
 
 The volume header is a canonical 512-byte envelope embedded in one physical
 logical block. Blocks 0 and 1 hold immutable header copies, block 2 is the
@@ -143,6 +184,12 @@ visible, recovery may issue a logically unchanged generation-bump CAW and
 stabilize it. Either the delayed mutation or the fence can win the old compare,
 but not both. Recovery never changes an extent candidate, index slot, or gate
 phase until the old command is observed or durably fenced.
+An in-process transport reset advances a reset epoch. CAW dispatch is atomically
+bound to that epoch, and allocator completion crosses a barrier and rereads the
+exact replacement before advancing a gate. Pending transition tokens carry the
+epoch of the actual fence CAW; an older token is classified as not completed
+when its expected entry remains, rather than waiting forever for a command
+canceled by reset.
 Mount recovery scans the fixed gate region and helps every active descriptor to
 completion; it does not need a whole-index or whole-allocator reconstruction.
 

@@ -32,6 +32,7 @@ pub const ConditionalBlockTransport = struct {
     context: *anyopaque,
     vtable: *const VTable,
     geometry: Geometry,
+    device_identity: ?*anyopaque = null,
 
     pub const VTable = struct {
         read_block: *const fn (*anyopaque, u64, []u8) anyerror!void,
@@ -41,8 +42,25 @@ pub const ConditionalBlockTransport = struct {
             []const u8,
             []const u8,
         ) anyerror!CawResult,
+        compare_and_write_at_epoch: ?*const fn (
+            *anyopaque,
+            u64,
+            u64,
+            []const u8,
+            []const u8,
+        ) anyerror!CawResult = null,
         stabilize: *const fn (*anyopaque) anyerror!void,
+        reset_epoch: ?*const fn (*anyopaque) u64 = null,
     };
+
+    pub fn validate(self: ConditionalBlockTransport) !void {
+        try self.geometry.validate();
+        if (self.vtable.reset_epoch != null and
+            self.vtable.compare_and_write_at_epoch == null)
+        {
+            return error.AtomicEpochDispatchUnsupported;
+        }
+    }
 
     pub fn readBlock(
         self: ConditionalBlockTransport,
@@ -76,10 +94,41 @@ pub const ConditionalBlockTransport = struct {
         );
     }
 
+    /// Dispatches only while the transport remains in `reset_epoch`. A
+    /// transport with a changing epoch must implement the atomic vtable hook.
+    pub fn compareAndWriteAtEpoch(
+        self: ConditionalBlockTransport,
+        reset_epoch: u64,
+        block_index: u64,
+        expected: []const u8,
+        replacement: []const u8,
+    ) !CawResult {
+        try self.validateAccess(block_index, expected.len);
+        if (replacement.len != expected.len) return error.InvalidBufferSize;
+        if (std.mem.eql(u8, expected, replacement)) return error.NoOpWrite;
+        if (self.vtable.compare_and_write_at_epoch) |compare| {
+            return compare(self.context, reset_epoch, block_index, expected, replacement);
+        }
+        if (self.vtable.reset_epoch != null) return error.AtomicEpochDispatchUnsupported;
+        if (reset_epoch != 0) return error.DeviceReset;
+        return self.vtable.compare_and_write(self.context, block_index, expected, replacement);
+    }
+
     /// Makes completed writes crash durable. It is safe to retry after error.
     pub fn stabilize(self: ConditionalBlockTransport) !void {
         try self.geometry.validate();
         return self.vtable.stabilize(self.context);
+    }
+
+    /// Changes whenever an in-process transport reset can cancel outstanding
+    /// commands or roll visible state back. Process-scoped transports may use 0.
+    pub fn resetEpoch(self: ConditionalBlockTransport) u64 {
+        const get = self.vtable.reset_epoch orelse return 0;
+        return get(self.context);
+    }
+
+    pub fn deviceIdentity(self: ConditionalBlockTransport) *anyopaque {
+        return self.device_identity orelse self.context;
     }
 
     fn validateAccess(
@@ -106,4 +155,30 @@ test "conditional block validates geometry and access" {
         error.InvalidBlockCount,
         (Geometry{ .logical_block_size = 512, .block_count = 0 }).validate(),
     );
+}
+
+test "changing reset epochs require atomic CAW dispatch" {
+    const Stub = struct {
+        fn read(_: *anyopaque, _: u64, _: []u8) !void {}
+        fn compare(_: *anyopaque, _: u64, _: []const u8, _: []const u8) !CawResult {
+            return .written;
+        }
+        fn stabilize(_: *anyopaque) !void {}
+        fn epoch(_: *anyopaque) u64 {
+            return 1;
+        }
+        const vtable = ConditionalBlockTransport.VTable{
+            .read_block = read,
+            .compare_and_write = compare,
+            .stabilize = stabilize,
+            .reset_epoch = epoch,
+        };
+    };
+    var context: u8 = 0;
+    const transport = ConditionalBlockTransport{
+        .context = &context,
+        .vtable = &Stub.vtable,
+        .geometry = .{ .logical_block_size = 512, .block_count = 1 },
+    };
+    try std.testing.expectError(error.AtomicEpochDispatchUnsupported, transport.validate());
 }

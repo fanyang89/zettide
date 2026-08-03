@@ -65,7 +65,12 @@ pub const ConditionalStore = struct {
     pub const VTable = struct {
         read_anchor: *const fn (*anyopaque, std.mem.Allocator) anyerror!AnchorSnapshot,
         load_immutable: *const fn (*anyopaque, ObjectRef, std.mem.Allocator) anyerror!OwnedBytes,
-        begin_batch: *const fn (*anyopaque, std.mem.Allocator, TransactionId) anyerror!WriteBatch,
+        begin_batch: *const fn (
+            *anyopaque,
+            std.mem.Allocator,
+            TransactionId,
+            []const u8,
+        ) anyerror!WriteBatch,
     };
 
     pub fn readAnchor(self: ConditionalStore, allocator: std.mem.Allocator) !AnchorSnapshot {
@@ -84,8 +89,9 @@ pub const ConditionalStore = struct {
         self: ConditionalStore,
         allocator: std.mem.Allocator,
         transaction_id: TransactionId,
+        base_version: []const u8,
     ) !WriteBatch {
-        return self.vtable.begin_batch(self.context, allocator, transaction_id);
+        return self.vtable.begin_batch(self.context, allocator, transaction_id, base_version);
     }
 };
 
@@ -98,6 +104,7 @@ pub const WriteBatch = struct {
         prepare: *const fn (*anyopaque) anyerror!void,
         publish: *const fn (*anyopaque, []const u8, *const Anchor) anyerror!PublishResult,
         stabilize: *const fn (*anyopaque) anyerror!void,
+        publication_terminated: *const fn (*anyopaque) bool,
         deinit: *const fn (*anyopaque) void,
     };
 
@@ -126,6 +133,12 @@ pub const WriteBatch = struct {
     /// May be retried until durability is known.
     pub fn stabilize(self: *WriteBatch) !void {
         return self.vtable.stabilize(self.context);
+    }
+
+    /// True when backend recovery has proven that no ambiguous publication
+    /// command from this batch can still reach storage.
+    pub fn publicationTerminated(self: *const WriteBatch) bool {
+        return self.vtable.publication_terminated(self.context);
     }
 
     pub fn deinit(self: *WriteBatch) void {

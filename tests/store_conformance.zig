@@ -18,12 +18,22 @@ fn makeAnchor(generation: u64, label: []const u8) Anchor {
 
 const initial_anchor = makeAnchor(1, "anchor-0");
 
+fn beginCurrentBatch(
+    store: cawfs.store.ConditionalStore,
+    allocator: std.mem.Allocator,
+    transaction_id: cawfs.store.TransactionId,
+) !cawfs.store.WriteBatch {
+    var snapshot = try store.readAnchor(allocator);
+    defer snapshot.deinit();
+    return store.beginBatch(allocator, transaction_id, snapshot.version.bytes);
+}
+
 test "model store stages immutable objects before publication" {
     var model = ModelStore.init(std.testing.allocator, initial_anchor);
     defer model.deinit();
     const store = model.conditionalStore();
 
-    var batch = try store.beginBatch(std.testing.allocator, txn_a);
+    var batch = try beginCurrentBatch(store, std.testing.allocator, txn_a);
     defer batch.deinit();
     const object_ref = try batch.putImmutable("page-a");
 
@@ -46,12 +56,12 @@ test "only one publisher can replace an anchor version" {
     var initial = try store.readAnchor(std.testing.allocator);
     defer initial.deinit();
 
-    var first = try store.beginBatch(std.testing.allocator, txn_a);
+    var first = try store.beginBatch(std.testing.allocator, txn_a, initial.version.bytes);
     defer first.deinit();
     _ = try first.putImmutable("first-page");
     try first.prepare();
 
-    var second = try store.beginBatch(std.testing.allocator, txn_b);
+    var second = try store.beginBatch(std.testing.allocator, txn_b, initial.version.bytes);
     defer second.deinit();
     _ = try second.putImmutable("second-page");
     try second.prepare();
@@ -83,7 +93,7 @@ test "stabilized publication survives a crash" {
 
     var initial = try store.readAnchor(std.testing.allocator);
     defer initial.deinit();
-    var batch = try store.beginBatch(std.testing.allocator, txn_a);
+    var batch = try store.beginBatch(std.testing.allocator, txn_a, initial.version.bytes);
     defer batch.deinit();
     try batch.prepare();
     const next_anchor = makeAnchor(2, "anchor-1");
@@ -106,7 +116,7 @@ test "indeterminate publication can occur before or after replacement" {
 
     var initial = try store.readAnchor(std.testing.allocator);
     defer initial.deinit();
-    var before = try store.beginBatch(std.testing.allocator, txn_a);
+    var before = try store.beginBatch(std.testing.allocator, txn_a, initial.version.bytes);
     defer before.deinit();
     try before.prepare();
     model.injectNextPublishFault(.indeterminate_before);
@@ -118,7 +128,7 @@ test "indeterminate publication can occur before or after replacement" {
     defer unchanged.deinit();
     try std.testing.expectEqualSlices(u8, &initial_anchor, &unchanged.anchor);
 
-    var after = try store.beginBatch(std.testing.allocator, txn_b);
+    var after = try store.beginBatch(std.testing.allocator, txn_b, unchanged.version.bytes);
     defer after.deinit();
     try after.prepare();
     model.injectNextPublishFault(.indeterminate_after);
@@ -142,7 +152,7 @@ test "object references are opaque and content-specific" {
     defer model.deinit();
     const store = model.conditionalStore();
 
-    var batch = try store.beginBatch(std.testing.allocator, txn_a);
+    var batch = try beginCurrentBatch(store, std.testing.allocator, txn_a);
     defer batch.deinit();
     const first = try batch.putImmutable("first");
     const second = try batch.putImmutable("second");
@@ -154,7 +164,7 @@ test "crash invalidates batches created in the previous process epoch" {
     defer model.deinit();
     const store = model.conditionalStore();
 
-    var batch = try store.beginBatch(std.testing.allocator, txn_a);
+    var batch = try beginCurrentBatch(store, std.testing.allocator, txn_a);
     defer batch.deinit();
     _ = try batch.putImmutable("unprepared");
 
@@ -169,7 +179,7 @@ test "publishing an identical physical anchor is rejected" {
 
     var initial = try store.readAnchor(std.testing.allocator);
     defer initial.deinit();
-    var batch = try store.beginBatch(std.testing.allocator, txn_a);
+    var batch = try store.beginBatch(std.testing.allocator, txn_a, initial.version.bytes);
     defer batch.deinit();
     try batch.prepare();
 
@@ -184,7 +194,7 @@ test "prepared immutable objects survive a crash" {
     defer model.deinit();
     const store = model.conditionalStore();
 
-    var batch = try store.beginBatch(std.testing.allocator, txn_a);
+    var batch = try beginCurrentBatch(store, std.testing.allocator, txn_a);
     defer batch.deinit();
     const object_ref = try batch.putImmutable("durable-page");
     try batch.prepare();
@@ -202,7 +212,7 @@ test "an indeterminate applied publication can be stabilized" {
 
     var initial = try store.readAnchor(std.testing.allocator);
     defer initial.deinit();
-    var batch = try store.beginBatch(std.testing.allocator, txn_a);
+    var batch = try store.beginBatch(std.testing.allocator, txn_a, initial.version.bytes);
     defer batch.deinit();
     try batch.prepare();
 
@@ -235,7 +245,11 @@ test "concurrent publishers have exactly one winner" {
         }
 
         fn runFallible(self: *@This()) !void {
-            var batch = try self.store.beginBatch(std.heap.page_allocator, self.transaction_id);
+            var batch = try self.store.beginBatch(
+                std.heap.page_allocator,
+                self.transaction_id,
+                self.version,
+            );
             defer batch.deinit();
             try batch.prepare();
             self.result = try batch.publish(self.version, &self.anchor);

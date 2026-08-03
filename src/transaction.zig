@@ -60,7 +60,7 @@ pub const Transaction = struct {
                 ((record.generation == 1) != (record.parent == null)))
                 return error.InvalidAnchorState;
         }
-        const batch = try store.beginBatch(allocator, transaction_id);
+        const batch = try store.beginBatch(allocator, transaction_id, snapshot.version.bytes);
 
         return .{
             .store = store,
@@ -147,7 +147,7 @@ pub const Transaction = struct {
     /// to `.published`; call stabilize before acknowledging the transaction.
     pub fn resolve(self: *Transaction, options: resolution.Options) !resolution.Resolution {
         const terminal = switch (self.current_status) {
-            .indeterminate => false,
+            .indeterminate => self.batch.publicationTerminated(),
             .published => true,
             else => return error.InvalidState,
         };

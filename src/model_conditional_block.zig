@@ -28,9 +28,11 @@ pub const ModelConditionalBlock = struct {
     stable: []u8,
     next_fault: Fault = .none,
     fail_next_stabilize: bool = false,
+    reset_before_next_stabilize: bool = false,
     stabilizes_until_failure: usize = 0,
     pending: std.ArrayList(Pending) = .empty,
     caws_until_fault: usize = 0,
+    reset_epoch: u64 = 1,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -104,6 +106,12 @@ pub const ModelConditionalBlock = struct {
         self.stabilizes_until_failure = successful_stabilizes;
     }
 
+    pub fn injectResetBeforeNextStabilize(self: *ModelConditionalBlock) void {
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        self.reset_before_next_stabilize = true;
+    }
+
     pub fn completePending(self: *ModelConditionalBlock) ?block.CawResult {
         spinLock(&self.mutex);
         defer self.mutex.unlock();
@@ -126,6 +134,8 @@ pub const ModelConditionalBlock = struct {
         self.caws_until_fault = 0;
         self.fail_next_stabilize = false;
         self.stabilizes_until_failure = 0;
+        self.reset_before_next_stabilize = false;
+        self.reset_epoch += 1;
     }
 
     fn readBlock(context: *anyopaque, block_index: u64, output: []u8) !void {
@@ -144,6 +154,29 @@ pub const ModelConditionalBlock = struct {
         const self: *ModelConditionalBlock = @ptrCast(@alignCast(context));
         spinLock(&self.mutex);
         defer self.mutex.unlock();
+        return self.compareAndWriteLocked(block_index, expected, replacement);
+    }
+
+    fn compareAndWriteAtEpoch(
+        context: *anyopaque,
+        reset_epoch: u64,
+        block_index: u64,
+        expected: []const u8,
+        replacement: []const u8,
+    ) !block.CawResult {
+        const self: *ModelConditionalBlock = @ptrCast(@alignCast(context));
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        if (reset_epoch != self.reset_epoch) return error.DeviceReset;
+        return self.compareAndWriteLocked(block_index, expected, replacement);
+    }
+
+    fn compareAndWriteLocked(
+        self: *ModelConditionalBlock,
+        block_index: u64,
+        expected: []const u8,
+        replacement: []const u8,
+    ) !block.CawResult {
         const current = self.blockSlice(self.visible, block_index);
         if (!std.mem.eql(u8, current, expected)) return .miscompare;
 
@@ -185,6 +218,15 @@ pub const ModelConditionalBlock = struct {
         const self: *ModelConditionalBlock = @ptrCast(@alignCast(context));
         spinLock(&self.mutex);
         defer self.mutex.unlock();
+        if (self.reset_before_next_stabilize) {
+            self.reset_before_next_stabilize = false;
+            @memcpy(self.visible, self.stable);
+            for (self.pending.items) |pending| self.freePending(pending);
+            self.pending.clearRetainingCapacity();
+            self.next_fault = .none;
+            self.caws_until_fault = 0;
+            self.reset_epoch += 1;
+        }
         if (self.fail_next_stabilize) {
             if (self.stabilizes_until_failure == 0) {
                 self.fail_next_stabilize = false;
@@ -193,6 +235,13 @@ pub const ModelConditionalBlock = struct {
             self.stabilizes_until_failure -= 1;
         }
         @memcpy(self.stable, self.visible);
+    }
+
+    fn resetEpoch(context: *anyopaque) u64 {
+        const self: *ModelConditionalBlock = @ptrCast(@alignCast(context));
+        spinLock(&self.mutex);
+        defer self.mutex.unlock();
+        return self.reset_epoch;
     }
 
     fn blockSlice(self: *const ModelConditionalBlock, bytes: []u8, block_index: u64) []u8 {
@@ -208,7 +257,9 @@ pub const ModelConditionalBlock = struct {
     const vtable = block.ConditionalBlockTransport.VTable{
         .read_block = readBlock,
         .compare_and_write = compareAndWrite,
+        .compare_and_write_at_epoch = compareAndWriteAtEpoch,
         .stabilize = stabilize,
+        .reset_epoch = resetEpoch,
     };
 };
 
@@ -364,4 +415,25 @@ test "model queues delayed commands for independent blocks" {
     try std.testing.expectEqual(block.CawResult.written, model.completePending().?);
     try std.testing.expectEqual(block.CawResult.written, model.completePending().?);
     try std.testing.expectEqual(@as(?block.CawResult, null), model.completePending());
+}
+
+test "epoch-bound CAW cannot dispatch after reset" {
+    var model = try ModelConditionalBlock.init(std.testing.allocator, .{
+        .logical_block_size = 512,
+        .block_count = 1,
+    });
+    defer model.deinit();
+    const transport = model.transport();
+    const epoch = transport.resetEpoch();
+    const expected: [512]u8 = @splat(0);
+    const replacement: [512]u8 = @splat(1);
+    model.crash();
+
+    try std.testing.expectError(
+        error.DeviceReset,
+        transport.compareAndWriteAtEpoch(epoch, 0, &expected, &replacement),
+    );
+    var observed: [512]u8 = undefined;
+    try transport.readBlock(0, &observed);
+    try std.testing.expectEqualSlices(u8, &expected, &observed);
 }

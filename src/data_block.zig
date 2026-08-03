@@ -21,6 +21,7 @@ pub const DataBlockTransport = struct {
     vtable: *const VTable,
     geometry: Geometry,
     memory_alignment: u32 = 1,
+    device_identity: ?*anyopaque = null,
 
     pub const VTable = struct {
         read_blocks: *const fn (*anyopaque, u64, []u8) anyerror!void,
@@ -55,6 +56,10 @@ pub const DataBlockTransport = struct {
 
     pub fn stabilize(self: DataBlockTransport) !void {
         return self.vtable.stabilize(self.context);
+    }
+
+    pub fn deviceIdentity(self: DataBlockTransport) *anyopaque {
+        return self.device_identity orelse self.context;
     }
 
     fn validateTransfer(
