@@ -33,8 +33,10 @@ mkdir -p "$fio_aux_dir"
 run_fio() {
     local phase=$1
     local allow_file_create=$2
-    shift 2
+    local verify_header_seed=$3
+    shift 3
     FIO_DIR="$fio_data_dir" FIO_ALLOW_FILE_CREATE="$allow_file_create" \
+        FIO_VERIFY_HEADER_SEED="$verify_header_seed" \
         timeout --kill-after=30s 1800s \
         "$fio" --aux-path="$fio_aux_dir" "$@" "$job_file" \
         2>&1 | tee "$fio_log_dir/fio-$phase.log"
@@ -46,12 +48,14 @@ save_mount_log() {
         cp "$external_mount_log" "$fio_log_dir/fio-$phase-mount.log"
 }
 
-run_fio live 1
+run_fio live 1 1
 external_stop_mount
 save_mount_log live
 timeout --kill-after=10s 300s "$external_exe" check "$external_image"
 
 external_start_mount
-run_fio remount 0 --verify_only=1
+# A separate verify-only process does not replay random-write buffer seeds in
+# the original order; CRC32C, block headers, and offsets remain verified.
+run_fio remount 0 0 --verify_only=1
 external_stop_mount
 save_mount_log remount
