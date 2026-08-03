@@ -553,7 +553,7 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
 fn printPipelineMetrics(writer: *Io.Writer, metrics: zettide.volume.PipelineMetrics) !void {
     const block = metrics.block_device;
     try writer.print(
-        "pipeline_metrics logical_write_calls={} logical_write_bytes={} journaled={} littlefs_program_calls={} littlefs_program_bytes={} direct_program_bytes={} redo_transactions={} redo_flushes={} redo_record_bytes={} redo_anchor_bytes={} checkpoints={} checkpoint_home_bytes={} backing_write_bytes={} logical_sync_calls={} backing_sync_calls={}\n",
+        "pipeline_metrics logical_write_calls={} logical_write_bytes={} journaled={} littlefs_program_calls={} littlefs_program_bytes={} direct_program_bytes={} redo_transactions={} redo_flushes={} redo_record_bytes={} redo_anchor_bytes={} checkpoints={} checkpoint_home_bytes={} backing_write_bytes={} logical_sync_calls={} backing_sync_calls={} backing_sync_elapsed_ns={}\n",
         .{
             metrics.logical_write_calls,
             metrics.logical_write_bytes,
@@ -570,6 +570,7 @@ fn printPipelineMetrics(writer: *Io.Writer, metrics: zettide.volume.PipelineMetr
             block.backing_write_bytes,
             block.logical_sync_calls,
             block.backing_sync_calls,
+            block.backing_sync_elapsed_ns,
         },
     );
 }

@@ -36,6 +36,7 @@ pub const PipelineMetrics = struct {
     backing_write_bytes: u64 = 0,
     logical_sync_calls: u64 = 0,
     backing_sync_calls: u64 = 0,
+    backing_sync_elapsed_ns: u64 = 0,
 };
 
 const AtomicPipelineMetrics = struct {
@@ -51,6 +52,7 @@ const AtomicPipelineMetrics = struct {
     backing_write_bytes: std.atomic.Value(u64) = .init(0),
     logical_sync_calls: std.atomic.Value(u64) = .init(0),
     backing_sync_calls: std.atomic.Value(u64) = .init(0),
+    backing_sync_elapsed_ns: std.atomic.Value(u64) = .init(0),
 
     fn snapshot(self: *const AtomicPipelineMetrics) PipelineMetrics {
         return .{
@@ -66,6 +68,7 @@ const AtomicPipelineMetrics = struct {
             .backing_write_bytes = self.backing_write_bytes.load(.acquire),
             .logical_sync_calls = self.logical_sync_calls.load(.acquire),
             .backing_sync_calls = self.backing_sync_calls.load(.acquire),
+            .backing_sync_elapsed_ns = self.backing_sync_elapsed_ns.load(.acquire),
         };
     }
 };
@@ -652,6 +655,7 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return error.InjectedFault;
         }
+        const sync_start = Io.Clock.awake.now(self.io).nanoseconds;
         self.file_io.sync(
             self.io,
             if (self.redo == null) .foreground else .writeback,
@@ -660,7 +664,9 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return err;
         };
+        const sync_elapsed: u64 = @intCast(Io.Clock.awake.now(self.io).nanoseconds - sync_start);
         _ = self.pipeline_metrics.backing_sync_calls.fetchAdd(1, .monotonic);
+        _ = self.pipeline_metrics.backing_sync_elapsed_ns.fetchAdd(sync_elapsed, .monotonic);
         if (action == .after) {
             self.freezeWrites();
             return error.InjectedFault;
