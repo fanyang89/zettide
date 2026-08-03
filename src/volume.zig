@@ -12,6 +12,7 @@ const pool_member_set = @import("v3/pool_member_set.zig");
 const ReplicaEndpoint = @import("v3/replica_endpoint.zig").ReplicaEndpoint;
 const pool_provision = @import("v3/pool_provision.zig");
 const name_profile = @import("name_profile.zig");
+pub const nfs_handle = @import("nfs_handle.zig");
 const volume_crypto = @import("volume_crypto.zig");
 pub const c = block_device.c;
 
@@ -436,6 +437,20 @@ pub const Volume = struct {
         defer self.view_lock.unlock(self.io);
         self.fallback_uid = uid;
         self.fallback_gid = gid;
+    }
+
+    pub fn volumeUuid(self: *const Volume) [16]u8 {
+        return self.header.uuid;
+    }
+
+    pub fn statIdentity(self: *Volume, handle: nfs_handle.Handle) !NodeInfo {
+        const info = if (handle.kind == .directory)
+            try self.statDirectoryIdentity(handle.identity)
+        else
+            try self.statObject(handle.identity);
+        if (info.metadata.kind != handle.kind or !std.mem.eql(u8, &info.identity, &handle.identity))
+            return error.FileNotFound;
+        return info;
     }
 
     pub fn mount(self: *Volume) !void {

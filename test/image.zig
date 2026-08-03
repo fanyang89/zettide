@@ -919,6 +919,69 @@ test "identity based namespace operations do not require caller paths" {
     try volume.removeAt(root, "parent");
 }
 
+test "NFS file handles survive rename and reopen then become stale on removal" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var directory_bytes: [zettide.volume.nfs_handle.encoded_size]u8 = undefined;
+    var file_bytes: [zettide.volume.nfs_handle.encoded_size]u8 = undefined;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        const root = try volume.rootDirectoryIdentity();
+        const directory = try volume.makeDirectoryAt(root, "directory", 0o40755, 10, 20);
+        var file: FileHandle = undefined;
+        try volume.openFileAt(
+            &file,
+            directory.identity,
+            "file",
+            c.LFS_O_CREAT | c.LFS_O_RDWR,
+            0o100644,
+            10,
+            20,
+        );
+        const file_identity = file.object_id;
+        try volume.closeFile(&file);
+        directory_bytes = zettide.volume.nfs_handle.encode(volume.volumeUuid(), .{
+            .kind = .directory,
+            .identity = directory.identity,
+        });
+        file_bytes = zettide.volume.nfs_handle.encode(volume.volumeUuid(), .{
+            .kind = .file,
+            .identity = file_identity,
+        });
+
+        _ = try volume.renameAt(root, "directory", root, "renamed", false);
+        const decoded_directory = try zettide.volume.nfs_handle.decode(volume.volumeUuid(), &directory_bytes);
+        const decoded_file = try zettide.volume.nfs_handle.decode(volume.volumeUuid(), &file_bytes);
+        try std.testing.expectEqual(
+            zettide.metadata.Kind.directory,
+            (try volume.statIdentity(decoded_directory)).metadata.kind,
+        );
+        try std.testing.expectEqual(
+            zettide.metadata.Kind.file,
+            (try volume.statIdentity(decoded_file)).metadata.kind,
+        );
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        const directory = try zettide.volume.nfs_handle.decode(volume.volumeUuid(), &directory_bytes);
+        const file = try zettide.volume.nfs_handle.decode(volume.volumeUuid(), &file_bytes);
+        try std.testing.expectEqual(zettide.metadata.Kind.directory, (try volume.statIdentity(directory)).metadata.kind);
+        try std.testing.expectEqual(zettide.metadata.Kind.file, (try volume.statIdentity(file)).metadata.kind);
+        try volume.removeAt(directory.identity, "file");
+        try std.testing.expectError(error.FileNotFound, volume.statIdentity(file));
+        try volume.removeAt(try volume.rootDirectoryIdentity(), "renamed");
+        try std.testing.expectError(error.FileNotFound, volume.statIdentity(directory));
+    }
+}
+
 test "directories from old images receive a compatible persistent identity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
