@@ -756,6 +756,106 @@ test "directory identity survives rename and container reopen" {
     }
 }
 
+test "directory identities resolve namespace operations across rename and reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var root_identity: zettide.object_format.ObjectId = undefined;
+    var parent_identity: zettide.object_format.ObjectId = undefined;
+    var child_identity: zettide.object_format.ObjectId = undefined;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        root_identity = try volume.rootDirectoryIdentity();
+        try std.testing.expectEqualSlices(u8, &root_identity, &(try volume.stat("/")).identity);
+
+        try volume.makeDirectory("/parent", 0o40755, 10, 20);
+        parent_identity = (try volume.lookupAt(root_identity, "parent")).identity;
+        try volume.makeDirectory("/parent/child", 0o40755, 10, 20);
+        child_identity = (try volume.lookupAt(parent_identity, "child")).identity;
+        try std.testing.expectEqualSlices(
+            u8,
+            &parent_identity,
+            &(try volume.parentDirectoryIdentity(child_identity)),
+        );
+
+        var file: FileHandle = undefined;
+        try volume.openFile(&file, "/parent/child/file", c.LFS_O_CREAT | c.LFS_O_RDWR, 0o100644, 10, 20);
+        try volume.closeFile(&file);
+        try std.testing.expectEqualSlices(
+            u8,
+            &file.object_id,
+            &(try volume.lookupAt(child_identity, "file")).identity,
+        );
+
+        try volume.rename("/parent", "/renamed");
+        try std.testing.expectEqualSlices(
+            u8,
+            &parent_identity,
+            &(try volume.lookupAt(root_identity, "renamed")).identity,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &child_identity,
+            &(try volume.statDirectoryIdentity(child_identity)).identity,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &file.object_id,
+            &(try volume.lookupAt(child_identity, "file")).identity,
+        );
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try std.testing.expectEqualSlices(u8, &root_identity, &(try volume.rootDirectoryIdentity()));
+        try std.testing.expectEqualSlices(
+            u8,
+            &parent_identity,
+            &(try volume.lookupAt(root_identity, "renamed")).identity,
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &child_identity,
+            &(try volume.statDirectoryIdentity(child_identity)).identity,
+        );
+        try volume.remove("/renamed/child/file");
+        try volume.remove("/renamed/child");
+        try std.testing.expectError(error.FileNotFound, volume.statDirectoryIdentity(child_identity));
+        try volume.remove("/renamed");
+        try std.testing.expectError(error.FileNotFound, volume.statDirectoryIdentity(parent_identity));
+    }
+}
+
+test "directory identity replacement makes the replaced handle stale" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createVolume(&tmp, &path_buffer, 1024 * 1024);
+    var volume = try openVolume(path);
+    defer volume.deinit();
+    try volume.mount();
+
+    const root_identity = try volume.rootDirectoryIdentity();
+    try volume.makeDirectory("/source", 0o40755, 10, 20);
+    try volume.makeDirectory("/target", 0o40755, 10, 20);
+    const source_identity = (try volume.lookupAt(root_identity, "source")).identity;
+    const target_identity = (try volume.lookupAt(root_identity, "target")).identity;
+
+    try volume.rename("/source", "/target");
+    try std.testing.expectEqualSlices(
+        u8,
+        &source_identity,
+        &(try volume.lookupAt(root_identity, "target")).identity,
+    );
+    try std.testing.expectError(error.FileNotFound, volume.statDirectoryIdentity(target_identity));
+}
+
 test "directories from old images receive a compatible persistent identity" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -817,6 +917,64 @@ test "directories from old images receive a compatible persistent identity" {
         defer volume.deinit();
         try volume.mount();
         try std.testing.expectEqualSlices(u8, &expected_identity, &(try volume.stat("/legacy-directory")).identity);
+    }
+}
+
+test "journaled legacy directories receive persistent identities during writable mount" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try createJournaledVolume(&tmp, &path_buffer, 4 * 1024 * 1024);
+    var expected_identity: zettide.object_format.ObjectId = undefined;
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try volume.makeDirectory("/legacy-directory", 0o40755, 1, 2);
+        try volume.device.beginTransaction();
+        try zettide.volume.checkLfs(c.lfs_removeattr(
+            &volume.lfs,
+            "/namespace/legacy-directory",
+            zettide.metadata.directory_identity_attribute_type,
+        ));
+        try volume.device.commitTransaction();
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        expected_identity = (try volume.lookupAt(try volume.rootDirectoryIdentity(), "legacy-directory")).identity;
+        var stored_identity: zettide.object_format.ObjectId = undefined;
+        try std.testing.expectEqual(
+            @as(c_int, stored_identity.len),
+            c.lfs_getattr(
+                &volume.lfs,
+                "/namespace/legacy-directory",
+                zettide.metadata.directory_identity_attribute_type,
+                &stored_identity,
+                stored_identity.len,
+            ),
+        );
+        try std.testing.expectEqualSlices(u8, &expected_identity, &stored_identity);
+        try volume.rename("/legacy-directory", "/renamed-directory");
+        try std.testing.expectEqualSlices(
+            u8,
+            &expected_identity,
+            &(try volume.statDirectoryIdentity(expected_identity)).identity,
+        );
+    }
+
+    {
+        var volume = try openVolume(path);
+        defer volume.deinit();
+        try volume.mount();
+        try std.testing.expectEqualSlices(
+            u8,
+            &expected_identity,
+            &(try volume.lookupAt(try volume.rootDirectoryIdentity(), "renamed-directory")).identity,
+        );
     }
 }
 

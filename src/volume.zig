@@ -44,6 +44,8 @@ pub const Volume = struct {
     open_objects: std.AutoHashMap(object_format.ObjectId, OpenObject),
     link_counts: std.AutoHashMap(object_format.ObjectId, u64),
     directory_link_counts: std.AutoHashMap(object_format.ObjectId, u64),
+    directory_index: std.AutoHashMap(object_format.ObjectId, DirectoryIndexEntry),
+    root_directory_identity: ?object_format.ObjectId = null,
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
     chunk_cache: object_store.ChunkCache,
     reservation_blocks: u64 = 0,
@@ -322,6 +324,8 @@ pub const Volume = struct {
         result.open_objects = std.AutoHashMap(object_format.ObjectId, OpenObject).init(std.heap.c_allocator);
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.directory_link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.directory_index = std.AutoHashMap(object_format.ObjectId, DirectoryIndexEntry).init(std.heap.c_allocator);
+        result.root_directory_identity = null;
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.chunk_cache = .{};
         result.reservation_blocks = 0;
@@ -413,6 +417,8 @@ pub const Volume = struct {
         result.open_objects = std.AutoHashMap(object_format.ObjectId, OpenObject).init(std.heap.c_allocator);
         result.link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.directory_link_counts = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
+        result.directory_index = std.AutoHashMap(object_format.ObjectId, DirectoryIndexEntry).init(std.heap.c_allocator);
+        result.root_directory_identity = null;
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.chunk_cache = .{};
         result.reservation_blocks = 0;
@@ -469,6 +475,8 @@ pub const Volume = struct {
             try self.device.setDurability(options.journal_durability);
         self.link_counts.clearRetainingCapacity();
         self.directory_link_counts.clearRetainingCapacity();
+        self.directory_index.clearRetainingCapacity();
+        self.root_directory_identity = null;
         self.object_pins.clearRetainingCapacity();
         try self.store().collectLinkCounts(&self.link_counts);
         var recovered_heads = std.AutoHashMap(object_format.ObjectId, object_format.ObjectHead).init(std.heap.c_allocator);
@@ -476,6 +484,7 @@ pub const Volume = struct {
         var recovery_mutation = if (self.writable) try self.beginMutation() else Mutation{};
         defer recovery_mutation.deinit();
         if (self.writable) try self.store().recoverOrphans(&self.link_counts, &recovered_heads);
+        try self.rebuildDirectoryIndex();
         self.reservation_blocks = try self.collectReservationBlocks(if (self.writable) &recovered_heads else null);
         try recovery_mutation.commit();
     }
@@ -509,6 +518,7 @@ pub const Volume = struct {
             self.file.close(self.io);
         }
         self.open_objects.deinit();
+        self.directory_index.deinit();
         self.directory_link_counts.deinit();
         self.object_pins.deinit();
         self.link_counts.deinit();
@@ -703,6 +713,57 @@ pub const Volume = struct {
         return self.link_counts.count();
     }
 
+    pub fn rootDirectoryIdentity(self: *Volume) !object_format.ObjectId {
+        var view = try self.beginView();
+        defer view.deinit();
+        return self.root_directory_identity orelse error.CorruptFilesystem;
+    }
+
+    pub fn parentDirectoryIdentity(
+        self: *Volume,
+        identity: object_format.ObjectId,
+    ) !object_format.ObjectId {
+        var view = try self.beginView();
+        defer view.deinit();
+        return (self.directory_index.get(identity) orelse return error.FileNotFound).parent;
+    }
+
+    pub fn statDirectoryIdentity(self: *Volume, identity: object_format.ObjectId) !NodeInfo {
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginStateMutation();
+        defer mutation.deinit();
+        var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const path = try self.directoryPathUnlocked(identity, &path_buffer);
+        const result = try self.statUnlocked(path);
+        if (result.metadata.kind != .directory or !std.mem.eql(u8, &result.identity, &identity))
+            return error.CorruptFilesystem;
+        try mutation.commit();
+        return result;
+    }
+
+    pub fn lookupAt(
+        self: *Volume,
+        parent_identity: object_format.ObjectId,
+        name: []const u8,
+    ) !NodeInfo {
+        if (name.len == 0 or name.len >= directory_name_capacity or
+            std.mem.indexOfScalar(u8, name, '/') != null or
+            std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, ".."))
+            return error.InvalidArgument;
+        try self.object_transaction_mutex.lock(self.io);
+        defer self.object_transaction_mutex.unlock(self.io);
+        var mutation = try self.beginStateMutation();
+        defer mutation.deinit();
+        var parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const parent = try self.directoryPathUnlocked(parent_identity, &parent_buffer);
+        var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const path = try joinPathComponent(&path_buffer, parent, name);
+        const result = try self.statUnlocked(path);
+        try mutation.commit();
+        return result;
+    }
+
     pub fn setMetadata(self: *Volume, path: [*:0]const u8, value: metadata.Metadata) !void {
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
@@ -768,12 +829,21 @@ pub const Volume = struct {
         defer mutation.deinit();
         const inherited = try self.inheritCreateMetadata(path, mode, gid, true);
         try self.ensureGrowthCapacity();
+        try self.directory_index.ensureUnusedCapacity(1);
+        const parent_path = parentSlice(path);
+        var parent_path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        @memcpy(parent_path_buffer[0..parent_path.len], parent_path);
+        var parent_translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
+        const parent_translated = try object_store.Store.translateUserPath(&parent_path_buffer, &parent_translated_buffer);
+        const parent_identity = try self.directoryIdentity(parent_translated);
+        const name = baseNameSlice(path);
+        var identity: object_format.ObjectId = undefined;
+        try self.io.randomSecure(&identity);
+        if (self.directory_index.contains(identity)) return error.CorruptFilesystem;
         var translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         try checkLfs(c.lfs_mkdir(&self.lfs, translated));
         errdefer _ = c.lfs_remove(&self.lfs, translated);
-        var identity: object_format.ObjectId = undefined;
-        try self.io.randomSecure(&identity);
         try checkLfs(c.lfs_setattr(
             &self.lfs,
             translated,
@@ -791,6 +861,11 @@ pub const Volume = struct {
         try self.setDirectoryMetadataTranslated(translated, directory_metadata.encode());
         try self.updateParentTimes(path);
         self.adjustCachedParentLinkCount(path, true);
+        self.directory_index.putAssumeCapacityNoClobber(
+            identity,
+            try DirectoryIndexEntry.init(parent_identity, name),
+        );
+        errdefer _ = self.directory_index.remove(identity);
         try mutation.commit();
     }
 
@@ -866,6 +941,10 @@ pub const Volume = struct {
         const translated = try object_store.Store.translateUserPath(path, &translated_buffer);
         var info: c.struct_lfs_info = undefined;
         try checkLfs(c.lfs_stat(&self.lfs, translated, &info));
+        const removed_directory_identity = if (info.type == c.LFS_TYPE_DIR)
+            try self.directoryIdentity(translated)
+        else
+            null;
         const removed_object = if (info.type == c.LFS_TYPE_DIR) null else try self.store().readRef(path);
         if (info.type == c.LFS_TYPE_DIR and !try self.directoryIsEmpty(translated))
             return error.DirectoryNotEmpty;
@@ -887,6 +966,12 @@ pub const Volume = struct {
         }
         try self.updateParentTimes(path);
         try checkLfs(c.lfs_remove(&self.lfs, translated));
+        const removed_directory_entry = if (removed_directory_identity) |identity|
+            self.directory_index.fetchRemove(identity) orelse return error.CorruptFilesystem
+        else
+            null;
+        errdefer if (removed_directory_entry) |entry|
+            self.directory_index.put(entry.key, entry.value) catch {};
         if (info.type == c.LFS_TYPE_DIR) self.adjustCachedParentLinkCount(path, false);
         if (removed_object) |object_ref| {
             object_count.?.* -= 1;
@@ -950,6 +1035,30 @@ pub const Volume = struct {
                 return error.InvalidArgument;
         }
         try self.validateParentDirectory(new_path);
+        const source_directory_identity = if (old_info.type == c.LFS_TYPE_DIR)
+            try self.directoryIdentity(old_translated)
+        else
+            null;
+        const replaced_directory_identity = if (new_exists and new_info.type == c.LFS_TYPE_DIR)
+            try self.directoryIdentity(new_translated)
+        else
+            null;
+        const original_source_entry = if (source_directory_identity) |identity|
+            self.directory_index.get(identity) orelse return error.CorruptFilesystem
+        else
+            null;
+        var new_parent_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+        const new_parent_path = parentSlice(new_path);
+        @memcpy(new_parent_buffer[0..new_parent_path.len], new_parent_path);
+        var new_parent_translated_buffer: [object_store.max_path_bytes:0]u8 = undefined;
+        const new_parent_translated = try object_store.Store.translateUserPath(
+            &new_parent_buffer,
+            &new_parent_translated_buffer,
+        );
+        const new_parent_identity = if (source_directory_identity != null)
+            try self.directoryIdentity(new_parent_translated)
+        else
+            undefined;
         const replaced = self.store().readRef(new_path) catch |err| switch (err) {
             error.FileNotFound, error.IsDirectory => null,
             else => return err,
@@ -987,6 +1096,17 @@ pub const Volume = struct {
         if (!std.mem.eql(u8, parentSlice(old_path), parentSlice(new_path)))
             try self.updateParentTimes(new_path);
         try checkLfs(c.lfs_rename(&self.lfs, old_translated, new_translated));
+        const removed_replaced_directory = if (replaced_directory_identity) |identity|
+            self.directory_index.fetchRemove(identity) orelse return error.CorruptFilesystem
+        else
+            null;
+        errdefer if (removed_replaced_directory) |entry|
+            self.directory_index.put(entry.key, entry.value) catch {};
+        if (source_directory_identity) |identity| {
+            const entry = self.directory_index.getPtr(identity) orelse return error.CorruptFilesystem;
+            entry.* = try DirectoryIndexEntry.init(new_parent_identity, baseNameSlice(new_path));
+            errdefer entry.* = original_source_entry.?;
+        }
         if (old_info.type == c.LFS_TYPE_DIR) {
             const same_parent = std.mem.eql(u8, parentSlice(old_path), parentSlice(new_path));
             if (!same_parent) self.adjustCachedParentLinkCount(old_path, false);
@@ -1441,7 +1561,86 @@ pub const Volume = struct {
         }
     }
 
+    fn rebuildDirectoryIndex(self: *Volume) !void {
+        self.directory_index.clearRetainingCapacity();
+        self.root_directory_identity = null;
+        const root = try self.directoryIdentityOptions(object_store.namespace_root, self.writable);
+        try self.directory_index.put(root, try DirectoryIndexEntry.init(root, ""));
+        self.root_directory_identity = root;
+        try self.indexChildDirectories(object_store.namespace_root, root);
+    }
+
+    fn indexChildDirectories(
+        self: *Volume,
+        translated_parent: [*:0]const u8,
+        parent_identity: object_format.ObjectId,
+    ) !void {
+        var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+        try checkLfs(c.lfs_dir_open(&self.lfs, &directory, translated_parent));
+        defer _ = c.lfs_dir_close(&self.lfs, &directory);
+        while (true) {
+            var info: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(&self.lfs, &directory, &info);
+            try checkLfs(result);
+            if (result == 0) return;
+            if (info.type != c.LFS_TYPE_DIR) continue;
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            var path_buffer: [object_store.max_path_bytes:0]u8 = @splat(0);
+            const path = try joinPathComponent(&path_buffer, translated_parent, name);
+            const identity = try self.directoryIdentityOptions(path, self.writable);
+            if (self.directory_index.contains(identity)) return error.CorruptFilesystem;
+            try self.directory_index.put(identity, try DirectoryIndexEntry.init(parent_identity, name));
+            try self.indexChildDirectories(path, identity);
+        }
+    }
+
+    fn directoryPathUnlocked(
+        self: *const Volume,
+        identity: object_format.ObjectId,
+        buffer: *[object_store.max_path_bytes:0]u8,
+    ) ![*:0]const u8 {
+        const root = self.root_directory_identity orelse return error.CorruptFilesystem;
+        if (!self.directory_index.contains(identity)) return error.FileNotFound;
+        buffer.* = @splat(0);
+        if (std.mem.eql(u8, &identity, &root)) {
+            buffer[0] = '/';
+            return buffer;
+        }
+
+        var cursor: usize = buffer.len - 1;
+        var current = identity;
+        var remaining = self.directory_index.count();
+        while (!std.mem.eql(u8, &current, &root)) {
+            if (remaining == 0) return error.CorruptFilesystem;
+            remaining -= 1;
+            const entry = self.directory_index.get(current) orelse return error.FileNotFound;
+            const name = entry.nameSlice();
+            if (name.len == 0 or cursor < name.len + 1) return error.CorruptFilesystem;
+            cursor -= name.len;
+            @memcpy(buffer[cursor .. cursor + name.len], name);
+            cursor -= 1;
+            buffer[cursor] = '/';
+            current = entry.parent;
+        }
+        const length = buffer.len - 1 - cursor;
+        std.mem.copyForwards(u8, buffer[0..length], buffer[cursor .. cursor + length]);
+        buffer[length] = 0;
+        return buffer;
+    }
+
     fn directoryIdentity(self: *Volume, translated: [*:0]const u8) !object_format.ObjectId {
+        return self.directoryIdentityOptions(
+            translated,
+            self.writable and (self.backing != .file or !self.device.isJournaled()),
+        );
+    }
+
+    fn directoryIdentityOptions(
+        self: *Volume,
+        translated: [*:0]const u8,
+        persist_missing: bool,
+    ) !object_format.ObjectId {
         var identity: object_format.ObjectId = undefined;
         const result = c.lfs_getattr(
             &self.lfs,
@@ -1459,7 +1658,7 @@ pub const Volume = struct {
             unreachable;
         }
 
-        if (self.writable and (self.backing != .file or !self.device.isJournaled())) {
+        if (persist_missing) {
             try self.io.randomSecure(&identity);
             const set_result = c.lfs_setattr(
                 &self.lfs,
@@ -1736,6 +1935,45 @@ fn makeReplicaEndpoints(
 
 const accounting_metadata_blocks: u64 = 32;
 
+const directory_name_capacity = 256;
+
+const DirectoryIndexEntry = struct {
+    parent: object_format.ObjectId,
+    name: [directory_name_capacity:0]u8,
+
+    fn init(parent: object_format.ObjectId, name: []const u8) !DirectoryIndexEntry {
+        if (name.len >= directory_name_capacity) return error.NameTooLong;
+        var result: DirectoryIndexEntry = .{ .parent = parent, .name = @splat(0) };
+        @memcpy(result.name[0..name.len], name);
+        return result;
+    }
+
+    fn nameSlice(self: *const DirectoryIndexEntry) []const u8 {
+        return std.mem.sliceTo(&self.name, 0);
+    }
+};
+
+fn joinPathComponent(
+    buffer: *[object_store.max_path_bytes:0]u8,
+    parent: [*:0]const u8,
+    name: []const u8,
+) ![*:0]const u8 {
+    const parent_value = std.mem.span(parent);
+    const separator: usize = if (parent_value.len == 1) 0 else 1;
+    const length = std.math.add(usize, parent_value.len + separator, name.len) catch
+        return error.NameTooLong;
+    if (length >= buffer.len) return error.NameTooLong;
+    buffer.* = @splat(0);
+    @memcpy(buffer[0..parent_value.len], parent_value);
+    var cursor = parent_value.len;
+    if (separator != 0) {
+        buffer[cursor] = '/';
+        cursor += 1;
+    }
+    @memcpy(buffer[cursor .. cursor + name.len], name);
+    return buffer;
+}
+
 fn inflatedDataBlocks(bytes: u64, block_size: u32) !u64 {
     const blocks = try std.math.divCeil(u64, bytes, block_size);
     return std.math.mul(u64, blocks, 2) catch error.FileTooLarge;
@@ -1750,6 +1988,12 @@ fn parentSlice(path: [*:0]const u8) []const u8 {
     if (value.len <= 1) return "/";
     const separator = std.mem.lastIndexOfScalar(u8, value, '/') orelse return "/";
     return if (separator == 0) "/" else value[0..separator];
+}
+
+fn baseNameSlice(path: [*:0]const u8) []const u8 {
+    const value = std.mem.span(path);
+    const separator = std.mem.lastIndexOfScalar(u8, value, '/') orelse return value;
+    return value[separator + 1 ..];
 }
 
 fn hostOwner() struct { uid: u32, gid: u32 } {
