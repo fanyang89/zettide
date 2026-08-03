@@ -11,6 +11,7 @@ pub const claim_gate_format = @import("claim_gate_format.zig");
 pub const claim_index_format = @import("claim_index_format.zig");
 pub const data_block = @import("data_block.zig");
 pub const extent_allocator = @import("extent_allocator.zig");
+pub const filesystem_format = @import("filesystem_format.zig");
 pub const immutable_extent = @import("immutable_extent.zig");
 pub const linux_sg_io = if (builtin.os.tag == .linux) @import("linux_sg_io.zig") else struct {};
 pub const model_conditional_block = @import("model_conditional_block.zig");
@@ -39,6 +40,7 @@ test {
     _ = claim_index_format;
     _ = data_block;
     _ = extent_allocator;
+    _ = filesystem_format;
     _ = immutable_extent;
     _ = linux_sg_io;
     _ = model_conditional_block;
