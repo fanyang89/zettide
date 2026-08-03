@@ -144,6 +144,15 @@ pub const ModelStore = struct {
         };
     }
 
+    fn beginControlBatch(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        operation_id: TransactionId,
+        base_version: []const u8,
+    ) !WriteBatch {
+        return beginBatch(context, allocator, operation_id, base_version);
+    }
+
     fn encodeVersion(allocator: std.mem.Allocator, anchor: Anchor) !OwnedBytes {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(&anchor, &digest, .{});
@@ -167,6 +176,7 @@ pub const ModelStore = struct {
         .read_anchor = readAnchor,
         .load_immutable = loadImmutable,
         .begin_batch = beginBatch,
+        .begin_control_batch = beginControlBatch,
     };
 
     const batch_vtable: WriteBatch.VTable = .{

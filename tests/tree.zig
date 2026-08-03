@@ -39,10 +39,21 @@ const LoadFaultStore = struct {
         return self.delegate.beginBatch(allocator, transaction_id, base_version);
     }
 
+    fn beginControlBatch(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        operation_id: TransactionId,
+        base_version: []const u8,
+    ) !cawfs.store.WriteBatch {
+        const self: *LoadFaultStore = @ptrCast(@alignCast(context));
+        return self.delegate.beginControlBatch(allocator, operation_id, base_version);
+    }
+
     const vtable = cawfs.store.ConditionalStore.VTable{
         .read_anchor = readAnchor,
         .load_immutable = loadImmutable,
         .begin_batch = beginBatch,
+        .begin_control_batch = beginControlBatch,
     };
 };
 

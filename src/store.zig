@@ -71,6 +71,12 @@ pub const ConditionalStore = struct {
             TransactionId,
             []const u8,
         ) anyerror!WriteBatch,
+        begin_control_batch: *const fn (
+            *anyopaque,
+            std.mem.Allocator,
+            TransactionId,
+            []const u8,
+        ) anyerror!WriteBatch,
     };
 
     pub fn sameBackend(self: ConditionalStore, other: ConditionalStore) bool {
@@ -96,6 +102,20 @@ pub const ConditionalStore = struct {
         base_version: []const u8,
     ) !WriteBatch {
         return self.vtable.begin_batch(self.context, allocator, transaction_id, base_version);
+    }
+
+    pub fn beginControlBatch(
+        self: ConditionalStore,
+        allocator: std.mem.Allocator,
+        operation_id: TransactionId,
+        base_version: []const u8,
+    ) !WriteBatch {
+        return self.vtable.begin_control_batch(
+            self.context,
+            allocator,
+            operation_id,
+            base_version,
+        );
     }
 };
 

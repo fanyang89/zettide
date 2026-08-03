@@ -352,3 +352,43 @@ test "maintenance revision fences old publications and blocks transactions" {
         ),
     );
 }
+
+test "normal transaction preserves control ancestry" {
+    var model = ModelStore.init(std.testing.allocator, initialAnchor());
+    defer model.deinit();
+    const store = model.conditionalStore();
+    var previous = try store.readAnchor(std.testing.allocator);
+    defer previous.deinit();
+    var control_batch = try store.beginControlBatch(
+        std.testing.allocator,
+        txn_a,
+        previous.version.bytes,
+    );
+    defer control_batch.deinit();
+    const control = try control_batch.putImmutable("completed maintenance");
+    try control_batch.prepare();
+    const active = cawfs.anchor.encode(.{
+        .revision = 1,
+        .generation = 0,
+        .transaction_id = @splat(0),
+        .head = null,
+        .mode = .active,
+        .mode_epoch = 2,
+        .control_ref = control,
+    });
+    try std.testing.expectEqual(
+        cawfs.store.PublishResult.committed,
+        try control_batch.publish(previous.version.bytes, &active),
+    );
+    try control_batch.stabilize();
+
+    var transaction = try Transaction.begin(store, std.testing.allocator, txn_b);
+    defer transaction.deinit();
+    const root = try transaction.putImmutable("root after maintenance");
+    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+
+    var current = try store.readAnchor(std.testing.allocator);
+    defer current.deinit();
+    const state = try cawfs.anchor.decode(&current.anchor);
+    try std.testing.expect(cawfs.store.ObjectRef.eql(control, state.control_ref.?));
+}

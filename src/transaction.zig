@@ -40,6 +40,7 @@ pub const Transaction = struct {
     base_generation: u64,
     base_mode_epoch: u64,
     base_head: ?store_mod.ObjectRef,
+    base_control_ref: ?store_mod.ObjectRef,
     version: store_mod.OwnedBytes,
     batch: store_mod.WriteBatch,
     staged: std.ArrayList(store_mod.ObjectRef) = .empty,
@@ -74,6 +75,7 @@ pub const Transaction = struct {
             .base_generation = base.generation,
             .base_mode_epoch = base.mode_epoch,
             .base_head = base.head,
+            .base_control_ref = base.control_ref,
             .version = snapshot.version,
             .batch = batch,
         };
@@ -135,6 +137,7 @@ pub const Transaction = struct {
             .head = commit_ref,
             .mode = .active,
             .mode_epoch = self.base_mode_epoch,
+            .control_ref = self.base_control_ref,
         });
         const result = try self.batch.publish(self.version.bytes, &next);
         switch (result) {

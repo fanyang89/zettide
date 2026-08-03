@@ -179,6 +179,25 @@ pub const ScsiStore = struct {
         transaction_id: store_mod.TransactionId,
         base_version: []const u8,
     ) !WriteBatch {
+        return beginBatchFor(context, allocator, transaction_id, base_version, .transaction);
+    }
+
+    fn beginControlBatch(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        operation_id: store_mod.TransactionId,
+        base_version: []const u8,
+    ) !WriteBatch {
+        return beginBatchFor(context, allocator, operation_id, base_version, .control);
+    }
+
+    fn beginBatchFor(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        transaction_id: store_mod.TransactionId,
+        base_version: []const u8,
+        purpose: BatchPurpose,
+    ) !WriteBatch {
         const self: *ScsiStore = @ptrCast(@alignCast(context));
         if (allZero(&transaction_id)) return error.InvalidTransactionId;
         if (base_version.len != self.header.logical_block_size)
@@ -186,7 +205,8 @@ pub const ScsiStore = struct {
         const logical = try validatePhysicalAnchor(base_version, self.header.volume_id);
         const base_state = try anchor_format.decode(&logical);
         try validateAnchorState(base_state);
-        if (base_state.mode != .active) return error.VolumeNotActive;
+        if (purpose == .transaction and base_state.mode != .active)
+            return error.VolumeNotActive;
         const publication_revision = std.math.add(u64, base_state.revision, 1) catch
             return error.RevisionOverflow;
         const publication_generation = std.math.add(u64, base_state.generation, 1) catch
@@ -198,6 +218,7 @@ pub const ScsiStore = struct {
             .backing_allocator = allocator,
             .store = self,
             .transaction_id = transaction_id,
+            .purpose = purpose,
             .base_version = base,
             .base_revision = base_state.revision,
             .base_generation = base_state.generation,
@@ -244,6 +265,7 @@ pub const ScsiStore = struct {
         .read_anchor = readAnchor,
         .load_immutable = loadImmutable,
         .begin_batch = beginBatch,
+        .begin_control_batch = beginControlBatch,
     };
 
     const batch_vtable = WriteBatch.VTable{
@@ -267,11 +289,13 @@ const StagedObject = struct {
 };
 
 const BatchState = enum { staging, preparing, prepared, finished, poisoned };
+const BatchPurpose = enum { transaction, control };
 
 const ScsiWriteBatch = struct {
     backing_allocator: std.mem.Allocator,
     store: *ScsiStore,
     transaction_id: store_mod.TransactionId,
+    purpose: BatchPurpose,
     base_version: store_mod.OwnedBytes,
     base_revision: u64,
     base_generation: u64,
@@ -451,15 +475,28 @@ const ScsiWriteBatch = struct {
         if (previous.generation != self.base_generation) return error.BatchBaseVersionMismatch;
         const next = try anchor_format.decode(next_anchor);
         try validateAnchorState(next);
-        if (next.mode != .active or next.mode_epoch != self.base_mode_epoch)
-            return error.InvalidAnchorMode;
-        const expected_generation = std.math.add(u64, previous.generation, 1) catch
-            return error.GenerationOverflow;
-        if (next.generation != expected_generation) return error.InvalidAnchorGeneration;
-        if (next.revision != self.publication_revision) return error.InvalidAnchorRevision;
-        if (!std.mem.eql(u8, &next.transaction_id, &self.transaction_id))
-            return error.InvalidAnchorTransaction;
-        if (next.head == null) return error.InvalidAnchorState;
+        switch (self.purpose) {
+            .transaction => {
+                if (next.mode != .active or next.mode_epoch != self.base_mode_epoch)
+                    return error.InvalidAnchorMode;
+                const expected_generation = std.math.add(u64, previous.generation, 1) catch
+                    return error.GenerationOverflow;
+                if (next.generation != expected_generation)
+                    return error.InvalidAnchorGeneration;
+                if (!std.mem.eql(u8, &next.transaction_id, &self.transaction_id))
+                    return error.InvalidAnchorTransaction;
+                if (next.head == null) return error.InvalidAnchorState;
+                if (next.revision != self.publication_revision)
+                    return error.InvalidAnchorRevision;
+                if (!optionalRefEql(next.control_ref, previous.control_ref))
+                    return error.InvalidAnchorControl;
+            },
+            .control => {
+                if (next.revision != self.publication_revision)
+                    return error.InvalidAnchorRevision;
+                try validateControlSuccessor(previous, next, self.transaction_id);
+            },
+        }
 
         var replacement = try self.store.physicalAnchor(self.backing_allocator, next_anchor);
         errdefer replacement.deinit();
@@ -559,6 +596,61 @@ fn validatePhysicalAnchor(physical: []const u8, volume_id: [16]u8) !store_mod.An
 
 fn validateAnchorState(state: anchor_format.State) !void {
     anchor_format.validate(state) catch return error.InvalidAnchorState;
+}
+
+fn validateControlSuccessor(
+    previous: anchor_format.State,
+    next: anchor_format.State,
+    operation_id: store_mod.TransactionId,
+) !void {
+    if (next.generation != previous.generation) return error.InvalidAnchorGeneration;
+    if (!std.mem.eql(u8, &next.transaction_id, &previous.transaction_id) or
+        !optionalRefEql(next.head, previous.head))
+    {
+        return error.InvalidAnchorTransaction;
+    }
+    if (next.control_ref == null or optionalRefEql(next.control_ref, previous.control_ref))
+        return error.InvalidAnchorControl;
+    if (next.mode == .active) {
+        if (previous.mode != .maintenance or
+            !std.mem.eql(u8, &previous.control_operation_id, &operation_id) or
+            next.mode_epoch != previous.mode_epoch)
+        {
+            return error.InvalidAnchorMode;
+        }
+        return;
+    }
+    if (!std.mem.eql(u8, &next.control_operation_id, &operation_id))
+        return error.InvalidAnchorControl;
+    switch (previous.mode) {
+        .active => if (next.mode != .quiescing or
+            next.mode_epoch != std.math.add(u64, previous.mode_epoch, 1) catch
+                return error.ModeEpochOverflow)
+        {
+            return error.InvalidAnchorMode;
+        },
+        .quiescing => if ((next.mode != .maintenance and next.mode != .blocked) or
+            next.mode_epoch != previous.mode_epoch or
+            !std.mem.eql(u8, &previous.control_operation_id, &operation_id))
+        {
+            return error.InvalidAnchorMode;
+        },
+        .maintenance => if (next.mode != .blocked or
+            next.mode_epoch != previous.mode_epoch or
+            !std.mem.eql(u8, &previous.control_operation_id, &operation_id))
+        {
+            return error.InvalidAnchorMode;
+        },
+        .blocked => return error.InvalidAnchorMode,
+    }
+}
+
+fn optionalRefEql(a: ?store_mod.ObjectRef, b: ?store_mod.ObjectRef) bool {
+    if (a) |a_ref| {
+        const b_ref = b orelse return false;
+        return store_mod.ObjectRef.eql(a_ref, b_ref);
+    }
+    return b == null;
 }
 
 fn makeClaimId(

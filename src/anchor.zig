@@ -149,7 +149,7 @@ pub fn validate(state: State) Error!void {
 
     const has_operation = !allZero(&state.control_operation_id);
     if (state.mode == .active) {
-        if (has_operation or state.control_ref != null) return error.InvalidControlState;
+        if (has_operation) return error.InvalidControlState;
     } else {
         if (!has_operation or state.control_ref == null or
             state.revision == state.generation or state.mode_epoch == 1)
@@ -192,6 +192,23 @@ fn activeState(
         .mode = .active,
         .mode_epoch = 1,
     };
+}
+
+test "active anchor may retain control ancestry" {
+    const control = objectRef(&([_]u8{0x52} ** store.object_ref_size));
+    const encoded = encode(.{
+        .revision = 9,
+        .generation = 7,
+        .transaction_id = @splat(0x31),
+        .head = objectRef(&([_]u8{0x32} ** store.object_ref_size)),
+        .mode = .active,
+        .mode_epoch = 2,
+        .control_ref = control,
+    });
+
+    const decoded = try decode(&encoded);
+    try std.testing.expect(store.ObjectRef.eql(control, decoded.control_ref.?));
+    try std.testing.expectEqual(@as(store.TransactionId, @splat(0)), decoded.control_operation_id);
 }
 
 test "anchor state round trips" {
