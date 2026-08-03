@@ -98,7 +98,7 @@ start_monitors() {
     monitor_pids+=("$!")
     if command -v perf >/dev/null; then
         perf_data="$fio_log_dir/zettide-$phase-perf.data"
-        perf record --quiet --frequency 99 --call-graph fp \
+        perf record --quiet -F 99 --call-graph fp \
             --pid "$external_mount_pid" --output "$perf_data" -- sleep 180 &
         monitor_pids+=("$!")
     fi
