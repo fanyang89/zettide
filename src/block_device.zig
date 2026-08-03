@@ -24,8 +24,12 @@ pub const WritebackState = struct {
 };
 
 pub const PipelineMetrics = struct {
+    littlefs_read_calls: u64 = 0,
+    littlefs_read_bytes: u64 = 0,
+    littlefs_read_elapsed_ns: u64 = 0,
     littlefs_program_calls: u64 = 0,
     littlefs_program_bytes: u64 = 0,
+    littlefs_program_elapsed_ns: u64 = 0,
     direct_program_bytes: u64 = 0,
     redo_transactions: u64 = 0,
     redo_flushes: u64 = 0,
@@ -40,8 +44,12 @@ pub const PipelineMetrics = struct {
 };
 
 const AtomicPipelineMetrics = struct {
+    littlefs_read_calls: std.atomic.Value(u64) = .init(0),
+    littlefs_read_bytes: std.atomic.Value(u64) = .init(0),
+    littlefs_read_elapsed_ns: std.atomic.Value(u64) = .init(0),
     littlefs_program_calls: std.atomic.Value(u64) = .init(0),
     littlefs_program_bytes: std.atomic.Value(u64) = .init(0),
+    littlefs_program_elapsed_ns: std.atomic.Value(u64) = .init(0),
     direct_program_bytes: std.atomic.Value(u64) = .init(0),
     redo_transactions: std.atomic.Value(u64) = .init(0),
     redo_flushes: std.atomic.Value(u64) = .init(0),
@@ -56,8 +64,12 @@ const AtomicPipelineMetrics = struct {
 
     fn snapshot(self: *const AtomicPipelineMetrics) PipelineMetrics {
         return .{
+            .littlefs_read_calls = self.littlefs_read_calls.load(.acquire),
+            .littlefs_read_bytes = self.littlefs_read_bytes.load(.acquire),
+            .littlefs_read_elapsed_ns = self.littlefs_read_elapsed_ns.load(.acquire),
             .littlefs_program_calls = self.littlefs_program_calls.load(.acquire),
             .littlefs_program_bytes = self.littlefs_program_bytes.load(.acquire),
+            .littlefs_program_elapsed_ns = self.littlefs_program_elapsed_ns.load(.acquire),
             .direct_program_bytes = self.direct_program_bytes.load(.acquire),
             .redo_transactions = self.redo_transactions.load(.acquire),
             .redo_flushes = self.redo_flushes.load(.acquire),
@@ -137,13 +149,19 @@ pub const FileBlockDevice = struct {
 
     pub fn read(self: *FileBlockDevice, block: u32, offset: u32, buffer: []u8) !void {
         if (self.fault) |fault| if (fault.action(.read) == .before) return error.InjectedFault;
+        const read_start = Io.Clock.awake.now(self.io).nanoseconds;
         if (self.redo) |*redo| {
             try self.redo_mutex.lock(self.io);
             defer self.redo_mutex.unlock(self.io);
-            return redo.read(block, offset, buffer);
+            try redo.read(block, offset, buffer);
+        } else {
+            const file_offset = try self.position(block, offset, buffer.len);
+            try self.file_io.readAllAt(self.io, .foreground, buffer, file_offset);
         }
-        const file_offset = try self.position(block, offset, buffer.len);
-        try self.file_io.readAllAt(self.io, .foreground, buffer, file_offset);
+        const read_elapsed: u64 = @intCast(Io.Clock.awake.now(self.io).nanoseconds - read_start);
+        _ = self.pipeline_metrics.littlefs_read_calls.fetchAdd(1, .monotonic);
+        _ = self.pipeline_metrics.littlefs_read_bytes.fetchAdd(buffer.len, .monotonic);
+        _ = self.pipeline_metrics.littlefs_read_elapsed_ns.fetchAdd(read_elapsed, .monotonic);
     }
 
     pub fn program(self: *FileBlockDevice, block: u32, offset: u32, data: []const u8) !void {
@@ -156,6 +174,7 @@ pub const FileBlockDevice = struct {
             return error.InjectedFault;
         }
         const write_data = if (action == .partial) data[0 .. data.len / 2] else data;
+        const program_start = Io.Clock.awake.now(self.io).nanoseconds;
         if (self.redo) |*redo| {
             try self.redo_mutex.lock(self.io);
             defer self.redo_mutex.unlock(self.io);
@@ -167,8 +186,10 @@ pub const FileBlockDevice = struct {
             self.freezeWrites();
             return err;
         };
+        const program_elapsed: u64 = @intCast(Io.Clock.awake.now(self.io).nanoseconds - program_start);
         _ = self.pipeline_metrics.littlefs_program_calls.fetchAdd(1, .monotonic);
         _ = self.pipeline_metrics.littlefs_program_bytes.fetchAdd(write_data.len, .monotonic);
+        _ = self.pipeline_metrics.littlefs_program_elapsed_ns.fetchAdd(program_elapsed, .monotonic);
         if (self.redo == null) {
             _ = self.pipeline_metrics.direct_program_bytes.fetchAdd(write_data.len, .monotonic);
             _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(write_data.len, .monotonic);
@@ -890,6 +911,9 @@ test "block device enforces payload boundaries" {
     var actual: [data.len]u8 = undefined;
     try device.read(header.block_count - 1, last_offset, &actual);
     try std.testing.expectEqualSlices(u8, &data, &actual);
+    const read_metrics = device.pipelineMetrics();
+    try std.testing.expectEqual(@as(u64, 1), read_metrics.littlefs_read_calls);
+    try std.testing.expectEqual(@as(u64, data.len), read_metrics.littlefs_read_bytes);
 
     try std.testing.expectError(error.OutOfBounds, device.read(header.block_count, 0, &actual));
     try std.testing.expectError(error.OutOfBounds, device.read(0, header.block_size - 1, &actual));
