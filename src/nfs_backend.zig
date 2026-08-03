@@ -83,6 +83,12 @@ const SetAttributes = extern struct {
     reserved: u32,
 };
 
+const FilesystemInfo = extern struct {
+    total_bytes: u64,
+    free_bytes: u64,
+    available_bytes: u64,
+};
+
 const set_mode: u64 = 1 << 0;
 const set_uid: u64 = 1 << 1;
 const set_gid: u64 = 1 << 2;
@@ -131,6 +137,24 @@ pub export fn zettide_nfs_export_close(export_handle: ?*Export) callconv(.c) c_i
     self.threaded.deinit();
     allocator.destroy(self);
     result catch |err| return statusFor(err, false);
+    return status(.ok);
+}
+
+pub export fn zettide_nfs_statfs(
+    export_handle: ?*Export,
+    out_info: ?*FilesystemInfo,
+) callconv(.c) c_int {
+    const self = export_handle orelse return status(.invalid_argument);
+    const output = out_info orelse return status(.invalid_argument);
+    self.lock() catch return status(.internal);
+    defer self.unlock();
+    const available_blocks = self.volume.availableBlocks() catch |err| return statusFor(err, false);
+    const block_size = self.volume.header.block_size;
+    output.* = .{
+        .total_bytes = @as(u64, self.volume.header.block_count) * block_size,
+        .free_bytes = available_blocks * block_size,
+        .available_bytes = available_blocks * block_size,
+    };
     return status(.ok);
 }
 
@@ -690,6 +714,11 @@ test "direct NFS backend resolves and reads stable handles" {
     var root_attributes: Attributes = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &root_handle, &root_attributes));
     try std.testing.expectEqual(@intFromEnum(zettide.metadata.Kind.directory), root_attributes.kind);
+    var filesystem_info: FilesystemInfo = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_statfs(export_handle, &filesystem_info));
+    try std.testing.expect(filesystem_info.total_bytes > 0);
+    try std.testing.expect(filesystem_info.free_bytes <= filesystem_info.total_bytes);
+    try std.testing.expectEqual(filesystem_info.free_bytes, filesystem_info.available_bytes);
 
     var file_handle: Handle = undefined;
     var file_attributes: Attributes = undefined;

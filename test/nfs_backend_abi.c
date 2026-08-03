@@ -7,6 +7,8 @@ _Static_assert(sizeof(((struct zettide_nfs_directory_entry *)0)->name) ==
                "directory name capacity changed");
 _Static_assert(sizeof(struct zettide_nfs_set_attributes) == 48,
                "setattr ABI size changed");
+_Static_assert(sizeof(struct zettide_nfs_filesystem_info) == 24,
+               "statfs ABI size changed");
 
 int main(void) {
     if (zettide_nfs_export_open(NULL, false, NULL) !=

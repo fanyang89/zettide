@@ -84,11 +84,20 @@ struct zettide_nfs_set_attributes {
     uint32_t reserved;
 };
 
+struct zettide_nfs_filesystem_info {
+    uint64_t total_bytes;
+    uint64_t free_bytes;
+    uint64_t available_bytes;
+};
+
 int zettide_nfs_export_open(
     const char *target,
     bool writable,
     struct zettide_nfs_export **out_export);
 int zettide_nfs_export_close(struct zettide_nfs_export *export_handle);
+int zettide_nfs_statfs(
+    struct zettide_nfs_export *export_handle,
+    struct zettide_nfs_filesystem_info *out_info);
 int zettide_nfs_root(
     struct zettide_nfs_export *export_handle,
     struct zettide_nfs_handle *out_handle,
