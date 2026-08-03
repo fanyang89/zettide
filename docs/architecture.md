@@ -93,6 +93,14 @@ rejects partitions and sliced mappings whose passthrough LBAs would bypass the
 block mapping. A post-dispatch timeout, path failure, or ambiguous status is an
 indeterminate CAW result rather than permission to resend the command.
 
+Mutable extent data uses aligned positioned I/O on the same complete Linux
+block device with `O_DIRECT`, bypassing host page caches that are not coherent
+between machines. A successful ordinary write may remain unstable until the
+next durability barrier. Any failure after dispatch is indeterminate: a delayed
+ordinary write has no expected-value guard and may overwrite a later write, so
+the affected owner and range must stop issuing dependent writes until recovery
+or fencing proves that the old command cannot arrive.
+
 The complete SCSI backend will own append allocation and map prepare/stabilize
 to cache synchronization.
 
