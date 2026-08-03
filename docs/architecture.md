@@ -96,6 +96,17 @@ compare-and-write heartbeat and durable vote slot per member, and one active
 authority record. Version 1 supports exactly three or five configured members;
 changing the roster creates a new fencing domain.
 
+The region occupies seven consecutive physical logical blocks: configuration,
+authority, and five member slots. A 512-byte voting envelope is placed at the
+start of each 512- or 4096-byte physical block; all physical padding is
+canonical zero and participates in the full-block compare. Three-member
+configurations leave the last two member blocks entirely zero.
+
+Formatting writes and stabilizes authority and member records first, then
+publishes and stabilizes configuration last. A valid configuration therefore
+commits the region. A zero configuration block is unformatted, while a nonzero
+invalid or different block is a conflict and is never overwritten implicitly.
+
 Every member restart advances a persistent incarnation counter and chooses a
 new opaque incarnation identifier. Heartbeat sequence numbers increase within
 that incarnation. A ballot number is the ordered pair of counter and candidate
@@ -115,6 +126,11 @@ The backend then rereads the durable member slots, validates the exact quorum
 certificate, and only then issues the authority compare-and-write. A caller
 cannot publish authority from an unverified in-memory or merely visible member
 snapshot.
+
+Authority publication first observes the member blocks, runs a durability
+barrier, and rereads those exact physical blocks. Any change aborts the attempt.
+Only an unchanged, durable quorum can authorize the authority full-block CAW;
+the authority itself requires a final barrier before consumers may rely on it.
 
 Nodes use private-network observations and their local monotonic clocks for
 failure suspicion. A majority certificate published through the voting region
