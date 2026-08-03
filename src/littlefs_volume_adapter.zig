@@ -227,11 +227,12 @@ fn sync(raw: *anyopaque) !void {
 fn spaceInfo(raw: *anyopaque) !backend.SpaceInfo {
     const value = nativeVolume(raw);
     const used = try value.usedBlocks();
+    const free = @as(u64, value.header.block_count) - used;
     return .{
         .block_size = value.header.block_size,
         .total_blocks = value.header.block_count,
-        .free_blocks = @as(u64, value.header.block_count) - used,
-        .available_blocks = try value.availableBlocks(),
+        .free_blocks = free,
+        .available_blocks = free -| try value.reservedCapacityBlocks(),
         .name_max = value.header.name_max,
     };
 }

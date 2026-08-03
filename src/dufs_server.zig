@@ -1,6 +1,7 @@
 const std = @import("std");
 const volume_api = @import("volume.zig");
 const linux_fuse = @import("linux_fuse.zig");
+const littlefs_volume_adapter = @import("littlefs_volume_adapter.zig");
 const linux = std.os.linux;
 
 var spawn_signal_received = std.atomic.Value(bool).init(false);
@@ -135,13 +136,20 @@ pub fn serve(
     defer notification.deinit();
 
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
-    try volume.mountOptions(.{ .access_time = access_time });
+    try volume.mountOptions(.{ .access_time = .noatime });
 
-    var session = try linux_fuse.Session.start(allocator, volume, mountpoint, .{
-        .read_only = read_only,
-        .on_exit = Notification.notify,
-        .on_exit_context = &notification,
-    });
+    var session = try linux_fuse.Session.start(
+        allocator,
+        littlefs_volume_adapter.filesystem(volume),
+        io,
+        mountpoint,
+        .{
+            .read_only = read_only,
+            .update_access_time = access_time == .relatime,
+            .on_exit = Notification.notify,
+            .on_exit_context = &notification,
+        },
+    );
     var session_open = true;
     defer if (session_open) session.stop() catch {};
 

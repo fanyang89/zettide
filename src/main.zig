@@ -381,10 +381,19 @@ fn poolMountCommand(
     var volume = try zettide.volume.Volume.openPool(io, allocator, &set, writable);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
-    try volume.mountOptions(.{ .access_time = access_time });
+    try volume.mountOptions(.{ .access_time = .noatime });
     try stdout.print("Mounted pool at {s}; press Ctrl-C to stop\n", .{mountpoint});
     try stdout.flush();
-    try zettide.linux_fuse.mount(&volume, mountpoint, allow_other, !writable);
+    try zettide.linux_fuse.mount(
+        zettide.littlefs_volume_adapter.filesystem(&volume),
+        io,
+        mountpoint,
+        .{
+            .allow_other = allow_other,
+            .read_only = !writable,
+            .update_access_time = access_time == .relatime,
+        },
+    );
     try volume.close();
 }
 
@@ -518,10 +527,18 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
     try zettide.target.openVolumeInto(volume, io, allocator, args[0], true);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
-    try volume.mountOptions(.{ .access_time = access_time });
+    try volume.mountOptions(.{ .access_time = .noatime });
     try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
     try stdout.flush();
-    try zettide.linux_fuse.mount(volume, args[1], allow_other, false);
+    try zettide.linux_fuse.mount(
+        zettide.littlefs_volume_adapter.filesystem(volume),
+        io,
+        args[1],
+        .{
+            .allow_other = allow_other,
+            .update_access_time = access_time == .relatime,
+        },
+    );
     try volume.close();
 }
 
