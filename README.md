@@ -23,6 +23,13 @@ an immutable filesystem root references inode, directory-entry, and extent
 B+trees. Zettide remains responsible for FUSE and POSIX policy, while littlefs
 remains its local single-writer backend.
 
+Current file data support is deliberately narrow: one non-empty immutable
+object and opaque extent reference may be written once to an existing empty
+regular file. Payload and metadata preparation completes before conditional
+anchor publication. Overwrite, multi-extent files, mutable `.data` allocations,
+orphan reclaim and garbage collection, and general POSIX data semantics are not
+implemented. Writable ownership and takeover still require external fencing.
+
 ## Development
 
 The project requires Zig 0.16.0 and Task 3.48.0.

@@ -22,6 +22,17 @@ pub const Error = error{
     InodeIdCollision,
     MissingChildInode,
     DirectoryEntryKindMismatch,
+    InodeNotFound,
+    NotFile,
+    FileNotEmpty,
+    EmptyWrite,
+    FileTooLarge,
+    MissingExtentMapping,
+    UnexpectedExtentMapping,
+    UnsupportedExtentLayout,
+    AllocatedSizeMismatch,
+    MappingLengthMismatch,
+    DataLengthMismatch,
 };
 
 pub const FormatOptions = struct {
@@ -35,6 +46,10 @@ pub const CreateFileOptions = struct {
     mode: u32,
     uid: u32,
     gid: u32,
+    now_ns: u64,
+};
+
+pub const WriteWholeFileOptions = struct {
     now_ns: u64,
 };
 
@@ -96,6 +111,59 @@ pub const Snapshot = struct {
         const mapping = try format_mod.decodeExtentMapping(entry.value.bytes);
         try format_mod.validateExtentKeyValue(entry.key.bytes, mapping);
         return true;
+    }
+
+    pub fn readWholeFile(
+        self: Snapshot,
+        allocator: std.mem.Allocator,
+        inode_id: format_mod.InodeId,
+    ) !store_mod.OwnedBytes {
+        const inode = try self.getInode(allocator, inode_id) orelse return error.InodeNotFound;
+        if (inode.kind != .file) return error.NotFile;
+
+        const mapping = try self.onlyExtentMapping(allocator, inode_id);
+        if (inode.logical_size == 0) {
+            if (inode.allocated_bytes != 0) return error.AllocatedSizeMismatch;
+            if (mapping != null) return error.UnexpectedExtentMapping;
+            return store_mod.OwnedBytes.dupe(allocator, "");
+        }
+        if (inode.allocated_bytes != inode.logical_size) return error.AllocatedSizeMismatch;
+        const extent = mapping orelse return error.MissingExtentMapping;
+        if (extent.logical_offset != 0) return error.UnsupportedExtentLayout;
+        if (extent.byte_length != inode.logical_size) return error.MappingLengthMismatch;
+
+        var data = try self.store.loadImmutable(extent.data_ref, allocator);
+        const data_length = std.math.cast(u64, data.bytes.len) orelse {
+            data.deinit();
+            return error.DataLengthMismatch;
+        };
+        if (data_length != extent.byte_length) {
+            data.deinit();
+            return error.DataLengthMismatch;
+        }
+        return data;
+    }
+
+    fn onlyExtentMapping(
+        self: Snapshot,
+        allocator: std.mem.Allocator,
+        inode_id: format_mod.InodeId,
+    ) !?format_mod.ExtentMapping {
+        const start = try format_mod.encodeInodeKey(inode_id);
+        var cursor = try tree.scan(self.store, allocator, self.root.extent_tree_root, &start);
+        defer cursor.deinit();
+        var first = (try cursor.next()) orelse return null;
+        defer first.deinit();
+        const first_key = try format_mod.decodeExtentKey(first.key.bytes);
+        if (first_key.inode_id != inode_id) return null;
+        const mapping = try format_mod.decodeExtentMapping(first.value.bytes);
+        try format_mod.validateExtentKeyValue(first.key.bytes, mapping);
+
+        var second = (try cursor.next()) orelse return mapping;
+        defer second.deinit();
+        const second_key = try format_mod.decodeExtentKey(second.key.bytes);
+        if (second_key.inode_id == inode_id) return error.UnsupportedExtentLayout;
+        return mapping;
     }
 };
 
@@ -283,6 +351,48 @@ pub const Mutator = struct {
         return inode_id;
     }
 
+    pub fn writeWholeFileOnce(
+        self: *Mutator,
+        inode_id: format_mod.InodeId,
+        data: []const u8,
+        options: WriteWholeFileOptions,
+    ) !void {
+        if (data.len == 0) return error.EmptyWrite;
+        const byte_length = std.math.cast(u64, data.len) orelse return error.FileTooLarge;
+        var inode = try self.getInode(inode_id) orelse return error.InodeNotFound;
+        if (inode.kind != .file) return error.NotFile;
+        if (inode.logical_size != 0 or inode.allocated_bytes != 0) return error.FileNotEmpty;
+        if (try self.hasExtentMappings(inode_id)) return error.UnexpectedExtentMapping;
+
+        const extent_key = try format_mod.encodeExtentKey(inode_id, 0);
+        inode.logical_size = byte_length;
+        inode.allocated_bytes = byte_length;
+        inode.mtime_ns = options.now_ns;
+        inode.ctime_ns = options.now_ns;
+        const inode_key = try format_mod.encodeInodeKey(inode_id);
+        const encoded_inode = try format_mod.encodeInode(inode);
+
+        const data_ref = try self.transaction.putImmutable(data);
+        const encoded_mapping = try format_mod.encodeExtentMapping(.{
+            .inode_id = inode_id,
+            .logical_offset = 0,
+            .byte_length = byte_length,
+            .data_ref = data_ref,
+        });
+        const extent_tree_root = try self.trees.put(
+            self.root.extent_tree_root,
+            &extent_key,
+            &encoded_mapping,
+        );
+        const inode_tree_root = try self.trees.put(
+            self.root.inode_tree_root,
+            &inode_key,
+            &encoded_inode,
+        );
+        self.root.extent_tree_root = extent_tree_root;
+        self.root.inode_tree_root = inode_tree_root;
+    }
+
     /// Stages the current filesystem root without publishing it.
     pub fn finish(self: *Mutator) !store_mod.ObjectRef {
         const encoded = try format_mod.encodeFilesystemRoot(self.root);
@@ -297,5 +407,18 @@ pub const Mutator = struct {
         const inode = try format_mod.decodeInode(value.bytes);
         try format_mod.validateInodeKeyValue(&key, inode);
         return inode;
+    }
+
+    fn hasExtentMappings(self: *Mutator, inode_id: format_mod.InodeId) !bool {
+        const start = try format_mod.encodeInodeKey(inode_id);
+        var cursor = try self.trees.scan(self.root.extent_tree_root, &start);
+        defer cursor.deinit();
+        var entry = (try cursor.next()) orelse return false;
+        defer entry.deinit();
+        const key = try format_mod.decodeExtentKey(entry.key.bytes);
+        if (key.inode_id != inode_id) return false;
+        const mapping = try format_mod.decodeExtentMapping(entry.value.bytes);
+        try format_mod.validateExtentKeyValue(entry.key.bytes, mapping);
+        return true;
     }
 };

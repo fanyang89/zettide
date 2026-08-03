@@ -7,11 +7,12 @@ pub const InodeId = u64;
 pub const root_inode_id: InodeId = 1;
 pub const max_name_size: usize = 255;
 pub const format_version: u16 = 1;
+pub const extent_mapping_format_version: u16 = 2;
 
 pub const filesystem_root_size: usize = 256;
 pub const inode_record_size: usize = 128;
 pub const directory_entry_size: usize = 64;
-pub const extent_mapping_size: usize = 128;
+pub const extent_mapping_size: usize = 160;
 pub const inode_key_size: usize = 8;
 pub const directory_key_max_size: usize = inode_key_size + max_name_size;
 pub const extent_key_size: usize = 16;
@@ -62,10 +63,7 @@ pub const ExtentMapping = struct {
     inode_id: InodeId,
     logical_offset: u64,
     byte_length: u64,
-    extent_index: u64,
-    extent_offset: u64,
-    claim_epoch: u64,
-    claim_id: [16]u8,
+    data_ref: store.ObjectRef,
 };
 
 pub const DirectoryKeyView = struct {
@@ -94,9 +92,6 @@ pub const Error = error{
     InvalidLinkCount,
     InvalidByteLength,
     LogicalRangeOverflow,
-    ExtentRangeOverflow,
-    InvalidClaimEpoch,
-    InvalidClaimId,
     InvalidName,
     BufferTooSmall,
     KeyValueMismatch,
@@ -114,7 +109,7 @@ comptime {
     std.debug.assert(filesystem_root_size - checksum_size == 224);
     std.debug.assert(inode_record_size - checksum_size == 96);
     std.debug.assert(directory_entry_size - checksum_size == 32);
-    std.debug.assert(extent_mapping_size - checksum_size == 96);
+    std.debug.assert(extent_mapping_size - checksum_size == 128);
 }
 
 pub fn encodeFilesystemRoot(root: FilesystemRoot) Error!EncodedFilesystemRoot {
@@ -222,14 +217,15 @@ pub fn decodeDirectoryEntry(bytes: []const u8) Error!DirectoryEntry {
 
 pub fn encodeExtentMapping(mapping: ExtentMapping) Error!EncodedExtentMapping {
     try validateExtentMapping(mapping);
-    var encoded = initRecord(extent_mapping_size, extent_mapping_magic);
+    var encoded = initRecordVersion(
+        extent_mapping_size,
+        extent_mapping_magic,
+        extent_mapping_format_version,
+    );
     putInt(u64, &encoded, 16, mapping.inode_id);
     putInt(u64, &encoded, 24, mapping.logical_offset);
     putInt(u64, &encoded, 32, mapping.byte_length);
-    putInt(u64, &encoded, 40, mapping.extent_index);
-    putInt(u64, &encoded, 48, mapping.extent_offset);
-    putInt(u64, &encoded, 56, mapping.claim_epoch);
-    @memcpy(encoded[64..80], &mapping.claim_id);
+    @memcpy(encoded[40..104], &mapping.data_ref.bytes);
     seal(&encoded);
     return encoded;
 }
@@ -237,19 +233,20 @@ pub fn encodeExtentMapping(mapping: ExtentMapping) Error!EncodedExtentMapping {
 pub fn decodeExtentMapping(bytes: []const u8) Error!ExtentMapping {
     if (bytes.len != extent_mapping_size) return error.InvalidSize;
     const encoded: *const EncodedExtentMapping = @ptrCast(bytes.ptr);
-    try validateCommonHeader(encoded, extent_mapping_magic);
+    try validateCommonHeaderVersion(
+        encoded,
+        extent_mapping_magic,
+        extent_mapping_format_version,
+    );
     if (getInt(u16, encoded, 10) != 0) return error.InvalidFlags;
-    if (!allZero(encoded[80..96])) return error.NonCanonicalEncoding;
+    if (!allZero(encoded[104..128])) return error.NonCanonicalEncoding;
     try verifyChecksum(encoded);
 
     const mapping = ExtentMapping{
         .inode_id = getInt(u64, encoded, 16),
         .logical_offset = getInt(u64, encoded, 24),
         .byte_length = getInt(u64, encoded, 32),
-        .extent_index = getInt(u64, encoded, 40),
-        .extent_offset = getInt(u64, encoded, 48),
-        .claim_epoch = getInt(u64, encoded, 56),
-        .claim_id = encoded[64..80].*,
+        .data_ref = objectRef(encoded[40..104]),
     };
     try validateExtentMapping(mapping);
     return mapping;
@@ -352,10 +349,6 @@ fn validateExtentMapping(mapping: ExtentMapping) Error!void {
     if (mapping.byte_length == 0) return error.InvalidByteLength;
     _ = std.math.add(u64, mapping.logical_offset, mapping.byte_length) catch
         return error.LogicalRangeOverflow;
-    _ = std.math.add(u64, mapping.extent_offset, mapping.byte_length) catch
-        return error.ExtentRangeOverflow;
-    if (mapping.claim_epoch == 0) return error.InvalidClaimEpoch;
-    if (allZero(&mapping.claim_id)) return error.InvalidClaimId;
 }
 
 fn validateName(name: []const u8) Error!void {
@@ -364,16 +357,24 @@ fn validateName(name: []const u8) Error!void {
 }
 
 fn initRecord(comptime size: usize, magic: *const [8]u8) [size]u8 {
+    return initRecordVersion(size, magic, format_version);
+}
+
+fn initRecordVersion(comptime size: usize, magic: *const [8]u8, version: u16) [size]u8 {
     var encoded: [size]u8 = @splat(0);
     @memcpy(encoded[0..8], magic);
-    putInt(u16, &encoded, 8, format_version);
+    putInt(u16, &encoded, 8, version);
     putInt(u16, &encoded, 12, size);
     return encoded;
 }
 
 fn validateCommonHeader(encoded: anytype, magic: *const [8]u8) Error!void {
+    return validateCommonHeaderVersion(encoded, magic, format_version);
+}
+
+fn validateCommonHeaderVersion(encoded: anytype, magic: *const [8]u8, version: u16) Error!void {
     if (!std.mem.eql(u8, encoded[0..8], magic)) return error.InvalidMagic;
-    if (getInt(u16, encoded, 8) != format_version) return error.UnsupportedFormatVersion;
+    if (getInt(u16, encoded, 8) != version) return error.UnsupportedFormatVersion;
     if (getInt(u16, encoded, 12) != encoded.len or getInt(u16, encoded, 14) != 0)
         return error.NonCanonicalEncoding;
 }
@@ -421,12 +422,6 @@ fn patternedRef(seed: u8) store.ObjectRef {
     return result;
 }
 
-fn patternedId(seed: u8) [16]u8 {
-    var result: [16]u8 = undefined;
-    for (&result, 0..) |*byte, index| byte.* = seed +% @as(u8, @truncate(index));
-    return result;
-}
-
 fn testInode(kind: Kind) Inode {
     return .{
         .kind = kind,
@@ -449,10 +444,7 @@ fn testExtentMapping() ExtentMapping {
         .inode_id = 7,
         .logical_offset = 4096,
         .byte_length = 8192,
-        .extent_index = 19,
-        .extent_offset = 512,
-        .claim_epoch = 3,
-        .claim_id = patternedId(0x40),
+        .data_ref = patternedRef(0x40),
     };
 }
 
@@ -586,33 +578,28 @@ test "directory entry v1 encoding matches the golden vector" {
     _ = try decodeDirectoryEntry(&expected);
 }
 
-test "extent mapping v1 encoding matches the golden vector" {
+test "extent mapping v2 encoding matches the golden vector" {
     const mapping = ExtentMapping{
         .inode_id = 0x0102030405060708,
         .logical_offset = 0x1112131415161718,
         .byte_length = 0x0101010101010101,
-        .extent_index = 0x2122232425262728,
-        .extent_offset = 0x3132333435363738,
-        .claim_epoch = 0x4142434445464748,
-        .claim_id = patternedId(0x50),
+        .data_ref = patternedRef(0x20),
     };
     const encoded = try encodeExtentMapping(mapping);
     var expected: EncodedExtentMapping = @splat(0);
     @memcpy(expected[0..8], extent_mapping_magic);
-    expected[9] = 1;
-    expected[13] = 128;
+    expected[9] = 2;
+    expected[12] = 0;
+    expected[13] = 160;
     expected[16..24].* = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
     expected[24..32].* = .{ 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18 };
     expected[32..40].* = @splat(1);
-    expected[40..48].* = .{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };
-    expected[48..56].* = .{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
-    expected[56..64].* = .{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
-    @memcpy(expected[64..80], &mapping.claim_id);
-    @memcpy(expected[96..128], &[_]u8{
-        0xb8, 0xeb, 0x47, 0x17, 0xe9, 0xcd, 0xb3, 0x90,
-        0x40, 0x7e, 0x68, 0x86, 0x0d, 0x6f, 0x55, 0x9e,
-        0x6f, 0xf6, 0xb1, 0xb8, 0x8b, 0x87, 0x43, 0x2b,
-        0x24, 0x0b, 0x50, 0x72, 0x02, 0x5b, 0x59, 0x53,
+    @memcpy(expected[40..104], &mapping.data_ref.bytes);
+    @memcpy(expected[128..160], &[_]u8{
+        0x59, 0x68, 0xe5, 0x42, 0x46, 0x4e, 0x8a, 0x5d,
+        0x0b, 0xe6, 0x23, 0xa8, 0x86, 0xe8, 0x95, 0x14,
+        0xe8, 0xc3, 0x0d, 0x71, 0xc7, 0xce, 0x8b, 0xa0,
+        0xb6, 0xce, 0xc0, 0xd9, 0x27, 0x12, 0x37, 0xf8,
     });
     try std.testing.expectEqualSlices(u8, &expected, &encoded);
     _ = try decodeExtentMapping(&expected);
@@ -693,7 +680,7 @@ test "metadata records reject unknown headers and noncanonical reserved bytes" {
     seal(&mapping);
     try std.testing.expectError(error.InvalidFlags, decodeExtentMapping(&mapping));
     mapping[11] = 0;
-    mapping[80] = 1;
+    mapping[104] = 1;
     seal(&mapping);
     try std.testing.expectError(error.NonCanonicalEncoding, decodeExtentMapping(&mapping));
 }
@@ -725,6 +712,10 @@ test "metadata records reject unsupported versions and encoded lengths" {
     try std.testing.expectError(error.UnsupportedFormatVersion, decodeDirectoryEntry(&entry));
 
     var mapping = try encodeExtentMapping(testExtentMapping());
+    putInt(u16, &mapping, 8, format_version);
+    seal(&mapping);
+    try std.testing.expectError(error.UnsupportedFormatVersion, decodeExtentMapping(&mapping));
+    mapping = try encodeExtentMapping(testExtentMapping());
     putInt(u16, &mapping, 12, extent_mapping_size - 1);
     seal(&mapping);
     try std.testing.expectError(error.NonCanonicalEncoding, decodeExtentMapping(&mapping));
@@ -783,14 +774,8 @@ test "metadata record invariants are enforced" {
     mapping.logical_offset = std.math.maxInt(u64);
     try std.testing.expectError(error.LogicalRangeOverflow, encodeExtentMapping(mapping));
     mapping = testExtentMapping();
-    mapping.extent_offset = std.math.maxInt(u64);
-    try std.testing.expectError(error.ExtentRangeOverflow, encodeExtentMapping(mapping));
-    mapping = testExtentMapping();
-    mapping.claim_epoch = 0;
-    try std.testing.expectError(error.InvalidClaimEpoch, encodeExtentMapping(mapping));
-    mapping = testExtentMapping();
-    mapping.claim_id = @splat(0);
-    try std.testing.expectError(error.InvalidClaimId, encodeExtentMapping(mapping));
+    mapping.data_ref = .{};
+    _ = try encodeExtentMapping(mapping);
 }
 
 test "filesystem tree keys round trip and validate repeated identities" {

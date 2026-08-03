@@ -3,6 +3,22 @@ const cawfs = @import("zettide_cawfs");
 
 const txn_a: [16]u8 = .{ 0xa1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 const txn_b: [16]u8 = .{ 0xb2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
+const txn_c: [16]u8 = .{ 0xc3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 };
+const txn_d: [16]u8 = .{ 0xd4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4 };
+
+const filesystem_format_options = cawfs.filesystem.FormatOptions{
+    .mode = 0o40755,
+    .uid = 1000,
+    .gid = 1001,
+    .now_ns = 1,
+};
+
+const filesystem_file_options = cawfs.filesystem.CreateFileOptions{
+    .mode = 0o100640,
+    .uid = 2000,
+    .gid = 2001,
+    .now_ns = 2,
+};
 
 const Fixture = struct {
     allocator: std.mem.Allocator,
@@ -123,6 +139,35 @@ fn beginCurrentBatch(
     return store.beginBatch(allocator, transaction_id, snapshot.version.bytes);
 }
 
+fn formatFilesystem(store: cawfs.store.ConditionalStore) !cawfs.filesystem.Snapshot {
+    var transaction = try cawfs.transaction.Transaction.begin(store, std.testing.allocator, txn_a);
+    defer transaction.deinit();
+    const root = try cawfs.filesystem.format(&transaction, filesystem_format_options);
+    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    return cawfs.filesystem.open(store, std.testing.allocator);
+}
+
+fn createFilesystemFile(
+    store: cawfs.store.ConditionalStore,
+    snapshot: cawfs.filesystem.Snapshot,
+) !struct { snapshot: cawfs.filesystem.Snapshot, inode_id: cawfs.filesystem_format.InodeId } {
+    var transaction = try cawfs.transaction.Transaction.begin(store, std.testing.allocator, txn_b);
+    defer transaction.deinit();
+    var mutator = try cawfs.filesystem.Mutator.init(&transaction, snapshot);
+    defer mutator.deinit();
+    const inode_id = try mutator.createEmptyFile(
+        cawfs.filesystem_format.root_inode_id,
+        "alpha",
+        filesystem_file_options,
+    );
+    const root = try mutator.finish();
+    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    return .{
+        .snapshot = try cawfs.filesystem.open(store, std.testing.allocator),
+        .inode_id = inode_id,
+    };
+}
+
 test "SCSI extent store prepares and loads objects at 512 and 4096" {
     for ([_]u32{ 512, 4096 }) |block_size| {
         var fixture = try Fixture.init(std.testing.allocator, block_size);
@@ -145,6 +190,125 @@ test "SCSI extent store prepares and loads objects at 512 and 4096" {
         defer durable.deinit();
         try std.testing.expectEqualStrings("prepared object", durable.bytes);
     }
+}
+
+test "filesystem whole-file data reopens through SCSI at 512 and 4096" {
+    for ([_]u32{ 512, 4096 }) |block_size| {
+        var fixture = try Fixture.init(std.testing.allocator, block_size);
+        defer fixture.deinit();
+        const store = fixture.backend.conditionalStore();
+        const formatted = try formatFilesystem(store);
+        const empty = try createFilesystemFile(store, formatted);
+
+        var transaction = try cawfs.transaction.Transaction.begin(
+            store,
+            std.testing.allocator,
+            txn_c,
+        );
+        defer transaction.deinit();
+        var mutator = try cawfs.filesystem.Mutator.init(&transaction, empty.snapshot);
+        defer mutator.deinit();
+        const payload = "whole-file payload across SCSI";
+        try mutator.writeWholeFileOnce(empty.inode_id, payload, .{ .now_ns = 3 });
+        const root = try mutator.finish();
+        try std.testing.expectEqual(
+            cawfs.transaction.Outcome.committed,
+            try transaction.commit(root),
+        );
+
+        fixture.model.crash();
+        var reopened = try fixture.reopened();
+        const reopened_store = reopened.conditionalStore();
+        const snapshot = try cawfs.filesystem.open(reopened_store, std.testing.allocator);
+        var data = try snapshot.readWholeFile(std.testing.allocator, empty.inode_id);
+        defer data.deinit();
+        try std.testing.expectEqualStrings(payload, data.bytes);
+
+        const key = try cawfs.filesystem_format.encodeExtentKey(empty.inode_id, 0);
+        var encoded_mapping = (try cawfs.tree.get(
+            reopened_store,
+            std.testing.allocator,
+            snapshot.root.extent_tree_root,
+            &key,
+        )).?;
+        defer encoded_mapping.deinit();
+        const mapping = try cawfs.filesystem_format.decodeExtentMapping(encoded_mapping.bytes);
+        try cawfs.filesystem_format.validateExtentKeyValue(&key, mapping);
+        const identity = try cawfs.immutable_extent.decodeObjectRef(mapping.data_ref);
+        const entry = try fixture.extent_allocator.readEntry(identity.extent_index);
+        try std.testing.expectEqual(cawfs.allocation_format.State.live, entry.state);
+        try std.testing.expectEqual(cawfs.allocation_format.Kind.immutable, entry.kind);
+        try std.testing.expectEqual(identity.claim_epoch, entry.claim_epoch);
+        try std.testing.expectEqual(identity.claim_id, entry.claim_id);
+
+        var wrong_identity = mapping.data_ref;
+        wrong_identity.bytes[16] ^= 1;
+        try std.testing.expectError(
+            error.ObjectNotFound,
+            reopened_store.loadImmutable(wrong_identity, std.testing.allocator),
+        );
+    }
+}
+
+test "indeterminate filesystem data write leaves old metadata and retains claim" {
+    var fixture = try Fixture.init(std.testing.allocator, 512);
+    defer fixture.deinit();
+    const store = fixture.backend.conditionalStore();
+    const formatted = try formatFilesystem(store);
+    const empty = try createFilesystemFile(store, formatted);
+    var anchor_before = try store.readAnchor(std.testing.allocator);
+    defer anchor_before.deinit();
+    const generation_before = (try cawfs.anchor.decode(&anchor_before.anchor)).generation;
+
+    var poisoned_identity: cawfs.immutable_extent.Identity = undefined;
+    {
+        var transaction = try cawfs.transaction.Transaction.begin(
+            store,
+            std.testing.allocator,
+            txn_c,
+        );
+        defer transaction.deinit();
+        var mutator = try cawfs.filesystem.Mutator.init(&transaction, empty.snapshot);
+        defer mutator.deinit();
+        try mutator.writeWholeFileOnce(empty.inode_id, "uncertain payload", .{ .now_ns = 3 });
+        poisoned_identity = try cawfs.immutable_extent.decodeObjectRef(transaction.staged.items[0]);
+        const root = try mutator.finish();
+        fixture.model.injectNextDataFault(.indeterminate_after_write);
+        try std.testing.expectError(error.DataWriteIndeterminate, transaction.commit(root));
+    }
+
+    const poisoned_entry = try fixture.extent_allocator.readEntry(poisoned_identity.extent_index);
+    try std.testing.expectEqual(cawfs.allocation_format.State.claimed, poisoned_entry.state);
+    var anchor_after = try store.readAnchor(std.testing.allocator);
+    defer anchor_after.deinit();
+    try std.testing.expectEqual(
+        generation_before,
+        (try cawfs.anchor.decode(&anchor_after.anchor)).generation,
+    );
+    var authoritative = try empty.snapshot.readWholeFile(std.testing.allocator, empty.inode_id);
+    defer authoritative.deinit();
+    try std.testing.expectEqual(@as(usize, 0), authoritative.bytes.len);
+
+    {
+        var retry = try cawfs.transaction.Transaction.begin(store, std.testing.allocator, txn_d);
+        defer retry.deinit();
+        var retry_mutator = try cawfs.filesystem.Mutator.init(&retry, empty.snapshot);
+        defer retry_mutator.deinit();
+        try retry_mutator.writeWholeFileOnce(empty.inode_id, "replacement", .{ .now_ns = 4 });
+        const replacement = try cawfs.immutable_extent.decodeObjectRef(retry.staged.items[0]);
+        try std.testing.expect(replacement.extent_index != poisoned_identity.extent_index);
+    }
+    try std.testing.expectEqual(
+        cawfs.allocation_format.State.claimed,
+        (try fixture.extent_allocator.readEntry(poisoned_identity.extent_index)).state,
+    );
+
+    fixture.model.crash();
+    var reopened = try fixture.reopened();
+    const recovered = try cawfs.filesystem.open(reopened.conditionalStore(), std.testing.allocator);
+    var recovered_data = try recovered.readWholeFile(std.testing.allocator, empty.inode_id);
+    defer recovered_data.deinit();
+    try std.testing.expectEqual(@as(usize, 0), recovered_data.bytes.len);
 }
 
 test "indeterminate ordinary write poisons the batch and retains its claim" {

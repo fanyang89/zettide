@@ -59,6 +59,48 @@ fn stageEmptyFile(
     return mutator.finish();
 }
 
+fn createCommittedEmptyFile(
+    model: *ModelStore,
+    snapshot: Snapshot,
+    transaction_id: TransactionId,
+    name: []const u8,
+) !Snapshot {
+    var transaction = try Transaction.begin(
+        model.conditionalStore(),
+        std.testing.allocator,
+        transaction_id,
+    );
+    defer transaction.deinit();
+    const root = try stageEmptyFile(&transaction, snapshot, name);
+    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    return filesystem.open(model.conditionalStore(), std.testing.allocator);
+}
+
+fn inodeForName(snapshot: Snapshot, name: []const u8) !format.Inode {
+    const entry = (try snapshot.lookup(std.testing.allocator, format.root_inode_id, name)).?;
+    return (try snapshot.getInode(std.testing.allocator, entry.child_inode_id)).?;
+}
+
+fn stageInode(
+    trees: *cawfs.tree.Mutator,
+    root: *format.FilesystemRoot,
+    inode: format.Inode,
+) !void {
+    const key = try format.encodeInodeKey(inode.inode_id);
+    const encoded = try format.encodeInode(inode);
+    root.inode_tree_root = try trees.put(root.inode_tree_root, &key, &encoded);
+}
+
+fn stageMapping(
+    trees: *cawfs.tree.Mutator,
+    root: *format.FilesystemRoot,
+    key: []const u8,
+    mapping: format.ExtentMapping,
+) !void {
+    const encoded = try format.encodeExtentMapping(mapping);
+    root.extent_tree_root = try trees.put(root.extent_tree_root, key, &encoded);
+}
+
 fn expectName(snapshot: Snapshot, name: []const u8, present: bool) !void {
     const entry = try snapshot.lookup(std.testing.allocator, format.root_inode_id, name);
     try std.testing.expectEqual(present, entry != null);
@@ -132,6 +174,177 @@ test "empty file survives commit crash and reopen" {
     try std.testing.expectEqual(file_options.now_ns, inode.ctime_ns);
     try std.testing.expectEqual(file_options.now_ns, inode.birthtime_ns);
     try std.testing.expect(!try reopened.hasExtentMappings(std.testing.allocator, inode.inode_id));
+    var data = try reopened.readWholeFile(std.testing.allocator, inode.inode_id);
+    defer data.deinit();
+    try std.testing.expectEqual(@as(usize, 0), data.bytes.len);
+    try std.testing.expectError(
+        error.NotFile,
+        reopened.readWholeFile(std.testing.allocator, format.root_inode_id),
+    );
+    try std.testing.expectError(
+        error.InodeNotFound,
+        reopened.readWholeFile(std.testing.allocator, 999),
+    );
+}
+
+test "whole-file write commits reopens and preserves inode metadata" {
+    var model = ModelStore.init(std.testing.allocator, initialAnchor());
+    defer model.deinit();
+    const formatted = try formatStore(&model);
+    const empty = try createCommittedEmptyFile(&model, formatted, txn_a, "alpha");
+    const before = try inodeForName(empty, "alpha");
+
+    var transaction = try Transaction.begin(model.conditionalStore(), std.testing.allocator, txn_b);
+    defer transaction.deinit();
+    var mutator = try filesystem.Mutator.init(&transaction, empty);
+    defer mutator.deinit();
+    try mutator.writeWholeFileOnce(before.inode_id, "immutable contents", .{ .now_ns = 3_000_000 });
+    const root = try mutator.finish();
+    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+
+    model.crash();
+    const reopened = try filesystem.open(model.conditionalStore(), std.testing.allocator);
+    var data = try reopened.readWholeFile(std.testing.allocator, before.inode_id);
+    defer data.deinit();
+    try std.testing.expectEqualStrings("immutable contents", data.bytes);
+    const after = (try reopened.getInode(std.testing.allocator, before.inode_id)).?;
+    try std.testing.expectEqual(@as(u64, "immutable contents".len), after.logical_size);
+    try std.testing.expectEqual(after.logical_size, after.allocated_bytes);
+    try std.testing.expectEqual(@as(u64, 3_000_000), after.mtime_ns);
+    try std.testing.expectEqual(@as(u64, 3_000_000), after.ctime_ns);
+    try std.testing.expectEqual(before.atime_ns, after.atime_ns);
+    try std.testing.expectEqual(before.birthtime_ns, after.birthtime_ns);
+    try std.testing.expectEqual(before.mode, after.mode);
+    try std.testing.expectEqual(before.uid, after.uid);
+    try std.testing.expectEqual(before.gid, after.gid);
+    try std.testing.expectEqual(before.link_count, after.link_count);
+}
+
+test "whole-file write validation does not mutate the candidate root" {
+    var model = ModelStore.init(std.testing.allocator, initialAnchor());
+    defer model.deinit();
+    const formatted = try formatStore(&model);
+    const empty = try createCommittedEmptyFile(&model, formatted, txn_a, "alpha");
+    const inode = try inodeForName(empty, "alpha");
+
+    var transaction = try Transaction.begin(model.conditionalStore(), std.testing.allocator, txn_b);
+    defer transaction.deinit();
+    var mutator = try filesystem.Mutator.init(&transaction, empty);
+    defer mutator.deinit();
+    const original_root = mutator.root;
+    const original_staged = transaction.staged.items.len;
+    try std.testing.expectError(
+        error.EmptyWrite,
+        mutator.writeWholeFileOnce(inode.inode_id, "", .{ .now_ns = 3 }),
+    );
+    try std.testing.expectError(
+        error.NotFile,
+        mutator.writeWholeFileOnce(format.root_inode_id, "x", .{ .now_ns = 3 }),
+    );
+    try std.testing.expectEqual(original_staged, transaction.staged.items.len);
+    try std.testing.expect(std.meta.eql(original_root, mutator.root));
+
+    try mutator.writeWholeFileOnce(inode.inode_id, "first", .{ .now_ns = 3 });
+    const written_root = mutator.root;
+    const written_staged = transaction.staged.items.len;
+    try std.testing.expectError(
+        error.FileNotEmpty,
+        mutator.writeWholeFileOnce(inode.inode_id, "second", .{ .now_ns = 4 }),
+    );
+    try std.testing.expectEqual(written_staged, transaction.staged.items.len);
+    try std.testing.expect(std.meta.eql(written_root, mutator.root));
+
+    var existing_transaction = try Transaction.begin(
+        model.conditionalStore(),
+        std.testing.allocator,
+        txn_c,
+    );
+    defer existing_transaction.deinit();
+    var existing = try filesystem.Mutator.init(&existing_transaction, empty);
+    defer existing.deinit();
+    const key = try format.encodeExtentKey(inode.inode_id, 0);
+    const mapping = try format.encodeExtentMapping(.{
+        .inode_id = inode.inode_id,
+        .logical_offset = 0,
+        .byte_length = 1,
+        .data_ref = .{},
+    });
+    existing.root.extent_tree_root = try existing.trees.put(
+        existing.root.extent_tree_root,
+        &key,
+        &mapping,
+    );
+    const existing_root = existing.root;
+    const existing_staged = existing_transaction.staged.items.len;
+    try std.testing.expectError(
+        error.UnexpectedExtentMapping,
+        existing.writeWholeFileOnce(inode.inode_id, "x", .{ .now_ns = 3 }),
+    );
+    try std.testing.expectEqual(existing_staged, existing_transaction.staged.items.len);
+    try std.testing.expect(std.meta.eql(existing_root, existing.root));
+}
+
+test "competing whole-file writers preserve the winner and reject replay" {
+    var model = ModelStore.init(std.testing.allocator, initialAnchor());
+    defer model.deinit();
+    const formatted = try formatStore(&model);
+    const empty = try createCommittedEmptyFile(&model, formatted, txn_a, "alpha");
+    const inode = try inodeForName(empty, "alpha");
+
+    var first = try Transaction.begin(model.conditionalStore(), std.testing.allocator, txn_b);
+    defer first.deinit();
+    var first_mutator = try filesystem.Mutator.init(&first, empty);
+    defer first_mutator.deinit();
+    try first_mutator.writeWholeFileOnce(inode.inode_id, "winner", .{ .now_ns = 3 });
+    const first_root = try first_mutator.finish();
+
+    var second = try Transaction.begin(model.conditionalStore(), std.testing.allocator, txn_c);
+    defer second.deinit();
+    var second_mutator = try filesystem.Mutator.init(&second, empty);
+    defer second_mutator.deinit();
+    try second_mutator.writeWholeFileOnce(inode.inode_id, "loser", .{ .now_ns = 4 });
+    const second_root = try second_mutator.finish();
+
+    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try first.commit(first_root));
+    try std.testing.expectEqual(cawfs.transaction.Outcome.conflict, try second.commit(second_root));
+    const winner = try filesystem.open(model.conditionalStore(), std.testing.allocator);
+    var winner_data = try winner.readWholeFile(std.testing.allocator, inode.inode_id);
+    defer winner_data.deinit();
+    try std.testing.expectEqualStrings("winner", winner_data.bytes);
+
+    var replay = try Transaction.begin(model.conditionalStore(), std.testing.allocator, txn_d);
+    defer replay.deinit();
+    var replay_mutator = try filesystem.Mutator.init(&replay, winner);
+    defer replay_mutator.deinit();
+    try std.testing.expectError(
+        error.FileNotEmpty,
+        replay_mutator.writeWholeFileOnce(inode.inode_id, "loser", .{ .now_ns = 5 }),
+    );
+}
+
+test "indeterminate whole-file commit resolves stabilizes and preserves payload" {
+    var model = ModelStore.init(std.testing.allocator, initialAnchor());
+    defer model.deinit();
+    const formatted = try formatStore(&model);
+    const empty = try createCommittedEmptyFile(&model, formatted, txn_a, "alpha");
+    const inode = try inodeForName(empty, "alpha");
+
+    var transaction = try Transaction.begin(model.conditionalStore(), std.testing.allocator, txn_b);
+    defer transaction.deinit();
+    var mutator = try filesystem.Mutator.init(&transaction, empty);
+    defer mutator.deinit();
+    try mutator.writeWholeFileOnce(inode.inode_id, "resolved payload", .{ .now_ns = 3 });
+    const root = try mutator.finish();
+    model.injectNextPublishFault(.indeterminate_after);
+    try std.testing.expectEqual(cawfs.transaction.Outcome.indeterminate, try transaction.commit(root));
+    try std.testing.expectEqual(cawfs.resolution.Resolution.committed, try transaction.resolve(.{}));
+    try transaction.stabilize();
+
+    model.crash();
+    const reopened = try filesystem.open(model.conditionalStore(), std.testing.allocator);
+    var data = try reopened.readWholeFile(std.testing.allocator, inode.inode_id);
+    defer data.deinit();
+    try std.testing.expectEqualStrings("resolved payload", data.bytes);
 }
 
 test "stale transaction conflicts and replays from winner snapshot" {
@@ -232,10 +445,7 @@ test "extent scan rejects a malformed key at the inode prefix" {
         .inode_id = format.root_inode_id,
         .logical_offset = 0,
         .byte_length = 1,
-        .extent_index = 0,
-        .extent_offset = 0,
-        .claim_epoch = 1,
-        .claim_id = @splat(1),
+        .data_ref = .{},
     });
     var root = initial.root;
     root.extent_tree_root = try trees.put(root.extent_tree_root, &malformed_key, &mapping);
@@ -247,6 +457,182 @@ test "extent scan rejects a malformed key at the inode prefix" {
     try std.testing.expectError(
         error.InvalidSize,
         malformed.hasExtentMappings(std.testing.allocator, format.root_inode_id),
+    );
+}
+
+test "whole-file reads reject malformed mapping layouts and lengths" {
+    var model = ModelStore.init(std.testing.allocator, initialAnchor());
+    defer model.deinit();
+    const store = model.conditionalStore();
+    const formatted = try formatStore(&model);
+
+    const names = [_][]const u8{
+        "short-key",
+        "wrong-offset",
+        "wrong-length",
+        "second-mapping",
+        "missing-mapping",
+        "wrong-payload",
+        "allocated-mismatch",
+        "unexpected-mapping",
+        "identity-mismatch",
+        "missing-object",
+    };
+    var inode_ids: [names.len]format.InodeId = undefined;
+    var create = try Transaction.begin(store, std.testing.allocator, txn_a);
+    defer create.deinit();
+    var create_mutator = try filesystem.Mutator.init(&create, formatted);
+    defer create_mutator.deinit();
+    for (names, 0..) |name, index| {
+        inode_ids[index] = try create_mutator.createEmptyFile(
+            format.root_inode_id,
+            name,
+            file_options,
+        );
+    }
+    const create_root = try create_mutator.finish();
+    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try create.commit(create_root));
+    const empty = try filesystem.open(store, std.testing.allocator);
+
+    var corrupt = try Transaction.begin(store, std.testing.allocator, txn_b);
+    defer corrupt.deinit();
+    var trees = cawfs.tree.Mutator.init(&corrupt);
+    defer trees.deinit();
+    var root = empty.root;
+    const data_ref = try corrupt.putImmutable("data");
+    const short_key = try format.encodeInodeKey(inode_ids[0]);
+    try stageMapping(&trees, &root, &short_key, .{
+        .inode_id = inode_ids[0],
+        .logical_offset = 0,
+        .byte_length = 4,
+        .data_ref = data_ref,
+    });
+
+    const offset_key = try format.encodeExtentKey(inode_ids[1], 1);
+    try stageMapping(&trees, &root, &offset_key, .{
+        .inode_id = inode_ids[1],
+        .logical_offset = 1,
+        .byte_length = 4,
+        .data_ref = data_ref,
+    });
+
+    const length_key = try format.encodeExtentKey(inode_ids[2], 0);
+    try stageMapping(&trees, &root, &length_key, .{
+        .inode_id = inode_ids[2],
+        .logical_offset = 0,
+        .byte_length = 3,
+        .data_ref = data_ref,
+    });
+
+    const first_key = try format.encodeExtentKey(inode_ids[3], 0);
+    try stageMapping(&trees, &root, &first_key, .{
+        .inode_id = inode_ids[3],
+        .logical_offset = 0,
+        .byte_length = 4,
+        .data_ref = data_ref,
+    });
+    const second_key = try format.encodeExtentKey(inode_ids[3], 4);
+    try stageMapping(&trees, &root, &second_key, .{
+        .inode_id = inode_ids[3],
+        .logical_offset = 4,
+        .byte_length = 1,
+        .data_ref = data_ref,
+    });
+
+    const short_payload_ref = try corrupt.putImmutable("bad");
+    const payload_key = try format.encodeExtentKey(inode_ids[5], 0);
+    try stageMapping(&trees, &root, &payload_key, .{
+        .inode_id = inode_ids[5],
+        .logical_offset = 0,
+        .byte_length = 4,
+        .data_ref = short_payload_ref,
+    });
+
+    const unexpected_key = try format.encodeExtentKey(inode_ids[7], 0);
+    try stageMapping(&trees, &root, &unexpected_key, .{
+        .inode_id = inode_ids[7],
+        .logical_offset = 0,
+        .byte_length = 4,
+        .data_ref = data_ref,
+    });
+
+    const identity_key = try format.encodeExtentKey(inode_ids[8], 0);
+    try stageMapping(&trees, &root, &identity_key, .{
+        .inode_id = inode_ids[8],
+        .logical_offset = 1,
+        .byte_length = 4,
+        .data_ref = data_ref,
+    });
+
+    const missing_object_key = try format.encodeExtentKey(inode_ids[9], 0);
+    try stageMapping(&trees, &root, &missing_object_key, .{
+        .inode_id = inode_ids[9],
+        .logical_offset = 0,
+        .byte_length = 4,
+        .data_ref = .{},
+    });
+
+    for (inode_ids[0..6]) |inode_id| {
+        var inode = (try empty.getInode(std.testing.allocator, inode_id)).?;
+        inode.logical_size = 4;
+        inode.allocated_bytes = 4;
+        try stageInode(&trees, &root, inode);
+    }
+    var allocated_mismatch = (try empty.getInode(std.testing.allocator, inode_ids[6])).?;
+    allocated_mismatch.logical_size = 4;
+    allocated_mismatch.allocated_bytes = 3;
+    try stageInode(&trees, &root, allocated_mismatch);
+    for (inode_ids[8..10]) |inode_id| {
+        var inode = (try empty.getInode(std.testing.allocator, inode_id)).?;
+        inode.logical_size = 4;
+        inode.allocated_bytes = 4;
+        try stageInode(&trees, &root, inode);
+    }
+
+    const encoded_root = try format.encodeFilesystemRoot(root);
+    const root_ref = try corrupt.putImmutable(&encoded_root);
+    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try corrupt.commit(root_ref));
+    const malformed = try filesystem.open(store, std.testing.allocator);
+
+    try std.testing.expectError(
+        error.InvalidSize,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[0]),
+    );
+    try std.testing.expectError(
+        error.UnsupportedExtentLayout,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[1]),
+    );
+    try std.testing.expectError(
+        error.MappingLengthMismatch,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[2]),
+    );
+    try std.testing.expectError(
+        error.UnsupportedExtentLayout,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[3]),
+    );
+    try std.testing.expectError(
+        error.MissingExtentMapping,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[4]),
+    );
+    try std.testing.expectError(
+        error.DataLengthMismatch,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[5]),
+    );
+    try std.testing.expectError(
+        error.AllocatedSizeMismatch,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[6]),
+    );
+    try std.testing.expectError(
+        error.UnexpectedExtentMapping,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[7]),
+    );
+    try std.testing.expectError(
+        error.KeyValueMismatch,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[8]),
+    );
+    try std.testing.expectError(
+        error.ObjectNotFound,
+        malformed.readWholeFile(std.testing.allocator, inode_ids[9]),
     );
 }
 

@@ -262,14 +262,28 @@ directory. Directory values repeat their parent and identify a child inode whose
 kind must match; empty files have zero logical and allocated size and no extent
 mappings.
 
+Current file data support is one non-empty immutable object and one extent
+mapping, written once to an existing empty regular file. The mapping persists an
+opaque backend `ObjectRef`; filesystem metadata does not interpret SCSI extent
+identity. `allocated_bytes` is the mapped payload length in this slice. Reads
+require one exact offset-zero mapping whose length matches both the inode and the
+loaded immutable object, and reject malformed or incomplete layouts.
+
 Formatting and filesystem mutation use one tree mutator per transaction so
 later updates can read pages staged earlier in the same batch. They stage a new
 filesystem root but do not publish it. The transaction coordinator remains the
 only publication boundary and exposes conflict, indeterminate resolution, and
 stabilization directly to its caller; the filesystem layer does not retry or
-hide outcomes.
+hide outcomes. File payloads are staged with `Transaction.putImmutable` before
+their mapping and updated inode. The SCSI batch writes all staged payload and
+metadata objects, crosses one durability barrier, activates every object as
+live, and only then permits anchor publication.
 
 Zettide remains responsible for FUSE behavior and POSIX policy above this
 metadata core. Existing littlefs volumes stay single-writer; shared writable
-volumes use CAWFS. File data, deletion, rename, symlinks, Unicode policy,
-garbage collection, clocks, and fencing are outside the current metadata core.
+volumes use CAWFS. Overwrite, append, truncate, holes, multiple extents, mutable
+`.data` allocations, orphan reclaim, garbage collection, and general POSIX data
+semantics remain unsupported. Deletion, rename, symlinks, Unicode policy, and
+clocks are also outside the current metadata core. External fencing is still
+required before writable ownership or takeover; metadata publication does not
+prove that an old writer can no longer issue I/O.
