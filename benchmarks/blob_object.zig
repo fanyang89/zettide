@@ -95,28 +95,34 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 
     const io_start = Io.Clock.awake.now(init.io).nanoseconds;
-    switch (config.operation) {
-        .write => try runWrites(init.io, &object, buffers, config),
+    const validation_elapsed: u64 = switch (config.operation) {
+        .write => validation: {
+            try runWrites(init.io, &object, buffers, config);
+            break :validation 0;
+        },
         .read => try runReads(init.io, &object, buffers, config),
-    }
-    const io_elapsed: u64 = @intCast(Io.Clock.awake.now(init.io).nanoseconds - io_start);
+    };
+    const operation_elapsed: u64 = @intCast(Io.Clock.awake.now(init.io).nanoseconds - io_start);
+    const io_elapsed = operation_elapsed - validation_elapsed;
     var sync_elapsed: u64 = 0;
     if (config.operation == .write) {
         const sync_start = Io.Clock.awake.now(init.io).nanoseconds;
         try object.commit(init.io);
         sync_elapsed = @intCast(Io.Clock.awake.now(init.io).nanoseconds - sync_start);
     }
+    const durable_elapsed = if (config.operation == .write) operation_elapsed + sync_elapsed else io_elapsed;
     try stdout.print(
-        "blob_object_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} sync_elapsed_ns={} durable_bytes_per_second={} open_elapsed_ns={} total_bytes_per_second={}\n",
+        "blob_object_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} validation_elapsed_ns={} sync_elapsed_ns={} durable_bytes_per_second={} open_elapsed_ns={} total_bytes_per_second={}\n",
         .{
             @tagName(config.operation),
             config.size,
             io_elapsed,
             rate(config.size, io_elapsed),
+            validation_elapsed,
             sync_elapsed,
-            rate(config.size, io_elapsed + sync_elapsed),
+            rate(config.size, durable_elapsed),
             open_elapsed,
-            rate(config.size, open_elapsed + io_elapsed + sync_elapsed),
+            rate(config.size, open_elapsed + operation_elapsed + sync_elapsed),
         },
     );
 }
@@ -130,16 +136,21 @@ fn runWrites(io: Io, object: *Object, buffers: []const []u8, config: Config) !vo
     }
 }
 
-fn runReads(io: Io, object: *Object, buffers: []const []u8, config: Config) !void {
+fn runReads(io: Io, object: *Object, buffers: []const []u8, config: Config) !u64 {
     const blob_count = config.size / format.blob_size;
     var logical_blob: u64 = 0;
+    var validation_elapsed: u64 = 0;
     while (logical_blob < blob_count) : (logical_blob += 1) {
         const buffer = buffers[logical_blob % buffers.len];
         const expected: u8 = @intCast(logical_blob % buffers.len + 1);
         const amount = try object.readBlob(io, logical_blob, buffer);
-        if (amount != format.blob_size or !std.mem.allEqual(u8, buffer, expected))
-            return error.BlobObjectBenchmarkDataMismatch;
+        if (amount != format.blob_size) return error.BlobObjectBenchmarkDataMismatch;
+        const validation_start = Io.Clock.awake.now(io).nanoseconds;
+        const valid = std.mem.allEqual(u8, buffer, expected);
+        validation_elapsed += @intCast(Io.Clock.awake.now(io).nanoseconds - validation_start);
+        if (!valid) return error.BlobObjectBenchmarkDataMismatch;
     }
+    return validation_elapsed;
 }
 
 fn rate(bytes: u64, elapsed_ns: u64) u64 {

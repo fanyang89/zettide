@@ -90,11 +90,15 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 
     const io_start = Io.Clock.awake.now(init.io).nanoseconds;
-    switch (config.operation) {
-        .write => try runWrites(init.gpa, init.io, &device, buffers, config),
+    const validation_elapsed: u64 = switch (config.operation) {
+        .write => validation: {
+            try runWrites(init.gpa, init.io, &device, buffers, config);
+            break :validation 0;
+        },
         .read => try runReads(init.gpa, init.io, &device, buffers, config),
-    }
-    const io_elapsed: u64 = @intCast(Io.Clock.awake.now(init.io).nanoseconds - io_start);
+    };
+    const operation_elapsed: u64 = @intCast(Io.Clock.awake.now(init.io).nanoseconds - io_start);
+    const io_elapsed = operation_elapsed - validation_elapsed;
 
     var sync_elapsed: u64 = 0;
     if (config.operation == .write) {
@@ -102,16 +106,18 @@ pub fn main(init: std.process.Init) !void {
         try device.syncData(init.io);
         sync_elapsed = @intCast(Io.Clock.awake.now(init.io).nanoseconds - sync_start);
     }
-    const durable_elapsed = io_elapsed + sync_elapsed;
+    const durable_elapsed = if (config.operation == .write) operation_elapsed + sync_elapsed else io_elapsed;
     try stdout.print(
-        "blob_device_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} sync_elapsed_ns={} durable_bytes_per_second={}\n",
+        "blob_device_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} validation_elapsed_ns={} sync_elapsed_ns={} durable_bytes_per_second={} total_bytes_per_second={}\n",
         .{
             @tagName(config.operation),
             config.size,
             io_elapsed,
             rate(config.size, io_elapsed),
+            validation_elapsed,
             sync_elapsed,
             rate(config.size, durable_elapsed),
+            rate(config.size, operation_elapsed + sync_elapsed),
         },
     );
 }
@@ -144,11 +150,12 @@ fn runReads(
     device: *Device,
     buffers: []const []u8,
     config: Config,
-) !void {
+) !u64 {
     const reads = try allocator.alloc(zettide.blob_device.Read, buffers.len);
     defer allocator.free(reads);
     const results = try allocator.alloc(zettide.blob_device.ReadResult, buffers.len);
     defer allocator.free(results);
+    var validation_elapsed: u64 = 0;
     var offset: u64 = 0;
     while (offset < config.size) {
         const remaining_blocks = (config.size - offset) / config.block_size;
@@ -162,8 +169,15 @@ fn runReads(
             if (result.failure) |err| return err;
             if (result.amount != config.block_size) return error.IncompleteBlobDeviceRead;
         }
+        const validation_start = Io.Clock.awake.now(io).nanoseconds;
+        for (buffers[0..count], 0..) |buffer, index| {
+            const expected: u8 = @intCast(index + 1);
+            if (!std.mem.allEqual(u8, buffer, expected)) return error.BlobDeviceBenchmarkDataMismatch;
+        }
+        validation_elapsed += @intCast(Io.Clock.awake.now(io).nanoseconds - validation_start);
         offset += count * config.block_size;
     }
+    return validation_elapsed;
 }
 
 fn rate(bytes: u64, elapsed_ns: u64) u64 {

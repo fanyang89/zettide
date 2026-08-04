@@ -87,26 +87,33 @@ pub fn main(init: std.process.Init) !void {
     try stdout.flush();
 
     const io_start = Io.Clock.awake.now(init.io).nanoseconds;
-    switch (config.operation) {
-        .write => try runWrites(init.gpa, init.io, &store, buffers, config),
+    const validation_elapsed: u64 = switch (config.operation) {
+        .write => validation: {
+            try runWrites(init.gpa, init.io, &store, buffers, config);
+            break :validation 0;
+        },
         .read => try runReads(init.io, &store, buffers, config),
-    }
-    const io_elapsed: u64 = @intCast(Io.Clock.awake.now(init.io).nanoseconds - io_start);
+    };
+    const operation_elapsed: u64 = @intCast(Io.Clock.awake.now(init.io).nanoseconds - io_start);
+    const io_elapsed = operation_elapsed - validation_elapsed;
     var sync_elapsed: u64 = 0;
     if (config.operation == .write) {
         const sync_start = Io.Clock.awake.now(init.io).nanoseconds;
         try store.commit(init.io);
         sync_elapsed = @intCast(Io.Clock.awake.now(init.io).nanoseconds - sync_start);
     }
+    const durable_elapsed = if (config.operation == .write) operation_elapsed + sync_elapsed else io_elapsed;
     try stdout.print(
-        "blob_store_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} sync_elapsed_ns={} durable_bytes_per_second={}\n",
+        "blob_store_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} validation_elapsed_ns={} sync_elapsed_ns={} durable_bytes_per_second={} total_bytes_per_second={}\n",
         .{
             @tagName(config.operation),
             config.size,
             io_elapsed,
             rate(config.size, io_elapsed),
+            validation_elapsed,
             sync_elapsed,
-            rate(config.size, io_elapsed + sync_elapsed),
+            rate(config.size, durable_elapsed),
+            rate(config.size, operation_elapsed + sync_elapsed),
         },
     );
 }
@@ -128,11 +135,12 @@ fn runWrites(
     }
 }
 
-fn runReads(io: Io, store: *Store, buffers: []const []u8, config: Config) !void {
+fn runReads(io: Io, store: *Store, buffers: []const []u8, config: Config) !u64 {
     var checksums: [zettide.blob_device.max_batch][format.checksum_count]u32 = undefined;
     for (buffers, checksums[0..buffers.len]) |buffer, *checksum|
         checksum.* = format.payloadChecksums(buffer);
     var slot: u64 = 0;
+    var validation_elapsed: u64 = 0;
     const slot_count = config.size / format.blob_size;
     while (slot < slot_count) : (slot += 1) {
         const index: usize = @intCast(slot % buffers.len);
@@ -144,9 +152,13 @@ fn runReads(io: Io, store: *Store, buffers: []const []u8, config: Config) !void 
             .checksums = checksums[index],
         };
         const amount = try store.read(io, reference, buffer);
-        if (amount != format.blob_size or !std.mem.allEqual(u8, buffer, expected_byte))
-            return error.BlobBenchmarkDataMismatch;
+        if (amount != format.blob_size) return error.BlobBenchmarkDataMismatch;
+        const validation_start = Io.Clock.awake.now(io).nanoseconds;
+        const valid = std.mem.allEqual(u8, buffer, expected_byte);
+        validation_elapsed += @intCast(Io.Clock.awake.now(io).nanoseconds - validation_start);
+        if (!valid) return error.BlobBenchmarkDataMismatch;
     }
+    return validation_elapsed;
 }
 
 fn rate(bytes: u64, elapsed_ns: u64) u64 {
