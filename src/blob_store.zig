@@ -2,6 +2,7 @@ const std = @import("std");
 const blob_device = @import("blob_device.zig");
 const format = @import("blob_format.zig");
 const google_crc32c = @import("crc32c");
+const storage_api = @import("v3/storage.zig");
 
 const Io = std.Io;
 
@@ -57,6 +58,18 @@ pub const Store = struct {
 
     pub fn stagedSlots(self: *const Store) u64 {
         return self.staged_slots;
+    }
+
+    pub fn transportKind(self: *const Store) storage_api.TransportKind {
+        return self.device.transportKind();
+    }
+
+    pub fn transportStats(self: *Store, io: Io) storage_api.TransportStats {
+        return self.device.transportStats(io);
+    }
+
+    pub fn resetTransportStats(self: *Store, io: Io) void {
+        self.device.resetTransportStats(io);
     }
 
     pub fn put(self: *Store, io: Io, data: []const u8) !format.BlobRef {

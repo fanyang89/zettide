@@ -17,9 +17,11 @@ pub const Write = struct {
 };
 
 pub const Stats = struct {
+    queue_capacity: u64 = queue_entries,
     submitted_sqes: u64 = 0,
     submit_calls: u64 = 0,
     completions: u64 = 0,
+    current_inflight: u64 = 0,
     max_inflight: u64 = 0,
 };
 
@@ -254,7 +256,9 @@ pub const Engine = struct {
     pub fn getStats(self: *Engine, io: std.Io) Stats {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        return self.stats;
+        var result = self.stats;
+        result.current_inflight = self.current_inflight;
+        return result;
     }
 
     pub fn resetStats(self: *Engine, io: std.Io) void {

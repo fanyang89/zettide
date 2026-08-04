@@ -24,6 +24,21 @@ pub const Write = struct {
     offset: u64,
 };
 
+pub const TransportKind = enum {
+    posix,
+    io_uring,
+    custom,
+};
+
+pub const TransportStats = struct {
+    queue_capacity: u64 = 0,
+    submitted_sqes: u64 = 0,
+    submit_calls: u64 = 0,
+    completions: u64 = 0,
+    current_inflight: u64 = 0,
+    max_inflight: u64 = 0,
+};
+
 /// Owned durable random-access storage used by a v3 member.
 pub const Storage = struct {
     backend: Backend,
@@ -40,6 +55,9 @@ pub const Storage = struct {
         sync_data: ?*const fn (context: *anyopaque, io: Io) anyerror!void = null,
         sync: *const fn (context: *anyopaque, io: Io) anyerror!void,
         close: *const fn (context: *anyopaque, io: Io) anyerror!void,
+        transport_kind: ?*const fn (context: *anyopaque) TransportKind = null,
+        transport_stats: ?*const fn (context: *anyopaque, io: Io) TransportStats = null,
+        reset_transport_stats: ?*const fn (context: *anyopaque, io: Io) void = null,
     };
 
     const FileBackend = struct {
@@ -137,6 +155,34 @@ pub const Storage = struct {
 
     pub fn capacity(self: *const Storage) u64 {
         return self.capacity_bytes;
+    }
+
+    pub fn transportKind(self: *const Storage) TransportKind {
+        return switch (self.backend) {
+            .file => .posix,
+            .custom => |backend| if (backend.vtable.transport_kind) |kind|
+                kind(backend.context)
+            else
+                .custom,
+        };
+    }
+
+    pub fn transportStats(self: *Storage, io: Io) TransportStats {
+        return switch (self.backend) {
+            .file => .{},
+            .custom => |backend| if (backend.vtable.transport_stats) |stats|
+                stats(backend.context, io)
+            else
+                .{},
+        };
+    }
+
+    pub fn resetTransportStats(self: *Storage, io: Io) void {
+        switch (self.backend) {
+            .file => {},
+            .custom => |backend| if (backend.vtable.reset_transport_stats) |reset|
+                reset(backend.context, io),
+        }
     }
 
     pub fn sameIdentity(self: *const Storage, other: *const Storage) bool {

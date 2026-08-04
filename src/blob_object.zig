@@ -4,6 +4,7 @@ const blob_map = @import("blob_map.zig");
 const blob_map_store = @import("blob_map_store.zig");
 const blob_object_format = @import("blob_object_format.zig");
 const blob_store = @import("blob_store.zig");
+const storage_api = @import("v3/storage.zig");
 
 const Io = std.Io;
 
@@ -71,6 +72,18 @@ pub const Object = struct {
 
     pub fn logicalSize(self: *const Object) u64 {
         return self.staged.logical_size;
+    }
+
+    pub fn transportKind(self: *const Object) storage_api.TransportKind {
+        return self.blobs.transportKind();
+    }
+
+    pub fn transportStats(self: *Object, io: Io) storage_api.TransportStats {
+        return self.blobs.transportStats(io);
+    }
+
+    pub fn resetTransportStats(self: *Object, io: Io) void {
+        self.blobs.resetTransportStats(io);
     }
 
     pub fn appendMany(self: *Object, io: Io, inputs: []const []const u8) !void {
