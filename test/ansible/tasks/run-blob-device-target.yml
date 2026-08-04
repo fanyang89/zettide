@@ -25,7 +25,11 @@
 - name: Require BlobDevice target free space | {{ zettide_blob_device_target.name }}
   ansible.builtin.assert:
     that:
-      - (zettide_blob_device_target_space.stdout_lines[-1] | int) >= (zettide_blob_device_size | int) + 1073741824
+      - >-
+        (zettide_blob_device_target_space.stdout_lines[-1] | int) >=
+        (zettide_blob_device_size | int) +
+        (((zettide_blob_device_size | int) // 8 + 67108864) if zettide_blob_benchmark_name == 'blob-object' else 0) +
+        1073741824
     fail_msg: "BlobDevice target lacks benchmark capacity plus 1 GiB headroom."
 
 - name: Create BlobDevice target workspace | {{ zettide_blob_device_target.name }}

@@ -173,6 +173,29 @@ pub fn build(b: *std.Build) void {
     const run_blob_store_benchmark_tests = b.addRunArtifact(blob_store_benchmark_tests);
     unit_step.dependOn(&run_blob_store_benchmark_tests.step);
 
+    const blob_object_benchmark_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/blob_object.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = portable_core }},
+    });
+    const blob_object_benchmark = b.addExecutable(.{
+        .name = "zettide-blob-object-benchmark",
+        .root_module = blob_object_benchmark_module,
+    });
+    const run_blob_object_benchmark = b.addRunArtifact(blob_object_benchmark);
+    if (b.args) |args| run_blob_object_benchmark.addArgs(args);
+    const blob_object_benchmark_step = b.step("bench-blob-object", "Benchmark sequential BlobObject IO");
+    blob_object_benchmark_step.dependOn(&run_blob_object_benchmark.step);
+    const install_blob_object_benchmark = b.addInstallArtifact(blob_object_benchmark, .{});
+    const build_blob_object_benchmark_step = b.step("build-bench-blob-object", "Build the BlobObject benchmark");
+    build_blob_object_benchmark_step.dependOn(&install_blob_object_benchmark.step);
+
+    const blob_object_benchmark_tests = b.addTest(.{ .root_module = blob_object_benchmark_module });
+    const run_blob_object_benchmark_tests = b.addRunArtifact(blob_object_benchmark_tests);
+    unit_step.dependOn(&run_blob_object_benchmark_tests.step);
+
     const image_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/image.zig"),
