@@ -129,19 +129,22 @@ fn runWrites(
 }
 
 fn runReads(io: Io, store: *Store, buffers: []const []u8, config: Config) !void {
+    var checksums: [zettide.blob_device.max_batch][format.checksum_count]u32 = undefined;
+    for (buffers, checksums[0..buffers.len]) |buffer, *checksum|
+        checksum.* = format.payloadChecksums(buffer);
     var slot: u64 = 0;
     const slot_count = config.size / format.blob_size;
     while (slot < slot_count) : (slot += 1) {
-        const buffer = buffers[slot % buffers.len];
-        const expected_byte: u8 = @intCast(slot % buffers.len + 1);
+        const index: usize = @intCast(slot % buffers.len);
+        const buffer = buffers[index];
+        const expected_byte: u8 = @intCast(index + 1);
         const reference: format.BlobRef = .{
             .slot = slot,
             .valid_bytes = format.blob_size,
-            .checksums = format.payloadChecksums(buffer),
+            .checksums = checksums[index],
         };
         const amount = try store.read(io, reference, buffer);
-        if (amount != format.blob_size or buffer[0] != expected_byte or
-            !std.mem.allEqual(u8, buffer, expected_byte))
+        if (amount != format.blob_size or !std.mem.allEqual(u8, buffer, expected_byte))
             return error.BlobBenchmarkDataMismatch;
     }
 }
