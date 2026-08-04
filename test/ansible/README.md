@@ -100,8 +100,16 @@ delete the image only after both the test and restoration succeed. A host power
 loss or `SIGKILL` can prevent automatic restoration; use the retained image for
 manual recovery. The default async limit is 24 hours; increase
 `zettide_raw_timeout` when the backup, test, and restoration passes may exceed
-that time. This profile does not run fio and is not part of the default Tier 1
-gate.
+that time. This profile does not run fio by default and is not part of the
+default Tier 1 gate.
+
+Set `-e zettide_raw_fio=true` to run a direct `io_uring` fio matrix against the
+empty raw disk before pool creation. The matrix covers 1 MiB sequential I/O and
+4 KiB random I/O at QD1, QD32, and four jobs at QD32. It uses the first 64 GiB,
+runs each case for 20 seconds after a 5-second ramp, and archives JSON results.
+Override `zettide_raw_fio_size`, `zettide_raw_fio_runtime`, or
+`zettide_raw_fio_ramp_time` as needed. Raw fio writes are destructive and remain
+protected by the same image backup and restoration lifecycle.
 
 ## Throughput
 

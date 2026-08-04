@@ -14,6 +14,10 @@ backup=$5
 test_mib=$6
 log_dir=${ZETTIDE_TEST_LOG_DIR:?ZETTIDE_TEST_LOG_DIR is required}
 keep_backup=${ZETTIDE_RAW_KEEP_BACKUP:-1}
+run_fio=${ZETTIDE_RAW_FIO:-0}
+fio_size=${ZETTIDE_RAW_FIO_SIZE:-64G}
+fio_runtime=${ZETTIDE_RAW_FIO_RUNTIME:-20}
+fio_ramp_time=${ZETTIDE_RAW_FIO_RAMP_TIME:-5}
 expected_confirm="DESTROY:${device}:${expected_serial}"
 
 [[ ${ZETTIDE_RAW_DEVICE_CONFIRM:-} == "$expected_confirm" ]] || {
@@ -32,6 +36,14 @@ expected_confirm="DESTROY:${device}:${expected_serial}"
     echo "ZETTIDE_RAW_KEEP_BACKUP must be 0 or 1" >&2
     exit 2
 }
+[[ $run_fio == 0 || $run_fio == 1 ]] || {
+    echo "ZETTIDE_RAW_FIO must be 0 or 1" >&2
+    exit 2
+}
+[[ $fio_runtime =~ ^[1-9][0-9]*$ && $fio_ramp_time =~ ^[0-9]+$ ]] || {
+    echo "fio runtime and ramp time must be integer seconds" >&2
+    exit 2
+}
 
 for command in blkdiscard blockdev blkid cmp dd findmnt flock fusermount3 grep lsblk mount mountpoint setsid sfdisk sha256sum stat timeout udevadm umount wipefs; do
     command -v "$command" >/dev/null || {
@@ -39,6 +51,12 @@ for command in blkdiscard blockdev blkid cmp dd findmnt flock fusermount3 grep l
         exit 2
     }
 done
+if [[ $run_fio == 1 ]]; then
+    command -v fio >/dev/null || {
+        echo "fio is required for raw-device performance testing" >&2
+        exit 2
+    }
+fi
 
 mkdir -p "$log_dir"
 work=$(mktemp -d "${TMPDIR:-/tmp}/zettide-physical-block.XXXXXX")
@@ -61,6 +79,36 @@ check_identity() {
         echo "raw-device identity changed: $device ($actual_type, $actual_serial)" >&2
         return 1
     }
+}
+
+run_fio_case() {
+    local name=$1
+    local rw=$2
+    local block_size=$3
+    local depth=$4
+    local jobs=$5
+    fio \
+        --name="$name" \
+        --filename="$device" \
+        --rw="$rw" \
+        --bs="$block_size" \
+        --size="$fio_size" \
+        --ioengine=io_uring \
+        --iodepth="$depth" \
+        --numjobs="$jobs" \
+        --direct=1 \
+        --invalidate=1 \
+        --group_reporting=1 \
+        --time_based=1 \
+        --runtime="$fio_runtime" \
+        --ramp_time="$fio_ramp_time" \
+        --randrepeat=0 \
+        --norandommap=1 \
+        --refill_buffers=1 \
+        --percentile_list=50:95:99:99.9 \
+        --eta=never \
+        --output-format=json \
+        --output="$log_dir/fio-$name.json"
 }
 
 stop_pool_mount() {
@@ -156,6 +204,7 @@ finish() {
         echo "serial=$expected_serial"
         echo "backup=$backup"
         echo "backup_ready=$backup_ready"
+        echo "fio_enabled=$run_fio"
         echo "test_succeeded=$test_succeeded"
         echo "restore_verified=$restore_verified"
         echo "mount_verified=$mount_verified"
@@ -252,6 +301,23 @@ blockdev --rereadpt "$device"
 udevadm settle
 "$cli" device inspect "$device" >"$log_dir/empty-inspect.log"
 grep -q '^Preflight: eligible$' "$log_dir/empty-inspect.log"
+
+if [[ $run_fio == 1 ]]; then
+    run_fio_case seq-write-1m-qd32-j1 write 1m 32 1
+    run_fio_case seq-read-1m-qd32-j1 read 1m 32 1
+    run_fio_case randwrite-4k-qd1-j1 randwrite 4k 1 1
+    run_fio_case randread-4k-qd1-j1 randread 4k 1 1
+    run_fio_case randwrite-4k-qd32-j1 randwrite 4k 32 1
+    run_fio_case randread-4k-qd32-j1 randread 4k 32 1
+    run_fio_case randwrite-4k-qd32-j4 randwrite 4k 32 4
+    run_fio_case randread-4k-qd32-j4 randread 4k 32 4
+    check_identity
+    blkdiscard --zeroout "$device"
+    blockdev --rereadpt "$device"
+    udevadm settle
+    "$cli" device inspect "$device" >"$log_dir/post-fio-inspect.log"
+    grep -q '^Preflight: eligible$' "$log_dir/post-fio-inspect.log"
+fi
 
 "$cli" pool plan-create --device "$device" --profile unprotected --label physical-tier1 \
     >"$log_dir/plan.log"

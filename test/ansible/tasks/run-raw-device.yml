@@ -53,6 +53,10 @@
   environment:
     ZETTIDE_RAW_DEVICE_CONFIRM: "{{ zettide_raw_device_confirm }}"
     ZETTIDE_RAW_KEEP_BACKUP: "{{ '1' if zettide_raw_keep_backup | bool else '0' }}"
+    ZETTIDE_RAW_FIO: "{{ '1' if zettide_raw_fio | bool else '0' }}"
+    ZETTIDE_RAW_FIO_SIZE: "{{ zettide_raw_fio_size }}"
+    ZETTIDE_RAW_FIO_RUNTIME: "{{ zettide_raw_fio_runtime }}"
+    ZETTIDE_RAW_FIO_RAMP_TIME: "{{ zettide_raw_fio_ramp_time }}"
     ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/raw-device"
   async: "{{ zettide_raw_timeout }}"
   poll: 15
