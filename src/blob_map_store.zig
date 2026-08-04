@@ -153,6 +153,19 @@ pub const MapStore = struct {
         );
     }
 
+    pub fn loadAllAlloc(
+        self: *MapStore,
+        io: Io,
+        root: blob_map.PageRef,
+        root_generation: u64,
+        scratch: []u8,
+    ) ![]blob_map.LeafEntry {
+        var entries: std.ArrayList(blob_map.LeafEntry) = .empty;
+        errdefer entries.deinit(self.allocator);
+        try self.collectPage(io, root, root_generation, scratch, &entries);
+        return entries.toOwnedSlice(self.allocator);
+    }
+
     fn writePage(
         self: *MapStore,
         io: Io,
@@ -169,6 +182,39 @@ pub const MapStore = struct {
             .last_key = last_key,
             .digest = blob_map.pageDigest(page),
         };
+    }
+
+    fn collectPage(
+        self: *MapStore,
+        io: Io,
+        reference: blob_map.PageRef,
+        expected_generation: ?u64,
+        scratch: []u8,
+        output: *std.ArrayList(blob_map.LeafEntry),
+    ) !void {
+        try self.blobs.readDigestVerified(io, reference.page, blob_map.page_size, &reference.digest, scratch);
+        const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
+        const header = try blob_map.decodeHeader(page);
+        if (header.level != reference.level or
+            header.first_key != reference.first_key or
+            header.last_key != reference.last_key or
+            (expected_generation != null and header.generation != expected_generation.?))
+            return error.BlobMapReferenceMismatch;
+        if (header.kind == .leaf) {
+            var entries: [blob_map.max_leaf_entries]blob_map.LeafEntry = undefined;
+            _ = try blob_map.decodeLeaf(page, &entries);
+            try output.appendSlice(self.allocator, entries[0..header.count]);
+            return;
+        }
+        var entries: [blob_map.max_internal_entries]blob_map.InternalEntry = undefined;
+        _ = try blob_map.decodeInternal(page, &entries);
+        for (entries[0..header.count]) |entry| try self.collectPage(io, .{
+            .page = entry.child_page,
+            .level = header.level - 1,
+            .first_key = entry.first_key,
+            .last_key = entry.last_key,
+            .digest = entry.child_digest,
+        }, null, scratch, output);
     }
 
     const UpdateResult = struct {

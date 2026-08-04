@@ -3,6 +3,8 @@ pub const blob_device = @import("blob_device.zig");
 pub const blob_format = @import("blob_format.zig");
 pub const blob_map = @import("blob_map.zig");
 pub const blob_map_store = @import("blob_map_store.zig");
+pub const blob_object_format = @import("blob_object_format.zig");
+pub const blob_object = @import("blob_object.zig");
 pub const blob_store = @import("blob_store.zig");
 pub const container = @import("container.zig");
 pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("endpoint_control.zig") else struct {};
@@ -43,6 +45,8 @@ test {
     _ = blob_format;
     _ = blob_map;
     _ = blob_map_store;
+    _ = blob_object_format;
+    _ = blob_object;
     _ = blob_store;
     _ = container;
     _ = endpoint_control;
