@@ -24,7 +24,7 @@
         size: 17179869184
         block_size: 4096
         batch_depth: 1
-      - name: iops-4k-qd32
+      - name: iops-4k-batch32
         size: 17179869184
         block_size: 4096
         batch_depth: 32
