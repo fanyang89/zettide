@@ -16,10 +16,14 @@
     zettide_io_timeout: 5400
     zettide_io_minimum_free_bytes: 4294967296
     zettide_throughput_redo_journal_size: ""
+    zettide_blob_device_size: 17179869184
+    zettide_blob_device_block_size: 1048576
+    zettide_blob_device_batch_depth: 32
     zettide_profile_tasks:
       tier1: tasks/run-mode.yml
       io-verify: tasks/run-io-verify.yml
       throughput: tasks/run-io-verify.yml
+      blob-device: tasks/run-blob-device.yml
     zettide_packages:
       RedHat:
         - acl
@@ -193,7 +197,7 @@
       ansible.builtin.assert:
         that:
           - zettide_test_profile in zettide_profile_tasks
-        fail_msg: "Supported test profiles are tier1, io-verify, and throughput."
+        fail_msg: "Supported test profiles are tier1, io-verify, throughput, and blob-device."
 
   tasks:
     - name: Create the remote workspace
@@ -289,6 +293,7 @@
               fio_version: "{{ zettide_remote_fio.stdout | default('not-recorded') }}"
               io_targets: "{{ zettide_io_targets | default([]) }}"
               throughput_targets: "{{ zettide_throughput_targets | default([]) }}"
+              blob_device_targets: "{{ zettide_blob_device_targets | default([]) }}"
               started_utc: "{{ ansible_date_time.iso8601 }}"
 
         - name: Prepare pinned external suites

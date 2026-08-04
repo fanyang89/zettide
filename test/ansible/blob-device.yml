@@ -1,0 +1,7 @@
+---
+- name: Run the ReleaseSafe BlobDevice benchmark profile
+  import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: blob-device
+    zettide_optimize_modes_override:
+      - ReleaseSafe

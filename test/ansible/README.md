@@ -82,3 +82,12 @@ uv run ansible-playbook test/ansible/throughput.yml --limit zettide-tier1
 
 The benchmark creates sparse 8 GiB temporary images inside the configured
 directories. It never writes raw block devices.
+
+## BlobDevice
+
+The BlobDevice profile measures the file-backed data plane without LittleFS,
+object metadata, or FUSE. Configure `zettide_blob_device_targets` and run:
+
+```sh
+uv run ansible-playbook test/ansible/blob-device.yml --limit zettide-tier1
+```

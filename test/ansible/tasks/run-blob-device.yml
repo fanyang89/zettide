@@ -1,0 +1,36 @@
+---
+- name: Create BlobDevice result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}"
+    state: directory
+    mode: "0755"
+
+- name: Build BlobDevice benchmark | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - build-bench-blob-device
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+
+- name: Initialize BlobDevice failures | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_blob_device_failures: []
+
+- name: Run BlobDevice targets | {{ zettide_optimize }}
+  ansible.builtin.include_tasks: run-blob-device-target.yml
+  loop: "{{ zettide_blob_device_targets | default([{'name': 'default', 'tmpdir': '/tmp'}]) }}"
+  loop_control:
+    loop_var: zettide_blob_device_target
+    label: "{{ zettide_blob_device_target.name }}"
+
+- name: Require all BlobDevice targets | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_blob_device_failures | length == 0
+    fail_msg: >-
+      {{ zettide_optimize }} BlobDevice benchmark failed for:
+      {{ zettide_blob_device_failures | join(', ') }}.

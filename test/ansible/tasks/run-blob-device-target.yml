@@ -1,0 +1,125 @@
+---
+- name: Check BlobDevice target directory | {{ zettide_blob_device_target.name }}
+  ansible.builtin.stat:
+    path: "{{ zettide_blob_device_target.tmpdir }}"
+  register: zettide_blob_device_target_directory
+
+- name: Require BlobDevice target directory | {{ zettide_blob_device_target.name }}
+  ansible.builtin.assert:
+    that:
+      - zettide_blob_device_target_directory.stat.exists
+      - zettide_blob_device_target_directory.stat.isdir
+      - zettide_blob_device_target_directory.stat.writeable
+    fail_msg: "BlobDevice target {{ zettide_blob_device_target.tmpdir }} must be writable."
+
+- name: Read BlobDevice target free space | {{ zettide_blob_device_target.name }}
+  ansible.builtin.command:
+    argv:
+      - df
+      - --output=avail
+      - -B1
+      - "{{ zettide_blob_device_target.tmpdir }}"
+  changed_when: false
+  register: zettide_blob_device_target_space
+
+- name: Require BlobDevice target free space | {{ zettide_blob_device_target.name }}
+  ansible.builtin.assert:
+    that:
+      - (zettide_blob_device_target_space.stdout_lines[-1] | int) >= (zettide_blob_device_size | int) + 1073741824
+    fail_msg: "BlobDevice target lacks benchmark capacity plus 1 GiB headroom."
+
+- name: Create BlobDevice target workspace | {{ zettide_blob_device_target.name }}
+  ansible.builtin.tempfile:
+    path: "{{ zettide_blob_device_target.tmpdir }}"
+    state: directory
+    prefix: zettide-blob-device.
+  register: zettide_blob_device_workspace
+
+- name: Create BlobDevice result directory | {{ zettide_blob_device_target.name }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_blob_device_target.name }}"
+    state: directory
+    mode: "0755"
+
+- name: Run BlobDevice write benchmark | {{ zettide_blob_device_target.name }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-blob-device.lock
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide-blob-device-benchmark"
+      - --operation
+      - write
+      - --path
+      - "{{ zettide_blob_device_workspace.path }}/device.bin"
+      - --size
+      - "{{ zettide_blob_device_size }}"
+      - --block-size
+      - "{{ zettide_blob_device_block_size }}"
+      - --batch-depth
+      - "{{ zettide_blob_device_batch_depth }}"
+  changed_when: false
+  failed_when: false
+  register: zettide_blob_device_write
+
+- name: Drop caches before BlobDevice read | {{ zettide_blob_device_target.name }}
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - sync && echo 3 > /proc/sys/vm/drop_caches
+  changed_when: true
+  failed_when: false
+  register: zettide_blob_device_drop_caches
+  when: (zettide_blob_device_write.rc | default(1)) == 0
+
+- name: Run BlobDevice read benchmark | {{ zettide_blob_device_target.name }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-blob-device.lock
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide-blob-device-benchmark"
+      - --operation
+      - read
+      - --path
+      - "{{ zettide_blob_device_workspace.path }}/device.bin"
+      - --size
+      - "{{ zettide_blob_device_size }}"
+      - --block-size
+      - "{{ zettide_blob_device_block_size }}"
+      - --batch-depth
+      - "{{ zettide_blob_device_batch_depth }}"
+  changed_when: false
+  failed_when: false
+  register: zettide_blob_device_read
+  when:
+    - (zettide_blob_device_write.rc | default(1)) == 0
+    - (zettide_blob_device_drop_caches.rc | default(1)) == 0
+
+- name: Record BlobDevice benchmark | {{ zettide_blob_device_target.name }}
+  ansible.builtin.copy:
+    content: |-
+      target={{ zettide_blob_device_target.tmpdir }}
+      write_rc={{ zettide_blob_device_write.rc | default(1) }}
+      {{ zettide_blob_device_write.stdout | default('') }}
+      {{ zettide_blob_device_write.stderr | default('') }}
+      drop_caches_rc={{ zettide_blob_device_drop_caches.rc | default(1) }}
+      read_rc={{ zettide_blob_device_read.rc | default(1) }}
+      {{ zettide_blob_device_read.stdout | default('') }}
+      {{ zettide_blob_device_read.stderr | default('') }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_blob_device_target.name }}/blob-device.log"
+    mode: "0644"
+
+- name: Record failed BlobDevice target | {{ zettide_blob_device_target.name }}
+  ansible.builtin.set_fact:
+    zettide_blob_device_failures: "{{ zettide_blob_device_failures + [zettide_blob_device_target.name] }}"
+  when: >-
+    (zettide_blob_device_write.rc | default(1)) != 0 or
+    (zettide_blob_device_drop_caches.rc | default(1)) != 0 or
+    (zettide_blob_device_read.rc | default(1)) != 0
+
+- name: Remove BlobDevice target workspace | {{ zettide_blob_device_target.name }}
+  ansible.builtin.file:
+    path: "{{ zettide_blob_device_workspace.path }}"
+    state: absent
