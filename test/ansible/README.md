@@ -111,6 +111,20 @@ Override `zettide_raw_fio_size`, `zettide_raw_fio_runtime`, or
 `zettide_raw_fio_ramp_time` as needed. Raw fio writes are destructive and remain
 protected by the same image backup and restoration lifecycle.
 
+Set `-e zettide_raw_restore_original=false` to retain the successfully tested
+Zettide Pool on the physical disk instead of restoring the original image. Test
+failures still restore the original disk. A successful retained-Pool run keeps
+the original image in the configured backup directory regardless of
+`zettide_raw_keep_backup`.
+
+Set `-e zettide_raw_fuse_fio=true` to create the physical Pool first and run
+fio through its Zettide FUSE mount. This bypasses the original host filesystem
+while retaining the complete Zettide Pool, LittleFS, and FUSE path. The workload
+uses `io_uring` with direct I/O and covers 1 MiB sequential QD32 plus 4 KiB random
+QD1, QD32, and four jobs at QD32. It uses one 2 GiB file and four 512 MiB files.
+The Pool is cleanly reopened between write and read phases. Override the
+`zettide_raw_fuse_fio_*` variables to change sizes or timings.
+
 ## Throughput
 
 The throughput profile compares a direct-I/O host filesystem baseline with

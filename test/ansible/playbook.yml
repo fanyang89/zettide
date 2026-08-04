@@ -23,10 +23,16 @@
     zettide_raw_timeout: 86400
     zettide_raw_test_mebibytes: 64
     zettide_raw_keep_backup: true
+    zettide_raw_restore_original: true
     zettide_raw_fio: false
     zettide_raw_fio_size: 64G
     zettide_raw_fio_runtime: 20
     zettide_raw_fio_ramp_time: 5
+    zettide_raw_fuse_fio: false
+    zettide_raw_fuse_fio_single_size: 2G
+    zettide_raw_fuse_fio_multi_size: 512M
+    zettide_raw_fuse_fio_runtime: 20
+    zettide_raw_fuse_fio_ramp_time: 5
     zettide_blob_workloads:
       - name: iops-4k
         size: 17179869184

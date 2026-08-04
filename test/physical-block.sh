@@ -14,10 +14,16 @@ backup=$5
 test_mib=$6
 log_dir=${ZETTIDE_TEST_LOG_DIR:?ZETTIDE_TEST_LOG_DIR is required}
 keep_backup=${ZETTIDE_RAW_KEEP_BACKUP:-1}
+restore_original=${ZETTIDE_RAW_RESTORE_ORIGINAL:-1}
 run_fio=${ZETTIDE_RAW_FIO:-0}
 fio_size=${ZETTIDE_RAW_FIO_SIZE:-64G}
 fio_runtime=${ZETTIDE_RAW_FIO_RUNTIME:-20}
 fio_ramp_time=${ZETTIDE_RAW_FIO_RAMP_TIME:-5}
+run_fuse_fio=${ZETTIDE_RAW_FUSE_FIO:-0}
+fuse_fio_single_size=${ZETTIDE_RAW_FUSE_FIO_SINGLE_SIZE:-2G}
+fuse_fio_multi_size=${ZETTIDE_RAW_FUSE_FIO_MULTI_SIZE:-512M}
+fuse_fio_runtime=${ZETTIDE_RAW_FUSE_FIO_RUNTIME:-20}
+fuse_fio_ramp_time=${ZETTIDE_RAW_FUSE_FIO_RAMP_TIME:-5}
 expected_confirm="DESTROY:${device}:${expected_serial}"
 
 [[ ${ZETTIDE_RAW_DEVICE_CONFIRM:-} == "$expected_confirm" ]] || {
@@ -36,12 +42,24 @@ expected_confirm="DESTROY:${device}:${expected_serial}"
     echo "ZETTIDE_RAW_KEEP_BACKUP must be 0 or 1" >&2
     exit 2
 }
+[[ $restore_original == 0 || $restore_original == 1 ]] || {
+    echo "ZETTIDE_RAW_RESTORE_ORIGINAL must be 0 or 1" >&2
+    exit 2
+}
 [[ $run_fio == 0 || $run_fio == 1 ]] || {
     echo "ZETTIDE_RAW_FIO must be 0 or 1" >&2
     exit 2
 }
 [[ $fio_runtime =~ ^[1-9][0-9]*$ && $fio_ramp_time =~ ^[0-9]+$ ]] || {
     echo "fio runtime and ramp time must be integer seconds" >&2
+    exit 2
+}
+[[ $run_fuse_fio == 0 || $run_fuse_fio == 1 ]] || {
+    echo "ZETTIDE_RAW_FUSE_FIO must be 0 or 1" >&2
+    exit 2
+}
+[[ $fuse_fio_runtime =~ ^[1-9][0-9]*$ && $fuse_fio_ramp_time =~ ^[0-9]+$ ]] || {
+    echo "FUSE fio runtime and ramp time must be integer seconds" >&2
     exit 2
 }
 
@@ -51,9 +69,9 @@ for command in blkdiscard blockdev blkid cmp dd findmnt flock fusermount3 grep l
         exit 2
     }
 done
-if [[ $run_fio == 1 ]]; then
+if [[ $run_fio == 1 || $run_fuse_fio == 1 ]]; then
     command -v fio >/dev/null || {
-        echo "fio is required for raw-device performance testing" >&2
+        echo "fio is required for physical-device performance testing" >&2
         exit 2
     }
 fi
@@ -111,6 +129,83 @@ run_fio_case() {
         --output="$log_dir/fio-$name.json"
 }
 
+prepare_fuse_fio_files() {
+    local fio_dir="$test_mountpoint/fio-performance"
+    mkdir -p "$fio_dir"
+    fio \
+        --name=prepare-single \
+        --filename="$fio_dir/single.bin" \
+        --rw=write \
+        --bs=1m \
+        --size="$fuse_fio_single_size" \
+        --ioengine=io_uring \
+        --iodepth=32 \
+        --direct=1 \
+        --fallocate=none \
+        --end_fsync=1 \
+        --group_reporting=1 \
+        --eta=never \
+        --output-format=json \
+        --output="$log_dir/fuse-fio-prepare-single.json"
+    fio \
+        --name=prepare-multi \
+        --filename_format="$fio_dir/multi.\$jobnum.bin" \
+        --numjobs=4 \
+        --rw=write \
+        --bs=1m \
+        --size="$fuse_fio_multi_size" \
+        --ioengine=io_uring \
+        --iodepth=32 \
+        --direct=1 \
+        --fallocate=none \
+        --end_fsync=1 \
+        --group_reporting=1 \
+        --eta=never \
+        --output-format=json \
+        --output="$log_dir/fuse-fio-prepare-multi.json"
+}
+
+run_fuse_fio_case() {
+    local name=$1
+    local rw=$2
+    local block_size=$3
+    local depth=$4
+    local jobs=$5
+    local size=$6
+    local file_pattern=$7
+    local -a fio_args=(
+        fio
+        --name="$name"
+        --rw="$rw"
+        --bs="$block_size"
+        --size="$size"
+        --ioengine=io_uring
+        --iodepth="$depth"
+        --numjobs="$jobs"
+        --direct=1
+        --fallocate=none
+        --allow_file_create=0
+        --invalidate=1
+        --group_reporting=1
+        --time_based=1
+        --runtime="$fuse_fio_runtime"
+        --ramp_time="$fuse_fio_ramp_time"
+        --randrepeat=0
+        --norandommap=1
+        --refill_buffers=1
+        --percentile_list=50:95:99:99.9
+        --eta=never
+        --output-format=json
+        --output="$log_dir/fuse-fio-$name.json"
+    )
+    if [[ $jobs -eq 1 ]]; then
+        fio_args+=(--filename="$file_pattern")
+    else
+        fio_args+=(--filename_format="$file_pattern")
+    fi
+    "${fio_args[@]}"
+}
+
 stop_pool_mount() {
     if mountpoint -q "$test_mountpoint"; then
         timeout --kill-after=2s 10s "$cli" unmount "$test_mountpoint" >/dev/null 2>&1 ||
@@ -134,11 +229,24 @@ stop_pool_mount() {
     ! mountpoint -q "$test_mountpoint"
 }
 
+stop_pool_mount_clean() {
+    mountpoint -q "$test_mountpoint" || return 1
+    timeout --kill-after=2s 30s "$cli" unmount "$test_mountpoint" >/dev/null
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        kill -0 "$mount_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -0 "$mount_pid" 2>/dev/null && return 1
+    wait "$mount_pid"
+    mount_pid=""
+    ! mountpoint -q "$test_mountpoint"
+}
+
 start_pool_mount() {
     local log=$1
     shift
     : >"$log"
-    setsid timeout --kill-after=5s 600s "$cli" pool mount "$test_mountpoint" \
+    setsid "$cli" pool mount "$test_mountpoint" \
         --device "$device" --allow-other "$@" >"$log" 2>&1 &
     mount_pid=$!
     for ((attempt = 0; attempt < 100; attempt++)); do
@@ -160,6 +268,7 @@ finish() {
     local result=$?
     local cleanup_result=0
     local pool_stopped=true
+    local pool_preserved=false
     local restored_source=""
     trap - EXIT INT TERM
     set +e
@@ -168,7 +277,10 @@ finish() {
         cleanup_result=1
         pool_stopped=false
     fi
-    if [[ $device_modified == true && $backup_ready == true && $pool_stopped == true ]]; then
+    if [[ $restore_original == 0 && $test_succeeded == true && $result -eq 0 && $pool_stopped == true ]]; then
+        pool_preserved=true
+    fi
+    if [[ $pool_preserved == false && $device_modified == true && $backup_ready == true && $pool_stopped == true ]]; then
         if check_identity &&
             dd if="$backup" of="$device" bs=1M iflag=fullblock conv=fsync status=none &&
             blockdev --rereadpt "$device" &&
@@ -179,7 +291,7 @@ finish() {
             cleanup_result=1
         fi
     fi
-    if [[ $original_unmounted == true ]]; then
+    if [[ $pool_preserved == false && $original_unmounted == true ]]; then
         if [[ $device_modified == false || $restore_verified == true ]]; then
             if mount "$original_mountpoint" && mountpoint -q "$original_mountpoint"; then
                 restored_source=$(findmnt --noheadings --output SOURCE --target "$original_mountpoint")
@@ -204,7 +316,10 @@ finish() {
         echo "serial=$expected_serial"
         echo "backup=$backup"
         echo "backup_ready=$backup_ready"
+        echo "restore_original=$restore_original"
+        echo "pool_preserved=$pool_preserved"
         echo "fio_enabled=$run_fio"
+        echo "fuse_fio_enabled=$run_fuse_fio"
         echo "test_succeeded=$test_succeeded"
         echo "restore_verified=$restore_verified"
         echo "mount_verified=$mount_verified"
@@ -337,6 +452,23 @@ grep -q '^Data policy: read_write$' "$log_dir/inspect.log"
 grep -q '^Mountable: yes$' "$log_dir/inspect.log"
 
 start_pool_mount "$log_dir/writable-mount.log"
+if [[ $run_fuse_fio == 1 ]]; then
+    fuse_fio_dir="$test_mountpoint/fio-performance"
+    prepare_fuse_fio_files
+    run_fuse_fio_case seq-write-1m-qd32-j1 write 1m 32 1 "$fuse_fio_single_size" "$fuse_fio_dir/single.bin"
+    run_fuse_fio_case randwrite-4k-qd1-j1 randwrite 4k 1 1 "$fuse_fio_single_size" "$fuse_fio_dir/single.bin"
+    run_fuse_fio_case randwrite-4k-qd32-j1 randwrite 4k 32 1 "$fuse_fio_single_size" "$fuse_fio_dir/single.bin"
+    run_fuse_fio_case randwrite-4k-qd32-j4 randwrite 4k 32 4 "$fuse_fio_multi_size" "$fuse_fio_dir/multi.\$jobnum.bin"
+    stop_pool_mount_clean
+    "$cli" pool inspect --device "$device" >"$log_dir/fuse-fio-reopen-inspect.log"
+    grep -q '^Mountable: yes$' "$log_dir/fuse-fio-reopen-inspect.log"
+    start_pool_mount "$log_dir/fuse-fio-read-mount.log"
+    fuse_fio_dir="$test_mountpoint/fio-performance"
+    run_fuse_fio_case seq-read-1m-qd32-j1 read 1m 32 1 "$fuse_fio_single_size" "$fuse_fio_dir/single.bin"
+    run_fuse_fio_case randread-4k-qd1-j1 randread 4k 1 1 "$fuse_fio_single_size" "$fuse_fio_dir/single.bin"
+    run_fuse_fio_case randread-4k-qd32-j1 randread 4k 32 1 "$fuse_fio_single_size" "$fuse_fio_dir/single.bin"
+    run_fuse_fio_case randread-4k-qd32-j4 randread 4k 32 4 "$fuse_fio_multi_size" "$fuse_fio_dir/multi.\$jobnum.bin"
+fi
 dd if=/dev/urandom of="$test_mountpoint/persistence.bin" bs=1M count="$test_mib" conv=fsync status=none
 payload_hash=$(sha256sum "$test_mountpoint/persistence.bin")
 payload_hash=${payload_hash%% *}
@@ -346,7 +478,7 @@ if "$cli" pool create --device "$device" --profile unprotected --label busy-test
     exit 1
 fi
 grep -q 'DeviceBusy' "$log_dir/busy-create.log"
-stop_pool_mount
+stop_pool_mount_clean
 
 "$cli" pool inspect --device "$device" >"$log_dir/reopen-inspect.log"
 grep -q '^Mountable: yes$' "$log_dir/reopen-inspect.log"
@@ -361,8 +493,12 @@ if touch "$test_mountpoint/read-only-write" 2>"$log_dir/read-only-write.log"; th
     echo "read-only physical raw pool accepted a write" >&2
     exit 1
 fi
-stop_pool_mount
+stop_pool_mount_clean
 
 echo "$payload_hash" >"$log_dir/payload.sha256"
 test_succeeded=true
-echo "physical raw-device test passed; restoring $device"
+if [[ $restore_original == 1 ]]; then
+    echo "physical raw-device test passed; restoring $device"
+else
+    echo "physical raw-device test passed; preserving Zettide Pool on $device"
+fi
