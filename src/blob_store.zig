@@ -80,15 +80,32 @@ pub const Store = struct {
         if (inputs.len > self.header.slot_count - self.staged_slots) return error.BlobStoreFull;
         for (inputs) |input| if (input.len > format.blob_size) return error.BlobTooLarge;
 
-        const bytes = try self.allocator.alignedAlloc(
-            u8,
-            .fromByteUnits(4096),
-            inputs.len * format.blob_size,
-        );
+        var writes: [blob_device.max_batch]blob_device.Write = undefined;
+        const alignment = self.device.alignment();
+        const direct = for (inputs) |input| {
+            if (input.len != format.blob_size or @intFromPtr(input.ptr) % alignment != 0) break false;
+        } else true;
+        if (direct) {
+            for (inputs, references, writes[0..inputs.len], 0..) |input, *reference, *write, index| {
+                const slot = self.staged_slots + index;
+                reference.* = .{
+                    .slot = slot,
+                    .valid_bytes = format.blob_size,
+                    .checksums = format.payloadChecksums(input),
+                };
+                write.* = .{ .bytes = input, .offset = try format.slotOffset(slot) };
+            }
+            self.device.writeAllManyAt(io, writes[0..inputs.len]) catch |err| {
+                self.frozen = true;
+                return err;
+            };
+            self.staged_slots += inputs.len;
+            return;
+        }
+
+        const bytes = try self.allocator.alignedAlloc(u8, .fromByteUnits(4096), inputs.len * format.blob_size);
         defer self.allocator.free(bytes);
-        const writes = try self.allocator.alloc(blob_device.Write, inputs.len);
-        defer self.allocator.free(writes);
-        for (inputs, references, writes, 0..) |input, *reference, *write, index| {
+        for (inputs, references, writes[0..inputs.len], 0..) |input, *reference, *write, index| {
             const slot = self.staged_slots + index;
             const payload = bytes[index * format.blob_size ..][0..format.blob_size];
             @memcpy(payload[0..input.len], input);
@@ -100,11 +117,40 @@ pub const Store = struct {
             };
             write.* = .{ .bytes = payload, .offset = try format.slotOffset(slot) };
         }
-        self.device.writeAllManyAt(io, writes) catch |err| {
+        self.device.writeAllManyAt(io, writes[0..inputs.len]) catch |err| {
             self.frozen = true;
             return err;
         };
         self.staged_slots += inputs.len;
+    }
+
+    /// Reserves one slot but writes only an aligned digest-protected prefix.
+    pub fn putDigestOnly(self: *Store, io: Io, data: []const u8) !u64 {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        try self.requireWritable();
+        if (self.staged_slots == self.header.slot_count) return error.BlobStoreFull;
+        const alignment = self.device.alignment();
+        if (data.len == 0 or data.len > format.blob_size or data.len % alignment != 0)
+            return error.InvalidDigestOnlyBlob;
+
+        var allocated: ?[]align(4096) u8 = null;
+        defer if (allocated) |bytes| self.allocator.free(bytes);
+        const bytes = if (@intFromPtr(data.ptr) % alignment == 0)
+            data
+        else copied: {
+            const buffer = try self.allocator.alignedAlloc(u8, .fromByteUnits(4096), data.len);
+            @memcpy(buffer, data);
+            allocated = buffer;
+            break :copied buffer;
+        };
+        const slot = self.staged_slots;
+        self.device.writeAllAt(io, bytes, try format.slotOffset(slot)) catch |err| {
+            self.frozen = true;
+            return err;
+        };
+        self.staged_slots += 1;
+        return slot;
     }
 
     /// Reads and verifies one complete slot. Returns the logical payload length.
@@ -129,7 +175,7 @@ pub const Store = struct {
         expected_digest: *const [32]u8,
         output: []u8,
     ) !void {
-        if (output.len != format.blob_size or valid_bytes > output.len)
+        if (output.len != valid_bytes or valid_bytes == 0)
             return error.InvalidBlobBuffer;
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
@@ -137,7 +183,7 @@ pub const Store = struct {
         if (slot >= self.staged_slots) return error.UnpublishedBlobReference;
         try self.device.readAt(io, output, try format.slotOffset(slot));
         var digest: [32]u8 = undefined;
-        std.crypto.hash.Blake3.hash(output[0..valid_bytes], &digest, .{});
+        std.crypto.hash.Blake3.hash(output, &digest, .{});
         if (!std.mem.eql(u8, &digest, expected_digest)) return error.BlobDigestMismatch;
     }
 

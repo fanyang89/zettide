@@ -62,6 +62,10 @@ pub const Device = struct {
         return self.capacity_bytes;
     }
 
+    pub fn alignment(self: *const Device) u32 {
+        return self.io_alignment;
+    }
+
     pub fn readAt(self: *Device, io: Io, buffer: []u8, offset: u64) !void {
         try self.validateIo(buffer.ptr, buffer.len, offset);
         const amount = try self.storage.readAt(io, buffer, self.region_offset + offset);
