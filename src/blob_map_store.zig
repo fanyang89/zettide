@@ -76,7 +76,7 @@ pub const MapStore = struct {
         logical_blob: u64,
         scratch: []u8,
     ) !?blob_format.BlobRef {
-        if (scratch.len != blob_format.blob_size) return error.InvalidBlobBuffer;
+        if (scratch.len != blob_map.page_size) return error.InvalidBlobBuffer;
         if (logical_blob < root.first_key or logical_blob > root.last_key) return null;
         var current = root;
         while (true) {
@@ -174,9 +174,9 @@ pub const MapStore = struct {
         last_key: u64,
         page: *const [blob_map.page_size]u8,
     ) !blob_map.PageRef {
-        const reference = try self.blobs.put(io, page);
+        const slot = try self.blobs.putDigestOnly(io, page);
         return .{
-            .page = reference.slot,
+            .page = slot,
             .level = level,
             .first_key = first_key,
             .last_key = last_key,
@@ -374,7 +374,7 @@ test "blob map store builds and queries multiple levels" {
     try std.testing.expectEqual(@as(u8, 1), root.level);
     try blobs.commit(std.testing.io);
 
-    const scratch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_format.blob_size);
+    const scratch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
     defer std.testing.allocator.free(scratch);
     const found = (try maps.lookup(std.testing.io, root, 84, scratch)).?;
     try std.testing.expectEqual(@as(u64, 1042), found.slot);
@@ -415,7 +415,7 @@ test "blob map store detects root digest mismatch" {
     }};
     var root = try maps.build(std.testing.io, 1, &entries);
     root.digest[0] ^= 1;
-    const scratch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_format.blob_size);
+    const scratch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
     defer std.testing.allocator.free(scratch);
     try std.testing.expectError(error.BlobDigestMismatch, maps.lookup(std.testing.io, root, 0, scratch));
 }

@@ -12,7 +12,7 @@ pub const Object = struct {
     blobs: blob_store.Store,
     authority: blob_object_format.Head,
     staged: blob_object_format.Head,
-    entries: []blob_map.LeafEntry,
+    entries: std.ArrayList(blob_map.LeafEntry),
     frozen: bool = false,
 
     /// Takes ownership of blobs, including on failure.
@@ -30,7 +30,7 @@ pub const Object = struct {
             .blobs = owned_blobs,
             .authority = head,
             .staged = head,
-            .entries = try allocator.alloc(blob_map.LeafEntry, 0),
+            .entries = .empty,
         };
     }
 
@@ -64,7 +64,7 @@ pub const Object = struct {
     }
 
     pub fn close(self: *Object, io: Io) !void {
-        self.allocator.free(self.entries);
+        self.entries.deinit(self.allocator);
         try self.blobs.close(io);
         self.* = undefined;
     }
@@ -82,16 +82,17 @@ pub const Object = struct {
         if (self.staged.logical_size % blob_format.blob_size != 0)
             return error.UnsupportedPartialBlobAppend;
 
-        const old_count = self.entries.len;
-        const next_entries = try self.allocator.alloc(blob_map.LeafEntry, old_count + inputs.len);
-        errdefer self.allocator.free(next_entries);
-        @memcpy(next_entries[0..old_count], self.entries);
+        const old_count = self.entries.items.len;
+        try self.entries.ensureUnusedCapacity(self.allocator, inputs.len);
+        const scratch = try self.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
+        defer self.allocator.free(scratch);
         var references: [32]blob_format.BlobRef = undefined;
         self.blobs.putMany(io, inputs, references[0..inputs.len]) catch |err| {
             self.frozen = true;
             return err;
         };
-        for (references[0..inputs.len], next_entries[old_count..], old_count..) |reference, *entry, index|
+        var appended_entries: [32]blob_map.LeafEntry = undefined;
+        for (references[0..inputs.len], appended_entries[0..inputs.len], old_count..) |reference, *entry, index|
             entry.* = .{ .logical_blob = index, .reference = reference };
 
         const generation = std.math.add(u64, self.staged.generation, 1) catch {
@@ -99,9 +100,7 @@ pub const Object = struct {
             return error.BlobObjectGenerationExhausted;
         };
         var maps = blob_map_store.MapStore.init(self.allocator, &self.blobs);
-        const scratch = try self.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_format.blob_size);
-        defer self.allocator.free(scratch);
-        const appended = next_entries[old_count..];
+        const appended = appended_entries[0..inputs.len];
         const root = if (self.staged.root) |current|
             maps.append(io, current, generation, appended, scratch) catch |err| {
                 self.frozen = true;
@@ -113,8 +112,7 @@ pub const Object = struct {
                 return err;
             };
 
-        self.allocator.free(self.entries);
-        self.entries = next_entries;
+        self.entries.appendSliceAssumeCapacity(appended);
         self.staged.generation = generation;
         self.staged.map_generation = generation;
         self.staged.logical_size += inputs.len * blob_format.blob_size;
@@ -124,8 +122,8 @@ pub const Object = struct {
 
     pub fn readBlob(self: *Object, io: Io, logical_blob: u64, output: []u8) !usize {
         if (self.frozen) return error.BlobObjectFrozen;
-        if (logical_blob >= self.entries.len) return error.BlobOutsideObject;
-        const entry = self.entries[logical_blob];
+        if (logical_blob >= self.entries.items.len) return error.BlobOutsideObject;
+        const entry = self.entries.items[logical_blob];
         if (entry.logical_blob != logical_blob) return error.InvalidBlobObjectMap;
         return self.blobs.read(io, entry.reference, output);
     }
@@ -198,7 +196,7 @@ fn selectHead(first: ?blob_object_format.Head, second: ?blob_object_format.Head)
 
 const OpenedHead = struct {
     head: blob_object_format.Head,
-    entries: []blob_map.LeafEntry,
+    entries: std.ArrayList(blob_map.LeafEntry),
 };
 
 fn loadHead(
@@ -207,19 +205,17 @@ fn loadHead(
     blobs: *blob_store.Store,
     head: blob_object_format.Head,
 ) !OpenedHead {
-    var entries = try allocator.alloc(blob_map.LeafEntry, 0);
-    errdefer allocator.free(entries);
+    var entries: std.ArrayList(blob_map.LeafEntry) = .empty;
+    errdefer entries.deinit(allocator);
     if (head.root) |root| {
         if (root.page >= blobs.committedSlots()) return error.UncommittedBlobMapRoot;
-        const scratch = try allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_format.blob_size);
+        const scratch = try allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
         defer allocator.free(scratch);
         var maps = blob_map_store.MapStore.init(allocator, blobs);
-        const loaded = try maps.loadAllAlloc(io, root, head.map_generation, scratch);
-        allocator.free(entries);
-        entries = loaded;
+        entries = .fromOwnedSlice(try maps.loadAllAlloc(io, root, head.map_generation, scratch));
         const expected = try std.math.divCeil(u64, head.logical_size, blob_format.blob_size);
-        if (entries.len != expected) return error.InvalidBlobObjectMap;
-        for (entries, 0..) |entry, index| {
+        if (entries.items.len != expected) return error.InvalidBlobObjectMap;
+        for (entries.items, 0..) |entry, index| {
             if (entry.logical_blob != index or entry.reference.slot >= blobs.committedSlots())
                 return error.InvalidBlobObjectMap;
             try entry.reference.validate(blobs.header.slot_count);
