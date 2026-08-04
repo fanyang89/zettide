@@ -10,7 +10,7 @@
     argv:
       - "{{ zettide_zig }}"
       - build
-      - build-bench-blob-device
+      - build-bench-{{ zettide_blob_benchmark_name }}
       - -Doptimize={{ zettide_optimize }}
   args:
     chdir: "{{ zettide_remote_workspace.path }}"

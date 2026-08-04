@@ -96,7 +96,7 @@ pub const Store = struct {
             reference.* = .{
                 .slot = slot,
                 .valid_bytes = @intCast(input.len),
-                .checksums = checksums(payload),
+                .checksums = format.payloadChecksums(payload),
             };
             write.* = .{ .bytes = payload, .offset = try format.slotOffset(slot) };
         }
@@ -116,7 +116,8 @@ pub const Store = struct {
         try reference.validate(self.header.slot_count);
         if (reference.slot >= self.staged_slots) return error.UnpublishedBlobReference;
         try self.device.readAt(io, output, try format.slotOffset(reference.slot));
-        if (!std.mem.eql(u32, &reference.checksums, &checksums(output))) return error.BlobChecksumMismatch;
+        if (!std.mem.eql(u32, &reference.checksums, &format.payloadChecksums(output)))
+            return error.BlobChecksumMismatch;
         return reference.valid_bytes;
     }
 
@@ -152,16 +153,6 @@ pub const Store = struct {
         if (self.frozen) return error.BlobStoreFrozen;
     }
 };
-
-fn checksums(bytes: []const u8) [format.checksum_count]u32 {
-    std.debug.assert(bytes.len == format.blob_size);
-    var result: [format.checksum_count]u32 = undefined;
-    for (&result, 0..) |*checksum, index| {
-        const start = index * format.checksum_unit;
-        checksum.* = google_crc32c.value(bytes[start..][0..format.checksum_unit]);
-    }
-    return result;
-}
 
 fn writeHeader(
     allocator: std.mem.Allocator,

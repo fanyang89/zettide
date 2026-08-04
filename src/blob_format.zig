@@ -99,6 +99,16 @@ pub fn slotOffset(slot: u64) !u64 {
     return std.math.add(u64, arena_offset, try std.math.mul(u64, slot, blob_size));
 }
 
+pub fn payloadChecksums(bytes: []const u8) [checksum_count]u32 {
+    std.debug.assert(bytes.len == blob_size);
+    var result: [checksum_count]u32 = undefined;
+    for (&result, 0..) |*checksum, index| {
+        const start = index * checksum_unit;
+        checksum.* = google_crc32c.value(bytes[start..][0..checksum_unit]);
+    }
+    return result;
+}
+
 test "blob store header round trips and rejects corruption" {
     const header = try Header.init(std.testing.io, 8 * 1024 * 1024);
     const encoded = encodeHeader(header);

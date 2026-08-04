@@ -150,6 +150,29 @@ pub fn build(b: *std.Build) void {
     const run_blob_device_benchmark_tests = b.addRunArtifact(blob_device_benchmark_tests);
     unit_step.dependOn(&run_blob_device_benchmark_tests.step);
 
+    const blob_store_benchmark_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/blob_store.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = portable_core }},
+    });
+    const blob_store_benchmark = b.addExecutable(.{
+        .name = "zettide-blob-store-benchmark",
+        .root_module = blob_store_benchmark_module,
+    });
+    const run_blob_store_benchmark = b.addRunArtifact(blob_store_benchmark);
+    if (b.args) |args| run_blob_store_benchmark.addArgs(args);
+    const blob_store_benchmark_step = b.step("bench-blob-store", "Benchmark immutable BlobStore IO");
+    blob_store_benchmark_step.dependOn(&run_blob_store_benchmark.step);
+    const install_blob_store_benchmark = b.addInstallArtifact(blob_store_benchmark, .{});
+    const build_blob_store_benchmark_step = b.step("build-bench-blob-store", "Build the BlobStore benchmark");
+    build_blob_store_benchmark_step.dependOn(&install_blob_store_benchmark.step);
+
+    const blob_store_benchmark_tests = b.addTest(.{ .root_module = blob_store_benchmark_module });
+    const run_blob_store_benchmark_tests = b.addRunArtifact(blob_store_benchmark_tests);
+    unit_step.dependOn(&run_blob_store_benchmark_tests.step);
+
     const image_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/image.zig"),

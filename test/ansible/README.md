@@ -91,3 +91,6 @@ object metadata, or FUSE. Configure `zettide_blob_device_targets` and run:
 ```sh
 uv run ansible-playbook test/ansible/blob-device.yml --limit zettide-tier1
 ```
+
+Use `blob-store.yml` with the same targets to include immutable blob framing,
+CRC32C, allocation, commit, reopen, and verification.

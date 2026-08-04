@@ -47,7 +47,7 @@
       - flock
       - --nonblock
       - /var/lock/zettide-blob-device.lock
-      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide-blob-device-benchmark"
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide-{{ zettide_blob_benchmark_name }}-benchmark"
       - --operation
       - write
       - --path
@@ -79,7 +79,7 @@
       - flock
       - --nonblock
       - /var/lock/zettide-blob-device.lock
-      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide-blob-device-benchmark"
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide-{{ zettide_blob_benchmark_name }}-benchmark"
       - --operation
       - read
       - --path
@@ -108,7 +108,7 @@
       read_rc={{ zettide_blob_device_read.rc | default(1) }}
       {{ zettide_blob_device_read.stdout | default('') }}
       {{ zettide_blob_device_read.stderr | default('') }}
-    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_blob_device_target.name }}/blob-device.log"
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_blob_device_target.name }}/{{ zettide_blob_benchmark_name }}.log"
     mode: "0644"
 
 - name: Record failed BlobDevice target | {{ zettide_blob_device_target.name }}
