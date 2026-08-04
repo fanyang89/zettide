@@ -121,6 +121,26 @@ pub const Store = struct {
         return reference.valid_bytes;
     }
 
+    pub fn readDigestVerified(
+        self: *Store,
+        io: Io,
+        slot: u64,
+        valid_bytes: usize,
+        expected_digest: *const [32]u8,
+        output: []u8,
+    ) !void {
+        if (output.len != format.blob_size or valid_bytes > output.len)
+            return error.InvalidBlobBuffer;
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        if (self.frozen) return error.BlobStoreFrozen;
+        if (slot >= self.staged_slots) return error.UnpublishedBlobReference;
+        try self.device.readAt(io, output, try format.slotOffset(slot));
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.Blake3.hash(output[0..valid_bytes], &digest, .{});
+        if (!std.mem.eql(u8, &digest, expected_digest)) return error.BlobDigestMismatch;
+    }
+
     pub fn commit(self: *Store, io: Io) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
