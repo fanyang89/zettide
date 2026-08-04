@@ -1,0 +1,7 @@
+---
+- name: Run the destructive ReleaseSafe raw-device profile
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: raw-device
+    zettide_optimize_modes_override:
+      - ReleaseSafe

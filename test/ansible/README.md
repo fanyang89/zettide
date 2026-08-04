@@ -66,6 +66,43 @@ uv run ansible-playbook test/ansible/io-verify.yml --limit zettide-tier1
 Each run uses a host-wide lock and stores a timestamped result archive under
 `test-results/ansible/`.
 
+## Physical raw device
+
+The raw-device profile temporarily destroys an entire physical disk. It checks
+the configured whole-disk serial number and requires a command-line confirmation
+that includes both the path and serial. The disk must have exactly one mounted
+descendant, that mount must have an `/etc/fstab` entry, and the backup directory
+must be on another filesystem with more free space than the disk capacity.
+
+Configure the device in the ignored inventory:
+
+```ini
+[zettide_test:vars]
+zettide_raw_device={"path":"/dev/nvme1n1","serial":"PHYSICAL-DISK-SERIAL","mountpoint":"/mnt/raw-test","backup_dir":"/mnt/backup"}
+```
+
+Run with the exact destructive confirmation:
+
+```sh
+uv run ansible-playbook test/ansible/raw-device.yml --limit zettide-tier1 \
+  -e 'zettide_raw_device_confirm=DESTROY:/dev/nvme1n1:PHYSICAL-DISK-SERIAL'
+```
+
+The remote test unmounts the original filesystem, creates and byte-compares a
+sparse full-device image, zeroes the disk, and exercises an unprotected Zettide
+pool. It verifies writable persistence, exclusive-open protection, reopen, and
+read-only enforcement. An exit trap restores and byte-compares the original
+device image before remounting the original filesystem, including after test
+failures or an SSH disconnect.
+
+Backups are retained by default. Set `-e zettide_raw_keep_backup=false` to
+delete the image only after both the test and restoration succeed. A host power
+loss or `SIGKILL` can prevent automatic restoration; use the retained image for
+manual recovery. The default async limit is 24 hours; increase
+`zettide_raw_timeout` when the backup, test, and restoration passes may exceed
+that time. This profile does not run fio and is not part of the default Tier 1
+gate.
+
 ## Throughput
 
 The throughput profile compares a direct-I/O host filesystem baseline with

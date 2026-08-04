@@ -20,6 +20,9 @@
     zettide_blob_device_block_size: 1048576
     zettide_blob_device_batch_depth: 32
     zettide_blob_device_file_io: posix
+    zettide_raw_timeout: 86400
+    zettide_raw_test_mebibytes: 64
+    zettide_raw_keep_backup: true
     zettide_blob_workloads:
       - name: iops-4k
         size: 17179869184
@@ -57,6 +60,7 @@
       blob-workload: tasks/run-blob-device.yml
       blob-store: tasks/run-blob-device.yml
       blob-object: tasks/run-blob-device.yml
+      raw-device: tasks/run-raw-device.yml
     zettide_packages:
       RedHat:
         - acl
@@ -230,7 +234,7 @@
       ansible.builtin.assert:
         that:
           - zettide_test_profile in zettide_profile_tasks
-        fail_msg: "Supported test profiles are tier1, io-verify, throughput, blob-device, blob-workload, blob-store, and blob-object."
+        fail_msg: "Supported test profiles are tier1, io-verify, throughput, blob-device, blob-workload, blob-store, blob-object, and raw-device."
 
   tasks:
     - name: Create the remote workspace
@@ -327,7 +331,8 @@
               io_targets: "{{ zettide_io_targets | default([]) }}"
               throughput_targets: "{{ zettide_throughput_targets | default([]) }}"
               blob_device_targets: "{{ zettide_blob_device_targets | default([]) }}"
-              started_utc: "{{ ansible_date_time.iso8601 }}"
+              raw_device: "{{ zettide_raw_device | default({}) }}"
+              started_utc: "{{ ansible_facts['date_time']['iso8601'] }}"
 
         - name: Prepare pinned external suites
           ansible.builtin.command:
@@ -384,7 +389,7 @@
         - name: Fetch remote test results
           ansible.builtin.fetch:
             src: "{{ zettide_remote_workspace.path }}/results.tar.gz"
-            dest: "{{ zettide_results_root }}/{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}-{{ zettide_source_revision.stdout[:12] }}.tar.gz"
+            dest: "{{ zettide_results_root }}/{{ inventory_hostname }}-{{ ansible_facts['date_time']['iso8601_basic_short'] }}-{{ zettide_source_revision.stdout[:12] }}.tar.gz"
             flat: true
           when: zettide_archive_results.rc == 0
 
