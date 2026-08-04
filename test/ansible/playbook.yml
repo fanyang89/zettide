@@ -19,23 +19,33 @@
     zettide_blob_device_size: 17179869184
     zettide_blob_device_block_size: 1048576
     zettide_blob_device_batch_depth: 32
+    zettide_blob_device_file_io: posix
     zettide_blob_workloads:
       - name: iops-4k
         size: 17179869184
         block_size: 4096
         batch_depth: 1
+        file_io: posix
       - name: iops-4k-batch32
         size: 17179869184
         block_size: 4096
         batch_depth: 32
+        file_io: posix
+      - name: iops-4k-uring32
+        size: 17179869184
+        block_size: 4096
+        batch_depth: 32
+        file_io: io_uring
       - name: bw-256k
         size: 17179869184
         block_size: 262144
         batch_depth: 1
+        file_io: posix
       - name: bw-1m
         size: 17179869184
         block_size: 1048576
         batch_depth: 1
+        file_io: posix
     zettide_blob_benchmark_name: >-
       {{ 'blob-object' if zettide_test_profile == 'blob-object'
          else ('blob-store' if zettide_test_profile == 'blob-store' else 'blob-device') }}

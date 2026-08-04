@@ -6,6 +6,7 @@ const Io = std.Io;
 const Device = zettide.blob_device.Device;
 const Store = zettide.blob_store.Store;
 const format = zettide.blob_format;
+const FileIoMode = zettide.v3.file_storage.Mode;
 
 const Operation = enum {
     read,
@@ -24,6 +25,7 @@ const Config = struct {
     size: u64 = 8 * 1024 * 1024 * 1024,
     block_size: usize = format.blob_size,
     batch_depth: usize = zettide.blob_device.max_batch,
+    file_io: FileIoMode = .posix,
     help: bool = false,
 };
 
@@ -54,7 +56,14 @@ pub fn main(init: std.process.Init) !void {
     defer if (file_open) file.close(init.io);
     if (config.operation == .write) try file.setLength(init.io, device_size);
     if (try file.length(init.io) != device_size) return error.InvalidBenchmarkFileSize;
-    const storage = zettide.v3.storage.Storage.initOwned(file, device_size, .regular_file, 1, false);
+    const storage = try zettide.v3.file_storage.initOwned(
+        init.gpa,
+        file,
+        device_size,
+        config.operation == .write,
+        false,
+        config.file_io,
+    );
     const device = try Device.init(storage, 0, device_size, 4096);
     file_open = false;
     var store = switch (config.operation) {
@@ -74,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try stdout.print(
-        "benchmark=zettide_blob_store optimize={s} operation={s} path={s} size={} blob_size={} batch_depth={}\n",
+        "benchmark=zettide_blob_store optimize={s} operation={s} path={s} size={} blob_size={} batch_depth={} requested_file_io={s} selected_file_io={s}\n",
         .{
             @tagName(builtin.mode),
             @tagName(config.operation),
@@ -82,10 +91,13 @@ pub fn main(init: std.process.Init) !void {
             config.size,
             format.blob_size,
             config.batch_depth,
+            @tagName(config.file_io),
+            @tagName(store.transportKind()),
         },
     );
     try stdout.flush();
 
+    store.resetTransportStats(init.io);
     const io_start = Io.Clock.awake.now(init.io).nanoseconds;
     const validation_elapsed: u64 = switch (config.operation) {
         .write => validation: {
@@ -96,6 +108,8 @@ pub fn main(init: std.process.Init) !void {
     };
     const operation_elapsed: u64 = @intCast(Io.Clock.awake.now(init.io).nanoseconds - io_start);
     const io_elapsed = operation_elapsed - validation_elapsed;
+    const transport = store.transportStats(init.io);
+    try validateTransport(config, store.transportKind(), transport, config.size / format.blob_size);
     var sync_elapsed: u64 = 0;
     if (config.operation == .write) {
         const sync_start = Io.Clock.awake.now(init.io).nanoseconds;
@@ -104,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const durable_elapsed = if (config.operation == .write) operation_elapsed + sync_elapsed else io_elapsed;
     try stdout.print(
-        "blob_store_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} validation_elapsed_ns={} sync_elapsed_ns={} durable_bytes_per_second={} total_bytes_per_second={}\n",
+        "blob_store_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} validation_elapsed_ns={} sync_elapsed_ns={} durable_bytes_per_second={} total_bytes_per_second={} transport={s} operation_transport_queue_capacity={} operation_transport_submitted_sqes={} operation_transport_submit_calls={} operation_transport_completions={} operation_transport_current_inflight={} operation_transport_max_inflight={}\n",
         .{
             @tagName(config.operation),
             config.size,
@@ -114,6 +128,13 @@ pub fn main(init: std.process.Init) !void {
             sync_elapsed,
             rate(config.size, durable_elapsed),
             rate(config.size, operation_elapsed + sync_elapsed),
+            @tagName(store.transportKind()),
+            transport.queue_capacity,
+            transport.submitted_sqes,
+            transport.submit_calls,
+            transport.completions,
+            transport.current_inflight,
+            transport.max_inflight,
         },
     );
 }
@@ -166,6 +187,20 @@ fn rate(bytes: u64, elapsed_ns: u64) u64 {
     return @intCast((@as(u128, bytes) * std.time.ns_per_s) / elapsed_ns);
 }
 
+fn validateTransport(
+    config: Config,
+    kind: zettide.v3.storage.TransportKind,
+    stats: zettide.v3.storage.TransportStats,
+    operation_count: u64,
+) !void {
+    if (config.file_io == .io_uring and kind != .io_uring) return error.IoUringBackendNotSelected;
+    if (kind == .io_uring and (stats.queue_capacity != 32 or
+        stats.submitted_sqes < operation_count or
+        stats.submitted_sqes != stats.completions or
+        stats.current_inflight != 0))
+        return error.InvalidIoUringBenchmarkStats;
+}
+
 fn parseArgs(args: []const []const u8) !Config {
     var result: Config = .{};
     var index: usize = 1;
@@ -194,6 +229,10 @@ fn parseArgs(args: []const []const u8) !Config {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
             result.batch_depth = try std.fmt.parseInt(usize, args[index], 10);
+        } else if (std.mem.eql(u8, arg, "--file-io")) {
+            index += 1;
+            if (index == args.len) return error.MissingArgumentValue;
+            result.file_io = try .parse(args[index]);
         } else return error.UnknownArgument;
     }
     if (result.help) return result;
@@ -216,6 +255,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  --size N               payload bytes (default: 8GiB)
         \\  --block-size 1MiB      immutable blob size
         \\  --batch-depth N        blobs per batch (default: 32)
+        \\  --file-io NAME         auto, posix, or io_uring (default: posix)
         \\  --help                 show this help
         \\
     );
@@ -232,10 +272,13 @@ test "parse blob store benchmark options" {
         "64MiB",
         "--batch-depth",
         "16",
+        "--file-io",
+        "io_uring",
     });
     try std.testing.expectEqual(Operation.read, config.operation);
     try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024), config.size);
     try std.testing.expectEqual(@as(usize, 16), config.batch_depth);
+    try std.testing.expectEqual(FileIoMode.io_uring, config.file_io);
 }
 
 test "reject invalid blob store benchmark options" {

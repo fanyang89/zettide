@@ -93,8 +93,8 @@ uv run ansible-playbook test/ansible/blob-device.yml --limit zettide-tier1
 ```
 
 The workload profile measures 4 KiB single-operation latency, 4 KiB batch-32
-vectored IOPS, and
-256 KiB/1 MiB QD1 bandwidth:
+POSIX vectored IOPS, 4 KiB io_uring with 32 ring-inflight SQEs, and 256 KiB/1
+MiB single-operation bandwidth:
 
 ```sh
 uv run ansible-playbook test/ansible/blob-workload.yml --limit zettide-tier1
@@ -103,9 +103,12 @@ uv run ansible-playbook test/ansible/blob-workload.yml --limit zettide-tier1
 Each result reports actual operations per second, bytes per second, average
 latency, and p95 latency. Latency samples cover one submitted batch; the
 Batch-depth-one cases sample one operation. The batch-32 case samples one
-32-operation vectored request; it is not an asynchronous queue depth.
+32-operation request. POSIX uses one vectored syscall; io_uring submits up to
+32 independent SQEs. Ring inflight does not imply the storage device executes
+the same physical queue depth.
 Write latency and IOPS measure accepted writes; durable throughput and IOPS
-include the final data sync.
+include the final data sync. `operation_transport_*` fields snapshot the data
+path before that final sync.
 
 Use `blob-store.yml` with the same targets to include immutable blob framing,
 CRC32C, allocation, commit, reopen, and verification.

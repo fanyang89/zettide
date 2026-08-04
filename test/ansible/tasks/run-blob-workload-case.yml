@@ -9,5 +9,6 @@
     zettide_blob_device_size: "{{ zettide_blob_workload_case.size }}"
     zettide_blob_device_block_size: "{{ zettide_blob_workload_case.block_size }}"
     zettide_blob_device_batch_depth: "{{ zettide_blob_workload_case.batch_depth }}"
+    zettide_blob_device_file_io: "{{ zettide_blob_workload_case.file_io }}"
     zettide_blob_benchmark_log_name: "blob-device-{{ zettide_blob_workload_case.name }}"
     zettide_blob_failure_name: "{{ zettide_blob_device_target.name }}/{{ zettide_blob_workload_case.name }}"
