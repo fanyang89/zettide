@@ -92,6 +92,18 @@ object metadata, or FUSE. Configure `zettide_blob_device_targets` and run:
 uv run ansible-playbook test/ansible/blob-device.yml --limit zettide-tier1
 ```
 
+The workload profile measures 4 KiB QD1 IOPS and 256 KiB/1 MiB QD1 bandwidth:
+
+```sh
+uv run ansible-playbook test/ansible/blob-workload.yml --limit zettide-tier1
+```
+
+Each result reports actual operations per second, bytes per second, average
+latency, and p95 latency. Latency samples cover one submitted batch; the
+default workload matrix uses batch depth one, so each sample is one operation.
+Write latency and IOPS measure accepted writes; durable throughput and IOPS
+include the final data sync.
+
 Use `blob-store.yml` with the same targets to include immutable blob framing,
 CRC32C, allocation, commit, reopen, and verification.
 Use `blob-object.yml` to include COW object maps and object-head publication.

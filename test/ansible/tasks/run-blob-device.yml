@@ -26,6 +26,15 @@
   loop_control:
     loop_var: zettide_blob_device_target
     label: "{{ zettide_blob_device_target.name }}"
+  when: zettide_test_profile != 'blob-workload'
+
+- name: Run BlobDevice workload cases | {{ zettide_optimize }}
+  ansible.builtin.include_tasks: run-blob-workload-case.yml
+  loop: "{{ zettide_blob_workloads }}"
+  loop_control:
+    loop_var: zettide_blob_workload_case
+    label: "{{ zettide_blob_workload_case.name }}"
+  when: zettide_test_profile == 'blob-workload'
 
 - name: Require all BlobDevice targets | {{ zettide_optimize }}
   ansible.builtin.assert:

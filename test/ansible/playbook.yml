@@ -19,6 +19,19 @@
     zettide_blob_device_size: 17179869184
     zettide_blob_device_block_size: 1048576
     zettide_blob_device_batch_depth: 32
+    zettide_blob_workloads:
+      - name: iops-4k
+        size: 17179869184
+        block_size: 4096
+        batch_depth: 1
+      - name: bw-256k
+        size: 17179869184
+        block_size: 262144
+        batch_depth: 1
+      - name: bw-1m
+        size: 17179869184
+        block_size: 1048576
+        batch_depth: 1
     zettide_blob_benchmark_name: >-
       {{ 'blob-object' if zettide_test_profile == 'blob-object'
          else ('blob-store' if zettide_test_profile == 'blob-store' else 'blob-device') }}
@@ -27,6 +40,7 @@
       io-verify: tasks/run-io-verify.yml
       throughput: tasks/run-io-verify.yml
       blob-device: tasks/run-blob-device.yml
+      blob-workload: tasks/run-blob-device.yml
       blob-store: tasks/run-blob-device.yml
       blob-object: tasks/run-blob-device.yml
     zettide_packages:
@@ -202,7 +216,7 @@
       ansible.builtin.assert:
         that:
           - zettide_test_profile in zettide_profile_tasks
-        fail_msg: "Supported test profiles are tier1, io-verify, throughput, blob-device, blob-store, and blob-object."
+        fail_msg: "Supported test profiles are tier1, io-verify, throughput, blob-device, blob-workload, blob-store, and blob-object."
 
   tasks:
     - name: Create the remote workspace

@@ -75,6 +75,11 @@ pub fn main(init: std.process.Init) !void {
         allocated += 1;
         @memset(buffer.*, @intCast(allocated));
     }
+    const operation_count = config.size / config.block_size;
+    const latency_capacity = try std.math.divCeil(u64, operation_count, config.batch_depth);
+    const latencies = try init.gpa.alloc(u64, @intCast(latency_capacity));
+    defer init.gpa.free(latencies);
+    var latency_count: usize = 0;
 
     try stdout.print(
         "benchmark=zettide_blob_device optimize={s} operation={s} path={s} size={} block_size={} batch_depth={}\n",
@@ -92,10 +97,10 @@ pub fn main(init: std.process.Init) !void {
     const io_start = Io.Clock.awake.now(init.io).nanoseconds;
     const validation_elapsed: u64 = switch (config.operation) {
         .write => validation: {
-            try runWrites(init.gpa, init.io, &device, buffers, config);
+            try runWrites(init.gpa, init.io, &device, buffers, config, latencies, &latency_count);
             break :validation 0;
         },
-        .read => try runReads(init.gpa, init.io, &device, buffers, config),
+        .read => try runReads(init.gpa, init.io, &device, buffers, config, latencies, &latency_count),
     };
     const operation_elapsed: u64 = @intCast(Io.Clock.awake.now(init.io).nanoseconds - io_start);
     const io_elapsed = operation_elapsed - validation_elapsed;
@@ -107,16 +112,25 @@ pub fn main(init: std.process.Init) !void {
         sync_elapsed = @intCast(Io.Clock.awake.now(init.io).nanoseconds - sync_start);
     }
     const durable_elapsed = if (config.operation == .write) operation_elapsed + sync_elapsed else io_elapsed;
+    const latency = latencySummary(latencies[0..latency_count]);
     try stdout.print(
-        "blob_device_result operation={s} bytes={} io_elapsed_ns={} bytes_per_second={} validation_elapsed_ns={} sync_elapsed_ns={} durable_bytes_per_second={} total_bytes_per_second={}\n",
+        "blob_device_result operation={s} bytes={} block_size={} batch_depth={} operations={} io_elapsed_ns={} bytes_per_second={} iops={} latency_scope=batch latency_samples={} latency_avg_ns={} latency_p95_ns={} validation_elapsed_ns={} sync_elapsed_ns={} durable_bytes_per_second={} durable_iops={} total_bytes_per_second={}\n",
         .{
             @tagName(config.operation),
             config.size,
+            config.block_size,
+            config.batch_depth,
+            operation_count,
             io_elapsed,
             rate(config.size, io_elapsed),
+            rate(operation_count, io_elapsed),
+            latency_count,
+            latency.average_ns,
+            latency.p95_ns,
             validation_elapsed,
             sync_elapsed,
             rate(config.size, durable_elapsed),
+            rate(operation_count, durable_elapsed),
             rate(config.size, operation_elapsed + sync_elapsed),
         },
     );
@@ -128,6 +142,8 @@ fn runWrites(
     device: *Device,
     buffers: []const []u8,
     config: Config,
+    latencies: []u64,
+    latency_count: *usize,
 ) !void {
     const writes = try allocator.alloc(zettide.blob_device.Write, buffers.len);
     defer allocator.free(writes);
@@ -139,7 +155,10 @@ fn runWrites(
             .bytes = buffer,
             .offset = offset + index * config.block_size,
         };
+        const latency_start = Io.Clock.awake.now(io).nanoseconds;
         try device.writeAllManyAt(io, writes[0..count]);
+        latencies[latency_count.*] = @intCast(Io.Clock.awake.now(io).nanoseconds - latency_start);
+        latency_count.* += 1;
         offset += count * config.block_size;
     }
 }
@@ -150,6 +169,8 @@ fn runReads(
     device: *Device,
     buffers: []const []u8,
     config: Config,
+    latencies: []u64,
+    latency_count: *usize,
 ) !u64 {
     const reads = try allocator.alloc(zettide.blob_device.Read, buffers.len);
     defer allocator.free(reads);
@@ -164,11 +185,14 @@ fn runReads(
             .buffer = buffer,
             .offset = offset + index * config.block_size,
         };
+        const latency_start = Io.Clock.awake.now(io).nanoseconds;
         try device.readManyAt(io, reads[0..count], results[0..count]);
         for (results[0..count]) |result| {
             if (result.failure) |err| return err;
             if (result.amount != config.block_size) return error.IncompleteBlobDeviceRead;
         }
+        latencies[latency_count.*] = @intCast(Io.Clock.awake.now(io).nanoseconds - latency_start);
+        latency_count.* += 1;
         const validation_start = Io.Clock.awake.now(io).nanoseconds;
         for (buffers[0..count], 0..) |buffer, index| {
             const expected: u8 = @intCast(index + 1);
@@ -178,6 +202,23 @@ fn runReads(
         offset += count * config.block_size;
     }
     return validation_elapsed;
+}
+
+const LatencySummary = struct {
+    average_ns: u64,
+    p95_ns: u64,
+};
+
+fn latencySummary(samples: []u64) LatencySummary {
+    std.debug.assert(samples.len != 0);
+    var total: u128 = 0;
+    for (samples) |sample| total += sample;
+    std.mem.sort(u64, samples, {}, std.sort.asc(u64));
+    const p95_index = (samples.len * 95 + 99) / 100 - 1;
+    return .{
+        .average_ns = @intCast(total / samples.len),
+        .p95_ns = samples[p95_index],
+    };
 }
 
 fn rate(bytes: u64, elapsed_ns: u64) u64 {
@@ -259,6 +300,13 @@ test "parse blob device benchmark options" {
     try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024), config.size);
     try std.testing.expectEqual(@as(usize, 1024 * 1024), config.block_size);
     try std.testing.expectEqual(@as(usize, 16), config.batch_depth);
+}
+
+test "summarize blob device benchmark latency" {
+    var samples = [_]u64{ 4, 1, 3, 2 };
+    const summary = latencySummary(&samples);
+    try std.testing.expectEqual(@as(u64, 2), summary.average_ns);
+    try std.testing.expectEqual(@as(u64, 4), summary.p95_ns);
 }
 
 test "reject invalid blob device benchmark options" {

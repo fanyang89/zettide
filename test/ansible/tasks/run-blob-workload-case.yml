@@ -1,0 +1,13 @@
+---
+- name: Run BlobDevice workload targets | {{ zettide_blob_workload_case.name }}
+  ansible.builtin.include_tasks: run-blob-device-target.yml
+  loop: "{{ zettide_blob_device_targets | default([{'name': 'default', 'tmpdir': '/tmp'}]) }}"
+  loop_control:
+    loop_var: zettide_blob_device_target
+    label: "{{ zettide_blob_device_target.name }}/{{ zettide_blob_workload_case.name }}"
+  vars:
+    zettide_blob_device_size: "{{ zettide_blob_workload_case.size }}"
+    zettide_blob_device_block_size: "{{ zettide_blob_workload_case.block_size }}"
+    zettide_blob_device_batch_depth: "{{ zettide_blob_workload_case.batch_depth }}"
+    zettide_blob_benchmark_log_name: "blob-device-{{ zettide_blob_workload_case.name }}"
+    zettide_blob_failure_name: "{{ zettide_blob_device_target.name }}/{{ zettide_blob_workload_case.name }}"

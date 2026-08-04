@@ -112,12 +112,12 @@
       read_rc={{ zettide_blob_device_read.rc | default(1) }}
       {{ zettide_blob_device_read.stdout | default('') }}
       {{ zettide_blob_device_read.stderr | default('') }}
-    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_blob_device_target.name }}/{{ zettide_blob_benchmark_name }}.log"
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_blob_device_target.name }}/{{ zettide_blob_benchmark_log_name | default(zettide_blob_benchmark_name) }}.log"
     mode: "0644"
 
 - name: Record failed BlobDevice target | {{ zettide_blob_device_target.name }}
   ansible.builtin.set_fact:
-    zettide_blob_device_failures: "{{ zettide_blob_device_failures + [zettide_blob_device_target.name] }}"
+    zettide_blob_device_failures: "{{ zettide_blob_device_failures + [zettide_blob_failure_name | default(zettide_blob_device_target.name)] }}"
   when: >-
     (zettide_blob_device_write.rc | default(1)) != 0 or
     (zettide_blob_device_drop_caches.rc | default(1)) != 0 or
