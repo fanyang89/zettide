@@ -135,6 +135,31 @@ fn writeAllAt(context_ptr: *anyopaque, io: std.Io, bytes: []const u8, offset: u6
         context.file.writePositionalAll(io, bytes, offset) catch |err| return mapOperationError(err);
 }
 
+fn writeAllManyAt(context_ptr: *anyopaque, io: std.Io, writes: []const storage_api.Write) !void {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    context.mutex.lock(io) catch |err| return mapOperationError(err);
+    defer context.mutex.unlock(io);
+    if (!context.writable) return error.ReadOnlyStorage;
+    for (writes) |write| try validateRange(context, write.offset, write.bytes.len);
+
+    if (context.engine) |*engine|
+        engine.writeAllManyAt(io, writes) catch |err| return mapOperationError(err)
+    else for (writes) |write|
+        context.file.writePositionalAll(io, write.bytes, write.offset) catch |err|
+            return mapOperationError(err);
+}
+
+fn syncData(context_ptr: *anyopaque, io: std.Io) !void {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    context.mutex.lock(io) catch |err| return mapOperationError(err);
+    defer context.mutex.unlock(io);
+
+    if (context.engine) |*engine|
+        engine.sync(io, .data) catch |err| return mapOperationError(err)
+    else
+        std.posix.fdatasync(context.file.handle) catch |err| return mapOperationError(err);
+}
+
 fn sync(context_ptr: *anyopaque, io: std.Io) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.mutex.lock(io) catch |err| return mapOperationError(err);
@@ -192,6 +217,8 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .read_at = readAt,
     .read_many_at = readManyAt,
     .write_all_at = writeAllAt,
+    .write_all_many_at = writeAllManyAt,
+    .sync_data = syncData,
     .sync = sync,
     .close = close,
 };

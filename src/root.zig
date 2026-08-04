@@ -1,4 +1,5 @@
 pub const block_device = @import("block_device.zig");
+pub const blob_device = @import("blob_device.zig");
 pub const container = @import("container.zig");
 pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("endpoint_control.zig") else struct {};
 pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("endpoint_daemon.zig") else struct {};
@@ -34,6 +35,7 @@ comptime {
 
 test {
     _ = block_device;
+    _ = blob_device;
     _ = container;
     _ = endpoint_control;
     _ = endpoint_daemon;

@@ -19,6 +19,11 @@ pub const ReadResult = struct {
     failure: ?anyerror = null,
 };
 
+pub const Write = struct {
+    bytes: []const u8,
+    offset: u64,
+};
+
 /// Owned durable random-access storage used by a v3 member.
 pub const Storage = struct {
     backend: Backend,
@@ -31,6 +36,8 @@ pub const Storage = struct {
         read_at: *const fn (context: *anyopaque, io: Io, buffer: []u8, offset: u64) anyerror!usize,
         read_many_at: ?*const fn (context: *anyopaque, io: Io, reads: []const Read, results: []ReadResult) anyerror!void = null,
         write_all_at: *const fn (context: *anyopaque, io: Io, bytes: []const u8, offset: u64) anyerror!void,
+        write_all_many_at: ?*const fn (context: *anyopaque, io: Io, writes: []const Write) anyerror!void = null,
+        sync_data: ?*const fn (context: *anyopaque, io: Io) anyerror!void = null,
         sync: *const fn (context: *anyopaque, io: Io) anyerror!void,
         close: *const fn (context: *anyopaque, io: Io) anyerror!void,
     };
@@ -189,6 +196,29 @@ pub const Storage = struct {
         }
     }
 
+    /// Writes must not overlap; execution order is backend-dependent.
+    pub fn writeAllManyAt(self: *Storage, io: Io, writes: []const Write) !void {
+        if (self.backend == .custom) {
+            const backend = self.backend.custom;
+            if (backend.vtable.write_all_many_at) |write_many|
+                return write_many(backend.context, io, writes);
+        }
+        for (writes) |write| try self.writeAllAt(io, write.bytes, write.offset);
+    }
+
+    pub fn syncData(self: *Storage, io: Io) !void {
+        switch (self.backend) {
+            .file => |backend| if (@import("builtin").os.tag == .linux)
+                try std.posix.fdatasync(backend.file.handle)
+            else
+                try backend.file.sync(io),
+            .custom => |backend| if (backend.vtable.sync_data) |sync_data|
+                try sync_data(backend.context, io)
+            else
+                try backend.vtable.sync(backend.context, io),
+        }
+    }
+
     pub fn sync(self: *Storage, io: Io) !void {
         switch (self.backend) {
             .file => |backend| try backend.file.sync(io),
@@ -235,8 +265,12 @@ test "file storage reports capacity and supports positional IO" {
 
     try std.testing.expectEqual(Kind.regular_file, storage.kind);
     try std.testing.expectEqual(@as(u64, 4096), storage.capacity());
-    try storage.writeAllAt(std.testing.io, "data", 2048);
-    try storage.sync(std.testing.io);
+    const writes = [_]Write{
+        .{ .bytes = "da", .offset = 2048 },
+        .{ .bytes = "ta", .offset = 2050 },
+    };
+    try storage.writeAllManyAt(std.testing.io, &writes);
+    try storage.syncData(std.testing.io);
 
     var actual: [4]u8 = undefined;
     try std.testing.expectEqual(actual.len, try storage.readAt(std.testing.io, &actual, 2048));

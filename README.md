@@ -78,6 +78,15 @@ throughput, writeback backlog, SQE submission counts, and maximum in-flight I/O.
 zBench reports average, standard deviation, range, and percentiles without a
 performance pass/fail threshold. Run with `--help` for all options.
 
+The BlobDevice benchmark measures aligned sequential I/O without LittleFS,
+object metadata, or FUSE:
+
+```sh
+zig build build-bench-blob-device -Doptimize=ReleaseSafe
+./zig-out/bin/zettide-blob-device-benchmark \
+  --operation write --path /mnt/data/blob-device.bin --size 64GiB
+```
+
 ## Tests
 
 ```sh

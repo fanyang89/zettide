@@ -127,6 +127,29 @@ pub fn build(b: *std.Build) void {
     const run_fs_ops_benchmark_tests = b.addRunArtifact(fs_ops_benchmark_tests);
     unit_step.dependOn(&run_fs_ops_benchmark_tests.step);
 
+    const blob_device_benchmark_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/blob_device.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = portable_core }},
+    });
+    const blob_device_benchmark = b.addExecutable(.{
+        .name = "zettide-blob-device-benchmark",
+        .root_module = blob_device_benchmark_module,
+    });
+    const run_blob_device_benchmark = b.addRunArtifact(blob_device_benchmark);
+    if (b.args) |args| run_blob_device_benchmark.addArgs(args);
+    const blob_device_benchmark_step = b.step("bench-blob-device", "Benchmark sequential BlobDevice IO");
+    blob_device_benchmark_step.dependOn(&run_blob_device_benchmark.step);
+    const install_blob_device_benchmark = b.addInstallArtifact(blob_device_benchmark, .{});
+    const build_blob_device_benchmark_step = b.step("build-bench-blob-device", "Build the BlobDevice benchmark");
+    build_blob_device_benchmark_step.dependOn(&install_blob_device_benchmark.step);
+
+    const blob_device_benchmark_tests = b.addTest(.{ .root_module = blob_device_benchmark_module });
+    const run_blob_device_benchmark_tests = b.addRunArtifact(blob_device_benchmark_tests);
+    unit_step.dependOn(&run_blob_device_benchmark_tests.step);
+
     const image_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/image.zig"),
