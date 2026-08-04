@@ -92,7 +92,8 @@ object metadata, or FUSE. Configure `zettide_blob_device_targets` and run:
 uv run ansible-playbook test/ansible/blob-device.yml --limit zettide-tier1
 ```
 
-The workload profile measures 4 KiB QD1 IOPS and 256 KiB/1 MiB QD1 bandwidth:
+The workload profile measures 4 KiB QD1 latency, 4 KiB QD32 IOPS, and
+256 KiB/1 MiB QD1 bandwidth:
 
 ```sh
 uv run ansible-playbook test/ansible/blob-workload.yml --limit zettide-tier1
@@ -100,7 +101,7 @@ uv run ansible-playbook test/ansible/blob-workload.yml --limit zettide-tier1
 
 Each result reports actual operations per second, bytes per second, average
 latency, and p95 latency. Latency samples cover one submitted batch; the
-default workload matrix uses batch depth one, so each sample is one operation.
+QD1 cases sample one operation. The QD32 case samples one 32-operation batch.
 Write latency and IOPS measure accepted writes; durable throughput and IOPS
 include the final data sync.
 

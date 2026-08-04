@@ -176,6 +176,15 @@ pub const Storage = struct {
     pub fn readManyAt(self: *Storage, io: Io, reads: []const Read, results: []ReadResult) !void {
         if (reads.len != results.len) return error.InvalidReadBatch;
         for (results) |*result| result.* = .{};
+        if (self.backend == .file and reads.len <= max_file_batch and contiguousReads(reads)) {
+            readFileMany(self.backend.file.file, io, reads, results) catch {
+                for (results) |*result| result.* = .{};
+            };
+            var complete = true;
+            for (reads, results) |read, result| complete = complete and result.amount == read.buffer.len;
+            if (complete) return;
+            for (results) |*result| result.* = .{};
+        }
         if (self.backend == .custom) {
             const backend = self.backend.custom;
             if (backend.vtable.read_many_at) |read_many|
@@ -198,6 +207,8 @@ pub const Storage = struct {
 
     /// Writes must not overlap; execution order is backend-dependent.
     pub fn writeAllManyAt(self: *Storage, io: Io, writes: []const Write) !void {
+        if (self.backend == .file and writes.len <= max_file_batch and contiguousWrites(writes))
+            return writeFileMany(self.backend.file.file, io, writes);
         if (self.backend == .custom) {
             const backend = self.backend.custom;
             if (backend.vtable.write_all_many_at) |write_many|
@@ -237,6 +248,67 @@ pub const Storage = struct {
         }
     }
 };
+
+const max_file_batch = 128;
+
+fn contiguousReads(reads: []const Read) bool {
+    if (reads.len == 0) return false;
+    for (reads[1..], reads[0 .. reads.len - 1]) |current, previous| {
+        const expected = std.math.add(u64, previous.offset, previous.buffer.len) catch return false;
+        if (current.offset != expected) return false;
+    }
+    return true;
+}
+
+fn contiguousWrites(writes: []const Write) bool {
+    if (writes.len == 0) return false;
+    for (writes[1..], writes[0 .. writes.len - 1]) |current, previous| {
+        const expected = std.math.add(u64, previous.offset, previous.bytes.len) catch return false;
+        if (current.offset != expected) return false;
+    }
+    return true;
+}
+
+fn readFileMany(file: File, io: Io, reads: []const Read, results: []ReadResult) !void {
+    var buffers: [max_file_batch][]u8 = undefined;
+    for (reads, buffers[0..reads.len]) |read, *buffer| buffer.* = read.buffer;
+    var first: usize = 0;
+    var offset = reads[0].offset;
+    while (first < reads.len) {
+        const amount = try file.readPositional(io, buffers[first..reads.len], offset);
+        if (amount == 0) break;
+        offset += amount;
+        consumeBuffers(buffers[0..reads.len], &first, amount);
+    }
+    var remaining = offset - reads[0].offset;
+    for (reads, results) |read, *result| {
+        result.amount = @intCast(@min(remaining, read.buffer.len));
+        remaining -= result.amount;
+    }
+}
+
+fn writeFileMany(file: File, io: Io, writes: []const Write) !void {
+    var buffers: [max_file_batch][]const u8 = undefined;
+    for (writes, buffers[0..writes.len]) |write, *buffer| buffer.* = write.bytes;
+    var first: usize = 0;
+    var offset = writes[0].offset;
+    while (first < writes.len) {
+        const amount = try file.writePositional(io, buffers[first..writes.len], offset);
+        if (amount == 0) return error.UnexpectedWriteFailure;
+        offset += amount;
+        consumeBuffers(buffers[0..writes.len], &first, amount);
+    }
+}
+
+fn consumeBuffers(buffers: anytype, first: *usize, amount: usize) void {
+    var remaining = amount;
+    while (remaining != 0) {
+        const consumed = @min(remaining, buffers[first.*].len);
+        buffers[first.*] = buffers[first.*][consumed..];
+        remaining -= consumed;
+        if (buffers[first.*].len == 0) first.* += 1;
+    }
+}
 
 /// Closes each owned backend once even if the slice contains copied Storage values.
 pub fn closeAll(storages: []Storage, io: Io) !void {
@@ -287,6 +359,15 @@ test "file storage reports capacity and supports positional IO" {
     try std.testing.expectEqual(@as(usize, 2), results[1].amount);
     try std.testing.expectEqualStrings("da", &first);
     try std.testing.expectEqualStrings("ta", &second);
+}
+
+test "vectored storage advances partially consumed buffers" {
+    var buffers = [_][]const u8{ "abc", "def", "ghi" };
+    var first: usize = 0;
+    consumeBuffers(&buffers, &first, 4);
+    try std.testing.expectEqual(@as(usize, 1), first);
+    try std.testing.expectEqualStrings("ef", buffers[1]);
+    try std.testing.expectEqualStrings("ghi", buffers[2]);
 }
 
 test "custom storage delegates operations and preserves identity" {

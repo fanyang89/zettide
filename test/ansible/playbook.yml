@@ -24,6 +24,10 @@
         size: 17179869184
         block_size: 4096
         batch_depth: 1
+      - name: iops-4k-qd32
+        size: 17179869184
+        block_size: 4096
+        batch_depth: 32
       - name: bw-256k
         size: 17179869184
         block_size: 262144
