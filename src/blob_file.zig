@@ -72,8 +72,10 @@ pub const State = struct {
     logical_size: u64,
     root: ?blob_map.PageRef,
     blocks: std.AutoHashMap(u64, blob_format.BlobRef),
+    pending: std.AutoHashMap(u64, ?blob_format.BlobRef),
     dirty: bool = false,
     prepared: ?Snapshot = null,
+    prepared_checkpoint: ?u64 = null,
     frozen: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, blobs: *blob_store.Store) State {
@@ -84,6 +86,7 @@ pub const State = struct {
             .logical_size = 0,
             .root = null,
             .blocks = .init(allocator),
+            .pending = .init(allocator),
         };
     }
 
@@ -103,6 +106,7 @@ pub const State = struct {
             .logical_size = snapshot.logical_size,
             .root = snapshot.root,
             .blocks = .init(allocator),
+            .pending = .init(allocator),
         };
         errdefer result.deinit();
         const root = snapshot.root orelse return result;
@@ -128,6 +132,7 @@ pub const State = struct {
 
     pub fn deinit(self: *State) void {
         self.blocks.deinit();
+        self.pending.deinit();
         self.* = undefined;
     }
 
@@ -172,6 +177,7 @@ pub const State = struct {
         const span = std.math.add(usize, @intCast(offset % block_size), data.len) catch return error.FileTooLarge;
         const touched = try std.math.divCeil(usize, span, block_size);
         try self.blocks.ensureUnusedCapacity(@intCast(touched));
+        try self.pending.ensureUnusedCapacity(@intCast(touched));
 
         const buffers = try self.allocator.alignedAlloc(
             u8,
@@ -183,6 +189,10 @@ pub const State = struct {
         var references: [blob_device.max_batch]blob_format.BlobRef = undefined;
         var block_indices: [blob_device.max_batch]u64 = undefined;
         var consumed: usize = 0;
+        var staged_data = false;
+        errdefer if (staged_data) {
+            self.frozen = true;
+        };
         while (consumed < data.len) {
             var count: usize = 0;
             while (count < blob_device.max_batch and consumed < data.len) : (count += 1) {
@@ -208,8 +218,11 @@ pub const State = struct {
                 self.frozen = true;
                 return err;
             };
-            for (block_indices[0..count], references[0..count]) |block, reference|
+            staged_data = true;
+            for (block_indices[0..count], references[0..count]) |block, reference| {
                 self.blocks.putAssumeCapacity(block, reference);
+                self.pending.putAssumeCapacity(block, reference);
+            }
         }
         self.logical_size = @max(self.logical_size, end);
         self.dirty = true;
@@ -220,7 +233,23 @@ pub const State = struct {
         try self.requireMutable();
         if (size_value > std.math.maxInt(i64)) return error.FileTooLarge;
         if (size_value == self.logical_size) return;
-        if (size_value < self.logical_size and size_value % block_size != 0) {
+        const shrinking = size_value < self.logical_size;
+        const first_removed = try std.math.divCeil(u64, size_value, block_size);
+        const keys = try self.allocator.alloc(u64, if (shrinking) self.blocks.count() else 0);
+        defer self.allocator.free(keys);
+        var removed_count: usize = 0;
+        if (shrinking) {
+            var iterator = self.blocks.keyIterator();
+            while (iterator.next()) |block| {
+                if (block.* < first_removed) continue;
+                keys[removed_count] = block.*;
+                removed_count += 1;
+            }
+        }
+        const partial_upsert: usize = if (shrinking and size_value % block_size != 0 and
+            self.blocks.contains(size_value / block_size)) 1 else 0;
+        try self.pending.ensureUnusedCapacity(@intCast(removed_count + partial_upsert));
+        if (shrinking and size_value % block_size != 0) {
             const block = size_value / block_size;
             if (self.blocks.get(block)) |reference| {
                 const buffer = try self.allocator.alignedAlloc(u8, .fromByteUnits(block_size), block_size);
@@ -232,21 +261,15 @@ pub const State = struct {
                     self.frozen = true;
                     return err;
                 };
-                try self.blocks.put(block, updated);
+                self.blocks.putAssumeCapacity(block, updated);
+                self.pending.putAssumeCapacity(block, updated);
             }
         }
-        if (size_value < self.logical_size) {
-            const first_removed = try std.math.divCeil(u64, size_value, block_size);
-            const keys = try self.allocator.alloc(u64, self.blocks.count());
-            defer self.allocator.free(keys);
-            var count: usize = 0;
-            var iterator = self.blocks.keyIterator();
-            while (iterator.next()) |block| {
-                if (block.* < first_removed) continue;
-                keys[count] = block.*;
-                count += 1;
+        if (shrinking) {
+            for (keys[0..removed_count]) |block| {
+                _ = self.blocks.remove(block);
+                self.pending.putAssumeCapacity(block, null);
             }
-            for (keys[0..count]) |block| _ = self.blocks.remove(block);
         }
         self.logical_size = size_value;
         self.dirty = true;
@@ -256,44 +279,82 @@ pub const State = struct {
         try self.requireUsable();
         if (self.prepared) |snapshot| return snapshot;
         if (!self.dirty) return self.currentSnapshot();
+        errdefer self.frozen = true;
         const generation = std.math.add(u64, self.generation, 1) catch return error.BlobFileGenerationExhausted;
-        const entries = try self.allocator.alloc(blob_map.LeafEntry, self.blocks.count());
-        defer self.allocator.free(entries);
-        var iterator = self.blocks.iterator();
+        const mutations = try self.allocator.alloc(blob_map_store.Mutation, self.pending.count());
+        defer self.allocator.free(mutations);
+        var iterator = self.pending.iterator();
         var index: usize = 0;
-        while (iterator.next()) |entry| : (index += 1) entries[index] = .{
-            .logical_blob = entry.key_ptr.*,
-            .reference = entry.value_ptr.*,
+        while (iterator.next()) |entry| : (index += 1) mutations[index] = if (entry.value_ptr.*) |reference| .{
+            .upsert = .{
+                .logical_blob = entry.key_ptr.*,
+                .reference = reference,
+            },
+        } else .{
+            .remove = entry.key_ptr.*,
         };
-        std.mem.sort(blob_map.LeafEntry, entries, {}, struct {
-            fn lessThan(_: void, left: blob_map.LeafEntry, right: blob_map.LeafEntry) bool {
-                return left.logical_blob < right.logical_blob;
+        std.mem.sort(blob_map_store.Mutation, mutations, {}, struct {
+            fn lessThan(_: void, left: blob_map_store.Mutation, right: blob_map_store.Mutation) bool {
+                return left.key() < right.key();
             }
         }.lessThan);
+        const scratch = try self.allocator.alignedAlloc(
+            u8,
+            .fromByteUnits(blob_format.allocation_unit),
+            blob_map.page_size,
+        );
+        defer self.allocator.free(scratch);
         var maps = blob_map_store.MapStore.init(self.allocator, self.blobs);
+        const checkpoint = self.blobs.stagedUnits();
+        var map_pages_owned = true;
+        errdefer if (map_pages_owned) self.blobs.discardStaged(io, checkpoint) catch {};
         const snapshot: Snapshot = .{
             .generation = generation,
             .logical_size = self.logical_size,
-            .root = if (entries.len == 0) null else try maps.build(io, generation, entries),
+            .root = try maps.applyBatch(
+                io,
+                self.root,
+                self.generation,
+                generation,
+                mutations,
+                null,
+                scratch,
+            ),
         };
+        const block_count = try std.math.divCeil(u64, snapshot.logical_size, block_size);
+        if ((snapshot.root == null) != (self.blocks.count() == 0) or
+            (snapshot.root != null and (snapshot.root.?.first_key > snapshot.root.?.last_key or
+                snapshot.root.?.last_key >= block_count)))
+            return error.InvalidBlobFileSnapshot;
         self.prepared = snapshot;
+        self.prepared_checkpoint = checkpoint;
+        map_pages_owned = false;
         return snapshot;
     }
 
     pub fn acceptSnapshot(self: *State, snapshot: Snapshot) !void {
         const prepared = self.prepared orelse {
-            if (std.meta.eql(snapshot, self.currentSnapshot())) return;
+            if (!self.dirty and std.meta.eql(snapshot, self.currentSnapshot())) return;
             return error.BlobFileSnapshotNotPrepared;
         };
         if (!std.meta.eql(prepared, snapshot)) return error.BlobFileSnapshotMismatch;
         self.generation = snapshot.generation;
         self.root = snapshot.root;
         self.prepared = null;
+        self.prepared_checkpoint = null;
         self.dirty = false;
+        self.pending.clearRetainingCapacity();
     }
 
-    pub fn abortSnapshot(self: *State) void {
+    pub fn abortSnapshot(self: *State, io: Io) !void {
+        const checkpoint = self.prepared_checkpoint orelse {
+            std.debug.assert(self.prepared == null);
+            return;
+        };
+        std.debug.assert(self.prepared != null);
+        try self.blobs.discardStaged(io, checkpoint);
         self.prepared = null;
+        self.prepared_checkpoint = null;
     }
 
     fn currentSnapshot(self: *const State) Snapshot {
@@ -352,6 +413,7 @@ test "blob file preserves random writes sparse holes and truncate across reopen"
 
     const snapshot = try file.prepareSnapshot(std.testing.io);
     try std.testing.expectError(error.BlobFileSnapshotPending, file.write(std.testing.io, "x", 0));
+    try std.testing.expectError(error.BlobFileSnapshotPending, file.truncate(std.testing.io, 1));
     try blobs.commit(std.testing.io);
     try file.acceptSnapshot(snapshot);
     const committed_units = blobs.committedUnits();
@@ -372,6 +434,270 @@ test "blob file preserves random writes sparse holes and truncate across reopen"
     var reopened_tail: [100]u8 = undefined;
     try std.testing.expectEqual(reopened_tail.len, try file.read(std.testing.io, &reopened_tail, sparse_offset));
     try std.testing.expectEqualSlices(u8, &tail, &reopened_tail);
+}
+
+test "blob file replaces one block with path copy and preserves old snapshot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-path-copy",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var file = State.init(std.testing.allocator, &blobs);
+    defer file.deinit();
+
+    const old_data: [block_size]u8 = @splat('o');
+    const old_reference = try blobs.put(std.testing.io, &old_data);
+    const entry_count = blob_map.max_leaf_entries * blob_map.max_internal_entries + 1;
+    try file.blocks.ensureUnusedCapacity(entry_count);
+    try file.pending.ensureUnusedCapacity(entry_count);
+    for (0..entry_count) |key| {
+        file.blocks.putAssumeCapacity(key, old_reference);
+        file.pending.putAssumeCapacity(key, old_reference);
+    }
+    file.logical_size = entry_count * block_size;
+    file.dirty = true;
+    const old_snapshot = try file.prepareSnapshot(std.testing.io);
+    try std.testing.expectEqual(@as(u8, 2), old_snapshot.root.?.level);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(old_snapshot);
+
+    const replaced_key = entry_count / 2;
+    const new_data: [block_size]u8 = @splat('n');
+    try std.testing.expectEqual(
+        new_data.len,
+        try file.write(std.testing.io, &new_data, replaced_key * block_size),
+    );
+    const map_checkpoint = blobs.stagedUnits();
+    const new_snapshot = try file.prepareSnapshot(std.testing.io);
+    try std.testing.expectEqual(
+        @as(u64, old_snapshot.root.?.level + 1),
+        blobs.stagedUnits() - map_checkpoint,
+    );
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(new_snapshot);
+
+    var byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        old_snapshot,
+        &byte,
+        replaced_key * block_size,
+    ));
+    try std.testing.expectEqual(@as(u8, 'o'), byte[0]);
+    try std.testing.expectEqual(@as(usize, 1), try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        new_snapshot,
+        &byte,
+        replaced_key * block_size,
+    ));
+    try std.testing.expectEqual(@as(u8, 'n'), byte[0]);
+}
+
+test "blob file pending mutations retain final write and truncate state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-pending",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var file = State.init(std.testing.allocator, &blobs);
+    defer file.deinit();
+
+    const full_block: [block_size]u8 = @splat('x');
+    _ = try file.write(std.testing.io, &full_block, 5 * block_size);
+    const base = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(base);
+    try std.testing.expectEqual(@as(usize, 0), file.pending.count());
+
+    _ = try file.write(std.testing.io, "gone", 8 * block_size);
+    _ = try file.write(std.testing.io, "removed", 9 * block_size);
+    try file.truncate(std.testing.io, 6 * block_size);
+    try file.truncate(std.testing.io, 5 * block_size + 100);
+    _ = try file.write(std.testing.io, "Y", 5 * block_size + 50);
+    _ = try file.write(std.testing.io, "first", 9 * block_size);
+    _ = try file.write(std.testing.io, "final", 9 * block_size);
+    try std.testing.expectEqual(@as(u64, 2 * block_size), file.allocatedBytes());
+    try std.testing.expectEqual(@as(usize, 3), file.pending.count());
+
+    const map_checkpoint = blobs.stagedUnits();
+    _ = try file.prepareSnapshot(std.testing.io);
+    const staged_after_prepare = blobs.stagedUnits();
+    try std.testing.expect(staged_after_prepare > map_checkpoint);
+    try file.abortSnapshot(std.testing.io);
+    try std.testing.expectEqual(map_checkpoint, blobs.stagedUnits());
+    try std.testing.expectEqual(@as(usize, 3), file.pending.count());
+    _ = try file.prepareSnapshot(std.testing.io);
+    try std.testing.expectEqual(staged_after_prepare, blobs.stagedUnits());
+    try file.abortSnapshot(std.testing.io);
+    try std.testing.expectEqual(map_checkpoint, blobs.stagedUnits());
+    const retried = try file.prepareSnapshot(std.testing.io);
+    try std.testing.expectEqual(staged_after_prepare, blobs.stagedUnits());
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(retried);
+    try std.testing.expectEqual(@as(usize, 0), file.pending.count());
+
+    var final: [5]u8 = undefined;
+    try std.testing.expectEqual(final.len, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        retried,
+        &final,
+        9 * block_size,
+    ));
+    try std.testing.expectEqualStrings("final", &final);
+    var removed: [1]u8 = undefined;
+    try std.testing.expectEqual(removed.len, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        retried,
+        &removed,
+        8 * block_size,
+    ));
+    try std.testing.expectEqual(@as(u8, 0), removed[0]);
+    var tail: [52]u8 = undefined;
+    try std.testing.expectEqual(tail.len, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        retried,
+        &tail,
+        5 * block_size + 49,
+    ));
+    try std.testing.expectEqual(@as(u8, 'x'), tail[0]);
+    try std.testing.expectEqual(@as(u8, 'Y'), tail[1]);
+    try std.testing.expect(std.mem.allEqual(u8, tail[2..51], 'x'));
+    try std.testing.expectEqual(@as(u8, 0), tail[51]);
+
+    try file.truncate(std.testing.io, 0);
+    try std.testing.expectEqual(@as(u64, 0), file.allocatedBytes());
+    const empty = try file.prepareSnapshot(std.testing.io);
+    try std.testing.expectEqual(@as(?blob_map.PageRef, null), empty.root);
+    try file.abortSnapshot(std.testing.io);
+    const empty_retry = try file.prepareSnapshot(std.testing.io);
+    try std.testing.expectEqual(@as(?blob_map.PageRef, null), empty_retry.root);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(empty_retry);
+    try std.testing.expectEqual(@as(usize, 0), file.pending.count());
+}
+
+test "blob file freezes when a later write batch cannot read a partial block" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-partial-write-failure",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var file = State.init(std.testing.allocator, &blobs);
+    defer file.deinit();
+
+    const old_data: [block_size]u8 = @splat('o');
+    var invalid_reference = try blobs.put(std.testing.io, &old_data);
+    invalid_reference.checksums[0] ^= 1;
+    try file.blocks.put(blob_device.max_batch, invalid_reference);
+    file.logical_size = (blob_device.max_batch + 1) * block_size;
+    const data = try std.testing.allocator.alloc(u8, blob_device.max_batch * block_size + 1);
+    defer std.testing.allocator.free(data);
+    @memset(data, 'n');
+
+    try std.testing.expectError(error.BlobChecksumMismatch, file.write(std.testing.io, data, 0));
+    try std.testing.expect(file.frozen);
+    try std.testing.expectError(error.BlobFileFrozen, file.read(std.testing.io, data[0..1], 0));
+}
+
+test "blob file rejects accepting dirty state without a prepared snapshot" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-unprepared-accept",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var file = State.init(std.testing.allocator, &blobs);
+    defer file.deinit();
+
+    _ = try file.write(std.testing.io, "old", 0);
+    const snapshot = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(snapshot);
+    try file.acceptSnapshot(snapshot);
+
+    _ = try file.write(std.testing.io, "new", 0);
+    try std.testing.expectError(error.BlobFileSnapshotNotPrepared, file.acceptSnapshot(snapshot));
+
+    try file.truncate(std.testing.io, 1);
+    const truncated = file.currentSnapshot();
+    try std.testing.expectError(error.BlobFileSnapshotNotPrepared, file.acceptSnapshot(truncated));
+}
+
+test "blob file map capacity failure preserves checkpoints for outer rollback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-capacity",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var file = State.init(std.testing.allocator, &blobs);
+    defer file.deinit();
+
+    _ = try file.write(std.testing.io, "old", 0);
+    const old_snapshot = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(old_snapshot);
+
+    const transaction_checkpoint = blobs.stagedUnits();
+    _ = try file.write(std.testing.io, "new", 0);
+    const map_checkpoint = blobs.stagedUnits();
+    const unit_count = blobs.header.unit_count;
+    blobs.header.unit_count = map_checkpoint;
+    try std.testing.expectError(error.BlobStoreFull, file.prepareSnapshot(std.testing.io));
+    try std.testing.expectEqual(map_checkpoint, blobs.stagedUnits());
+    try std.testing.expect(file.frozen);
+
+    blobs.header.unit_count = unit_count;
+    try blobs.discardStaged(std.testing.io, transaction_checkpoint);
+    try std.testing.expectEqual(transaction_checkpoint, blobs.stagedUnits());
+    var contents: [3]u8 = undefined;
+    try std.testing.expectEqual(contents.len, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        old_snapshot,
+        &contents,
+        0,
+    ));
+    try std.testing.expectEqualStrings("old", &contents);
 }
 
 test "blob file snapshot reads empty sparse partial multi-block and EOF ranges" {

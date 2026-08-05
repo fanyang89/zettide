@@ -2103,7 +2103,7 @@ test "blob filesystem writable open recovers persisted orphans in one transactio
     try expectFilesystemCounts(&filesystem, std.testing.io, 1, 0);
 }
 
-test "blob filesystem data failure rolls back the full transaction tail" {
+test "blob filesystem map capacity failure rolls back the full data transaction tail" {
     const blob_device = @import("blob_device.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
