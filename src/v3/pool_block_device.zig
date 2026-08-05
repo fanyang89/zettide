@@ -8,6 +8,7 @@ const volume_crypto = @import("../volume_crypto.zig");
 
 const c = block_device.c;
 const max_replica_count = 3;
+const byte_io_alignment = 4096;
 
 const ReplicaOperation = union(enum) {
     read: struct { offset: u64, buffer: []u8 },
@@ -24,6 +25,7 @@ pub const PoolBlockDevice = struct {
     volume_header: container.Header,
     block_size: u32,
     block_count: u32,
+    logical_capacity: u64,
     mutex: std.Io.Mutex = .init,
     dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
@@ -62,10 +64,45 @@ pub const PoolBlockDevice = struct {
             .volume_header = header,
             .block_size = header.block_size,
             .block_count = header.block_count,
+            .logical_capacity = header.logical_size,
             .crypto = crypto,
         };
         for (replicas, 0..) |replica, index| {
             if (header.logical_size > replica.geometry.logical_capacity)
+                return error.InconsistentPoolCapacity;
+            result.replicas[index] = replica;
+        }
+        return result;
+    }
+
+    /// Initializes a header-free byte device over the Pool data regions.
+    pub fn initBytes(
+        io: std.Io,
+        replicas: []const ReplicaEndpoint,
+        layout: pool_layout.Layout,
+        logical_capacity: u64,
+    ) !PoolBlockDevice {
+        const required_count: usize = switch (layout.kind) {
+            .unprotected => 1,
+            .replicated => max_replica_count,
+            .erasure_coded => return error.ErasureCodingNotImplemented,
+        };
+        if (replicas.len != required_count) return error.UnsupportedPoolWidth;
+        if (logical_capacity == 0 or logical_capacity % byte_io_alignment != 0)
+            return error.InvalidPoolDataGeometry;
+        var result: PoolBlockDevice = .{
+            .io = io,
+            .replicas = undefined,
+            .replica_count = replicas.len,
+            .kind = layout.kind,
+            .volume_header = undefined,
+            .block_size = 0,
+            .block_count = 0,
+            .logical_capacity = logical_capacity,
+        };
+        for (replicas, 0..) |replica, index| {
+            if (replica.geometry.logical_capacity != logical_capacity or
+                replica.geometry.data_length < logical_capacity)
                 return error.InconsistentPoolCapacity;
             result.replicas[index] = replica;
         }
@@ -148,6 +185,63 @@ pub const PoolBlockDevice = struct {
         var operations: [max_replica_count]ReplicaOperation = undefined;
         for (operations[0..self.replica_count]) |*operation|
             operation.* = .{ .write = .{ .offset = data_offset, .data = write_data } };
+        var errors: [max_replica_count]?anyerror = @splat(null);
+        self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
+        if (firstReplicaError(errors[0..self.replica_count])) |err| {
+            self.freezeWrites();
+            return err;
+        }
+        _ = self.pipeline_metrics.direct_program_bytes.fetchAdd(data.len, .monotonic);
+        _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(data.len * self.replica_count, .monotonic);
+        self.dirty.store(true, .release);
+    }
+
+    pub fn readAt(self: *PoolBlockDevice, buffer: []u8, offset: u64) !usize {
+        try self.validateByteIo(offset, buffer.len);
+        if (self.kind == .unprotected) {
+            try self.replicas[0].readData(offset, buffer);
+            return buffer.len;
+        }
+
+        var processed: usize = 0;
+        while (processed < buffer.len) : (processed += byte_io_alignment) {
+            const chunk = buffer[processed..][0..byte_io_alignment];
+            const chunk_offset = offset + processed;
+            var copies: [max_replica_count][byte_io_alignment]u8 = undefined;
+            var operations: [max_replica_count]ReplicaOperation = undefined;
+            for (operations[0..self.replica_count], 0..) |*operation, index|
+                operation.* = .{ .read = .{ .offset = chunk_offset, .buffer = &copies[index] } };
+            var errors: [max_replica_count]?anyerror = @splat(null);
+            try self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]);
+            for (0..self.replica_count) |left| {
+                if (errors[left] != null) continue;
+                for (left + 1..self.replica_count) |right| {
+                    if (errors[right] == null and std.mem.eql(u8, &copies[left], &copies[right])) {
+                        @memcpy(chunk, &copies[left]);
+                        break;
+                    }
+                } else continue;
+                break;
+            } else {
+                if (firstReplicaError(errors[0..self.replica_count]) == null)
+                    return error.ReplicaDivergence;
+                return error.ReplicaQuorumUnavailable;
+            }
+        }
+        return buffer.len;
+    }
+
+    pub fn writeAllAt(self: *PoolBlockDevice, data: []const u8, offset: u64) !void {
+        if (self.isWriteFrozen()) return error.WriteFrozen;
+        try self.validateByteIo(offset, data.len);
+        // Unlike control-plane quorum commits, Blob data writes require every replica.
+        // Otherwise replicas could expose divergent committed Blob prefixes after failover.
+        var operations: [max_replica_count]ReplicaOperation = undefined;
+        for (operations[0..self.replica_count]) |*operation|
+            operation.* = .{ .write = .{ .offset = offset, .data = data } };
         var errors: [max_replica_count]?anyerror = @splat(null);
         self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]) catch |err| {
             self.freezeWrites();
@@ -416,6 +510,12 @@ pub const PoolBlockDevice = struct {
         if (len > self.block_size - offset) return error.OutOfBounds;
         const block_offset = std.math.mul(u64, block, self.block_size) catch return error.OutOfBounds;
         return std.math.add(u64, block_offset, offset) catch return error.OutOfBounds;
+    }
+
+    fn validateByteIo(self: *const PoolBlockDevice, offset: u64, len: usize) !void {
+        if (len == 0 or len % byte_io_alignment != 0 or offset % byte_io_alignment != 0 or
+            offset > self.logical_capacity or len > self.logical_capacity - offset)
+            return error.InvalidPoolDataIo;
     }
 
     fn encrypt(self: *const PoolBlockDevice, output: []u8, input: []const u8, offset: u64) !void {

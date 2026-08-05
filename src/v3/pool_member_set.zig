@@ -585,6 +585,8 @@ pub const PoolMemberSet = struct {
         self.recomputeDataAccess(selected.topology);
     }
 
+    /// An active coordinator rejects close. Once closing starts, consumed members
+    /// are discarded even when their close reports an error.
     pub fn close(self: *PoolMemberSet) !void {
         while (true) {
             const state = self.coordinator_state.load(.acquire);
@@ -1031,6 +1033,26 @@ test "one-member pool opens with one control voter" {
     const data_member = try set.dataMemberForRead(7);
     try std.testing.expectEqual(@as(usize, 0), data_member.set_index);
     try std.testing.expectEqual(@as(u16, 7), data_member.member.header().member_slot);
+}
+
+test "Pool member set close consumes members after a close error" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createTestPool(tmp.dir, "member", .unprotected);
+    const locations = [_]Location{.{ .parent = tmp.dir, .basename = "member" }};
+    var set = try open(std.testing.io, std.testing.allocator, &locations, .writable);
+    var fault: member_api.FaultController = .{ .fail_sync_at = 0 };
+    const member = (try set.memberAt(0)).?;
+    member.setFaultController(&fault);
+    try member.write(.metadata, 0, &.{1});
+
+    try std.testing.expectError(error.InjectedFault, set.close());
+    try std.testing.expect(set.isClosed());
+    try std.testing.expect((try set.memberAt(0)) == null);
+    try set.close();
+
+    var reopened = try open(std.testing.io, std.testing.allocator, &locations, .writable);
+    try reopened.close();
 }
 
 test "replicated pool below full width permits maintenance but keeps data read only" {

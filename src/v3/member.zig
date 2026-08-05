@@ -789,6 +789,8 @@ pub const Member = struct {
         try self.syncLocked();
     }
 
+    /// Active catalog or data claims reject close without consuming the member.
+    /// Otherwise close consumes the underlying Storage even when cleanup fails.
     pub fn close(self: *Member) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -807,9 +809,13 @@ pub const Member = struct {
                 };
             }
         }
-        try self.storage.close(self.io);
+        var close_error: ?anyerror = null;
+        self.storage.close(self.io) catch |err| {
+            close_error = err;
+        };
         self.closed.store(true, .release);
         if (first_error) |err| return err;
+        if (close_error) |err| return err;
     }
 
     pub fn deinit(self: *Member) void {

@@ -177,10 +177,11 @@ pub const Filesystem = struct {
     }
 
     pub fn close(self: *Filesystem, io: Io) !void {
-        defer self.* = undefined;
+        var blobs = self.blobs;
         self.open_references.deinit();
         self.inode_pins.deinit();
-        try self.blobs.close(io);
+        self.* = undefined;
+        try blobs.close(io);
     }
 
     pub fn stat(self: *Filesystem, io: Io, inode: u64) !InodeRecord {
@@ -2625,6 +2626,79 @@ test "blob filesystem directory snapshots own sorted canonical entries and persi
     try std.testing.expectEqualStrings("Delta", reopened.entries[2].spelling);
     try std.testing.expectEqualStrings("\u{e9}.TXT", reopened.entries[3].spelling);
     try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob close chain consumes ownership when backend close fails" {
+    const blob_device = @import("blob_device.zig");
+    const storage_api = @import("v3/storage.zig");
+    const FailingCloseBackend = struct {
+        inner: storage_api.Storage,
+        close_count: usize = 0,
+
+        fn fromContext(context: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(context));
+        }
+
+        fn sameIdentity(context: *anyopaque, other: *anyopaque) bool {
+            return context == other;
+        }
+
+        fn readAt(context: *anyopaque, io: Io, buffer: []u8, offset: u64) !usize {
+            return fromContext(context).inner.readAt(io, buffer, offset);
+        }
+
+        fn writeAllAt(context: *anyopaque, io: Io, bytes: []const u8, offset: u64) !void {
+            try fromContext(context).inner.writeAllAt(io, bytes, offset);
+        }
+
+        fn syncData(context: *anyopaque, io: Io) !void {
+            try fromContext(context).inner.syncData(io);
+        }
+
+        fn sync(context: *anyopaque, io: Io) !void {
+            try fromContext(context).inner.sync(io);
+        }
+
+        fn close(context: *anyopaque, io: Io) !void {
+            const self = fromContext(context);
+            var inner = self.inner;
+            self.inner = undefined;
+            self.close_count += 1;
+            try inner.close(io);
+            return error.InjectedCloseFailure;
+        }
+
+        const vtable: storage_api.Storage.VTable = .{
+            .same_identity = sameIdentity,
+            .read_at = readAt,
+            .write_all_at = writeAllAt,
+            .sync_data = syncData,
+            .sync = sync,
+            .close = close,
+        };
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 16 * 1024 * 1024;
+    var backend: FailingCloseBackend = .{
+        .inner = try storage_api.Storage.createFile(std.testing.io, tmp.dir, "close-error", device_size),
+    };
+    const storage = storage_api.Storage.initBackend(
+        &backend,
+        &FailingCloseBackend.vtable,
+        device_size,
+        .regular_file,
+        1,
+    );
+    const device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(std.testing.allocator, std.testing.io, blobs, .legacy_raw);
+    try std.testing.expectError(error.InjectedCloseFailure, filesystem.close(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), backend.close_count);
+
+    var reopened = try storage_api.Storage.openFile(std.testing.io, tmp.dir, "close-error", false);
+    try reopened.close(std.testing.io);
 }
 
 fn expectValidGraph(filesystem: *Filesystem, io: Io) !void {

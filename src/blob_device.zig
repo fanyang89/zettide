@@ -149,8 +149,9 @@ pub const Device = struct {
     }
 
     pub fn close(self: *Device, io: Io) !void {
-        try self.storage.close(io);
+        var storage = self.storage;
         self.* = undefined;
+        try storage.close(io);
     }
 
     fn validateIo(self: *const Device, pointer: [*]const u8, len: usize, offset: u64) !void {

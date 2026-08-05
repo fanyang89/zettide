@@ -134,9 +134,15 @@ fn sync(context_ptr: *anyopaque, _: std.Io) !void {
 
 fn close(context_ptr: *anyopaque, _: std.Io) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    try statusError(c.zettide_spdk_bdev_dispatcher_close(context.dispatcher));
+    const close_error = statusError(c.zettide_spdk_bdev_dispatcher_close(context.dispatcher));
     c.free(context.canonical_name);
-    context.allocator.destroy(context);
+    const allocator = context.allocator;
+    allocator.destroy(context);
+    close_error catch |err| {
+        // A failed C close cannot be retried through a safely owned Zig context. The
+        // dispatcher and its runtime references are intentionally abandoned here.
+        return err;
+    };
 }
 
 fn validateIo(context: *const Context, offset: u64, len: usize, alignment: u32) !void {

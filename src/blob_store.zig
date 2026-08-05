@@ -66,8 +66,9 @@ pub const Store = struct {
     }
 
     pub fn close(self: *Store, io: Io) !void {
-        try self.device.close(io);
+        var device = self.device;
         self.* = undefined;
+        try device.close(io);
     }
 
     pub fn committedUnits(self: *const Store) u64 {

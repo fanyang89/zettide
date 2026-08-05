@@ -65,9 +65,10 @@ pub const Object = struct {
     }
 
     pub fn close(self: *Object, io: Io) !void {
+        var blobs = self.blobs;
         self.entries.deinit(self.allocator);
-        try self.blobs.close(io);
         self.* = undefined;
+        try blobs.close(io);
     }
 
     pub fn logicalSize(self: *const Object) u64 {

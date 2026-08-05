@@ -7,6 +7,7 @@ pub const Kind = enum {
     regular_file,
     linux_block_device,
     spdk_bdev,
+    pool_data,
 };
 
 pub const Read = struct {
@@ -54,6 +55,7 @@ pub const Storage = struct {
         write_all_many_at: ?*const fn (context: *anyopaque, io: Io, writes: []const Write) anyerror!void = null,
         sync_data: ?*const fn (context: *anyopaque, io: Io) anyerror!void = null,
         sync: *const fn (context: *anyopaque, io: Io) anyerror!void,
+        /// Consumes context even when cleanup reports an error. It must not be retried.
         close: *const fn (context: *anyopaque, io: Io) anyerror!void,
         transport_kind: ?*const fn (context: *anyopaque) TransportKind = null,
         transport_stats: ?*const fn (context: *anyopaque, io: Io) TransportStats = null,
@@ -283,7 +285,8 @@ pub const Storage = struct {
         }
     }
 
-    /// The owner must ensure no operation is active or waiting before close.
+    /// The owner must ensure no operation is active or waiting before close. Custom
+    /// backends consume their context even when close returns an error.
     pub fn close(self: *Storage, io: Io) !void {
         switch (self.backend) {
             .file => |backend| {
