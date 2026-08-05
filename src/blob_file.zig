@@ -287,12 +287,16 @@ pub const State = struct {
         var inputs: [blob_device.max_batch][]const u8 = undefined;
         var references: [blob_device.max_batch]blob_format.BlobRef = undefined;
         var block_indices: [blob_device.max_batch]u64 = undefined;
+        var existence_known: [blob_device.max_batch]bool = @splat(false);
+        var existed: [blob_device.max_batch]bool = @splat(false);
         var consumed: usize = 0;
         var staged_data = false;
         errdefer if (staged_data) {
             self.frozen = true;
         };
         while (consumed < data.len) {
+            @memset(&existence_known, false);
+            @memset(&existed, false);
             var count: usize = 0;
             while (count < blob_device.max_batch and consumed < data.len) : (count += 1) {
                 const position = offset + consumed;
@@ -302,11 +306,13 @@ pub const State = struct {
                 const buffer = buffers[count * block_size ..][0..block_size];
                 if (block_offset != 0 or part != block_size) {
                     if (try self.lookupCurrent(io, block)) |reference| {
+                        existed[count] = true;
                         const read_amount = try self.blobs.read(io, reference, buffer);
                         if (read_amount != block_size) return error.InvalidBlobFileBlock;
                     } else {
                         @memset(buffer, 0);
                     }
+                    existence_known[count] = true;
                 }
                 @memcpy(buffer[block_offset..][0..part], data[consumed..][0..part]);
                 inputs[count] = buffer;
@@ -318,11 +324,16 @@ pub const State = struct {
                 return err;
             };
             staged_data = true;
-            for (block_indices[0..count], references[0..count]) |block, reference| {
-                const existed = (try self.lookupCurrent(io, block)) != null;
+            try self.resolveExistence(
+                io,
+                block_indices[0..count],
+                existence_known[0..count],
+                existed[0..count],
+            );
+            for (block_indices[0..count], references[0..count], existed[0..count]) |block, reference, block_existed| {
                 if (self.blocks_materialized) self.blocks.putAssumeCapacity(block, reference);
                 self.pending.putAssumeCapacity(block, reference);
-                if (!existed) self.allocated_blocks += 1;
+                if (!block_existed) self.allocated_blocks += 1;
             }
         }
         self.logical_size = @max(self.logical_size, end);
@@ -484,6 +495,65 @@ pub const State = struct {
         if (reference.valid_bytes != block_size or reference.endUnit() > self.blobs.committedUnits())
             return error.InvalidBlobFileSnapshot;
         return reference;
+    }
+
+    fn resolveExistence(
+        self: *State,
+        io: Io,
+        keys: []const u64,
+        known: []bool,
+        existed: []bool,
+    ) !void {
+        std.debug.assert(keys.len == known.len and keys.len == existed.len);
+        if (keys.len == 0) return;
+        for (keys, 0..) |key, index| {
+            if (index != 0) std.debug.assert(key == keys[0] + index);
+            if (known[index]) continue;
+            if (self.pending.get(key)) |reference| {
+                existed[index] = reference != null;
+                known[index] = true;
+            } else if (self.blocks_materialized) {
+                existed[index] = self.blocks.contains(key);
+                known[index] = true;
+            }
+        }
+        if (self.blocks_materialized or self.root == null) return;
+
+        const scratch = try self.allocator.alignedAlloc(
+            u8,
+            .fromByteUnits(blob_format.allocation_unit),
+            blob_map.page_size,
+        );
+        defer self.allocator.free(scratch);
+        var maps = blob_map_store.MapStore.init(self.allocator, self.blobs);
+        var entries: [blob_device.max_batch]blob_map.LeafEntry = undefined;
+        const end_key = keys[0] + keys.len;
+        var first_key = keys[0];
+        while (first_key < end_key) {
+            const loaded = try maps.loadRange(
+                io,
+                self.root.?,
+                self.generation,
+                first_key,
+                end_key,
+                scratch,
+                &entries,
+            );
+            if (loaded.end_key <= first_key) return error.InvalidBlobFileSnapshot;
+            for (entries[0..loaded.count]) |entry| {
+                entry.reference.validate(self.blobs.header.unit_count) catch
+                    return error.InvalidBlobFileSnapshot;
+                if (entry.reference.valid_bytes != block_size or
+                    entry.reference.endUnit() > self.blobs.committedUnits())
+                    return error.InvalidBlobFileSnapshot;
+                const index: usize = @intCast(entry.logical_blob - keys[0]);
+                if (!known[index]) {
+                    existed[index] = true;
+                    known[index] = true;
+                }
+            }
+            first_key = loaded.end_key;
+        }
     }
 
     fn materializeCurrent(self: *State, io: Io) !void {
@@ -729,6 +799,59 @@ test "blob file lazy writes track allocation and expose pending partial blocks" 
     try std.testing.expectEqual(@as(usize, 6), try file.read(std.testing.io, &inserted, 3 * block_size + 19));
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 'f', 'i', 'n', 'a', 'l' }, inserted[0..6]);
     try std.testing.expect(!file.blocks_materialized);
+}
+
+test "blob file lazy rewrites batch allocation lookups across device batches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-lazy-batch-rewrite",
+        16 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    const block_count = blob_map.max_leaf_entries + 5;
+    const data = try std.testing.allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(block_size),
+        block_count * block_size,
+    );
+    defer std.testing.allocator.free(data);
+    @memset(data, 'a');
+    var base = State.init(std.testing.allocator, &blobs);
+    defer base.deinit();
+    _ = try base.write(std.testing.io, data, 0);
+    const snapshot = try base.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try base.acceptSnapshot(snapshot);
+
+    var file = try State.openKnownAllocated(
+        std.testing.allocator,
+        &blobs,
+        snapshot,
+        block_count * block_size,
+    );
+    defer file.deinit();
+    @memset(data, 'b');
+    try std.testing.expectEqual(data.len, try file.write(std.testing.io, data, 0));
+    try std.testing.expectEqual(@as(u64, block_count * block_size), file.allocatedBytes());
+    try std.testing.expect(!file.blocks_materialized);
+    const updated = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(updated);
+    var boundary: [2]u8 = undefined;
+    _ = try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        updated,
+        &boundary,
+        blob_device.max_batch * block_size - 1,
+    );
+    try std.testing.expectEqualSlices(u8, "bb", &boundary);
 }
 
 test "blob file lazy empty root materializes pending writes transactionally" {
