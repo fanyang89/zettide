@@ -5,6 +5,7 @@ pub const blob_filesystem_format = @import("blob_filesystem_format.zig");
 pub const blob_format = @import("blob_format.zig");
 pub const blob_map = @import("blob_map.zig");
 pub const blob_map_store = @import("blob_map_store.zig");
+pub const blob_metadata_map = @import("blob_metadata_map.zig");
 pub const blob_object_format = @import("blob_object_format.zig");
 pub const blob_object = @import("blob_object.zig");
 pub const blob_store = @import("blob_store.zig");
@@ -49,6 +50,7 @@ test {
     _ = blob_format;
     _ = blob_map;
     _ = blob_map_store;
+    _ = blob_metadata_map;
     _ = blob_object_format;
     _ = blob_object;
     _ = blob_store;
