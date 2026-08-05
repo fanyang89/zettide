@@ -1,5 +1,6 @@
 pub const block_device = @import("block_device.zig");
 pub const blob_device = @import("blob_device.zig");
+pub const blob_file = @import("blob_file.zig");
 pub const blob_format = @import("blob_format.zig");
 pub const blob_map = @import("blob_map.zig");
 pub const blob_map_store = @import("blob_map_store.zig");
@@ -42,6 +43,7 @@ comptime {
 test {
     _ = block_device;
     _ = blob_device;
+    _ = blob_file;
     _ = blob_format;
     _ = blob_map;
     _ = blob_map_store;
