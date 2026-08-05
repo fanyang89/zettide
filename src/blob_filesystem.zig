@@ -15,6 +15,9 @@ pub const Filesystem = struct {
     blobs: blob_store.Store,
     authority_ref: blob_format.BlobRef,
     root: filesystem_format.Root,
+    writable: bool,
+    open_references: std.AutoHashMap(u64, u64),
+    inode_pins: std.AutoHashMap(u64, u64),
     transaction_mutex: Io.Mutex = .init,
     frozen: bool = false,
 
@@ -30,6 +33,26 @@ pub const Filesystem = struct {
     };
 
     pub const max_symlink_target_bytes: usize = filesystem_format.max_symlink_target_bytes;
+
+    const RuntimeReferenceKind = enum { open, pin };
+
+    fn init(
+        allocator: std.mem.Allocator,
+        blobs: blob_store.Store,
+        authority_ref: blob_format.BlobRef,
+        root: filesystem_format.Root,
+        writable: bool,
+    ) Filesystem {
+        return .{
+            .allocator = allocator,
+            .blobs = blobs,
+            .authority_ref = authority_ref,
+            .root = root,
+            .writable = writable,
+            .open_references = std.AutoHashMap(u64, u64).init(allocator),
+            .inode_pins = std.AutoHashMap(u64, u64).init(allocator),
+        };
+    }
 
     /// Takes ownership of blobs, including on failure.
     pub fn format(
@@ -67,18 +90,25 @@ pub const Filesystem = struct {
         const root_bytes = try filesystem_format.encodeRoot(root);
         const authority_ref = try owned_blobs.put(io, &root_bytes);
         try owned_blobs.commitAuthority(io, authority_ref);
-        return .{
-            .allocator = allocator,
-            .blobs = owned_blobs,
-            .authority_ref = authority_ref,
-            .root = root,
-        };
+        return init(
+            allocator,
+            owned_blobs,
+            authority_ref,
+            root,
+            true,
+        );
     }
 
     /// Takes ownership of blobs, including on failure.
-    pub fn open(allocator: std.mem.Allocator, io: Io, blobs: blob_store.Store) !Filesystem {
+    pub fn open(
+        allocator: std.mem.Allocator,
+        io: Io,
+        blobs: blob_store.Store,
+        writable: bool,
+    ) !Filesystem {
         var owned_blobs = blobs;
-        errdefer owned_blobs.close(io) catch {};
+        var owns_blobs = true;
+        errdefer if (owns_blobs) owned_blobs.close(io) catch {};
         var candidates = owned_blobs.authorityCandidates();
         if (candidates[0] == null or
             (candidates[1] != null and candidates[1].?.sequence > candidates[0].?.sequence))
@@ -94,25 +124,138 @@ pub const Filesystem = struct {
                 if (first_error == null) first_error = err;
                 continue;
             };
-            return .{
-                .allocator = allocator,
-                .blobs = owned_blobs,
-                .authority_ref = authority_ref,
-                .root = root,
-            };
+            var result = init(allocator, owned_blobs, authority_ref, root, writable);
+            owns_blobs = false;
+            errdefer result.close(io) catch {};
+            if (writable) try result.recoverOrphans(io);
+            return result;
         }
         return first_error orelse error.NoValidBlobFilesystemAuthority;
     }
 
     pub fn close(self: *Filesystem, io: Io) !void {
+        defer self.* = undefined;
+        self.open_references.deinit();
+        self.inode_pins.deinit();
         try self.blobs.close(io);
-        self.* = undefined;
     }
 
     pub fn stat(self: *Filesystem, io: Io, inode: u64) !filesystem_format.InodeRecord {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
-        return (try self.loadInode(io, inode)) orelse error.FileNotFound;
+        const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        try self.authorizeDirectInode(inode, record);
+        return record;
+    }
+
+    /// Retains an inode while an open backend handle refers to it.
+    pub fn retainInode(self: *Filesystem, io: Io, inode: u64) !void {
+        return self.addRuntimeReference(io, inode, .open);
+    }
+
+    /// Releases an open-handle reference and reclaims an unlinked inode when unused.
+    pub fn releaseInode(self: *Filesystem, io: Io, inode: u64) !void {
+        return self.removeRuntimeReference(io, inode, .open);
+    }
+
+    /// Pins an inode while it is present in a backend inode cache.
+    pub fn pinInode(self: *Filesystem, io: Io, inode: u64) !void {
+        return self.addRuntimeReference(io, inode, .pin);
+    }
+
+    /// Removes an inode-cache pin and reclaims an unlinked inode when unused.
+    pub fn unpinInode(self: *Filesystem, io: Io, inode: u64) !void {
+        return self.removeRuntimeReference(io, inode, .pin);
+    }
+
+    fn addRuntimeReference(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        kind: RuntimeReferenceKind,
+    ) !void {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        try self.authorizeDirectInode(inode, record);
+        const entry = try self.runtimeReferences(kind).getOrPut(inode);
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* = std.math.add(u64, entry.value_ptr.*, 1) catch
+            return error.TooManyReferences;
+    }
+
+    fn removeRuntimeReference(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        kind: RuntimeReferenceKind,
+    ) !void {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        const references = self.runtimeReferences(kind);
+        const count = references.get(inode) orelse return error.InvalidArgument;
+        if (count == 0) return error.InvalidArgument;
+        const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        if (count > 1 or record.nlink != 0 or self.otherRuntimeReferences(kind).contains(inode)) {
+            if (count == 1) {
+                std.debug.assert(references.remove(inode));
+            } else {
+                references.getPtr(inode).?.* = count - 1;
+            }
+            return;
+        }
+
+        try self.requireMutable();
+        const orphan = (try self.loadOrphan(io, inode)) orelse
+            return error.InvalidBlobFilesystemGraph;
+        if (orphan.generation != record.generation or orphan.kind != record.metadata.kind)
+            return error.InvalidBlobFilesystemGraph;
+        if (record.metadata.kind == .directory and !try self.directoryIsEmpty(io, inode))
+            return error.InvalidBlobFilesystemGraph;
+        var mutations: MutationAccumulator = .init(self.allocator);
+        defer mutations.deinit();
+        try mutations.removeOrphan(inode);
+        try mutations.removeInode(inode);
+        var next_root = self.root;
+        next_root.generation = try nextGeneration(self.root.generation);
+        next_root.record_count = std.math.sub(u64, next_root.record_count, 2) catch
+            return error.InvalidBlobFilesystemGraph;
+        next_root.orphan_count = std.math.sub(u64, next_root.orphan_count, 1) catch
+            return error.InvalidBlobFilesystemGraph;
+        try self.publish(io, next_root, &mutations, null);
+        std.debug.assert(references.remove(inode));
+    }
+
+    fn runtimeReferences(
+        self: *Filesystem,
+        kind: RuntimeReferenceKind,
+    ) *std.AutoHashMap(u64, u64) {
+        return switch (kind) {
+            .open => &self.open_references,
+            .pin => &self.inode_pins,
+        };
+    }
+
+    fn otherRuntimeReferences(
+        self: *Filesystem,
+        kind: RuntimeReferenceKind,
+    ) *std.AutoHashMap(u64, u64) {
+        return switch (kind) {
+            .open => &self.inode_pins,
+            .pin => &self.open_references,
+        };
+    }
+
+    fn inodeIsRetained(self: *const Filesystem, inode: u64) bool {
+        return self.open_references.contains(inode) or self.inode_pins.contains(inode);
+    }
+
+    fn authorizeDirectInode(
+        self: *const Filesystem,
+        inode: u64,
+        record: filesystem_format.InodeRecord,
+    ) !void {
+        if (record.nlink == 0 and !self.inodeIsRetained(inode)) return error.FileNotFound;
     }
 
     pub fn lookup(self: *Filesystem, io: Io, parent_inode: u64, name: []const u8) !?LookupResult {
@@ -191,7 +334,7 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
-        if (record.nlink == 0) return error.FileNotFound;
+        try self.authorizeDirectInode(inode, record);
         if (record.metadata.kind != .symlink) return error.InvalidArgument;
         var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
         defer file.deinit();
@@ -454,28 +597,23 @@ pub const Filesystem = struct {
             try mutations.putInode(old_parent_inode, new_parent);
 
         var removed_records: u64 = 0;
+        var added_orphans: u64 = 0;
         if (victim_dentry) |entry| {
             removed_records = 1;
             var record = victim.?;
             record.metadata.ctime_ns = now;
-            if (record.metadata.kind == .directory) {
-                try mutations.removeInode(entry.inode);
-                removed_records += 1;
-            } else {
-                if (record.nlink == 0) return error.InvalidBlobFilesystemGraph;
-                record.nlink -= 1;
-                if (record.nlink == 0) {
-                    try mutations.removeInode(entry.inode);
-                    removed_records += 1;
-                } else {
-                    try mutations.putInode(entry.inode, record);
-                }
-            }
+            const retired = try self.retireUnlinkedInode(entry.inode, record, &mutations);
+            removed_records += retired.removed_records;
+            added_orphans += retired.added_orphans;
         }
         var next_root = self.root;
         next_root.generation = try nextGeneration(self.root.generation);
         next_root.record_count = std.math.sub(u64, next_root.record_count, removed_records) catch
             return error.InvalidBlobFilesystemGraph;
+        next_root.record_count = std.math.add(u64, next_root.record_count, added_orphans) catch
+            return error.FilesystemRecordCountOverflow;
+        next_root.orphan_count = std.math.add(u64, next_root.orphan_count, added_orphans) catch
+            return error.FilesystemRecordCountOverflow;
         try self.publish(io, next_root, &mutations, null);
         return .renamed;
     }
@@ -573,26 +711,53 @@ pub const Filesystem = struct {
         defer mutations.deinit();
         try mutations.removeDentry(parent_inode, prepared.key);
         try mutations.putInode(parent_inode, parent);
-        var removed_records: u64 = 1;
-        if (record.nlink == 0) return error.InvalidBlobFilesystemGraph;
-        if (is_directory) {
-            try mutations.removeInode(dentry.inode);
-            removed_records += 1;
-        } else {
-            record.nlink -= 1;
-            record.metadata.ctime_ns = now;
-            if (record.nlink == 0) {
-                try mutations.removeInode(dentry.inode);
-                removed_records += 1;
-            } else {
-                try mutations.putInode(dentry.inode, record);
-            }
-        }
+        record.metadata.ctime_ns = now;
+        const retired = try self.retireUnlinkedInode(dentry.inode, record, &mutations);
+        const removed_records = 1 + retired.removed_records;
         var next_root = self.root;
         next_root.generation = try nextGeneration(self.root.generation);
         next_root.record_count = std.math.sub(u64, next_root.record_count, removed_records) catch
             return error.InvalidBlobFilesystemGraph;
+        next_root.record_count = std.math.add(u64, next_root.record_count, retired.added_orphans) catch
+            return error.FilesystemRecordCountOverflow;
+        next_root.orphan_count = std.math.add(u64, next_root.orphan_count, retired.added_orphans) catch
+            return error.FilesystemRecordCountOverflow;
         try self.publish(io, next_root, &mutations, null);
+    }
+
+    const RetireResult = struct {
+        removed_records: u64,
+        added_orphans: u64,
+    };
+
+    fn retireUnlinkedInode(
+        self: *Filesystem,
+        inode: u64,
+        record_value: filesystem_format.InodeRecord,
+        mutations: *MutationAccumulator,
+    ) !RetireResult {
+        var record = record_value;
+        if (record.nlink == 0) return error.InvalidBlobFilesystemGraph;
+        if (record.metadata.kind == .directory) {
+            if (record.nlink != 2) return error.InvalidBlobFilesystemGraph;
+            record.nlink = 0;
+        } else {
+            record.nlink -= 1;
+        }
+        if (record.nlink != 0) {
+            try mutations.putInode(inode, record);
+            return .{ .removed_records = 0, .added_orphans = 0 };
+        }
+        if (self.inodeIsRetained(inode)) {
+            try mutations.putInode(inode, record);
+            try mutations.putOrphan(inode, .{
+                .generation = record.generation,
+                .kind = record.metadata.kind,
+            });
+            return .{ .removed_records = 0, .added_orphans = 1 };
+        }
+        try mutations.removeInode(inode);
+        return .{ .removed_records = 1, .added_orphans = 0 };
     }
 
     fn loadInode(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.InodeRecord {
@@ -607,6 +772,18 @@ pub const Filesystem = struct {
             return error.InvalidBlobFilesystemGraph;
     }
 
+    fn loadOrphan(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.OrphanRecord {
+        const key = filesystem_format.orphanKey(inode) catch return error.FileNotFound;
+        var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
+        const value = try maps.lookupAlloc(io, self.root.metadata_root, self.root.generation, &key) orelse
+            return null;
+        defer self.allocator.free(value);
+        if (value.len != filesystem_format.orphan_encoded_size)
+            return error.InvalidBlobFilesystemGraph;
+        return filesystem_format.decodeOrphan(@ptrCast(value.ptr)) catch
+            return error.InvalidBlobFilesystemGraph;
+    }
+
     fn requireDirectory(self: *Filesystem, io: Io, inode: u64) !filesystem_format.InodeRecord {
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
         if (record.metadata.kind != .directory) return error.NotDirectory;
@@ -616,7 +793,7 @@ pub const Filesystem = struct {
 
     fn requireRegularFile(self: *Filesystem, io: Io, inode: u64) !filesystem_format.InodeRecord {
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
-        if (record.nlink == 0) return error.FileNotFound;
+        try self.authorizeDirectInode(inode, record);
         return switch (record.metadata.kind) {
             .file => record,
             .directory => error.IsDirectory,
@@ -710,7 +887,36 @@ pub const Filesystem = struct {
         };
     }
 
+    fn recoverOrphans(self: *Filesystem, io: Io) !void {
+        if (self.root.orphan_count == 0) return;
+        var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
+        const entries = try maps.loadAllAlloc(io, self.root.metadata_root, self.root.generation);
+        defer metadata_map_store.deinitEntries(self.allocator, entries);
+        var mutations: MutationAccumulator = .init(self.allocator);
+        defer mutations.deinit();
+        var orphan_count: u64 = 0;
+        for (entries) |entry| switch (try filesystem_format.decodeKey(entry.key)) {
+            .orphan => |inode| {
+                try mutations.removeOrphan(inode);
+                try mutations.removeInode(inode);
+                orphan_count = std.math.add(u64, orphan_count, 1) catch
+                    return error.InvalidBlobFilesystemGraph;
+            },
+            else => {},
+        };
+        if (orphan_count != self.root.orphan_count) return error.InvalidBlobFilesystemGraph;
+        const removed_records = std.math.mul(u64, orphan_count, 2) catch
+            return error.InvalidBlobFilesystemGraph;
+        var next_root = self.root;
+        next_root.generation = try nextGeneration(self.root.generation);
+        next_root.record_count = std.math.sub(u64, next_root.record_count, removed_records) catch
+            return error.InvalidBlobFilesystemGraph;
+        next_root.orphan_count = 0;
+        try self.publish(io, next_root, &mutations, null);
+    }
+
     fn requireMutable(self: *const Filesystem) !void {
+        if (!self.writable) return error.ReadOnlyFilesystem;
         if (self.frozen) return error.BlobFilesystemFrozen;
     }
 };
@@ -772,6 +978,17 @@ const MutationAccumulator = struct {
 
     fn removeInode(self: *MutationAccumulator, inode: u64) !void {
         const key = try filesystem_format.inodeKey(inode);
+        try self.set(&key, null);
+    }
+
+    fn putOrphan(self: *MutationAccumulator, inode: u64, record: filesystem_format.OrphanRecord) !void {
+        const key = try filesystem_format.orphanKey(inode);
+        const value = try filesystem_format.encodeOrphan(record);
+        try self.set(&key, &value);
+    }
+
+    fn removeOrphan(self: *MutationAccumulator, inode: u64) !void {
+        const key = try filesystem_format.orphanKey(inode);
         try self.set(&key, null);
     }
 
@@ -947,7 +1164,7 @@ fn validateGraph(
         const orphan = orphans.get(inode);
         if (orphan) |value| {
             if (inode == filesystem_format.root_inode or record.nlink != 0 or namespace_links != 0 or
-                value.kind != record.metadata.kind)
+                value.generation != record.generation or value.kind != record.metadata.kind)
                 return error.InvalidBlobFilesystemGraph;
         } else if (record.nlink == 0) {
             return error.InvalidBlobFilesystemGraph;
@@ -1060,7 +1277,7 @@ test "blob filesystem formats and reopens an empty root" {
     const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
     file_open = false;
     const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
-    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs, true);
     filesystem_open = true;
     try std.testing.expectEqual(@as(u64, 1), filesystem.root.record_count);
     try std.testing.expectEqual(name_profile.Profile.portable_v1, filesystem.root.name_profile);
@@ -1276,7 +1493,7 @@ test "blob filesystem commits canonical namespace and reopens a valid graph" {
     const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
     file_open = false;
     const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
-    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs, true);
     filesystem_open = true;
     try std.testing.expectEqualDeep(committed_root, filesystem.root);
     try std.testing.expectEqualDeep(committed_authority, filesystem.authority_ref);
@@ -1430,7 +1647,7 @@ test "blob filesystem inode data and symlinks survive reopen" {
     const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
     backing_open = false;
     const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
-    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs, true);
     filesystem_open = true;
     try std.testing.expectEqualDeep(committed_root, filesystem.root);
     try std.testing.expectEqualDeep(committed_authority, filesystem.authority_ref);
@@ -1442,6 +1659,215 @@ test "blob filesystem inode data and symlinks survive reopen" {
     try std.testing.expectEqual(@as(usize, 9), try filesystem.readSpecial(std.testing.io, symlink, &target, 0));
     try std.testing.expectEqualStrings("../Target", target[0..9]);
     try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem runtime references retain and reclaim unlinked inodes" {
+    const blob_device = @import("blob_device.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 64 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "runtime-retention",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        blobs,
+        .portable_v1,
+    );
+    defer filesystem.close(std.testing.io) catch {};
+    const root_inode = filesystem_format.root_inode;
+
+    try std.testing.expectError(error.FileNotFound, filesystem.retainInode(std.testing.io, 99));
+    try std.testing.expectError(error.FileNotFound, filesystem.pinInode(std.testing.io, 99));
+    try std.testing.expectError(error.InvalidArgument, filesystem.releaseInode(std.testing.io, root_inode));
+    try std.testing.expectError(error.InvalidArgument, filesystem.unpinInode(std.testing.io, root_inode));
+
+    const retained = try filesystem.createFile(std.testing.io, root_inode, "entry", 0o600, 1, 2);
+    _ = try filesystem.write(std.testing.io, retained, "abcdef", 0);
+    try filesystem.retainInode(std.testing.io, retained);
+    filesystem.open_references.getPtr(retained).?.* = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.TooManyReferences,
+        filesystem.retainInode(std.testing.io, retained),
+    );
+    filesystem.open_references.getPtr(retained).?.* = 1;
+    try expectFilesystemCounts(&filesystem, std.testing.io, 3, 0);
+
+    try filesystem.unlink(std.testing.io, root_inode, "entry");
+    try std.testing.expectEqual(@as(?Filesystem.LookupResult, null), try filesystem.lookup(
+        std.testing.io,
+        root_inode,
+        "entry",
+    ));
+    try std.testing.expectEqual(@as(u64, 0), (try filesystem.stat(std.testing.io, retained)).nlink);
+    var contents: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), try filesystem.read(std.testing.io, retained, &contents, 0));
+    try std.testing.expectEqualStrings("abcdef", contents[0..6]);
+    try std.testing.expectEqual(@as(usize, 2), try filesystem.write(
+        std.testing.io,
+        retained,
+        "XY",
+        1,
+    ));
+    try filesystem.truncate(std.testing.io, retained, 4);
+    try std.testing.expectError(
+        error.FileNotFound,
+        filesystem.link(std.testing.io, retained, root_inode, "revived"),
+    );
+    try expectFilesystemCounts(&filesystem, std.testing.io, 3, 1);
+
+    const replacement = try filesystem.createFile(std.testing.io, root_inode, "entry", 0o644, 3, 4);
+    try std.testing.expect(replacement != retained);
+    _ = try filesystem.write(std.testing.io, replacement, "replacement", 0);
+    try std.testing.expectEqual(@as(usize, 4), try filesystem.read(std.testing.io, retained, &contents, 0));
+    try std.testing.expectEqualStrings("aXYd", contents[0..4]);
+    try std.testing.expectEqual(@as(usize, 11), try filesystem.read(std.testing.io, replacement, &contents, 0));
+    try std.testing.expectEqualStrings("replacement", contents[0..11]);
+    try expectFilesystemCounts(&filesystem, std.testing.io, 5, 1);
+
+    try filesystem.pinInode(std.testing.io, retained);
+    try filesystem.releaseInode(std.testing.io, retained);
+    try std.testing.expectEqual(@as(usize, 4), try filesystem.read(std.testing.io, retained, &contents, 0));
+    try expectFilesystemCounts(&filesystem, std.testing.io, 5, 1);
+    try filesystem.unpinInode(std.testing.io, retained);
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, retained));
+    try std.testing.expectError(error.InvalidArgument, filesystem.releaseInode(std.testing.io, retained));
+    try std.testing.expectError(error.InvalidArgument, filesystem.unpinInode(std.testing.io, retained));
+    try expectFilesystemCounts(&filesystem, std.testing.io, 3, 0);
+
+    const source = try filesystem.createFile(std.testing.io, root_inode, "source", 0o600, 0, 0);
+    const victim = try filesystem.createFile(std.testing.io, root_inode, "victim", 0o600, 0, 0);
+    _ = try filesystem.write(std.testing.io, source, "source-data", 0);
+    _ = try filesystem.write(std.testing.io, victim, "victim-data", 0);
+    try filesystem.retainInode(std.testing.io, victim);
+    try std.testing.expectEqual(
+        Filesystem.RenameResult.renamed,
+        try filesystem.rename(std.testing.io, root_inode, "source", root_inode, "victim", false),
+    );
+    try std.testing.expectEqual(source, (try filesystem.lookup(std.testing.io, root_inode, "victim")).?.inode);
+    try std.testing.expectEqual(@as(?Filesystem.LookupResult, null), try filesystem.lookup(
+        std.testing.io,
+        root_inode,
+        "source",
+    ));
+    try std.testing.expectEqual(@as(usize, 11), try filesystem.read(std.testing.io, victim, &contents, 0));
+    try std.testing.expectEqualStrings("victim-data", contents[0..11]);
+    try expectFilesystemCounts(&filesystem, std.testing.io, 7, 1);
+    try filesystem.releaseInode(std.testing.io, victim);
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, victim));
+    try expectFilesystemCounts(&filesystem, std.testing.io, 5, 0);
+
+    const directory = try filesystem.createDirectory(std.testing.io, root_inode, "cached", 0o755, 0, 0);
+    try filesystem.pinInode(std.testing.io, directory);
+    try filesystem.rmdir(std.testing.io, root_inode, "cached");
+    const retained_directory = try filesystem.stat(std.testing.io, directory);
+    try std.testing.expectEqual(metadata.Kind.directory, retained_directory.metadata.kind);
+    try std.testing.expectEqual(@as(u64, 0), retained_directory.nlink);
+    try expectFilesystemCounts(&filesystem, std.testing.io, 7, 1);
+    const replacement_directory = try filesystem.createDirectory(
+        std.testing.io,
+        root_inode,
+        "cached",
+        0o755,
+        0,
+        0,
+    );
+    try std.testing.expect(replacement_directory != directory);
+    try expectFilesystemCounts(&filesystem, std.testing.io, 9, 1);
+    try filesystem.unpinInode(std.testing.io, directory);
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, directory));
+    try expectFilesystemCounts(&filesystem, std.testing.io, 7, 0);
+}
+
+test "blob filesystem writable open recovers persisted orphans in one transaction" {
+    const blob_device = @import("blob_device.zig");
+    const storage_api = @import("v3/storage.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 32 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "orphan-recovery",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        blobs,
+        .legacy_raw,
+    );
+    var filesystem_open = true;
+    defer if (filesystem_open) filesystem.close(std.testing.io) catch {};
+    const root_inode = filesystem_format.root_inode;
+    const file_inode = try filesystem.createFile(std.testing.io, root_inode, "file", 0o600, 0, 0);
+    const directory_inode = try filesystem.createDirectory(std.testing.io, root_inode, "directory", 0o700, 0, 0);
+    try filesystem.retainInode(std.testing.io, file_inode);
+    try filesystem.pinInode(std.testing.io, directory_inode);
+    try filesystem.unlink(std.testing.io, root_inode, "file");
+    try filesystem.rmdir(std.testing.io, root_inode, "directory");
+    try expectFilesystemCounts(&filesystem, std.testing.io, 5, 2);
+    const orphan_generation = filesystem.root.generation;
+    try filesystem.close(std.testing.io);
+    filesystem_open = false;
+
+    const read_only_storage = try storage_api.Storage.openFile(
+        std.testing.io,
+        tmp.dir,
+        "orphan-recovery",
+        false,
+    );
+    const read_only_device = try blob_device.Device.init(
+        read_only_storage,
+        0,
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const read_only_blobs = try blob_store.Store.open(
+        std.testing.allocator,
+        std.testing.io,
+        read_only_device,
+    );
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, read_only_blobs, false);
+    filesystem_open = true;
+    try std.testing.expectEqual(orphan_generation, filesystem.root.generation);
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, file_inode));
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, directory_inode));
+    try expectFilesystemCounts(&filesystem, std.testing.io, 5, 2);
+    try filesystem.close(std.testing.io);
+    filesystem_open = false;
+
+    const writable_storage = try storage_api.Storage.openFile(
+        std.testing.io,
+        tmp.dir,
+        "orphan-recovery",
+        true,
+    );
+    const writable_device = try blob_device.Device.init(
+        writable_storage,
+        0,
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const writable_blobs = try blob_store.Store.open(
+        std.testing.allocator,
+        std.testing.io,
+        writable_device,
+    );
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, writable_blobs, true);
+    filesystem_open = true;
+    try std.testing.expectEqual(orphan_generation + 1, filesystem.root.generation);
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, file_inode));
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, directory_inode));
+    try expectFilesystemCounts(&filesystem, std.testing.io, 1, 0);
 }
 
 test "blob filesystem data failure rolls back the full transaction tail" {
@@ -1541,7 +1967,7 @@ test "blob filesystem freezes on ambiguous data publication" {
     const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
     backing_open = false;
     const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
-    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs, true);
     filesystem_open = true;
     var contents: [3]u8 = undefined;
     try std.testing.expectEqual(contents.len, try filesystem.read(std.testing.io, inode, &contents, 0));
@@ -1598,4 +2024,15 @@ fn expectValidGraph(filesystem: *Filesystem, io: Io) !void {
     const entries = try maps.loadAllAlloc(io, filesystem.root.metadata_root, filesystem.root.generation);
     defer metadata_map_store.deinitEntries(std.testing.allocator, entries);
     try validateGraph(std.testing.allocator, io, &filesystem.blobs, filesystem.root, entries);
+}
+
+fn expectFilesystemCounts(
+    filesystem: *Filesystem,
+    io: Io,
+    record_count: u64,
+    orphan_count: u64,
+) !void {
+    try std.testing.expectEqual(record_count, filesystem.root.record_count);
+    try std.testing.expectEqual(orphan_count, filesystem.root.orphan_count);
+    try expectValidGraph(filesystem, io);
 }
