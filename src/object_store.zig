@@ -173,13 +173,13 @@ pub const ChunkVersionIndex = struct {
         id: format.ObjectId,
         generation: u64,
         layout: ChunkLayout,
-    ) !void {
+    ) !bool {
         try self.mutex.lock(store.io);
         const key: ChunkVersionObjectKey = .{ .object_id = id, .layout = layout };
         if (self.objects.getPtr(key)) |object| {
             if (object.committed_generation == generation) {
                 self.mutex.unlock(store.io);
-                return;
+                return false;
             }
         }
         self.mutex.unlock(store.io);
@@ -187,6 +187,7 @@ pub const ChunkVersionIndex = struct {
         try self.mutex.lock(store.io);
         defer self.mutex.unlock(store.io);
         _ = try self.ensureLocked(store, id, generation, layout);
+        return true;
     }
 
     fn apply(
@@ -428,12 +429,14 @@ pub const Store = struct {
         const id = head.object_id;
         var temporary_buffer: [max_path_bytes:0]u8 = undefined;
         try removeIfPresent(self.lfs, try temporaryHeadPath(id, &temporary_buffer));
-        if (self.version_index) |index| {
-            try index.prepare(self, id, head.data_generation, try self.chunkLayout(id));
-        } else {
+        const clean_reservations = if (self.version_index) |index|
+            !(try index.prepare(self, id, head.data_generation, try self.chunkLayout(id)))
+        else value: {
             try self.removeUncommittedChunkVersions(id, head.data_generation);
-        }
-        try self.removeUnselectedReservationVersions(id, head.reservation_generation);
+            break :value false;
+        };
+        if (!clean_reservations)
+            try self.removeUnselectedReservationVersions(id, head.reservation_generation);
         return head;
     }
 
