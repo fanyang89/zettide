@@ -422,9 +422,7 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         const record = try self.requireRegularFile(io, inode);
-        var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
-        defer file.deinit();
-        return file.read(io, output, offset);
+        return blob_file.readSnapshot(self.allocator, io, &self.blobs, record.data.?, output, offset);
     }
 
     pub fn write(self: *Filesystem, io: Io, inode: u64, data: []const u8, offset: u64) !usize {

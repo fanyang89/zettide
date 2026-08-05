@@ -73,11 +73,11 @@ pub const MapStore = struct {
         self: *MapStore,
         io: Io,
         root: blob_map.PageRef,
+        root_generation: u64,
         logical_blob: u64,
         scratch: []u8,
     ) !?blob_format.BlobRef {
         if (scratch.len != blob_map.page_size) return error.InvalidBlobBuffer;
-        if (logical_blob < root.first_key or logical_blob > root.last_key) return null;
         var current = root;
         while (true) {
             try self.blobs.readDigestVerified(io, current.page, blob_map.page_size, &current.digest, scratch);
@@ -85,8 +85,10 @@ pub const MapStore = struct {
             const header = try blob_map.decodeHeader(page);
             if (header.level != current.level or
                 header.first_key != current.first_key or
-                header.last_key != current.last_key)
+                header.last_key != current.last_key or
+                (current.level == root.level and header.generation != root_generation))
                 return error.BlobMapReferenceMismatch;
+            if (logical_blob < current.first_key or logical_blob > current.last_key) return null;
             if (header.kind == .leaf) {
                 var entries: [blob_map.max_leaf_entries]blob_map.LeafEntry = undefined;
                 _ = try blob_map.decodeLeaf(page, &entries);
@@ -376,10 +378,10 @@ test "blob map store builds and queries multiple levels" {
 
     const scratch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
     defer std.testing.allocator.free(scratch);
-    const found = (try maps.lookup(std.testing.io, root, 84, scratch)).?;
+    const found = (try maps.lookup(std.testing.io, root, 7, 84, scratch)).?;
     try std.testing.expectEqual(@as(u64, 1042), found.slot);
-    try std.testing.expect((try maps.lookup(std.testing.io, root, 85, scratch)) == null);
-    try std.testing.expect((try maps.lookup(std.testing.io, root, 1000, scratch)) == null);
+    try std.testing.expect((try maps.lookup(std.testing.io, root, 7, 85, scratch)) == null);
+    try std.testing.expect((try maps.lookup(std.testing.io, root, 7, 1000, scratch)) == null);
 
     var appended: [40]blob_map.LeafEntry = undefined;
     for (&appended, 0..) |*entry, index| entry.* = .{
@@ -392,8 +394,8 @@ test "blob map store builds and queries multiple levels" {
     };
     const next_root = try maps.append(std.testing.io, root, 8, &appended, scratch);
     try std.testing.expectEqual(@as(u64, 239), next_root.last_key);
-    try std.testing.expectEqual(@as(u64, 2039), (try maps.lookup(std.testing.io, next_root, 239, scratch)).?.slot);
-    try std.testing.expectEqual(@as(u64, 1042), (try maps.lookup(std.testing.io, next_root, 84, scratch)).?.slot);
+    try std.testing.expectEqual(@as(u64, 2039), (try maps.lookup(std.testing.io, next_root, 8, 239, scratch)).?.slot);
+    try std.testing.expectEqual(@as(u64, 1042), (try maps.lookup(std.testing.io, next_root, 8, 84, scratch)).?.slot);
 }
 
 test "blob map store detects root digest mismatch" {
@@ -417,5 +419,5 @@ test "blob map store detects root digest mismatch" {
     root.digest[0] ^= 1;
     const scratch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
     defer std.testing.allocator.free(scratch);
-    try std.testing.expectError(error.BlobDigestMismatch, maps.lookup(std.testing.io, root, 0, scratch));
+    try std.testing.expectError(error.BlobDigestMismatch, maps.lookup(std.testing.io, root, 1, 0, scratch));
 }
