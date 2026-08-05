@@ -209,6 +209,18 @@ fn readAt(context_ptr: *anyopaque, io: Io, buffer: []u8, offset: u64) !usize {
     return context.device.readAt(buffer, offset);
 }
 
+fn readManyAt(
+    context_ptr: *anyopaque,
+    io: Io,
+    reads: []const storage_api.Read,
+    results: []storage_api.ReadResult,
+) !void {
+    const context = contextFromOpaque(context_ptr);
+    try context.mutex.lock(io);
+    defer context.mutex.unlock(io);
+    try context.device.readManyAt(reads, results);
+}
+
 fn writeAllAt(context_ptr: *anyopaque, io: Io, bytes: []const u8, offset: u64) !void {
     const context = contextFromOpaque(context_ptr);
     try context.mutex.lock(io);
@@ -355,6 +367,7 @@ fn addStats(total: *storage_api.TransportStats, value: storage_api.TransportStat
 const storage_vtable: storage_api.Storage.VTable = .{
     .same_identity = sameIdentity,
     .read_at = readAt,
+    .read_many_at = readManyAt,
     .write_all_at = writeAllAt,
     .write_all_many_at = writeAllManyAt,
     .sync_data = syncData,
@@ -438,10 +451,16 @@ test "Pool data storage supports aligned byte IO across protection modes" {
         };
         try storage.writeAllManyAt(std.testing.io, &writes);
         @memset(batch, 0);
-        try std.testing.expectEqual(
-            batch.len,
-            try storage.readAt(std.testing.io, batch, 4 * 1024 * 1024),
-        );
+        const reads = [_]storage_api.Read{
+            .{ .buffer = batch[0..io_alignment], .offset = 4 * 1024 * 1024 },
+            .{ .buffer = batch[io_alignment..], .offset = 4 * 1024 * 1024 + io_alignment },
+        };
+        var results: [reads.len]storage_api.ReadResult = undefined;
+        try storage.readManyAt(std.testing.io, &reads, &results);
+        for (results) |result| {
+            try std.testing.expectEqual(@as(?anyerror, null), result.failure);
+            try std.testing.expectEqual(@as(usize, io_alignment), result.amount);
+        }
         try std.testing.expect(std.mem.allEqual(u8, batch[0..io_alignment], 0x41));
         try std.testing.expect(std.mem.allEqual(u8, batch[io_alignment..], 0x42));
 

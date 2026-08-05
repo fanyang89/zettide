@@ -169,7 +169,7 @@ run_fio_case() {
         grep -q '^pool_transport_metrics ' "$mount_log"
         ! grep -q '^pipeline_metrics ' "$mount_log"
         ! grep -q '^member_transport_metrics ' "$mount_log"
-        if [[ $name == seq-write-1m-qd32-j1 ]]; then
+        if [[ $name == seq-write-1m-qd32-j1 || $name == seq-read-1m-qd32-j1 ]]; then
             peak_inflight=$(grep -o 'max_inflight=[0-9]*' "$mount_log")
             peak_inflight=${peak_inflight#max_inflight=}
             ((peak_inflight > 1))

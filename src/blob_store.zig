@@ -236,18 +236,56 @@ pub const Store = struct {
 
     /// Reads and verifies one complete slot. Returns the logical payload length.
     pub fn read(self: *Store, io: Io, reference: format.BlobRef, output: []u8) !usize {
+        const reads = [_]Read{.{ .reference = reference, .output = output }};
+        var results: [1]ReadResult = undefined;
+        try self.readMany(io, &reads, &results);
+        if (results[0].failure) |err| return err;
+        return results[0].amount;
+    }
+
+    pub const Read = struct {
+        reference: format.BlobRef,
+        output: []u8,
+    };
+
+    pub const ReadResult = blob_device.ReadResult;
+
+    pub fn readMany(self: *Store, io: Io, reads: []const Read, results: []ReadResult) !void {
+        if (reads.len == 0 or reads.len != results.len or reads.len > blob_device.max_batch)
+            return error.InvalidBlobBatch;
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         if (self.frozen) return error.BlobStoreFrozen;
-        try reference.validate(self.header.unit_count);
-        if (reference.endUnit() > self.staged_units) return error.UnpublishedBlobReference;
-        const stored_bytes: usize = @intCast(format.storedBytes(reference.valid_bytes));
-        if (output.len < stored_bytes) return error.InvalidBlobBuffer;
-        try self.device.readAt(io, output[0..stored_bytes], try format.slotOffset(reference.slot));
-        if (!std.mem.eql(u32, &reference.checksums, &format.payloadChecksums(output[0..reference.valid_bytes])))
-            return error.BlobChecksumMismatch;
-        @memset(output[reference.valid_bytes..], 0);
-        return reference.valid_bytes;
+        var device_reads: [blob_device.max_batch]blob_device.Read = undefined;
+        for (results) |*result| result.* = .{};
+        for (reads, device_reads[0..reads.len]) |request, *device_read| {
+            try request.reference.validate(self.header.unit_count);
+            if (request.reference.endUnit() > self.staged_units) return error.UnpublishedBlobReference;
+            const stored_bytes: usize = @intCast(format.storedBytes(request.reference.valid_bytes));
+            if (request.output.len < stored_bytes) return error.InvalidBlobBuffer;
+            device_read.* = .{
+                .buffer = request.output[0..stored_bytes],
+                .offset = try format.slotOffset(request.reference.slot),
+            };
+        }
+        try self.device.readManyAt(io, device_reads[0..reads.len], results);
+        for (reads, device_reads[0..reads.len], results) |request, device_read, *result| {
+            if (result.failure != null) continue;
+            if (result.amount != device_read.buffer.len) {
+                result.failure = error.UnexpectedEndOfBlobDevice;
+                continue;
+            }
+            if (!std.mem.eql(
+                u32,
+                &request.reference.checksums,
+                &format.payloadChecksums(request.output[0..request.reference.valid_bytes]),
+            )) {
+                result.failure = error.BlobChecksumMismatch;
+                continue;
+            }
+            @memset(request.output[request.reference.valid_bytes..], 0);
+            result.amount = request.reference.valid_bytes;
+        }
     }
 
     pub fn readDigestVerified(
@@ -486,6 +524,27 @@ test "blob store packs variable blobs into allocation units" {
         try std.testing.expectEqual(expected.len, amount);
         try std.testing.expectEqualSlices(u8, expected, output[0..amount]);
         try std.testing.expect(std.mem.allEqual(u8, output[amount..], 0));
+    }
+
+    const batch_output = try std.testing.allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(format.allocation_unit),
+        inputs.len * format.blob_size,
+    );
+    defer std.testing.allocator.free(batch_output);
+    @memset(batch_output, 0xff);
+    var reads: [inputs.len]Store.Read = undefined;
+    for (&reads, references, 0..) |*read_request, reference, index| read_request.* = .{
+        .reference = reference,
+        .output = batch_output[index * format.blob_size ..][0..format.blob_size],
+    };
+    var results: [inputs.len]Store.ReadResult = undefined;
+    try store.readMany(std.testing.io, &reads, &results);
+    for (inputs, reads, results) |expected, read_request, result| {
+        try std.testing.expectEqual(@as(?anyerror, null), result.failure);
+        try std.testing.expectEqual(expected.len, result.amount);
+        try std.testing.expectEqualSlices(u8, expected, read_request.output[0..result.amount]);
+        try std.testing.expect(std.mem.allEqual(u8, read_request.output[result.amount..], 0));
     }
 }
 

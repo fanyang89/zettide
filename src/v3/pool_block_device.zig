@@ -235,6 +235,24 @@ pub const PoolBlockDevice = struct {
         return buffer.len;
     }
 
+    pub fn readManyAt(
+        self: *PoolBlockDevice,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+    ) !void {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        for (results) |*result| result.* = .{};
+        for (reads) |request| try self.validateByteIo(request.offset, request.buffer.len);
+        if (self.kind == .unprotected)
+            return self.replicas[0].readDataMany(reads, results);
+        for (reads, results) |request, *result| {
+            result.amount = self.readAt(request.buffer, request.offset) catch |err| {
+                result.failure = err;
+                continue;
+            };
+        }
+    }
+
     pub fn writeAllAt(self: *PoolBlockDevice, data: []const u8, offset: u64) !void {
         if (self.isWriteFrozen()) return error.WriteFrozen;
         try self.validateByteIo(offset, data.len);

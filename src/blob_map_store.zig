@@ -140,6 +140,72 @@ pub const MapStore = struct {
         }
     }
 
+    pub const LoadedRange = struct {
+        end_key: u64,
+        count: usize,
+    };
+
+    pub fn loadRange(
+        self: *MapStore,
+        io: Io,
+        root: blob_map.PageRef,
+        root_generation: u64,
+        first_key: u64,
+        end_key: u64,
+        scratch: []u8,
+        output: []blob_map.LeafEntry,
+    ) !LoadedRange {
+        if (first_key >= end_key or end_key - first_key > output.len)
+            return error.InvalidBlobMapRange;
+        const boundary = self.blobs.committedUnits();
+        var current = root;
+        var maximum_generation = root_generation;
+        var is_root = true;
+        while (true) {
+            const header = try self.readPage(io, current, boundary, maximum_generation, is_root, scratch);
+            const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
+            is_root = false;
+            maximum_generation = header.generation;
+            if (first_key < current.first_key)
+                return .{ .end_key = @min(end_key, current.first_key), .count = 0 };
+            if (first_key > current.last_key)
+                return .{ .end_key = end_key, .count = 0 };
+            if (header.kind == .leaf) {
+                var entries: [blob_map.max_leaf_entries]blob_map.LeafEntry = undefined;
+                _ = try blob_map.decodeLeaf(page, &entries);
+                const leaf_end = std.math.add(u64, current.last_key, 1) catch end_key;
+                const range_end = @min(end_key, leaf_end);
+                var count: usize = 0;
+                for (entries[0..header.count]) |entry| {
+                    if (entry.logical_blob < first_key or entry.logical_blob >= range_end) continue;
+                    output[count] = entry;
+                    count += 1;
+                }
+                return .{ .end_key = range_end, .count = count };
+            }
+
+            var entries: [blob_map.max_internal_entries]blob_map.InternalEntry = undefined;
+            _ = try blob_map.decodeInternal(page, &entries);
+            var next_key = end_key;
+            var selected: ?blob_map.InternalEntry = null;
+            for (entries[0..header.count]) |entry| {
+                if (first_key >= entry.first_key and first_key <= entry.last_key) {
+                    selected = entry;
+                    break;
+                }
+                if (entry.first_key > first_key) next_key = @min(next_key, entry.first_key);
+            }
+            const child = selected orelse return .{ .end_key = next_key, .count = 0 };
+            current = try pageReference(.{
+                .page = child.child_page,
+                .level = header.level - 1,
+                .first_key = child.first_key,
+                .last_key = child.last_key,
+                .digest = child.child_digest,
+            }, boundary);
+        }
+    }
+
     /// The caller must serialize this multi-page staging operation with other writers.
     pub fn append(
         self: *MapStore,
