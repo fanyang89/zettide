@@ -27,6 +27,26 @@ pub const Filesystem = struct {
         kind: metadata.Kind,
     };
 
+    pub const InodeRecord = filesystem_format.InodeRecord;
+
+    pub const DirectoryEntry = struct {
+        inode: u64,
+        generation: u64,
+        kind: metadata.Kind,
+        spelling: []u8,
+    };
+
+    pub const DirectorySnapshot = struct {
+        allocator: std.mem.Allocator,
+        entries: []DirectoryEntry,
+
+        pub fn deinit(self: *DirectorySnapshot) void {
+            for (self.entries) |entry| self.allocator.free(entry.spelling);
+            self.allocator.free(self.entries);
+            self.* = undefined;
+        }
+    };
+
     pub const RenameResult = enum {
         renamed,
         same_object,
@@ -140,12 +160,117 @@ pub const Filesystem = struct {
         try self.blobs.close(io);
     }
 
-    pub fn stat(self: *Filesystem, io: Io, inode: u64) !filesystem_format.InodeRecord {
+    pub fn stat(self: *Filesystem, io: Io, inode: u64) !InodeRecord {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
-        try self.authorizeDirectInode(inode, record);
+        try self.authorizeDirectInode(io, inode, record);
         return record;
+    }
+
+    pub fn resolvePath(self: *Filesystem, io: Io, path: []const u8) !u64 {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        return self.resolvePathUnlocked(io, path);
+    }
+
+    pub fn statPath(self: *Filesystem, io: Io, path: []const u8) !InodeRecord {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        const inode = try self.resolvePathUnlocked(io, path);
+        const record = (try self.loadInode(io, inode)) orelse
+            return error.InvalidBlobFilesystemGraph;
+        if (record.nlink == 0) return error.InvalidBlobFilesystemGraph;
+        return record;
+    }
+
+    pub fn setMetadata(self: *Filesystem, io: Io, inode: u64, value: metadata.Metadata) !void {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        try self.requireMutable();
+        var record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        try self.authorizeDirectInode(io, inode, record);
+
+        var next = value;
+        next.kind = record.metadata.kind;
+        next.mode = (record.metadata.mode & 0o170000) | (value.mode & 0o7777);
+        next.birthtime_ns = record.metadata.birthtime_ns;
+        if (std.meta.eql(record.metadata, next)) return;
+
+        record.metadata = next;
+        try self.publishInodeMetadata(io, inode, record);
+    }
+
+    pub fn patchMetadata(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        patch: metadata.Patch,
+    ) !metadata.Metadata {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        try self.requireMutable();
+        var record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        try self.authorizeDirectInode(io, inode, record);
+
+        const previous = record.metadata;
+        if (patch.mode) |mode|
+            record.metadata.mode = (record.metadata.mode & 0o170000) | (mode & 0o7777);
+        if (patch.uid) |uid| record.metadata.uid = uid;
+        if (patch.gid) |gid| record.metadata.gid = gid;
+        if (patch.atime_ns) |atime_ns| record.metadata.atime_ns = atime_ns;
+        if (patch.mtime_ns) |mtime_ns| record.metadata.mtime_ns = mtime_ns;
+        if (patch.update_ctime) record.metadata.ctime_ns = timestamp(io);
+        if (std.meta.eql(previous, record.metadata)) return record.metadata;
+
+        try self.publishInodeMetadata(io, inode, record);
+        return record.metadata;
+    }
+
+    pub fn snapshotDirectory(self: *Filesystem, io: Io, inode: u64) !DirectorySnapshot {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        _ = try self.requireDirectDirectory(io, inode);
+
+        const prefix = try filesystem_format.dentryPrefix(inode);
+        var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
+        const stored = try maps.loadPrefixAlloc(io, self.root.metadata_root, self.root.generation, &prefix);
+        defer metadata_map_store.deinitEntries(self.allocator, stored);
+        const entries = try self.allocator.alloc(DirectoryEntry, stored.len);
+        errdefer self.allocator.free(entries);
+        var initialized: usize = 0;
+        errdefer for (entries[0..initialized]) |entry| self.allocator.free(entry.spelling);
+        for (stored, entries) |stored_entry, *entry| {
+            const key = switch (try filesystem_format.decodeKey(stored_entry.key)) {
+                .dentry => |value| value,
+                else => return error.InvalidBlobFilesystemGraph,
+            };
+            if (key.parent_inode != inode) return error.InvalidBlobFilesystemGraph;
+            const dentry = filesystem_format.decodeDentry(stored_entry.value) catch
+                return error.InvalidBlobFilesystemGraph;
+            filesystem_format.validateDentryIdentity(
+                self.allocator,
+                self.root.name_profile,
+                key.lookup_name,
+                dentry,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidBlobFilesystemGraph,
+            };
+            const child = (try self.loadInode(io, dentry.child_inode)) orelse
+                return error.InvalidBlobFilesystemGraph;
+            if (child.nlink == 0 or child.generation != dentry.child_generation or
+                child.metadata.kind != dentry.kind)
+                return error.InvalidBlobFilesystemGraph;
+            entry.* = .{
+                .inode = dentry.child_inode,
+                .generation = dentry.child_generation,
+                .kind = dentry.kind,
+                .spelling = try self.allocator.dupe(u8, dentry.spelling),
+            };
+            initialized += 1;
+        }
+        return .{ .allocator = self.allocator, .entries = entries };
     }
 
     /// Retains an inode while an open backend handle refers to it.
@@ -177,7 +302,7 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
-        try self.authorizeDirectInode(inode, record);
+        try self.authorizeDirectInode(io, inode, record);
         const entry = try self.runtimeReferences(kind).getOrPut(inode);
         if (!entry.found_existing) entry.value_ptr.* = 0;
         entry.value_ptr.* = std.math.add(u64, entry.value_ptr.*, 1) catch
@@ -251,11 +376,17 @@ pub const Filesystem = struct {
     }
 
     fn authorizeDirectInode(
-        self: *const Filesystem,
+        self: *Filesystem,
+        io: Io,
         inode: u64,
         record: filesystem_format.InodeRecord,
     ) !void {
-        if (record.nlink == 0 and !self.inodeIsRetained(inode)) return error.FileNotFound;
+        if (record.nlink != 0) return;
+        if (!self.inodeIsRetained(inode)) return error.FileNotFound;
+        const orphan = (try self.loadOrphan(io, inode)) orelse
+            return error.InvalidBlobFilesystemGraph;
+        if (orphan.generation != record.generation or orphan.kind != record.metadata.kind)
+            return error.InvalidBlobFilesystemGraph;
     }
 
     pub fn lookup(self: *Filesystem, io: Io, parent_inode: u64, name: []const u8) !?LookupResult {
@@ -334,7 +465,7 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
-        try self.authorizeDirectInode(inode, record);
+        try self.authorizeDirectInode(io, inode, record);
         if (record.metadata.kind != .symlink) return error.InvalidArgument;
         var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
         defer file.deinit();
@@ -784,6 +915,50 @@ pub const Filesystem = struct {
             return error.InvalidBlobFilesystemGraph;
     }
 
+    fn resolvePathUnlocked(self: *Filesystem, io: Io, path: []const u8) !u64 {
+        if (path.len == 0 or path[0] != '/' or std.mem.indexOfScalar(u8, path, 0) != null)
+            return error.InvalidArgument;
+        if (std.mem.eql(u8, path, "/")) return filesystem_format.root_inode;
+
+        var validation = std.mem.splitScalar(u8, path[1..], '/');
+        while (validation.next()) |component| {
+            if (component.len == 0 or std.mem.eql(u8, component, ".") or
+                std.mem.eql(u8, component, ".."))
+                return error.InvalidArgument;
+        }
+
+        var inode = filesystem_format.root_inode;
+        var components = std.mem.splitScalar(u8, path[1..], '/');
+        while (components.next()) |component| {
+            _ = try self.requireDirectory(io, inode);
+            var prepared = try PreparedName.init(self.allocator, self.root.name_profile, component);
+            defer prepared.deinit(self.allocator);
+            const dentry = (try self.lookupPrepared(io, inode, prepared.key)) orelse
+                return error.FileNotFound;
+            const child = (try self.loadInode(io, dentry.inode)) orelse
+                return error.InvalidBlobFilesystemGraph;
+            if (child.nlink == 0 or child.generation != dentry.generation or
+                child.metadata.kind != dentry.kind)
+                return error.InvalidBlobFilesystemGraph;
+            inode = dentry.inode;
+        }
+        return inode;
+    }
+
+    fn publishInodeMetadata(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        record: InodeRecord,
+    ) !void {
+        var mutations: MutationAccumulator = .init(self.allocator);
+        defer mutations.deinit();
+        try mutations.putInode(inode, record);
+        var next_root = self.root;
+        next_root.generation = try nextGeneration(self.root.generation);
+        try self.publish(io, next_root, &mutations, null);
+    }
+
     fn requireDirectory(self: *Filesystem, io: Io, inode: u64) !filesystem_format.InodeRecord {
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
         if (record.metadata.kind != .directory) return error.NotDirectory;
@@ -791,9 +966,16 @@ pub const Filesystem = struct {
         return record;
     }
 
+    fn requireDirectDirectory(self: *Filesystem, io: Io, inode: u64) !InodeRecord {
+        const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        try self.authorizeDirectInode(io, inode, record);
+        if (record.metadata.kind != .directory) return error.NotDirectory;
+        return record;
+    }
+
     fn requireRegularFile(self: *Filesystem, io: Io, inode: u64) !filesystem_format.InodeRecord {
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
-        try self.authorizeDirectInode(inode, record);
+        try self.authorizeDirectInode(io, inode, record);
         return switch (record.metadata.kind) {
             .file => record,
             .directory => error.IsDirectory,
@@ -2016,6 +2198,325 @@ test "blob filesystem pre-publication failure discards only its staged tail" {
         filesystem_format.root_inode,
         "file",
     ));
+    try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem resolves strict portable and legacy paths without following symlinks" {
+    const blob_device = @import("blob_device.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const portable_device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "portable-paths",
+        32 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    const portable_blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, portable_device);
+    var portable = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        portable_blobs,
+        .portable_v1,
+    );
+    defer portable.close(std.testing.io) catch {};
+
+    const root_inode = filesystem_format.root_inode;
+    const directory = try portable.createDirectory(std.testing.io, root_inode, "Alpha", 0o755, 1, 2);
+    const nested = try portable.createFile(std.testing.io, directory, "e\u{301}.TXT", 0o640, 3, 4);
+    const symlink = try portable.createSymlink(std.testing.io, root_inode, "Shortcut", "/Alpha", 5, 6);
+    try std.testing.expectEqual(root_inode, try portable.resolvePath(std.testing.io, "/"));
+    try std.testing.expectEqual(directory, try portable.resolvePath(std.testing.io, "/alpha"));
+    try std.testing.expectEqual(nested, try portable.resolvePath(std.testing.io, "/ALPHA/\u{e9}.txt"));
+    try std.testing.expectEqual(metadata.Kind.file, (try portable.statPath(std.testing.io, "/Alpha/\u{e9}.TXT")).metadata.kind);
+    try std.testing.expectEqual(symlink, try portable.resolvePath(std.testing.io, "/shortcut"));
+    try std.testing.expectError(error.NotDirectory, portable.resolvePath(std.testing.io, "/shortcut/child"));
+
+    for ([_][]const u8{
+        "",
+        "relative",
+        "//",
+        "/Alpha/",
+        "/Alpha//file",
+        "/.",
+        "/..",
+        "/Alpha/./file",
+        "/Alpha/../file",
+        "/missing/../file",
+        "/Alpha/\x00file",
+    }) |path| try std.testing.expectError(error.InvalidArgument, portable.resolvePath(std.testing.io, path));
+
+    try portable.retainInode(std.testing.io, nested);
+    try portable.unlink(std.testing.io, directory, "\u{e9}.txt");
+    try std.testing.expectError(error.FileNotFound, portable.resolvePath(std.testing.io, "/Alpha/\u{e9}.txt"));
+    const replacement = try portable.createFile(std.testing.io, directory, "\u{e9}.txt", 0o600, 7, 8);
+    try std.testing.expect(replacement != nested);
+    try std.testing.expectEqual(replacement, try portable.resolvePath(std.testing.io, "/Alpha/e\u{301}.TXT"));
+    try std.testing.expectEqual(@as(u64, 0), (try portable.stat(std.testing.io, nested)).nlink);
+    try portable.releaseInode(std.testing.io, nested);
+    try std.testing.expectError(error.FileNotFound, portable.stat(std.testing.io, nested));
+    try expectValidGraph(&portable, std.testing.io);
+
+    const legacy_device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "legacy-paths",
+        16 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    const legacy_blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, legacy_device);
+    var legacy = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        legacy_blobs,
+        .legacy_raw,
+    );
+    defer legacy.close(std.testing.io) catch {};
+    const mixed = try legacy.createFile(std.testing.io, root_inode, "Mixed", 0o644, 0, 0);
+    try std.testing.expectEqual(mixed, try legacy.resolvePath(std.testing.io, "/Mixed"));
+    try std.testing.expectError(error.FileNotFound, legacy.resolvePath(std.testing.io, "/mixed"));
+    try expectValidGraph(&legacy, std.testing.io);
+}
+
+test "blob filesystem inode metadata mutations preserve invariants and persist" {
+    const blob_device = @import("blob_device.zig");
+    const storage_api = @import("v3/storage.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 64 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "metadata-mutations",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        blobs,
+        .portable_v1,
+    );
+    var filesystem_open = true;
+    defer if (filesystem_open) filesystem.close(std.testing.io) catch {};
+
+    const root_inode = filesystem_format.root_inode;
+    const inode = try filesystem.createFile(std.testing.io, root_inode, "Metadata", 0o640, 1, 2);
+    const initial = try filesystem.stat(std.testing.io, inode);
+    var replacement = initial.metadata;
+    replacement.kind = .directory;
+    replacement.mode = 0o040777;
+    replacement.uid = 10;
+    replacement.gid = 20;
+    replacement.atime_ns = 30;
+    replacement.mtime_ns = 40;
+    replacement.ctime_ns = 50;
+    replacement.birthtime_ns = 60;
+    replacement.windows_attributes = 70;
+    const generation_before_set = filesystem.root.generation;
+    try filesystem.setMetadata(std.testing.io, inode, replacement);
+    const set = (try filesystem.stat(std.testing.io, inode)).metadata;
+    try std.testing.expectEqual(generation_before_set + 1, filesystem.root.generation);
+    try std.testing.expectEqual(metadata.Kind.file, set.kind);
+    try std.testing.expectEqual(@as(u32, 0o100777), set.mode);
+    try std.testing.expectEqual(@as(u32, 10), set.uid);
+    try std.testing.expectEqual(@as(i64, 50), set.ctime_ns);
+    try std.testing.expectEqual(initial.metadata.birthtime_ns, set.birthtime_ns);
+    try std.testing.expectEqual(@as(u32, 70), set.windows_attributes);
+
+    const generation_before_set_noop = filesystem.root.generation;
+    try filesystem.setMetadata(std.testing.io, inode, replacement);
+    try std.testing.expectEqual(generation_before_set_noop, filesystem.root.generation);
+    const patched = try filesystem.patchMetadata(std.testing.io, inode, .{
+        .mode = 0o040600,
+        .uid = 11,
+        .gid = 21,
+        .atime_ns = 31,
+        .mtime_ns = 41,
+        .update_ctime = false,
+    });
+    try std.testing.expectEqual(@as(u32, 0o100600), patched.mode);
+    try std.testing.expectEqual(@as(i64, 50), patched.ctime_ns);
+    try std.testing.expectEqual(initial.metadata.birthtime_ns, patched.birthtime_ns);
+    const generation_before_patch_noop = filesystem.root.generation;
+    try std.testing.expectEqualDeep(
+        patched,
+        try filesystem.patchMetadata(std.testing.io, inode, .{ .update_ctime = false }),
+    );
+    try std.testing.expectEqual(generation_before_patch_noop, filesystem.root.generation);
+    const ctime_updated = try filesystem.patchMetadata(std.testing.io, inode, .{ .uid = patched.uid });
+    try std.testing.expect(ctime_updated.ctime_ns != patched.ctime_ns);
+    try std.testing.expectEqual(generation_before_patch_noop + 1, filesystem.root.generation);
+
+    const orphan = try filesystem.createFile(std.testing.io, root_inode, "Orphan", 0o600, 3, 4);
+    try filesystem.retainInode(std.testing.io, orphan);
+    try filesystem.unlink(std.testing.io, root_inode, "Orphan");
+    const orphan_metadata = try filesystem.patchMetadata(std.testing.io, orphan, .{
+        .uid = 77,
+        .mtime_ns = 88,
+        .update_ctime = false,
+    });
+    try std.testing.expectEqual(@as(u32, 77), orphan_metadata.uid);
+    try std.testing.expectEqual(@as(i64, 88), orphan_metadata.mtime_ns);
+    try std.testing.expectEqual(@as(u64, 0), (try filesystem.stat(std.testing.io, orphan)).nlink);
+    try std.testing.expectError(error.FileNotFound, filesystem.resolvePath(std.testing.io, "/Orphan"));
+
+    const generation_before_rejections = filesystem.root.generation;
+    filesystem.writable = false;
+    try std.testing.expectError(error.ReadOnlyFilesystem, filesystem.setMetadata(std.testing.io, inode, set));
+    try std.testing.expectError(
+        error.ReadOnlyFilesystem,
+        filesystem.patchMetadata(std.testing.io, inode, .{ .update_ctime = false }),
+    );
+    filesystem.writable = true;
+    filesystem.frozen = true;
+    try std.testing.expectError(error.BlobFilesystemFrozen, filesystem.setMetadata(std.testing.io, inode, set));
+    filesystem.frozen = false;
+    try std.testing.expectEqual(generation_before_rejections, filesystem.root.generation);
+
+    const stale = try filesystem.createFile(std.testing.io, root_inode, "Stale", 0o600, 0, 0);
+    try filesystem.unlink(std.testing.io, root_inode, "Stale");
+    try std.testing.expectError(error.FileNotFound, filesystem.setMetadata(std.testing.io, stale, set));
+    try std.testing.expectError(
+        error.FileNotFound,
+        filesystem.patchMetadata(std.testing.io, stale, .{ .uid = 1 }),
+    );
+    try expectValidGraph(&filesystem, std.testing.io);
+
+    try filesystem.releaseInode(std.testing.io, orphan);
+    const persisted = try filesystem.createFile(std.testing.io, root_inode, "Persisted", 0o644, 5, 6);
+    const persisted_metadata = try filesystem.patchMetadata(std.testing.io, persisted, .{
+        .mode = 0o666,
+        .uid = 55,
+        .gid = 66,
+        .atime_ns = 77,
+        .mtime_ns = 88,
+        .update_ctime = false,
+    });
+    try expectValidGraph(&filesystem, std.testing.io);
+    try filesystem.close(std.testing.io);
+    filesystem_open = false;
+
+    const backing = try tmp.dir.openFile(std.testing.io, "metadata-mutations", .{ .mode = .read_write });
+    var backing_open = true;
+    defer if (backing_open) backing.close(std.testing.io);
+    const storage = storage_api.Storage.initOwned(backing, device_size, .regular_file, 1, false);
+    const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
+    backing_open = false;
+    const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs, true);
+    filesystem_open = true;
+    try std.testing.expectEqualDeep(
+        persisted_metadata,
+        (try filesystem.statPath(std.testing.io, "/persisted")).metadata,
+    );
+    try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem directory snapshots own sorted canonical entries and persist" {
+    const blob_device = @import("blob_device.zig");
+    const storage_api = @import("v3/storage.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 64 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "directory-snapshots",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        blobs,
+        .portable_v1,
+    );
+    var filesystem_open = true;
+    defer if (filesystem_open) filesystem.close(std.testing.io) catch {};
+
+    const root_inode = filesystem_format.root_inode;
+    const directory = try filesystem.createDirectory(std.testing.io, root_inode, "Entries", 0o755, 0, 0);
+    const zulu = try filesystem.createFile(std.testing.io, directory, "Zulu", 0o600, 0, 0);
+    const alpha = try filesystem.createDirectory(std.testing.io, directory, "alpha", 0o700, 0, 0);
+    const bravo = try filesystem.createFifo(std.testing.io, directory, "Bravo", 0o600, 0, 0);
+    const accent = try filesystem.createFile(std.testing.io, directory, "e\u{301}.TXT", 0o600, 0, 0);
+    var snapshot = try filesystem.snapshotDirectory(std.testing.io, directory);
+    defer snapshot.deinit();
+    try std.testing.expectEqual(@as(usize, 4), snapshot.entries.len);
+    try std.testing.expectEqualStrings("alpha", snapshot.entries[0].spelling);
+    try std.testing.expectEqual(alpha, snapshot.entries[0].inode);
+    try std.testing.expectEqual(metadata.Kind.directory, snapshot.entries[0].kind);
+    try std.testing.expectEqualStrings("Bravo", snapshot.entries[1].spelling);
+    try std.testing.expectEqual(bravo, snapshot.entries[1].inode);
+    try std.testing.expectEqualStrings("Zulu", snapshot.entries[2].spelling);
+    try std.testing.expectEqual(zulu, snapshot.entries[2].inode);
+    try std.testing.expectEqualStrings("\u{e9}.TXT", snapshot.entries[3].spelling);
+    try std.testing.expectEqual(accent, snapshot.entries[3].inode);
+    for (snapshot.entries) |entry|
+        try std.testing.expectEqual((try filesystem.stat(std.testing.io, entry.inode)).generation, entry.generation);
+
+    try std.testing.expectEqual(
+        Filesystem.RenameResult.renamed,
+        try filesystem.rename(std.testing.io, directory, "alpha", directory, "Aardvark", false),
+    );
+    try filesystem.unlink(std.testing.io, directory, "Zulu");
+    _ = try filesystem.createFile(std.testing.io, directory, "Delta", 0o600, 0, 0);
+    try std.testing.expectEqualStrings("alpha", snapshot.entries[0].spelling);
+    try std.testing.expectEqual(alpha, snapshot.entries[0].inode);
+    try std.testing.expectEqualStrings("Zulu", snapshot.entries[2].spelling);
+    try std.testing.expectEqual(zulu, snapshot.entries[2].inode);
+
+    var current = try filesystem.snapshotDirectory(std.testing.io, directory);
+    defer current.deinit();
+    try std.testing.expectEqual(@as(usize, 4), current.entries.len);
+    try std.testing.expectEqualStrings("Aardvark", current.entries[0].spelling);
+    try std.testing.expectEqualStrings("Bravo", current.entries[1].spelling);
+    try std.testing.expectEqualStrings("Delta", current.entries[2].spelling);
+    try std.testing.expectEqualStrings("\u{e9}.TXT", current.entries[3].spelling);
+
+    const empty = try filesystem.createDirectory(std.testing.io, root_inode, "Empty", 0o755, 0, 0);
+    var empty_snapshot = try filesystem.snapshotDirectory(std.testing.io, empty);
+    defer empty_snapshot.deinit();
+    try std.testing.expectEqual(@as(usize, 0), empty_snapshot.entries.len);
+    try std.testing.expectError(error.NotDirectory, filesystem.snapshotDirectory(std.testing.io, accent));
+    const stale = try filesystem.createDirectory(std.testing.io, root_inode, "Stale", 0o755, 0, 0);
+    try filesystem.rmdir(std.testing.io, root_inode, "Stale");
+    try std.testing.expectError(error.FileNotFound, filesystem.snapshotDirectory(std.testing.io, stale));
+    const retained = try filesystem.createDirectory(std.testing.io, root_inode, "Retained", 0o755, 0, 0);
+    try filesystem.pinInode(std.testing.io, retained);
+    try filesystem.rmdir(std.testing.io, root_inode, "Retained");
+    var retained_snapshot = try filesystem.snapshotDirectory(std.testing.io, retained);
+    try std.testing.expectEqual(@as(usize, 0), retained_snapshot.entries.len);
+    retained_snapshot.deinit();
+    try filesystem.unpinInode(std.testing.io, retained);
+    try std.testing.expectError(error.FileNotFound, filesystem.snapshotDirectory(std.testing.io, retained));
+    try expectValidGraph(&filesystem, std.testing.io);
+
+    try filesystem.close(std.testing.io);
+    filesystem_open = false;
+    const backing = try tmp.dir.openFile(std.testing.io, "directory-snapshots", .{ .mode = .read_write });
+    var backing_open = true;
+    defer if (backing_open) backing.close(std.testing.io);
+    const storage = storage_api.Storage.initOwned(backing, device_size, .regular_file, 1, false);
+    const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
+    backing_open = false;
+    const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs, true);
+    filesystem_open = true;
+    var reopened = try filesystem.snapshotDirectory(
+        std.testing.io,
+        try filesystem.resolvePath(std.testing.io, "/entries"),
+    );
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(usize, 4), reopened.entries.len);
+    try std.testing.expectEqualStrings("Aardvark", reopened.entries[0].spelling);
+    try std.testing.expectEqualStrings("Bravo", reopened.entries[1].spelling);
+    try std.testing.expectEqualStrings("Delta", reopened.entries[2].spelling);
+    try std.testing.expectEqualStrings("\u{e9}.TXT", reopened.entries[3].spelling);
     try expectValidGraph(&filesystem, std.testing.io);
 }
 
