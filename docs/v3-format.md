@@ -118,7 +118,19 @@ Open-mode policy is evaluated separately:
 | Read-only-compatible | Accept | Reject |
 | Incompatible | Reject | Reject |
 
-The initial supported masks are zero.
+The incompatible feature allocation is:
+
+| Bit | Meaning |
+|---:|---|
+| 0 | Dynamic Pool topology and layout |
+| 1 | Catalog data mode |
+| 2 | Blob Pool filesystem; absence selects LittleFS |
+
+All three incompatible bits are supported; the compatible and read-only-compatible supported masks
+remain zero. The Blob Pool filesystem bit requires the Dynamic Pool bit and conflicts with the
+catalog data bit; a static header carrying the Blob marker is invalid. Because the filesystem bit
+is incompatible, readers predating this allocation reject Blob Pool members while continuing to
+accept unchanged LittleFS headers.
 
 ## Subformat Policy
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const blob_format = @import("../blob_format.zig");
 const codec = @import("codec.zig");
 const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
@@ -16,12 +17,32 @@ const region_alignment: u64 = 1024 * 1024;
 
 pub const Options = struct {
     protection: pool_policy.Protection = .replicated,
+    filesystem: member_format.PoolFilesystem = .littlefs,
     label: []const u8 = "Zettide",
     chunk_size: u32 = default_chunk_size,
     control_bytes: u64 = default_control_bytes,
     metadata_bytes: u64 = default_metadata_bytes,
     member_create_options: []const member_api.CreateOptions = &.{},
 };
+
+pub fn minimumMemberBytes(options: Options) !u64 {
+    const data_offset = try dataOffset(options);
+    const minimum_logical_capacity: u64 = switch (options.filesystem) {
+        .littlefs => 1,
+        .blob => blob_format.minimum_device_size,
+    };
+    const required_bytes = std.math.add(u64, data_offset, minimum_logical_capacity) catch
+        return error.InvalidGeometry;
+    return codec.alignForward(required_bytes, options.chunk_size);
+}
+
+fn dataOffset(options: Options) !u64 {
+    const control: codec.Region = .{ .offset = 64 * 1024, .length = options.control_bytes };
+    const metadata_offset = try codec.alignForward(try control.end(), region_alignment);
+    const metadata_end = std.math.add(u64, metadata_offset, options.metadata_bytes) catch
+        return error.InvalidGeometry;
+    return codec.alignForward(metadata_end, region_alignment);
+}
 
 pub const ProvisionedPool = struct {
     allocator: std.mem.Allocator,
@@ -90,8 +111,9 @@ pub fn create(
         .offset = try codec.alignForward(try control.end(), region_alignment),
         .length = options.metadata_bytes,
     };
-    const data_offset = try codec.alignForward(try metadata.end(), region_alignment);
+    const data_offset = try dataOffset(options);
     if (data_offset % options.chunk_size != 0) return error.InvalidGeometry;
+    const minimum_member_bytes = try minimumMemberBytes(options);
     var member_bytes: [pool_topology.max_member_count]u64 = undefined;
     var minimum_data_bytes: u64 = std.math.maxInt(u64);
     var minimum_io_size: u32 = 512;
@@ -105,10 +127,16 @@ pub fn create(
         member_bytes[index] = storage.capacity() / options.chunk_size * options.chunk_size;
         if (storage.kind == .regular_file and member_bytes[index] != storage.capacity())
             return error.UnexpectedMemberLength;
-        if (member_bytes[index] <= data_offset)
+        if (member_bytes[index] < minimum_member_bytes)
             return error.StorageTooSmall;
         minimum_data_bytes = @min(minimum_data_bytes, member_bytes[index] - data_offset);
     }
+    const logical_capacity = switch (options.filesystem) {
+        .littlefs => minimum_data_bytes,
+        .blob => minimum_data_bytes / blob_format.blob_size * blob_format.blob_size,
+    };
+    if (options.filesystem == .blob and logical_capacity < blob_format.minimum_device_size)
+        return error.StorageTooSmall;
 
     var set_id: [16]u8 = undefined;
     try randomNonZeroId(io, &set_id);
@@ -140,7 +168,8 @@ pub fn create(
         const descriptor = descriptors[index];
         header.* = .{
             .header_sequence = 1,
-            .incompat_features = member_format.dynamic_pool_incompat_feature,
+            .incompat_features = member_format.dynamic_pool_incompat_feature |
+                (if (options.filesystem == .blob) member_format.blob_filesystem_incompat_feature else 0),
             .set_id = set_id,
             .member_id = descriptor.member_id,
             .member_slot = descriptor.slot,
@@ -148,7 +177,7 @@ pub fn create(
             .role_flags = descriptor.role_flags,
             .created_ns = created_ns,
             .member_bytes = member_bytes[index],
-            .logical_capacity = minimum_data_bytes,
+            .logical_capacity = logical_capacity,
             .control = control,
             .metadata = metadata,
             .data = .{ .offset = data_offset, .length = member_bytes[index] - data_offset },
@@ -208,6 +237,7 @@ fn containsMemberId(members: []const pool_topology.Member, id: [16]u8) bool {
 }
 
 test "provisioning validates all file storages then creates a reopenable pool" {
+    try std.testing.expectEqual(member_format.PoolFilesystem.littlefs, (Options{}).filesystem);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const names = [_][]const u8{ "a", "b", "c" };
@@ -221,6 +251,7 @@ test "provisioning validates all file storages then creates a reopenable pool" {
         .partial => return error.UnexpectedPartialCreation,
     };
     try std.testing.expectEqual(@as(usize, 3), provisioned.members.len);
+    try std.testing.expectEqual(member_format.PoolFilesystem.littlefs, member_format.poolFilesystem(provisioned.members[0].header()));
     try std.testing.expectEqual(pool_layout.Kind.replicated, provisioned.genesis.layout.kind);
     try std.testing.expectEqual(@as(u64, 240 * 4096), provisioned.members[0].header().control.length);
     try std.testing.expectEqual(@as(u64, 1024 * 1024), provisioned.members[0].header().metadata.offset);
@@ -238,6 +269,98 @@ test "provisioning validates all file storages then creates a reopenable pool" {
     defer reopened.deinit();
     try std.testing.expect(reopened.controlWriteReady() != null);
     try std.testing.expectEqual(pool_policy.DataAccess.read_write, reopened.dataAccess());
+}
+
+test "provisioning marks every Blob Pool member" {
+    inline for (.{
+        .{ .protection = pool_policy.Protection.unprotected, .member_count = 1 },
+        .{ .protection = pool_policy.Protection.replicated, .member_count = 3 },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const names = [_][]const u8{ "a", "b", "c" };
+        var storages: [case.member_count]storage_api.Storage = undefined;
+        for (names[0..case.member_count], 0..) |name, index|
+            storages[index] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, name, 8 * 1024 * 1024);
+
+        const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
+            .protection = case.protection,
+            .filesystem = .blob,
+        });
+        var provisioned = switch (outcome) {
+            .complete => |value| value,
+            .partial => return error.UnexpectedPartialCreation,
+        };
+        defer provisioned.deinit();
+        for (provisioned.members) |*member|
+            try std.testing.expectEqual(member_format.PoolFilesystem.blob, member_format.poolFilesystem(member.header()));
+        try provisioned.close();
+
+        for (names[0..case.member_count]) |name| {
+            const file = try tmp.dir.openFile(std.testing.io, name, .{ .mode = .read_only });
+            defer file.close(std.testing.io);
+            for ([_]u64{ 0, member_format.encoded_size }) |offset| {
+                var bytes: [member_format.encoded_size]u8 = undefined;
+                _ = try file.readPositionalAll(std.testing.io, &bytes, offset);
+                const header = try member_format.decode(&bytes);
+                try std.testing.expectEqual(member_format.PoolFilesystem.blob, member_format.poolFilesystem(header));
+            }
+        }
+    }
+}
+
+test "Blob Pool provisioning requires minimum Blob logical capacity" {
+    try std.testing.expectEqual(@as(u64, 3 * 1024 * 1024), try minimumMemberBytes(.{}));
+    try std.testing.expectEqual(@as(u64, 4 * 1024 * 1024), try minimumMemberBytes(.{ .filesystem = .blob }));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storages = [_]storage_api.Storage{
+        try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 3 * 1024 * 1024),
+    };
+    try std.testing.expectError(
+        error.StorageTooSmall,
+        create(std.testing.io, std.testing.allocator, &storages, .{
+            .protection = .unprotected,
+            .filesystem = .blob,
+        }),
+    );
+}
+
+test "Blob Pool logical capacity is common and Blob-aligned with 4KiB chunks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const names = [_][]const u8{ "a", "b", "c" };
+    const sizes = [_]u64{
+        4 * 1024 * 1024 + 4096,
+        5 * 1024 * 1024 + 2 * 4096,
+        6 * 1024 * 1024 + 3 * 4096,
+    };
+    var storages: [names.len]storage_api.Storage = undefined;
+    for (names, sizes, 0..) |name, size, index|
+        storages[index] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, name, size);
+
+    const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
+        .filesystem = .blob,
+        .chunk_size = 4096,
+    });
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    for (provisioned.members, sizes) |*member, size| {
+        try std.testing.expectEqual(size, member.header().member_bytes);
+        try std.testing.expectEqual(blob_format.minimum_device_size, member.header().logical_capacity);
+        try std.testing.expectEqual(@as(u64, 0), member.header().logical_capacity % blob_format.blob_size);
+    }
+}
+
+test "Blob minimum member geometry reports overflow" {
+    try std.testing.expectError(error.RegionOverflow, minimumMemberBytes(.{
+        .filesystem = .blob,
+        .control_bytes = std.math.maxInt(u64) - 4095,
+    }));
 }
 
 test "provisioning reserves genesis plus one control transaction" {

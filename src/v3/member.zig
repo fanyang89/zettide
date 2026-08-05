@@ -641,6 +641,8 @@ pub const Member = struct {
     }
 
     fn activateCatalogDataLocked(self: *Member) !void {
+        if (member_format.poolFilesystem(self.selected_header) == .blob)
+            return error.BlobFilesystemCatalogDataConflict;
         self.catalog_mode_active.store(true, .release);
         if (member_format.hasCatalogData(self.selected_header)) {
             if (!self.degraded) return;
@@ -1479,7 +1481,7 @@ test "open selects independent headers and enforces policy and exact length" {
     try createRawMember(tmp.dir, "member", unsupported, unsupported, unsupported.member_bytes);
     try std.testing.expectError(error.UnsupportedMetadataFormat, openAt(std.testing.io, tmp.dir, "member", .read_only));
     unsupported = header;
-    unsupported.incompat_features = 4;
+    unsupported.incompat_features = 1 << 3;
     try createRawMember(tmp.dir, "member", unsupported, unsupported, unsupported.member_bytes);
     try std.testing.expectError(error.UnsupportedIncompatFeature, openAt(std.testing.io, tmp.dir, "member", .read_only));
     unsupported = header;
@@ -1770,6 +1772,43 @@ test "catalog mode persists across standalone reopen" {
     try reopened_data_claim.write(0, "leased");
     try reopened_data_claim.sync();
     try reopened_data_claim.release();
+}
+
+test "Blob member catalog activation fails without changing writable state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var input = try testPoolCreate();
+    input[0].incompat_features |= member_format.blob_filesystem_incompat_feature;
+    var member = try createPoolAt(std.testing.io, tmp.dir, "member", input[0], input[1], .{});
+    defer member.deinit();
+
+    const original_header = member.header();
+    const original_source = member.source();
+    const original_degraded = member.redundancyDegraded();
+    var header_a_before: [member_format.encoded_size]u8 = undefined;
+    var header_b_before: [member_format.encoded_size]u8 = undefined;
+    _ = try member.storage.readAt(std.testing.io, &header_a_before, 0);
+    _ = try member.storage.readAt(std.testing.io, &header_b_before, member_format.encoded_size);
+
+    var claim = try member.claimCatalog();
+    try std.testing.expectError(error.BlobFilesystemCatalogDataConflict, claim.activateCatalogData());
+    try claim.release();
+
+    try std.testing.expect(!member.catalog_mode_active.load(.acquire));
+    try std.testing.expectEqual(member_format.OpenMode.writable, member.mode());
+    try std.testing.expect(!member.isFrozen());
+    try std.testing.expectEqualDeep(original_header, member.header());
+    try std.testing.expectEqual(original_source, member.source());
+    try std.testing.expectEqual(original_degraded, member.redundancyDegraded());
+    var header_a_after: [member_format.encoded_size]u8 = undefined;
+    var header_b_after: [member_format.encoded_size]u8 = undefined;
+    _ = try member.storage.readAt(std.testing.io, &header_a_after, 0);
+    _ = try member.storage.readAt(std.testing.io, &header_b_after, member_format.encoded_size);
+    try std.testing.expectEqualSlices(u8, &header_a_before, &header_a_after);
+    try std.testing.expectEqualSlices(u8, &header_b_before, &header_b_after);
+    try member.write(.metadata, 0, "metadata");
+    try member.write(.data, 0, "data");
+    try member.sync();
 }
 
 test "catalog mode survives interruption after the first header sync" {

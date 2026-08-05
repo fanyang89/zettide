@@ -8,6 +8,7 @@ const metadata = @import("metadata.zig");
 const object_format = @import("object_format.zig");
 const object_store = @import("object_store.zig");
 const pool_block_device = @import("v3/pool_block_device.zig");
+const member_format = @import("v3/member_format.zig");
 const pool_member_set = @import("v3/pool_member_set.zig");
 const ReplicaEndpoint = @import("v3/replica_endpoint.zig").ReplicaEndpoint;
 const pool_provision = @import("v3/pool_provision.zig");
@@ -199,6 +200,7 @@ pub const Volume = struct {
             return error.PoolWriteUnavailable;
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(set, &member_pointers);
+        try requireLittleFsPoolMembers(member_pointers[0..member_count]);
         var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
             io,
@@ -216,6 +218,7 @@ pub const Volume = struct {
         label: []const u8,
         options: InitializeOptions,
     ) !void {
+        try requireLittleFsPoolMembers(members);
         if (options.redo_journal != null) return error.RedoJournalRequiresFileBacking;
         if (options.file_io == .io_uring) return error.FileIoRequiresFileBacking;
         const capacity = members[0].header().logical_capacity;
@@ -307,9 +310,10 @@ pub const Volume = struct {
         if (set.dataAccess() == .unavailable or (writable and set.dataAccess() != .read_write))
             return error.PoolDataUnavailable;
         if (writable and set.controlWriteReady() == null) return error.PoolDataUnavailable;
-        const header = try inspectPoolHeader(io, set);
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(set, &member_pointers);
+        try requireLittleFsPoolMembers(member_pointers[0..member_count]);
+        const header = try inspectPoolHeader(io, set);
         var crypto_context: ?*volume_crypto.Context = null;
         errdefer if (crypto_context) |context| {
             context.deinit();
@@ -381,6 +385,7 @@ pub const Volume = struct {
         const authority = set.authority() orelse return error.MissingAuthority;
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(set, &member_pointers);
+        try requireLittleFsPoolMembers(member_pointers[0..member_count]);
         var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
             io,
@@ -394,6 +399,7 @@ pub const Volume = struct {
         const authority = set.authority() orelse return error.MissingAuthority;
         var member_pointers: [3]*@import("v3/member.zig").Member = undefined;
         const member_count = try collectPoolMembers(set, &member_pointers);
+        try requireLittleFsPoolMembers(member_pointers[0..member_count]);
         var replica_endpoints: [3]ReplicaEndpoint = undefined;
         var reader = try pool_block_device.PoolBlockDevice.initHeaderReader(
             io,
@@ -2358,6 +2364,13 @@ fn makeReplicaEndpoints(
     return output[0..members.len];
 }
 
+fn requireLittleFsPoolMembers(members: []const *@import("v3/member.zig").Member) !void {
+    for (members) |member| {
+        if (member_format.poolFilesystem(member.header()) != .littlefs)
+            return error.UnsupportedPoolFilesystem;
+    }
+}
+
 const accounting_metadata_blocks: u64 = 32;
 
 const directory_name_capacity = 256;
@@ -2569,4 +2582,62 @@ test "ordinary writes rely on littlefs capacity without a full-volume preflight"
         .chunk_count = 1,
         .reserved = false,
     });
+}
+
+test "LittleFS Pool APIs reject Blob Pools without changing pool data" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storages = [_]storage_api.Storage{
+        try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 4 * 1024 * 1024),
+    };
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{
+        .protection = .unprotected,
+        .filesystem = .blob,
+    });
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+
+    const data_length = provisioned.members[0].header().data.length;
+    const before = try std.testing.allocator.alloc(u8, data_length);
+    defer std.testing.allocator.free(before);
+    const after = try std.testing.allocator.alloc(u8, data_length);
+    defer std.testing.allocator.free(after);
+    try provisioned.members[0].read(.data, 0, before);
+    try std.testing.expectError(
+        error.UnsupportedPoolFilesystem,
+        Volume.initializePool(std.testing.io, &provisioned, "Blob"),
+    );
+    try provisioned.members[0].read(.data, 0, after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    try provisioned.close();
+
+    const locations = [_]pool_member_set.Location{.{ .parent = tmp.dir, .basename = "member" }};
+    var set = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+    defer set.deinit();
+    try std.testing.expectError(
+        error.UnsupportedPoolFilesystem,
+        Volume.canInitializePool(std.testing.io, &set),
+    );
+    try std.testing.expectError(
+        error.UnsupportedPoolFilesystem,
+        Volume.initializePoolSet(std.testing.io, &set, "Blob"),
+    );
+    const member = (try set.memberAt(0)).?;
+    try member.read(.data, 0, after);
+    try std.testing.expectEqualSlices(u8, before, after);
+
+    try std.testing.expectError(
+        error.UnsupportedPoolFilesystem,
+        Volume.openPool(std.testing.io, std.testing.allocator, &set, true),
+    );
+    try std.testing.expectEqual(@as(usize, 0), set.suppliedCount());
+
+    const file = try tmp.dir.openFile(std.testing.io, "member", .{ .mode = .read_only });
+    defer file.close(std.testing.io);
+    const amount = try file.readPositionalAll(std.testing.io, after, 2 * 1024 * 1024);
+    try std.testing.expectEqual(after.len, amount);
+    try std.testing.expectEqualSlices(u8, before, after);
 }

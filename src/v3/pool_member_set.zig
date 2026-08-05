@@ -414,6 +414,21 @@ pub const PoolMemberSet = struct {
         if (!samePoolGeometry(source.header(), target.header())) return error.InconsistentMemberGeometry;
     }
 
+    pub fn validateBootstrapTargetGeometry(
+        self: *const PoolMemberSet,
+        target: member_format.Header,
+    ) !void {
+        const ready = self.control_write_state orelse return error.WriteQuorumUnavailable;
+        var found_source = false;
+        for (ready.active_members[0..self.supplied_count], 0..) |active, index| {
+            if (!active) continue;
+            const member = if (self.members[index]) |*value| value else continue;
+            found_source = true;
+            if (!samePoolGeometry(member.header(), target)) return error.InconsistentMemberGeometry;
+        }
+        if (!found_source) return error.MemberUnavailable;
+    }
+
     pub fn noteCommittedGeneration(
         self: *PoolMemberSet,
         record: control_record.Record,
@@ -792,7 +807,8 @@ pub const PoolMemberSet = struct {
 };
 
 fn samePoolGeometry(a: member_format.Header, b: member_format.Header) bool {
-    return a.logical_capacity == b.logical_capacity and
+    return member_format.poolFilesystem(a) == member_format.poolFilesystem(b) and
+        a.logical_capacity == b.logical_capacity and
         a.control.offset == b.control.offset and a.control.length == b.control.length and
         a.metadata.offset == b.metadata.offset and a.metadata.length == b.metadata.length and
         a.data.offset == b.data.offset and
@@ -932,6 +948,7 @@ pub fn openAdministrativeRecovery(
 }
 
 const pool_genesis = @import("pool_genesis_payload.zig");
+const pool_provision = @import("pool_provision.zig");
 
 fn id(value: u8) [16]u8 {
     return @splat(value);
@@ -985,6 +1002,22 @@ fn createTestPoolWithControlBytes(
     try member.close();
 }
 
+fn rewriteFilesystemMarker(dir: std.Io.Dir, name: []const u8, filesystem: member_format.PoolFilesystem) !void {
+    var member = try member_api.openAt(std.testing.io, dir, name, .writable);
+    var header = member.header();
+    try member.close();
+    switch (filesystem) {
+        .littlefs => header.incompat_features &= ~member_format.blob_filesystem_incompat_feature,
+        .blob => header.incompat_features |= member_format.blob_filesystem_incompat_feature,
+    }
+    const bytes = try member_format.encode(header);
+    const file = try dir.openFile(std.testing.io, name, .{ .mode = .read_write });
+    defer file.close(std.testing.io);
+    try file.writePositionalAll(std.testing.io, &bytes, 0);
+    try file.writePositionalAll(std.testing.io, &bytes, member_format.encoded_size);
+    try file.sync(std.testing.io);
+}
+
 test "one-member pool opens with one control voter" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1023,6 +1056,49 @@ test "duplicate locations and legacy members are not admitted" {
         error.DuplicateMemberLocation,
         open(std.testing.io, std.testing.allocator, &duplicate, .read_only),
     );
+}
+
+test "authority geometry rejects mixed Pool filesystem members" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const names = [_][]const u8{ "a", "b", "c" };
+    var storages: [names.len]storage_api.Storage = undefined;
+    for (names, 0..) |name, index|
+        storages[index] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, name, 8 * 1024 * 1024);
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{});
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    try provisioned.close();
+    try rewriteFilesystemMarker(tmp.dir, "c", .blob);
+
+    const locations = [_]Location{
+        .{ .parent = tmp.dir, .basename = "a" },
+        .{ .parent = tmp.dir, .basename = "b" },
+        .{ .parent = tmp.dir, .basename = "c" },
+    };
+    try std.testing.expectError(
+        error.InconsistentMemberGeometry,
+        open(std.testing.io, std.testing.allocator, &locations, .read_only),
+    );
+}
+
+test "catalog bootstrap target geometry rejects a mixed Pool filesystem" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try createTestPool(tmp.dir, "source", .unprotected);
+    try createTestPool(tmp.dir, "target", .unprotected);
+    try rewriteFilesystemMarker(tmp.dir, "target", .blob);
+
+    const source = try member_api.openAt(std.testing.io, tmp.dir, "source", .writable);
+    const target = try member_api.openAt(std.testing.io, tmp.dir, "target", .writable);
+    var set: PoolMemberSet = .{ .supplied_count = 2 };
+    set.members[0] = source;
+    set.members[1] = target;
+    defer set.deinit();
+    try std.testing.expectError(error.InconsistentMemberGeometry, set.validateCatalogTargetGeometry(0, 1));
 }
 
 test "administrative recovery reserves a checkpoint slot" {

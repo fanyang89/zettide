@@ -1,6 +1,8 @@
 const std = @import("std");
 const linux_block = @import("linux_block_device.zig");
+const member_format = @import("member_format.zig");
 const pool_policy = @import("pool_policy.zig");
+const pool_provision = @import("pool_provision.zig");
 const storage_api = @import("storage.zig");
 const name_profile = @import("../name_profile.zig");
 
@@ -8,6 +10,7 @@ pub const Options = struct {
     protection: pool_policy.Protection,
     label: []const u8,
     name_profile: name_profile.Profile = .legacy_raw,
+    filesystem: member_format.PoolFilesystem = .littlefs,
 };
 
 pub const Plan = struct {
@@ -20,7 +23,7 @@ pub const Plan = struct {
 
     pub fn ready(self: *const Plan) bool {
         for (self.devices, self.contains_data) |device, contains_data| {
-            if (!deviceReady(device) or contains_data) return false;
+            if (!deviceReadyForFilesystem(device, self.options.filesystem) or contains_data) return false;
         }
         return true;
     }
@@ -152,7 +155,11 @@ pub fn acquire(plan: *const Plan, io: std.Io, allocator: std.mem.Allocator) ![]s
 }
 
 pub fn deviceReady(device: linux_block.DeviceInfo) bool {
-    const minimum_capacity = 3 * 1024 * 1024;
+    return deviceReadyForFilesystem(device, .littlefs);
+}
+
+pub fn deviceReadyForFilesystem(device: linux_block.DeviceInfo, filesystem: member_format.PoolFilesystem) bool {
+    const minimum_capacity = pool_provision.minimumMemberBytes(.{ .filesystem = filesystem }) catch return false;
     return device.preflightEligible() and
         std.math.isPowerOfTwo(device.logical_sector_size) and
         device.logical_sector_size <= 4096 and
@@ -170,7 +177,13 @@ fn validateRequest(paths: []const []const u8, options: Options) !void {
 
 fn computeToken(devices: []const linux_block.DeviceInfo, contains_data: []const bool, options: Options) [32]u8 {
     var hasher = std.crypto.hash.Blake3.init(.{});
-    hasher.update("zettide-linux-pool-plan-v1\x00");
+    if (options.filesystem == .littlefs) {
+        hasher.update("zettide-linux-pool-plan-v1\x00");
+    } else {
+        hasher.update("zettide-linux-pool-plan-v2\x00");
+        hasher.update(@tagName(options.filesystem));
+        hasher.update("\x00");
+    }
     var plan_header: [10]u8 = undefined;
     std.mem.writeInt(u64, plan_header[0..8], options.label.len, .little);
     plan_header[8] = @intFromEnum(std.meta.activeTag(options.protection));
@@ -216,11 +229,46 @@ test "plan token binds device order geometry and options" {
     const reversed = [_]linux_block.DeviceInfo{ second, first };
     const contains_data = [_]bool{ false, false };
     const options: Options = .{ .protection = .unprotected, .label = "pool" };
+    const legacy_token = computeToken(&devices, &contains_data, options);
+    var expected_legacy_token: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(
+        &expected_legacy_token,
+        "15462a01afe240a6751f24a1e69d222bd5b1fb3129319809e30f9c8d89d6ebcc",
+    );
+    try std.testing.expectEqualSlices(u8, &expected_legacy_token, &legacy_token);
+    try std.testing.expectEqualSlices(
+        u8,
+        &legacy_token,
+        &computeToken(&devices, &contains_data, .{
+            .protection = .unprotected,
+            .label = "pool",
+            .filesystem = .littlefs,
+        }),
+    );
     try std.testing.expect(!std.mem.eql(
         u8,
         &computeToken(&devices, &contains_data, options),
         &computeToken(&reversed, &contains_data, options),
     ));
+    const blob_options: Options = .{
+        .protection = .unprotected,
+        .label = "pool",
+        .filesystem = .blob,
+    };
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &legacy_token,
+        &computeToken(&devices, &contains_data, blob_options),
+    ));
+    try std.testing.expectEqualSlices(
+        u8,
+        &computeToken(&devices, &contains_data, blob_options),
+        &computeToken(&devices, &contains_data, .{
+            .protection = .unprotected,
+            .label = "pool",
+            .filesystem = .blob,
+        }),
+    );
     try std.testing.expect(!std.mem.eql(
         u8,
         &computeToken(&devices, &contains_data, options),
@@ -273,9 +321,26 @@ test "device readiness rejects unsupported geometry" {
         .eligibility = .{},
     };
     try std.testing.expect(deviceReady(device));
+    try std.testing.expect(!deviceReadyForFilesystem(device, .blob));
     device.capacity_bytes -= 1;
     try std.testing.expect(!deviceReady(device));
     device.capacity_bytes += 1;
     device.logical_sector_size = 8192;
     try std.testing.expect(!deviceReady(device));
+}
+
+test "Blob device readiness enforces Blob logical capacity" {
+    var device: linux_block.DeviceInfo = .{
+        .id = .{ .major = 8, .minor = 0 },
+        .disk_sequence = 10,
+        .capacity_bytes = try pool_provision.minimumMemberBytes(.{ .filesystem = .blob }),
+        .logical_sector_size = 512,
+        .sysfs_path = undefined,
+        .sysfs_path_len = 0,
+        .eligibility = .{},
+    };
+    try std.testing.expect(deviceReadyForFilesystem(device, .blob));
+    device.capacity_bytes -= 1;
+    try std.testing.expect(!deviceReadyForFilesystem(device, .blob));
+    try std.testing.expect(deviceReady(device));
 }

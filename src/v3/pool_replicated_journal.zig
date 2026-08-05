@@ -1442,6 +1442,7 @@ pub const ReplicatedJournal = struct {
             if (std.mem.eql(u8, &member.header().member_id, &evidence.target_member_id))
                 return error.MemberAlreadyPresent;
         }
+        try self.set.validateBootstrapTargetGeometry(header);
 
         var prepared: [max_control_participant_count]?journal_api.PreparedAppend = @splat(null);
         var target_count: u16 = 0;
@@ -3129,6 +3130,169 @@ test "one-member coordinator commits generation and membership then reopens" {
     var resumed = try open(std.testing.io, &recovered);
     defer resumed.deinit();
     try std.testing.expectEqual(@as(u16, 2), (try resumed.resumeRollover()).active_count);
+}
+
+test "member bootstrap rejects mixed Pool filesystem markers without mutation" {
+    inline for (.{
+        .{ .authority = member_format.PoolFilesystem.littlefs, .target = member_format.PoolFilesystem.blob },
+        .{ .authority = member_format.PoolFilesystem.blob, .target = member_format.PoolFilesystem.littlefs },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const members = [_]pool_topology.Member{.{
+            .member_id = id(2),
+            .slot = 7,
+            .control_role = pool_topology.voter_role,
+            .role_flags = member_format.known_role_flags,
+        }};
+        const payload: pool_genesis.GenesisPayload = .{
+            .topology = try pool_topology.Topology.init(id(1), 1, @splat(0), &members),
+            .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
+        };
+        var source_header: member_format.Header = .{
+            .header_sequence = 1,
+            .incompat_features = member_format.dynamic_pool_incompat_feature,
+            .set_id = payload.topology.set_id,
+            .member_id = id(2),
+            .member_slot = 7,
+            .member_count = 1,
+            .created_ns = 1,
+            .member_bytes = 3 * 1024 * 1024,
+            .logical_capacity = 1024 * 1024,
+            .control = .{ .offset = 64 * 1024, .length = 8 * control_record.encoded_size },
+            .metadata = .{ .offset = 1024 * 1024, .length = 256 * 1024 },
+            .data = .{ .offset = 2 * 1024 * 1024, .length = 1024 * 1024 },
+            .metadata_block_size = 4096,
+            .metadata_read_size = 512,
+            .metadata_program_size = 512,
+            .chunk_size = 1024 * 1024,
+            .metadata_format_version = 1,
+            .object_format_version = 1,
+            .layout_format_version = member_format.dynamic_layout_format_version,
+            .control_record_format_version = 1,
+            .label = try member_format.Label.init("bootstrap-filesystem-source"),
+            .genesis_topology_digest = try pool_topology.digest(payload.topology),
+        };
+        if (case.authority == .blob)
+            source_header.incompat_features |= member_format.blob_filesystem_incompat_feature;
+        var source = try member_api.createPoolAt(std.testing.io, tmp.dir, "source", source_header, payload, .{});
+        try source.close();
+
+        const locations = [_]pool_member_set.Location{.{ .parent = tmp.dir, .basename = "source" }};
+        var set = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+        defer set.deinit();
+        var coordinator = try open(std.testing.io, &set);
+        defer coordinator.deinit();
+        const initial_authority = set.authority().?;
+        const joining_members = [_]pool_topology.Member{
+            initial_authority.topology.members[0],
+            .{ .member_id = id(3), .slot = 19, .state = .joining },
+        };
+        const joining_topology = try pool_topology.Topology.init(
+            initial_authority.topology.set_id,
+            initial_authority.topology.epoch + 1,
+            try pool_topology.digest(initial_authority.topology),
+            &joining_members,
+        );
+        var membership_prepare: control_record.Record = .{
+            .kind = control_record.membership_prepare_kind,
+            .local_sequence = 99,
+            .membership_epoch = joining_topology.epoch,
+            .writer_term = 1,
+            .generation = initial_authority.generation,
+            .set_id = initial_authority.topology.set_id,
+            .member_id = id(8),
+            .mount_session_id = id(6),
+            .transaction_id = id(7),
+            .previous_record_digest = @splat(0x11),
+            .previous_history_digest = @splat(0x22),
+            .data_root_digest = initial_authority.data_root_digest,
+            .topology_digest = try pool_topology.digest(joining_topology),
+            .layout_digest = try pool_layout.digest(initial_authority.layout),
+            .payload = try membership.makePreparePayload(.{
+                .mode = .normal,
+                .topology = joining_topology,
+            }),
+        };
+        membership_prepare.history_digest = try control_record.historyDigest(membership_prepare);
+        _ = try coordinator.commitMembership(membership_prepare);
+        const authority_before = set.authority().?;
+        const control_before = set.controlWriteReady().?;
+        const source_member = (try set.memberAt(0)).?;
+        var headers_before: [2 * member_format.encoded_size]u8 = undefined;
+        var journal_before: [8 * control_record.encoded_size]u8 = undefined;
+        _ = try source_member.storage.readAt(std.testing.io, &headers_before, 0);
+        _ = try source_member.storage.readAt(std.testing.io, &journal_before, source_header.control.offset);
+
+        const evidence: member_bootstrap.Evidence = .{
+            .target_member_id = id(3),
+            .target_slot = 19,
+            .topology = authority_before.topology,
+            .layout = authority_before.layout,
+        };
+        var target_header = source_header;
+        target_header.member_id = id(3);
+        target_header.member_slot = 19;
+        target_header.member_count = 2;
+        target_header.role_flags = member_format.data_role;
+        target_header.created_ns = 2;
+        target_header.label = try member_format.Label.init("bootstrap-filesystem-target");
+        target_header.genesis_topology_digest = try pool_topology.digest(authority_before.topology);
+        switch (case.target) {
+            .littlefs => target_header.incompat_features &= ~member_format.blob_filesystem_incompat_feature,
+            .blob => target_header.incompat_features |= member_format.blob_filesystem_incompat_feature,
+        }
+        try std.testing.expectEqual(case.authority, member_format.poolFilesystem(source_member.header()));
+        try std.testing.expectEqual(case.target, member_format.poolFilesystem(target_header));
+        try std.testing.expect(case.authority != case.target);
+        var bootstrap_record: control_record.Record = .{
+            .kind = control_record.member_bootstrap_kind,
+            .local_sequence = 1,
+            .membership_epoch = authority_before.membership_epoch,
+            .writer_term = authority_before.writer_term,
+            .generation = authority_before.generation,
+            .set_id = authority_before.topology.set_id,
+            .member_id = target_header.member_id,
+            .mount_session_id = @splat(0),
+            .transaction_id = id(10),
+            .previous_record_digest = @splat(0),
+            .previous_history_digest = authority_before.history_digest,
+            .data_root_digest = authority_before.data_root_digest,
+            .topology_digest = try pool_topology.digest(authority_before.topology),
+            .layout_digest = try pool_layout.digest(authority_before.layout),
+            .payload = try member_bootstrap.makePayload(evidence),
+        };
+        bootstrap_record.history_digest = try control_record.historyDigest(bootstrap_record);
+        try std.testing.expectError(
+            error.InconsistentMemberGeometry,
+            coordinator.bootstrapMember(
+                std.testing.allocator,
+                .{ .parent = tmp.dir, .basename = "target" },
+                target_header,
+                bootstrap_record,
+                .{},
+            ),
+        );
+        try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "target", .{}));
+
+        try std.testing.expectEqualDeep(authority_before, set.authority().?);
+        try std.testing.expectEqualDeep(control_before, set.controlWriteReady().?);
+        try std.testing.expect(!coordinator.isFrozen());
+        try std.testing.expectEqual(@as(usize, 1), set.suppliedCount());
+        var headers_after: [headers_before.len]u8 = undefined;
+        var journal_after: [journal_before.len]u8 = undefined;
+        _ = try source_member.storage.readAt(std.testing.io, &headers_after, 0);
+        _ = try source_member.storage.readAt(std.testing.io, &journal_after, source_header.control.offset);
+        try std.testing.expectEqualSlices(u8, &headers_before, &headers_after);
+        try std.testing.expectEqualSlices(u8, &journal_before, &journal_after);
+
+        coordinator.close();
+        try set.close();
+        var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
+        defer reopened.deinit();
+        try std.testing.expectEqualDeep(authority_before, reopened.authority().?);
+        try std.testing.expectEqual(case.authority, member_format.poolFilesystem((try reopened.memberAt(0)).?.header()));
+    }
 }
 
 test "administrative recovery converts a lost two-of-two quorum to one-of-one" {
