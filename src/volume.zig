@@ -70,6 +70,7 @@ pub const Volume = struct {
     root_directory_identity: ?object_format.ObjectId = null,
     object_pins: std.AutoHashMap(object_format.ObjectId, u64),
     chunk_cache: object_store.ChunkCache,
+    chunk_version_index: object_store.ChunkVersionIndex,
     reservation_blocks: u64 = 0,
     object_transaction_mutex: Io.Mutex,
     view_lock: Io.RwLock,
@@ -358,6 +359,7 @@ pub const Volume = struct {
         result.root_directory_identity = null;
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.chunk_cache = .{};
+        result.chunk_version_index = .init(std.heap.c_allocator);
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
         result.view_lock = .init;
@@ -459,6 +461,7 @@ pub const Volume = struct {
         result.root_directory_identity = null;
         result.object_pins = std.AutoHashMap(object_format.ObjectId, u64).init(std.heap.c_allocator);
         result.chunk_cache = .{};
+        result.chunk_version_index = .init(std.heap.c_allocator);
         result.reservation_blocks = 0;
         result.object_transaction_mutex = .init;
         result.view_lock = .init;
@@ -622,6 +625,7 @@ pub const Volume = struct {
         self.object_pins.deinit();
         self.link_counts.deinit();
         self.chunk_cache.deinit(std.heap.c_allocator);
+        self.chunk_version_index.deinit();
         if (self.crypto_context) |context| {
             context.deinit();
             self.crypto_allocator.?.destroy(context);
@@ -1837,7 +1841,12 @@ pub const Volume = struct {
     }
 
     fn store(self: *Volume) object_store.Store {
-        return .{ .io = self.io, .lfs = &self.lfs, .cache = &self.chunk_cache };
+        return .{
+            .io = self.io,
+            .lfs = &self.lfs,
+            .cache = &self.chunk_cache,
+            .version_index = &self.chunk_version_index,
+        };
     }
 
     fn ensureWritesAllowed(self: *const Volume) !void {
@@ -2523,6 +2532,7 @@ test "create, write, reopen, and check volume" {
         metrics.block_device.littlefs_program_bytes,
         metrics.block_device.backing_write_bytes,
     );
+    try std.testing.expectEqual(@as(usize, 5), try volume.writeFile(&file, "HELLO", 0));
     try volume.syncFile(&file);
     try volume.closeFile(&file);
 
@@ -2537,7 +2547,7 @@ test "create, write, reopen, and check volume" {
     try std.testing.expectError(error.AccessDenied, volume.fallocateFile(&reopened, 0, 1));
     var buffer: [5]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 5), try volume.readFile(&reopened, &buffer, 0));
-    try std.testing.expectEqualStrings("hello", &buffer);
+    try std.testing.expectEqualStrings("HELLO", &buffer);
     const read_metrics = volume.pipelineMetrics();
     try std.testing.expectEqual(@as(u64, 1), read_metrics.logical_read_calls);
     try std.testing.expectEqual(@as(u64, 5), read_metrics.logical_read_bytes);

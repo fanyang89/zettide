@@ -24,6 +24,7 @@ const ChunkVersion = struct {
 const ChunkChange = struct {
     old_size: u32,
     new_size: u32,
+    old_version: ?ChunkVersion = null,
 };
 
 const ChunkData = struct {
@@ -123,6 +124,143 @@ pub const ChunkCache = struct {
     }
 };
 
+const ChunkVersionObjectKey = struct {
+    object_id: format.ObjectId,
+    layout: ChunkLayout,
+};
+
+const ChunkVersionObjectIndex = struct {
+    committed_generation: u64,
+    versions: std.AutoHashMap(u64, ChunkVersion),
+
+    fn deinit(self: *ChunkVersionObjectIndex) void {
+        self.versions.deinit();
+    }
+};
+
+pub const ChunkVersionIndex = struct {
+    mutex: Io.Mutex = .init,
+    objects: std.AutoHashMap(ChunkVersionObjectKey, ChunkVersionObjectIndex),
+
+    pub fn init(allocator: std.mem.Allocator) ChunkVersionIndex {
+        return .{ .objects = .init(allocator) };
+    }
+
+    pub fn deinit(self: *ChunkVersionIndex) void {
+        var iterator = self.objects.valueIterator();
+        while (iterator.next()) |object| object.deinit();
+        self.objects.deinit();
+    }
+
+    fn find(
+        self: *ChunkVersionIndex,
+        store: Store,
+        id: format.ObjectId,
+        index: u64,
+        generation: u64,
+        layout: ChunkLayout,
+    ) !?ChunkVersion {
+        try self.mutex.lock(store.io);
+        defer self.mutex.unlock(store.io);
+        const object = try self.ensureLocked(store, id, generation, layout);
+        const version = object.versions.get(index) orelse return null;
+        return if (version.generation <= generation) version else null;
+    }
+
+    fn prepare(
+        self: *ChunkVersionIndex,
+        store: Store,
+        id: format.ObjectId,
+        generation: u64,
+        layout: ChunkLayout,
+    ) !void {
+        try self.mutex.lock(store.io);
+        const key: ChunkVersionObjectKey = .{ .object_id = id, .layout = layout };
+        if (self.objects.getPtr(key)) |object| {
+            if (object.committed_generation == generation) {
+                self.mutex.unlock(store.io);
+                return;
+            }
+        }
+        self.mutex.unlock(store.io);
+        try store.removeUncommittedChunkVersions(id, generation);
+        try self.mutex.lock(store.io);
+        defer self.mutex.unlock(store.io);
+        _ = try self.ensureLocked(store, id, generation, layout);
+    }
+
+    fn apply(
+        self: *ChunkVersionIndex,
+        store: Store,
+        id: format.ObjectId,
+        generation: u64,
+        layout: ChunkLayout,
+        changes: []const ChunkReplacement,
+    ) !void {
+        try self.mutex.lock(store.io);
+        defer self.mutex.unlock(store.io);
+        const object = try self.ensureLocked(store, id, generation - 1, layout);
+        try object.versions.ensureUnusedCapacity(@intCast(changes.len));
+        for (changes) |change| object.versions.putAssumeCapacity(change.index, change.new_version);
+        object.committed_generation = generation;
+    }
+
+    fn invalidate(self: *ChunkVersionIndex, io: Io, id: format.ObjectId, layout: ChunkLayout) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.objects.fetchRemove(.{ .object_id = id, .layout = layout })) |removed| {
+            var object = removed.value;
+            object.deinit();
+        }
+    }
+
+    fn ensureLocked(
+        self: *ChunkVersionIndex,
+        store: Store,
+        id: format.ObjectId,
+        generation: u64,
+        layout: ChunkLayout,
+    ) !*ChunkVersionObjectIndex {
+        const key: ChunkVersionObjectKey = .{ .object_id = id, .layout = layout };
+        if (self.objects.getPtr(key)) |object| {
+            if (object.committed_generation == generation) return object;
+            var removed = self.objects.fetchRemove(key).?;
+            removed.value.deinit();
+        }
+
+        var object: ChunkVersionObjectIndex = .{
+            .committed_generation = generation,
+            .versions = .init(self.objects.allocator),
+        };
+        errdefer object.deinit();
+        var path_buffer: [max_path_bytes:0]u8 = undefined;
+        var directory: c.lfs_dir_t = std.mem.zeroes(c.lfs_dir_t);
+        try checkLfs(c.lfs_dir_open(store.lfs, &directory, try chunkDirectoryPathWithLayout(id, layout, &path_buffer)));
+        defer _ = c.lfs_dir_close(store.lfs, &directory);
+        while (true) {
+            var info: c.struct_lfs_info = undefined;
+            const result = c.lfs_dir_read(store.lfs, &directory, &info);
+            try checkLfs(result);
+            if (result == 0) break;
+            const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+            var version = parseChunkVersion(name) catch continue;
+            version.layout = layout;
+            if (version.generation > generation) continue;
+            const entry = try object.versions.getOrPut(version.index);
+            if (!entry.found_existing or version.generation > entry.value_ptr.generation)
+                entry.value_ptr.* = version;
+        }
+        try self.objects.put(key, object);
+        return self.objects.getPtr(key).?;
+    }
+};
+
+const ChunkReplacement = struct {
+    index: u64,
+    old_version: ?ChunkVersion,
+    new_version: ChunkVersion,
+};
+
 const ChunkHeader = struct {
     length: u32,
     crc: u32,
@@ -150,6 +288,7 @@ pub const Store = struct {
     io: Io,
     lfs: *c.lfs_t,
     cache: ?*ChunkCache = null,
+    version_index: ?*ChunkVersionIndex = null,
 
     pub fn initialize(self: Store) !void {
         try makeDirectory(self.lfs, namespace_root);
@@ -289,7 +428,11 @@ pub const Store = struct {
         const id = head.object_id;
         var temporary_buffer: [max_path_bytes:0]u8 = undefined;
         try removeIfPresent(self.lfs, try temporaryHeadPath(id, &temporary_buffer));
-        try self.removeUncommittedChunkVersions(id, head.data_generation);
+        if (self.version_index) |index| {
+            try index.prepare(self, id, head.data_generation, try self.chunkLayout(id));
+        } else {
+            try self.removeUncommittedChunkVersions(id, head.data_generation);
+        }
         try self.removeUnselectedReservationVersions(id, head.reservation_generation);
         return head;
     }
@@ -373,11 +516,15 @@ pub const Store = struct {
         if (data.len == 0) return .{ .amount = 0, .head = initial_head };
 
         var head = try self.prepareObjectTransactionWithHead(initial_head);
+        const layout = try self.chunkLayout(id);
+        errdefer if (self.version_index) |index| index.invalidate(self.io, id, layout);
         const reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
         defer std.heap.c_allocator.free(reservations);
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
         const first_touched = offset / head.stored_chunk_size;
         const last_touched = (end - 1) / head.stored_chunk_size;
+        var replacements: std.ArrayList(ChunkReplacement) = .empty;
+        defer replacements.deinit(std.heap.c_allocator);
         var consumed: usize = 0;
         while (consumed < data.len) {
             const position = offset + consumed;
@@ -391,7 +538,13 @@ pub const Store = struct {
                 generation,
                 data[consumed..][0..part],
                 chunk_offset,
+                layout,
             );
+            try replacements.append(std.heap.c_allocator, .{
+                .index = index,
+                .old_version = change.old_version,
+                .new_version = .{ .index = index, .generation = generation, .layout = layout },
+            });
             head.allocated_bytes = try adjustAllocated(head.allocated_bytes, change);
             consumed += part;
         }
@@ -403,8 +556,16 @@ pub const Store = struct {
         const now: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
         head.metadata.mtime_ns = now;
         head.metadata.ctime_ns = now;
+        if (self.version_index) |index| try index.apply(self, id, generation, layout, replacements.items);
         try self.writeHead(head);
-        self.pruneChunkVersionRange(id, first_touched, last_touched, generation) catch {};
+        if (self.version_index == null) {
+            self.pruneChunkVersionRange(id, first_touched, last_touched, generation) catch {};
+        } else for (replacements.items) |replacement| {
+            const old_version = replacement.old_version orelse continue;
+            var path_buffer: [max_path_bytes:0]u8 = undefined;
+            const path = chunkVersionPathWithLayout(id, old_version, &path_buffer) catch continue;
+            removeIfPresent(self.lfs, path) catch {};
+        }
         self.invalidateCachedObject(id);
         return .{ .amount = data.len, .head = head };
     }
@@ -490,6 +651,8 @@ pub const Store = struct {
     pub fn truncate(self: Store, id: format.ObjectId, size: u64) !format.ObjectHead {
         if (size > format.max_file_size) return error.FileTooLarge;
         var head = try self.prepareObjectTransaction(id);
+        const layout = try self.chunkLayout(id);
+        errdefer if (self.version_index) |index| index.invalidate(self.io, id, layout);
         const current_reservations = try self.readReservationsAlloc(head, std.heap.c_allocator);
         defer std.heap.c_allocator.free(current_reservations);
         const reservations = try clipReservationsAlloc(std.heap.c_allocator, current_reservations, size);
@@ -497,8 +660,10 @@ pub const Store = struct {
         const generation = std.math.add(u64, head.data_generation, 1) catch return error.CorruptFilesystem;
         var touched = std.AutoHashMap(u64, void).init(std.heap.c_allocator);
         defer touched.deinit();
+        var replacements: std.ArrayList(ChunkReplacement) = .empty;
+        defer replacements.deinit(std.heap.c_allocator);
         if (size < head.logical_size) {
-            try self.truncateChunks(&head, size, generation, &touched);
+            try self.truncateChunks(&head, size, generation, layout, &touched, &replacements);
         }
         head.logical_size = size;
         head.generation = std.math.add(u64, head.generation, 1) catch return error.CorruptFilesystem;
@@ -518,8 +683,16 @@ pub const Store = struct {
         head.metadata.mtime_ns = now;
         head.metadata.ctime_ns = now;
         errdefer if (wrote_reservation) self.removeReservationVersion(id, head.generation) catch {};
+        if (self.version_index) |index| try index.apply(self, id, generation, layout, replacements.items);
         try self.writeHead(head);
-        self.pruneTouchedChunkVersions(id, &touched, generation) catch {};
+        if (self.version_index == null) {
+            self.pruneTouchedChunkVersions(id, &touched, generation) catch {};
+        } else for (replacements.items) |replacement| {
+            const old_version = replacement.old_version orelse continue;
+            var path_buffer: [max_path_bytes:0]u8 = undefined;
+            const path = chunkVersionPathWithLayout(id, old_version, &path_buffer) catch continue;
+            removeIfPresent(self.lfs, path) catch {};
+        }
         self.removeUnselectedReservationVersions(id, head.reservation_generation) catch {};
         self.invalidateCachedObject(id);
         return head;
@@ -572,6 +745,10 @@ pub const Store = struct {
         try removeIfPresent(self.lfs, try chunksPath(id, &path_buffer));
         try removeIfPresent(self.lfs, try objectPath(id, &path_buffer));
         self.invalidateCachedObject(id);
+        if (self.version_index) |index| {
+            index.invalidate(self.io, id, .co_located);
+            index.invalidate(self.io, id, .legacy);
+        }
     }
 
     pub fn readReservationsAlloc(
@@ -799,9 +976,9 @@ pub const Store = struct {
         new_generation: u64,
         data: []const u8,
         offset: u32,
+        layout: ChunkLayout,
     ) !ChunkChange {
         const write_end: u32 = @intCast(@as(usize, offset) + data.len);
-        const layout = try self.chunkLayout(id);
         const old_version = try self.findChunkVersionWithLayout(id, index, old_generation, layout);
         const chunk = if (old_version) |version| try self.readChunkVersionAlloc(id, version, format.chunk_size, write_end) else value: {
             const bytes = try std.heap.c_allocator.alloc(u8, write_end);
@@ -816,7 +993,7 @@ pub const Store = struct {
             .generation = new_generation,
             .layout = layout,
         }, chunk.bytes[0..new_size]);
-        return .{ .old_size = chunk.stored_length, .new_size = new_size };
+        return .{ .old_size = chunk.stored_length, .new_size = new_size, .old_version = old_version };
     }
 
     fn truncateChunks(
@@ -824,7 +1001,9 @@ pub const Store = struct {
         head: *format.ObjectHead,
         size: u64,
         generation: u64,
+        layout: ChunkLayout,
         touched: *std.AutoHashMap(u64, void),
+        replacements: *std.ArrayList(ChunkReplacement),
     ) !void {
         var indices = std.AutoHashMap(u64, void).init(std.heap.c_allocator);
         defer indices.deinit();
@@ -844,7 +1023,7 @@ pub const Store = struct {
             if (new_size == chunk.stored_length) continue;
             try self.writeChunkVersion(
                 head.object_id,
-                .{ .index = index.*, .generation = generation, .layout = version.layout },
+                .{ .index = index.*, .generation = generation, .layout = layout },
                 chunk.bytes[0..new_size],
             );
             head.allocated_bytes = try adjustAllocated(head.allocated_bytes, .{
@@ -852,6 +1031,11 @@ pub const Store = struct {
                 .new_size = new_size,
             });
             try touched.put(index.*, {});
+            try replacements.append(std.heap.c_allocator, .{
+                .index = index.*,
+                .old_version = version,
+                .new_version = .{ .index = index.*, .generation = generation, .layout = layout },
+            });
         }
     }
 
@@ -883,6 +1067,8 @@ pub const Store = struct {
         generation: u64,
         layout: ChunkLayout,
     ) !?ChunkVersion {
+        if (self.version_index) |index_cache|
+            return index_cache.find(self, id, index, generation, layout);
         const exact: ChunkVersion = .{ .index = index, .generation = generation, .layout = layout };
         var exact_path_buffer: [max_path_bytes:0]u8 = undefined;
         var exact_info: c.struct_lfs_info = undefined;
