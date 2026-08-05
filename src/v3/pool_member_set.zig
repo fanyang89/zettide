@@ -89,17 +89,79 @@ pub const PoolMemberSet = struct {
         intent: OpenIntent,
     ) !void {
         try scanStoragesInto(result, io, allocator, storages, if (intent == .writable) .writable else .read_only);
-        return finishOpenInPlace(result, intent);
+        finishOpenInPlace(result, intent) catch |err| {
+            result.deinit();
+            return err;
+        };
+    }
+
+    /// Takes already-open writable genesis members only on success. This avoids
+    /// dropping exclusive storage locks between provisioning and first use.
+    pub fn adoptProvisionedMembers(
+        allocator: std.mem.Allocator,
+        members: []member_api.Member,
+    ) !PoolMemberSet {
+        if (members.len == 0 or members.len > max_member_count)
+            return error.InvalidMemberCount;
+        for (members, 0..) |*member, index| {
+            if (member.isClosed()) return error.MemberClosed;
+            if (member.mode() != .writable) return error.ReadOnlyMember;
+            if (!member_format.isDynamicPool(member.header())) return error.LegacyMemberUnsupported;
+            for (members[0..index]) |*previous| {
+                if (member.storage.sameIdentity(&previous.storage)) return error.DuplicateStorage;
+            }
+        }
+
+        var set: PoolMemberSet = .{ .supplied_count = members.len };
+        errdefer for (&set.histories) |*maybe_history| {
+            if (maybe_history.*) |*history| history.deinit();
+            maybe_history.* = null;
+        };
+        var history_pointers: [max_member_count]*const journal.HistoryScan = undefined;
+        for (members, 0..) |*member, index| {
+            var history = try journal.scanHistory(allocator, member);
+            if (history.entries().len == 0) {
+                history.deinit();
+                return error.MissingGenesis;
+            }
+            set.histories[index] = history;
+            set.statuses[index] = .stale;
+            history_pointers[index] = &set.histories[index].?;
+        }
+        const selected = try pool_authority.select(history_pointers[0..members.len]);
+        if (selected.kind != .genesis or selected.generation != 0)
+            return error.ProvisionedMemberSetRequired;
+        var canonical: ?member_format.Header = null;
+        for (members) |*member| {
+            const header = member.header();
+            if (canonical) |expected| {
+                if (!samePoolGeometry(expected, header)) return error.InconsistentMemberGeometry;
+            } else {
+                canonical = header;
+            }
+        }
+
+        for (members, 0..) |*member, index| {
+            set.members[index] = member.*;
+            member.* = undefined;
+        }
+        finishOpenInPlace(&set, .writable) catch |err| {
+            for (members, 0..) |*member, index| {
+                member.* = set.members[index].?;
+                set.members[index] = null;
+            }
+            return err;
+        };
+        return set;
     }
 
     fn finishOpen(set: *PoolMemberSet, intent: OpenIntent) !PoolMemberSet {
+        errdefer set.deinit();
         try finishOpenInPlace(set, intent);
         return set.*;
     }
 
     fn finishOpenInPlace(set: *PoolMemberSet, intent: OpenIntent) !void {
-        errdefer set.deinit();
-
         var history_pointers: [max_member_count]*const journal.HistoryScan = undefined;
         var history_count: usize = 0;
         for (set.histories[0..set.supplied_count]) |*maybe_history| {
@@ -169,6 +231,25 @@ pub const PoolMemberSet = struct {
 
     pub fn dataAccess(self: *const PoolMemberSet) pool_policy.DataAccess {
         return self.data_access_state;
+    }
+
+    pub fn filesystem(self: *const PoolMemberSet) !member_format.PoolFilesystem {
+        if (self.authority_state == null) return error.MissingAuthority;
+        var selected: ?member_format.PoolFilesystem = null;
+        for (self.members[0..self.supplied_count], self.statuses[0..self.supplied_count]) |maybe_member, status| {
+            switch (status) {
+                .authority, .active_voter, .catalog_failed => {},
+                else => continue,
+            }
+            const member = maybe_member orelse continue;
+            const filesystem_marker = member_format.poolFilesystem(member.header());
+            if (selected) |expected| {
+                if (filesystem_marker != expected) return error.InconsistentMemberGeometry;
+            } else {
+                selected = filesystem_marker;
+            }
+        }
+        return selected orelse error.MemberUnavailable;
     }
 
     pub fn isRecoveryOnly(self: *const PoolMemberSet) bool {
@@ -1105,6 +1186,33 @@ test "authority geometry rejects mixed Pool filesystem members" {
         error.InconsistentMemberGeometry,
         open(std.testing.io, std.testing.allocator, &locations, .read_only),
     );
+}
+
+test "Pool filesystem marker ignores stale members" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const names = [_][]const u8{ "a", "b", "c" };
+    var storages: [names.len]storage_api.Storage = undefined;
+    for (names, 0..) |name, index|
+        storages[index] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, name, 8 * 1024 * 1024);
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{});
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    try provisioned.close();
+
+    const locations = [_]Location{
+        .{ .parent = tmp.dir, .basename = "a" },
+        .{ .parent = tmp.dir, .basename = "b" },
+        .{ .parent = tmp.dir, .basename = "c" },
+    };
+    var set = try open(std.testing.io, std.testing.allocator, &locations, .read_only);
+    defer set.deinit();
+    set.statuses[0] = .stale;
+    set.members[0].?.selected_header.incompat_features |= member_format.blob_filesystem_incompat_feature;
+    try std.testing.expectEqual(member_format.PoolFilesystem.littlefs, try set.filesystem());
 }
 
 test "catalog bootstrap target geometry rejects a mixed Pool filesystem" {

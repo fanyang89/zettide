@@ -151,6 +151,8 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     var protection: zettide.v3.pool_policy.Protection = .replicated;
     var label: []const u8 = "Zettide";
     var name_profile: zettide.name_profile.Profile = .legacy_raw;
+    var filesystem: zettide.v3.member_format.PoolFilesystem = .littlefs;
+    var filesystem_explicit = false;
     var confirmation: ?[]const u8 = null;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -178,6 +180,12 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             name_profile = try zettide.name_profile.Profile.parse(args[index]);
+        } else if (std.mem.eql(u8, option, "--filesystem")) {
+            if (filesystem_explicit) return error.DuplicateOption;
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            filesystem = try parsePoolFilesystem(args[index]);
+            filesystem_explicit = true;
         } else if (std.mem.eql(u8, option, "--confirm")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -194,6 +202,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         .protection = protection,
         .label = label,
         .name_profile = name_profile,
+        .filesystem = filesystem,
     };
     if (planning) {
         var plan = try zettide.v3.linux_pool_plan.inspect(io, allocator, paths[0..path_count], options);
@@ -218,12 +227,44 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     defer allocator.free(storages);
     const outcome = try zettide.v3.pool_provision.create(io, allocator, storages, .{
         .protection = protection,
+        .filesystem = filesystem,
         .label = label,
     });
     switch (outcome) {
         .complete => |value| {
             var provisioned = value;
             defer provisioned.deinit();
+            if (filesystem == .blob) {
+                const pool_id = provisioned.genesis.topology.set_id;
+                const owner = currentOwner();
+                var native = zettide.filesystem_target.formatProvisionedBlobPool(
+                    allocator,
+                    io,
+                    &provisioned,
+                    name_profile,
+                    .{
+                        .root_uid = owner.uid,
+                        .root_gid = owner.gid,
+                    },
+                ) catch |cause| {
+                    try stdout.print("Blob initialization failed for Pool ID {x}: {s}\n", .{
+                        pool_id,
+                        @errorName(cause),
+                    });
+                    try stdout.flush();
+                    return cause;
+                };
+                native.close(io) catch |cause| {
+                    try stdout.print("Blob initialization failed for Pool ID {x}: {s}\n", .{
+                        pool_id,
+                        @errorName(cause),
+                    });
+                    try stdout.flush();
+                    return cause;
+                };
+                try stdout.print("Created pool: {x}\n", .{pool_id});
+                return;
+            }
             zettide.volume.Volume.initializePoolOptions(io, &provisioned, label, .{
                 .name_profile = name_profile,
             }) catch |cause| {
@@ -276,7 +317,12 @@ fn poolInspectCommand(
     var set = try openRawPoolSet(allocator, io, paths[0..path_count], false, false, .read_only);
     defer set.deinit();
     const authority = set.authority() orelse return error.MissingAuthority;
+    const filesystem = try set.filesystem();
+    var statuses: [zettide.v3.pool_topology.max_member_count]zettide.v3.pool_member_set.MemberStatus = undefined;
+    for (statuses[0..path_count], 0..) |*status, member_index|
+        status.* = try set.statusAt(member_index);
     try stdout.print("Pool: {x}\n", .{authority.topology.set_id});
+    try stdout.print("Filesystem: {s}\n", .{@tagName(filesystem)});
     try stdout.print("Authority: {s}\n", .{@tagName(authority.kind)});
     try stdout.print("Generation: {d}\n", .{authority.generation});
     try stdout.print("Topology epoch: {d}\n", .{authority.topology.epoch});
@@ -284,9 +330,22 @@ fn poolInspectCommand(
     try stdout.print("Profile: {s}\n", .{@tagName(authority.layout.kind)});
     try stdout.print("Members: {d}/{d}\n", .{ path_count, authority.topology.member_count });
     try stdout.print("Data policy: {s}\n", .{@tagName(set.dataAccess())});
-    const mountable = zettide.volume.Volume.inspectPoolHeader(io, &set) catch null;
-    try stdout.print("Mountable: {s}\n", .{if (mountable != null) "yes" else "no"});
-    const can_initialize = zettide.volume.Volume.canInitializePool(io, &set) catch false;
+    const mountable = switch (filesystem) {
+        .littlefs => (zettide.volume.Volume.inspectPoolHeader(io, &set) catch null) != null,
+        .blob => mountable: {
+            var native = zettide.filesystem_target.openBlobPoolFilesystem(
+                allocator,
+                io,
+                &set,
+                false,
+            ) catch break :mountable false;
+            native.close(io) catch break :mountable false;
+            break :mountable true;
+        },
+    };
+    try stdout.print("Mountable: {s}\n", .{if (mountable) "yes" else "no"});
+    const can_initialize = filesystem == .littlefs and
+        (zettide.volume.Volume.canInitializePool(io, &set) catch false);
     if (can_initialize) {
         try stdout.print("Initialize name profile: {s}\n", .{name_profile.name()});
         var token_buffer: [96]u8 = undefined;
@@ -295,7 +354,7 @@ fn poolInspectCommand(
         });
     }
     for (paths[0..path_count], 0..) |path, member_index| {
-        try stdout.print("Member: {s} ({s})\n", .{ path, memberStatusName(try set.statusAt(member_index)) });
+        try stdout.print("Member: {s} ({s})\n", .{ path, memberStatusName(statuses[member_index]) });
     }
 }
 
@@ -339,6 +398,8 @@ fn poolInitializeCommand(
     const supplied_confirmation = confirmation orelse return error.MissingConfirmation;
     var set = try openRawPoolSet(allocator, io, paths[0..path_count], true, true, .writable);
     defer set.deinit();
+    if (try set.filesystem() == .blob)
+        return error.BlobPoolInitializationUnsupported;
     const authority = set.authority() orelse return error.MissingAuthority;
     var expected_buffer: [96]u8 = undefined;
     const expected = poolInitializeToken(&expected_buffer, authority.topology.set_id, name_profile);
@@ -362,6 +423,7 @@ fn poolMountCommand(
     var writable = true;
     var allow_other = false;
     var metrics = false;
+    var filesystem: ?zettide.v3.member_format.PoolFilesystem = null;
     var access_time: zettide.volume.AccessTimePolicy = .relatime;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -379,6 +441,11 @@ fn poolMountCommand(
             metrics = true;
         } else if (std.mem.eql(u8, args[index], "--noatime")) {
             access_time = .noatime;
+        } else if (std.mem.eql(u8, args[index], "--filesystem")) {
+            if (filesystem != null) return error.DuplicateOption;
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            filesystem = try parsePoolFilesystem(args[index]);
         } else {
             return error.UnknownOption;
         }
@@ -388,6 +455,44 @@ fn poolMountCommand(
     const intent: zettide.v3.pool_member_set.OpenIntent = if (writable) .writable else .read_only;
     var set = try openRawPoolSet(allocator, io, paths[0..path_count], writable, true, intent);
     defer set.deinit();
+    const detected_filesystem = try set.filesystem();
+    if (filesystem) |selected| {
+        if (selected != detected_filesystem) return error.PoolFilesystemMismatch;
+    }
+    if (detected_filesystem == .blob) {
+        var native = try zettide.filesystem_target.openBlobPoolFilesystem(
+            allocator,
+            io,
+            &set,
+            writable,
+        );
+        var native_open = true;
+        defer if (native_open) native.close(io) catch {};
+        var adapter = zettide.blob_filesystem_adapter.Adapter.init(&native, io);
+        if (metrics) native.blobs.resetTransportStats(io);
+        var fuse_metrics: zettide.linux_fuse.Metrics = .{};
+        try stdout.print("Mounted pool at {s}; press Ctrl-C to stop\n", .{mountpoint});
+        try stdout.flush();
+        try zettide.linux_fuse.mount(
+            adapter.filesystem(),
+            io,
+            mountpoint,
+            .{
+                .allow_other = allow_other,
+                .read_only = !writable,
+                .update_access_time = access_time == .relatime,
+                .metrics = if (metrics) &fuse_metrics else null,
+            },
+        );
+        if (metrics) {
+            try printFuseMetrics(stdout, fuse_metrics);
+            try printPoolTransportMetrics(stdout, native.blobs.transportStats(io));
+            try stdout.flush();
+        }
+        native_open = false;
+        try native.close(io);
+        return;
+    }
     var volume = try zettide.volume.Volume.openPool(io, allocator, &set, writable);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
@@ -496,14 +601,21 @@ fn printPoolPlan(plan: *const zettide.v3.linux_pool_plan.Plan, stdout: *Io.Write
                 "rejected"
             else if (has_data)
                 "contains data"
-            else if (!zettide.v3.linux_pool_plan.deviceReady(device))
+            else if (!zettide.v3.linux_pool_plan.deviceReadyForFilesystem(device, plan.options.filesystem))
                 "unsupported geometry"
             else
                 "ready",
         });
     }
+    try stdout.print("Filesystem: {s}\n", .{@tagName(plan.options.filesystem)});
     try stdout.print("Name profile: {s}\n", .{plan.options.name_profile.name()});
     try stdout.print("Plan: {s}\n", .{if (plan.ready()) "ready" else "rejected"});
+}
+
+fn parsePoolFilesystem(value: []const u8) !zettide.v3.member_format.PoolFilesystem {
+    if (std.mem.eql(u8, value, "littlefs")) return .littlefs;
+    if (std.mem.eql(u8, value, "blob")) return .blob;
+    return error.InvalidFilesystem;
 }
 
 fn deviceCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
@@ -688,6 +800,20 @@ fn printFuseMetrics(writer: *Io.Writer, metrics: zettide.linux_fuse.Metrics) !vo
             metrics.release.errors,
             metrics.release.elapsed_ns,
             metrics.release.max_ns,
+        },
+    );
+}
+
+fn printPoolTransportMetrics(writer: *Io.Writer, stats: zettide.v3.storage.TransportStats) !void {
+    try writer.print(
+        "pool_transport_metrics queue_capacity={} submitted_sqes={} submit_calls={} completions={} current_inflight={} max_inflight={}\n",
+        .{
+            stats.queue_capacity,
+            stats.submitted_sqes,
+            stats.submit_calls,
+            stats.completions,
+            stats.current_inflight,
+            stats.max_inflight,
         },
     );
 }
@@ -1060,14 +1186,14 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide device inspect <device>
         \\  zettide pool inspect --device <device>... [--name-profile <profile>]
         \\  zettide pool initialize --device <device>... [--label <label>] [--name-profile <profile>] --confirm <token>
-        \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other] [--metrics] [--noatime]
-        \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>]
-        \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>] --confirm <token>
+        \\  zettide pool mount <mountpoint> --device <device>... [--filesystem littlefs|blob] [--read-only] [--allow-other] [--metrics] [--noatime]
+        \\  zettide pool plan-create --device <device>... [--filesystem littlefs|blob] [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>]
+        \\  zettide pool create --device <device>... [--filesystem littlefs|blob] [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>] --confirm <token>
         \\  zettide serve dufs <file|device> [--read-only] [--noatime] [--key-file <path>|--passphrase] [-- <dufs-options>...]
         \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]...
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
-        \\Blob filesystems support regular files only; label, encryption, and metrics are unavailable.
+        \\Blob file targets do not support labels, encryption, or transport metrics.
         \\Name profiles are legacy-raw and portable-v1; legacy-raw is the default.
         \\
     );

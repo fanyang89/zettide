@@ -36,6 +36,7 @@ sudo -n true 2>/dev/null || skip_or_fail "passwordless sudo is unavailable"
 work=$(mktemp -d "${TMPDIR:-/tmp}/zettide-block.XXXXXX")
 loop=""
 format_loop=""
+blob_loop=""
 replica_loops=()
 mounted=false
 pool_mount_pid=""
@@ -55,6 +56,9 @@ cleanup() {
     fi
     if [[ -n "$format_loop" ]]; then
         sudo -n losetup --detach "$format_loop" || true
+    fi
+    if [[ -n "$blob_loop" ]]; then
+        sudo -n losetup --detach "$blob_loop" || true
     fi
     for replica_loop in "${replica_loops[@]}"; do
         sudo -n blockdev --setrw "$replica_loop" 2>/dev/null || true
@@ -85,8 +89,20 @@ truncate --size 32MiB "$work/backing"
 loop=$(sudo -n losetup --find --show "$work/backing") || skip_or_fail "no loop device is available"
 sudo -n "$cli" device inspect "$loop" | grep -q '^Preflight: eligible$'
 stale_plan=$(sudo -n "$cli" pool plan-create --device "$loop" --profile unprotected --label loop-cli)
+grep -q '^Filesystem: littlefs$' <<<"$stale_plan"
 stale_token=$(grep '^Confirm token: ' <<<"$stale_plan")
 stale_token=${stale_token#Confirm token: }
+explicit_littlefs_plan=$(sudo -n "$cli" pool plan-create --device "$loop" --profile unprotected \
+    --label loop-cli --filesystem littlefs)
+explicit_littlefs_token=$(grep '^Confirm token: ' <<<"$explicit_littlefs_plan")
+explicit_littlefs_token=${explicit_littlefs_token#Confirm token: }
+[[ "$explicit_littlefs_token" == "$stale_token" ]]
+blob_selector_plan=$(sudo -n "$cli" pool plan-create --device "$loop" --profile unprotected \
+    --label loop-cli --filesystem blob)
+grep -q '^Filesystem: blob$' <<<"$blob_selector_plan"
+blob_selector_token=$(grep '^Confirm token: ' <<<"$blob_selector_plan")
+blob_selector_token=${blob_selector_token#Confirm token: }
+[[ "$blob_selector_token" != "$stale_token" ]]
 original_loop=$loop
 sudo -n losetup --detach "$loop"
 loop=""
@@ -294,4 +310,79 @@ sudo -n "$cli" pool inspect \
 start_pool_mount
 sudo -n cp "$work/expected" "$work/pool-mount/recovered.txt"
 sudo -n cmp "$work/expected" "$work/pool-mount/recovered.txt"
+stop_pool_mount
+
+truncate --size 32MiB "$work/blob-backing"
+blob_loop=$(sudo -n losetup --find --show "$work/blob-backing") || skip_or_fail "no Blob loop device is available"
+blob_plan=$(sudo -n "$cli" pool plan-create --device "$blob_loop" --profile unprotected \
+    --filesystem blob --name-profile portable-v1 --label blob-cli)
+grep -q '^Filesystem: blob$' <<<"$blob_plan"
+blob_token=$(grep '^Confirm token: ' <<<"$blob_plan")
+blob_token=${blob_token#Confirm token: }
+sudo -n "$cli" pool create --device "$blob_loop" --profile unprotected \
+    --filesystem blob --name-profile portable-v1 --label blob-cli --confirm "$blob_token" \
+    | grep -q '^Created pool: '
+blob_inspect=$(sudo -n "$cli" pool inspect --device "$blob_loop")
+grep -q '^Filesystem: blob$' <<<"$blob_inspect"
+grep -q '^Mountable: yes$' <<<"$blob_inspect"
+if grep -q '^Initialize token: ' <<<"$blob_inspect"; then
+    echo "Blob Pool inspect offered an initialize token" >&2
+    exit 1
+fi
+if sudo -n "$cli" pool initialize --device "$blob_loop" --confirm invalid >/dev/null 2>&1; then
+    echo "Blob Pool initialize unexpectedly succeeded" >&2
+    exit 1
+fi
+if sudo -n "$cli" pool mount "$work/pool-mount" --device "$blob_loop" \
+    --filesystem littlefs >/dev/null 2>&1; then
+    echo "Blob Pool mount accepted a LittleFS selector" >&2
+    exit 1
+fi
+
+: >"$work/blob-pool-mount.log"
+sudo -n timeout --kill-after=2s 30s "$cli" pool mount "$work/pool-mount" \
+    --device "$blob_loop" --metrics >"$work/blob-pool-mount.log" 2>&1 &
+pool_mount_pid=$!
+for _ in $(seq 1 100); do
+    sudo -n mountpoint -q "$work/pool-mount" && break
+    kill -0 "$pool_mount_pid" 2>/dev/null || {
+        cat "$work/blob-pool-mount.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+sudo -n mountpoint -q "$work/pool-mount" || {
+    cat "$work/blob-pool-mount.log" >&2
+    echo "Blob Pool mount readiness timeout" >&2
+    exit 1
+}
+sudo -n "$probe" expect-busy "$blob_loop"
+printf 'native blob pool data' >"$work/blob-expected"
+sudo -n cp "$work/blob-expected" "$work/pool-mount/blob.txt"
+sudo -n sync -f "$work/pool-mount/blob.txt"
+stop_pool_mount
+grep -Eq '^fuse_metrics .*write_calls=[1-9][0-9]* ' "$work/blob-pool-mount.log"
+grep -q '^pool_transport_metrics ' "$work/blob-pool-mount.log"
+if grep -q '^member_transport_metrics ' "$work/blob-pool-mount.log"; then
+    echo "Blob Pool metrics were incorrectly labeled per-member" >&2
+    exit 1
+fi
+
+: >"$work/blob-pool-read-only.log"
+sudo -n timeout --kill-after=2s 30s "$cli" pool mount "$work/pool-mount" \
+    --device "$blob_loop" --read-only >"$work/blob-pool-read-only.log" 2>&1 &
+pool_mount_pid=$!
+for _ in $(seq 1 100); do
+    sudo -n mountpoint -q "$work/pool-mount" && break
+    kill -0 "$pool_mount_pid" 2>/dev/null || {
+        cat "$work/blob-pool-read-only.log" >&2
+        exit 1
+    }
+    sleep 0.05
+done
+sudo -n cmp "$work/blob-expected" "$work/pool-mount/blob.txt"
+if sudo -n touch "$work/pool-mount/blob-read-only-write" 2>/dev/null; then
+    echo "read-only Blob Pool mount accepted a write" >&2
+    exit 1
+fi
 stop_pool_mount

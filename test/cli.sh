@@ -216,6 +216,16 @@ if [[ "$(uname -s)" == "Linux" ]]; then
         echo "character device unexpectedly passed inspection" >&2
         exit 1
     fi
+    if "$exe" pool plan-create --device /dev/null --profile unprotected \
+        --filesystem blob --filesystem littlefs >/dev/null 2>&1; then
+        echo "pool plan accepted duplicate filesystem options" >&2
+        exit 1
+    fi
+    if "$exe" pool plan-create --device /dev/null --profile unprotected \
+        --filesystem unknown >/dev/null 2>&1; then
+        echo "pool plan accepted an unknown filesystem" >&2
+        exit 1
+    fi
 fi
 
 cp "$image" "$tmp/corrupt.ddv"

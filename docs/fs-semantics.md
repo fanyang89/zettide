@@ -39,9 +39,10 @@ failure does not turn an otherwise successful read into an error.
 
 ## Persistence
 
-`fsync` commits file data through littlefs and synchronizes the container file.
-After a successful `fsync`, terminating the mount process must not lose the
-committed data. A clean unmount synchronizes and closes the littlefs volume.
+`fsync` commits file data through the selected filesystem backend and
+synchronizes its backing storage. After a successful `fsync`, terminating the
+mount process must not lose the committed data. A clean unmount closes all FUSE
+handles before closing BlobFilesystem or the littlefs volume.
 
 Link counts are not stored in object metadata. Each mount rebuilds the in-memory
 `ObjectId` link-count index by scanning namespace ObjectRefs, which remain the

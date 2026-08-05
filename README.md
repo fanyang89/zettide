@@ -1,9 +1,9 @@
 # Zettide
 
 Zettide is an experimental storage engine. Its current user-facing path mounts
-a [littlefs](https://github.com/littlefs-project/littlefs) filesystem from a
-sparse container file or an explicitly selected Linux raw-disk Pool. An
-experimental BlobFilesystem backend mounts from regular-file containers.
+either [littlefs](https://github.com/littlefs-project/littlefs) or the native
+BlobFilesystem backend from a container file or an explicitly selected Linux
+raw-disk Pool.
 
 The project currently implements the portable container core and a foreground
 Linux FUSE3 mount adapter. The core cross-compiles for Windows; the native
@@ -214,8 +214,9 @@ Mounts use relatime by default. Pass `--noatime` to disable automatic
 access-time updates.
 Pass `--read-only` to open either regular-file filesystem backend read-only.
 Pass `--metrics` to print FUSE operation counters after a clean unmount.
-LittleFS mounts additionally print write-pipeline and member transport counters;
-BlobFilesystem mounts do not.
+LittleFS mounts additionally print write-pipeline and member transport counters.
+Blob Pool mounts print aggregate Pool transport counters; standalone Blob file
+mounts expose FUSE counters only.
 `create --redo-journal-size <size>` appends a redo journal to a file-backed
 container; the journal must fit two maximum-size transactions.
 
@@ -242,8 +243,9 @@ files use a Blob-specific scan-bound confirmation token. The selected name
 profile and the current Linux UID/GID for the root directory are persisted.
 Linux FUSE mount, read-only mount, FUSE metrics, `info`, and `check` are
 supported.
-Labels, encryption, write-pipeline metrics, Pools, block devices, NFS, dufs,
-Windows mounts, and fallocate are not supported for BlobFilesystem.
+Standalone Blob targets do not support labels, block devices, or transport
+metrics. Encryption, write-pipeline metrics, NFS, dufs, Windows mounts, and
+fallocate are not supported for BlobFilesystem.
 
 Encryption is available only when `format` creates a v3 single-member,
 unprotected regular-file target. Key files contain exactly 32 random bytes;
@@ -295,9 +297,22 @@ zettide pool mount workspace \
   --device /dev/disk/by-id/disk-c
 ```
 
+Pool creation defaults to LittleFS. Add `--filesystem blob` to both
+`pool plan-create` and `pool create` to create a native Blob Pool; the selector
+is part of the confirmation token. Mount and inspect select the backend from the
+persisted member marker. `pool mount --filesystem littlefs|blob` can enforce an
+expected backend and rejects a mismatch before filesystem data access.
+
+Blob Pool support applies only to newly created unprotected or three-way
+replicated Pools. It does not migrate existing LittleFS Pools and does not yet
+support catalog mode, encryption, erasure coding, garbage collection, online
+expansion, or protection changes.
+
 Use `zettide pool inspect --device ...` to inspect authority and mountability.
-An interrupted empty-volume initialization exposes a Pool-bound recovery token;
-pass it to `zettide pool initialize --device ... --confirm <token>`.
+An interrupted LittleFS empty-volume initialization exposes a Pool-bound
+recovery token; pass it to `zettide pool initialize --device ... --confirm
+<token>`. Blob Pool inspection validates mountability by opening BlobFilesystem
+read-only and never offers this recovery token.
 
 ## Format limits
 

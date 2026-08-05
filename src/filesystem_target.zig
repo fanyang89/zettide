@@ -8,6 +8,9 @@ const container = @import("container.zig");
 const google_crc32c = @import("crc32c");
 const member_format = @import("v3/member_format.zig");
 const name_profile = @import("name_profile.zig");
+const pool_data_storage = @import("v3/pool_data_storage.zig");
+const pool_member_set = @import("v3/pool_member_set.zig");
+const pool_provision = @import("v3/pool_provision.zig");
 const storage_api = @import("v3/storage.zig");
 const target = @import("target.zig");
 
@@ -181,6 +184,68 @@ pub fn openBlobFilesystem(
     return blob_filesystem.Filesystem.open(allocator, io, blobs, writable);
 }
 
+/// Takes the provisioned Pool after its members have been adopted successfully.
+pub fn formatProvisionedBlobPool(
+    allocator: std.mem.Allocator,
+    io: Io,
+    provisioned: *pool_provision.ProvisionedPool,
+    profile: name_profile.Profile,
+    options: blob_filesystem.Filesystem.FormatOptions,
+) !blob_filesystem.Filesystem {
+    var set = try provisioned.intoMemberSet();
+    errdefer set.deinit();
+    return formatBlobPoolSet(allocator, io, &set, profile, options);
+}
+
+/// Leaves set untouched on marker rejection. Once Pool storage is created, failures
+/// close the complete ownership chain.
+pub fn formatBlobPoolSet(
+    allocator: std.mem.Allocator,
+    io: Io,
+    set: *pool_member_set.PoolMemberSet,
+    profile: name_profile.Profile,
+    options: blob_filesystem.Filesystem.FormatOptions,
+) !blob_filesystem.Filesystem {
+    if (try set.filesystem() != .blob) return error.PoolDataRequiresBlobFilesystem;
+    const storage = try pool_data_storage.create(allocator, io, set, true);
+    const device = blob_device.Device.init(
+        storage,
+        0,
+        storage.capacity(),
+        blob_format.allocation_unit,
+    ) catch |err| {
+        var owned_storage = storage;
+        owned_storage.close(io) catch {};
+        return err;
+    };
+    const blobs = try blob_store.Store.create(allocator, io, device);
+    return blob_filesystem.Filesystem.formatOptions(allocator, io, blobs, profile, options);
+}
+
+/// Leaves set untouched on marker rejection and preserves its access mode. Once
+/// Pool storage is created, failures close the complete ownership chain.
+pub fn openBlobPoolFilesystem(
+    allocator: std.mem.Allocator,
+    io: Io,
+    set: *pool_member_set.PoolMemberSet,
+    writable: bool,
+) !blob_filesystem.Filesystem {
+    if (try set.filesystem() != .blob) return error.PoolDataRequiresBlobFilesystem;
+    const storage = try pool_data_storage.create(allocator, io, set, writable);
+    const device = blob_device.Device.init(
+        storage,
+        0,
+        storage.capacity(),
+        blob_format.allocation_unit,
+    ) catch |err| {
+        var owned_storage = storage;
+        owned_storage.close(io) catch {};
+        return err;
+    };
+    const blobs = try blob_store.Store.open(allocator, io, device);
+    return blob_filesystem.Filesystem.open(allocator, io, blobs, writable);
+}
+
 fn blobPlan(
     target_plan: target.FormatPlan,
     options: blob_filesystem.Filesystem.FormatOptions,
@@ -234,6 +299,164 @@ fn headerKind(bytes: []const u8) FormatKind {
     if (container.hasHeaderMagic(bytes)) return .littlefs_container;
     if (member_format.hasHeaderMagic(bytes)) return .pool_member;
     return .unknown;
+}
+
+const pool_test_names = [_][]const u8{ "member-a", "member-b", "member-c" };
+
+fn provisionBlobTestPool(
+    dir: Io.Dir,
+    protection: @import("v3/pool_policy.zig").Protection,
+) !pool_provision.ProvisionedPool {
+    const member_count = try protection.fullWidth();
+    var storages: [pool_test_names.len]storage_api.Storage = undefined;
+    for (pool_test_names[0..member_count], storages[0..member_count]) |name, *storage|
+        storage.* = try storage_api.Storage.createFile(std.testing.io, dir, name, 16 * 1024 * 1024);
+    const outcome = try pool_provision.create(
+        std.testing.io,
+        std.testing.allocator,
+        storages[0..member_count],
+        .{ .protection = protection, .filesystem = .blob },
+    );
+    return switch (outcome) {
+        .complete => |value| value,
+        .partial => error.UnexpectedPartialCreation,
+    };
+}
+
+fn openBlobTestPoolSet(
+    dir: Io.Dir,
+    member_count: usize,
+    writable: bool,
+) !pool_member_set.PoolMemberSet {
+    var storages: [pool_test_names.len]storage_api.Storage = undefined;
+    for (pool_test_names[0..member_count], storages[0..member_count]) |name, *storage|
+        storage.* = try storage_api.Storage.openFile(std.testing.io, dir, name, writable);
+    return pool_member_set.PoolMemberSet.openStorages(
+        std.testing.io,
+        std.testing.allocator,
+        storages[0..member_count],
+        if (writable) .writable else .read_only,
+    );
+}
+
+test "Blob Pool format and writable and read-only reopen round trip" {
+    const protections = [_]@import("v3/pool_policy.zig").Protection{ .unprotected, .replicated };
+    for (protections) |protection| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const member_count = try protection.fullWidth();
+        var provisioned = try provisionBlobTestPool(tmp.dir, protection);
+        defer provisioned.deinit();
+        var formatted = try formatProvisionedBlobPool(
+            std.testing.allocator,
+            std.testing.io,
+            &provisioned,
+            .portable_v1,
+            .{ .root_uid = 123, .root_gid = 456 },
+        );
+        try std.testing.expectEqual(name_profile.Profile.portable_v1, formatted.root.name_profile);
+        const root = try formatted.stat(std.testing.io, blob_filesystem_format.root_inode);
+        try std.testing.expectEqual(@as(u32, 123), root.metadata.uid);
+        try std.testing.expectEqual(@as(u32, 456), root.metadata.gid);
+        const inode = try formatted.createFile(
+            std.testing.io,
+            blob_filesystem_format.root_inode,
+            "payload",
+            0o640,
+            123,
+            456,
+        );
+        try std.testing.expectEqual(@as(usize, 5), try formatted.write(std.testing.io, inode, "first", 0));
+        try formatted.close(std.testing.io);
+
+        var read_set = try openBlobTestPoolSet(tmp.dir, member_count, false);
+        defer read_set.deinit();
+        var readonly = try openBlobPoolFilesystem(
+            std.testing.allocator,
+            std.testing.io,
+            &read_set,
+            false,
+        );
+        const reopened_inode = try readonly.resolvePath(std.testing.io, "/payload");
+        var first: [5]u8 = undefined;
+        try std.testing.expectEqual(first.len, try readonly.read(std.testing.io, reopened_inode, &first, 0));
+        try std.testing.expectEqualStrings("first", &first);
+        try std.testing.expectError(
+            error.ReadOnlyFilesystem,
+            readonly.write(std.testing.io, reopened_inode, "x", 0),
+        );
+        try readonly.close(std.testing.io);
+
+        var write_set = try openBlobTestPoolSet(tmp.dir, member_count, true);
+        defer write_set.deinit();
+        var writable = try openBlobPoolFilesystem(
+            std.testing.allocator,
+            std.testing.io,
+            &write_set,
+            true,
+        );
+        const writable_inode = try writable.resolvePath(std.testing.io, "/payload");
+        try std.testing.expectEqual(@as(usize, 6), try writable.write(std.testing.io, writable_inode, "-again", 5));
+        try writable.close(std.testing.io);
+
+        var final_set = try openBlobTestPoolSet(tmp.dir, member_count, false);
+        defer final_set.deinit();
+        var final = try openBlobPoolFilesystem(
+            std.testing.allocator,
+            std.testing.io,
+            &final_set,
+            false,
+        );
+        defer final.close(std.testing.io) catch {};
+        const final_inode = try final.resolvePath(std.testing.io, "/payload");
+        var contents: [11]u8 = undefined;
+        try std.testing.expectEqual(contents.len, try final.read(std.testing.io, final_inode, &contents, 0));
+        try std.testing.expectEqualStrings("first-again", &contents);
+    }
+}
+
+test "LittleFS Pool marker rejects Blob formatting without data changes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storages = [_]storage_api.Storage{
+        try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member-a", 8 * 1024 * 1024),
+    };
+    const outcome = try pool_provision.create(
+        std.testing.io,
+        std.testing.allocator,
+        &storages,
+        .{ .protection = .unprotected, .filesystem = .littlefs },
+    );
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    const before = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "member-a",
+        std.testing.allocator,
+        .limited(8 * 1024 * 1024 + 1),
+    );
+    defer std.testing.allocator.free(before);
+    try std.testing.expectError(
+        error.PoolDataRequiresBlobFilesystem,
+        formatProvisionedBlobPool(
+            std.testing.allocator,
+            std.testing.io,
+            &provisioned,
+            .legacy_raw,
+            .{},
+        ),
+    );
+    const after = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "member-a",
+        std.testing.allocator,
+        .limited(8 * 1024 * 1024 + 1),
+    );
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
 }
 
 test "format classifier uses both slots and rejects conflicts" {

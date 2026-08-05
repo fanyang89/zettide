@@ -222,10 +222,11 @@ performs one final full-capacity scan, requires the exact token, and only then s
 Tokens cease to match when a device path is rebound to a different `diskseq` instance.
 
 `pool inspect` reopens an explicitly supplied member set read-only, selects control authority, and
-reports the topology, layout, generation, member classifications, policy-level data access, and
-whether the exact supplied profile width has a valid Pool volume header quorum. The policy value
-reflects available authoritative members only and is distinct from the stricter exact-width
-requirement of the initial mount command.
+reports the filesystem marker, topology, layout, generation, member classifications, and
+policy-level data access. LittleFS mountability requires a valid Pool volume header quorum. Blob
+mountability requires a successful read-only BlobFilesystem open; the incompatible marker alone is
+not sufficient. The policy value reflects available authoritative members only and is distinct from
+the stricter exact-width requirement of the initial mount command.
 
 ### Pool Volume Data Plane
 
@@ -242,6 +243,13 @@ region must have the same static volume identity and byte-identical data. These 
 intentionally stricter than the version 2 layout envelope's durable-write threshold of two and read
 threshold of one; the encoded policy fields remain unchanged for format compatibility and do not
 weaken this implementation's acknowledgement or read-validation requirements.
+
+A Blob Pool maps the same common logical data capacity through the Pool replica device and uses that
+device as one native Blob Store. New Blob Pools may be unprotected or three-way replicated. The
+Blob Store, filesystem root, name profile, and current Linux root UID/GID are initialized while the
+provisioned members remain open, preserving exclusive device acquisition. Existing LittleFS Pools
+are never converted in place. Blob Pools currently exclude catalog mode, encryption, erasure coding,
+garbage collection, online expansion, and protection migration.
 
 ### Optional Data Encryption
 
@@ -286,13 +294,17 @@ This format provides confidentiality only. It does not detect ciphertext modific
 sector relocation, or replay. Encryption mode and KDF are fixed at creation; this version defines no
 in-place enable, disable, or rekey operation.
 
-Pool creation initializes the volume before reporting success. `pool inspect` emits an
+LittleFS Pool creation initializes the volume before reporting success. `pool inspect` emits an
 `initialize-empty-volume:<set-id>` token in either of two cases: the complete member set has no ready
 header but retains a valid creating header for one volume identity, or every header slot and every
 complete member data region is zero. Any valid ready header or ambiguous nonzero header damage blocks
 destructive initialization. `pool initialize` requires the exact token, writable control and data
 policy, the complete profile width with no extra supplied devices, and exclusive acquisition of every
 supplied device.
+
+Blob Pool creation initializes BlobFilesystem before reporting success. Blob Pools do not use the
+LittleFS initialization token, and `pool initialize` rejects their marker rather than attempting
+destructive recovery.
 
 Ready-header quorum compares static volume identity rather than member-local sequence. A single ready
 header is also sufficient when every other member retains a matching creating header. Writable reopen

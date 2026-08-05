@@ -5,6 +5,7 @@ const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
 const pool_genesis = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
+const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
 const pool_topology = @import("pool_topology.zig");
 const storage_api = @import("storage.zig");
@@ -66,6 +67,18 @@ pub const ProvisionedPool = struct {
 
     pub fn deinit(self: *ProvisionedPool) void {
         self.close() catch {};
+    }
+
+    /// Transfers all provisioned members without closing or reopening them.
+    /// On failure this value retains every member and may be closed or retried.
+    pub fn intoMemberSet(self: *ProvisionedPool) !pool_member_set.PoolMemberSet {
+        const set = try pool_member_set.PoolMemberSet.adoptProvisionedMembers(
+            self.allocator,
+            self.members,
+        );
+        self.allocator.free(self.members);
+        self.members = &.{};
+        return set;
     }
 };
 
@@ -307,6 +320,36 @@ test "provisioning marks every Blob Pool member" {
             }
         }
     }
+}
+
+test "provisioned members transfer into a set only on success" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storages = [_]storage_api.Storage{
+        try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 8 * 1024 * 1024),
+    };
+    const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
+        .protection = .unprotected,
+        .filesystem = .blob,
+    });
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+
+    provisioned.members[0].frozen.store(true, .release);
+    try std.testing.expectError(error.WriteQuorumUnavailable, provisioned.intoMemberSet());
+    try std.testing.expectEqual(@as(usize, 1), provisioned.members.len);
+    try std.testing.expect(!provisioned.members[0].isClosed());
+    try std.testing.expect(provisioned.members[0].isFrozen());
+    provisioned.members[0].frozen.store(false, .release);
+
+    var set = try provisioned.intoMemberSet();
+    defer set.deinit();
+    try std.testing.expectEqual(@as(usize, 0), provisioned.members.len);
+    try std.testing.expectEqual(pool_policy.DataAccess.read_write, set.dataAccess());
+    try std.testing.expect(set.controlWriteReady() != null);
 }
 
 test "Blob Pool provisioning requires minimum Blob logical capacity" {
