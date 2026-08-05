@@ -29,6 +29,8 @@ pub const Filesystem = struct {
         same_object,
     };
 
+    pub const max_symlink_target_bytes: usize = filesystem_format.max_symlink_target_bytes;
+
     /// Takes ownership of blobs, including on failure.
     pub fn format(
         allocator: std.mem.Allocator,
@@ -122,6 +124,80 @@ pub const Filesystem = struct {
         return self.lookupPrepared(io, parent_inode, prepared.key);
     }
 
+    pub fn read(self: *Filesystem, io: Io, inode: u64, output: []u8, offset: u64) !usize {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        const record = try self.requireRegularFile(io, inode);
+        var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
+        defer file.deinit();
+        return file.read(io, output, offset);
+    }
+
+    pub fn write(self: *Filesystem, io: Io, inode: u64, data: []const u8, offset: u64) !usize {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        try self.requireMutable();
+        var record = try self.requireRegularFile(io, inode);
+        const checkpoint = self.blobs.stagedUnits();
+        var rollback_before_publish = true;
+        errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
+
+        var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
+        defer file.deinit();
+        const amount = try file.write(io, data, offset);
+        if (amount == 0) return 0;
+        record.data = try file.prepareSnapshot(io);
+        record.allocated_bytes = file.allocatedBytes();
+        const now = timestamp(io);
+        record.metadata.mtime_ns = now;
+        record.metadata.ctime_ns = now;
+        var mutations: MutationAccumulator = .init(self.allocator);
+        defer mutations.deinit();
+        try mutations.putInode(inode, record);
+        var next_root = self.root;
+        next_root.generation = try nextGeneration(self.root.generation);
+        rollback_before_publish = false;
+        try self.publish(io, next_root, &mutations, checkpoint);
+        return amount;
+    }
+
+    pub fn truncate(self: *Filesystem, io: Io, inode: u64, size: u64) !void {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        try self.requireMutable();
+        var record = try self.requireRegularFile(io, inode);
+        const checkpoint = self.blobs.stagedUnits();
+        var rollback_before_publish = true;
+        errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
+
+        var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
+        defer file.deinit();
+        try file.truncate(io, size);
+        record.data = try file.prepareSnapshot(io);
+        record.allocated_bytes = file.allocatedBytes();
+        const now = timestamp(io);
+        record.metadata.mtime_ns = now;
+        record.metadata.ctime_ns = now;
+        var mutations: MutationAccumulator = .init(self.allocator);
+        defer mutations.deinit();
+        try mutations.putInode(inode, record);
+        var next_root = self.root;
+        next_root.generation = try nextGeneration(self.root.generation);
+        rollback_before_publish = false;
+        try self.publish(io, next_root, &mutations, checkpoint);
+    }
+
+    pub fn readSpecial(self: *Filesystem, io: Io, inode: u64, output: []u8, offset: u64) !usize {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        if (record.nlink == 0) return error.FileNotFound;
+        if (record.metadata.kind != .symlink) return error.InvalidArgument;
+        var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
+        defer file.deinit();
+        return file.read(io, output, offset);
+    }
+
     pub fn createFile(
         self: *Filesystem,
         io: Io,
@@ -156,6 +232,66 @@ pub const Filesystem = struct {
         gid: u32,
     ) !u64 {
         return self.createNode(io, parent_inode, name, .fifo, mode, uid, gid);
+    }
+
+    pub fn createSymlink(
+        self: *Filesystem,
+        io: Io,
+        parent_inode: u64,
+        name: []const u8,
+        target: []const u8,
+        uid: u32,
+        gid: u32,
+    ) !u64 {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        try self.requireMutable();
+        if (target.len == 0) return error.InvalidArgument;
+        if (target.len > max_symlink_target_bytes) return error.NameTooLong;
+        if (std.mem.indexOfScalar(u8, target, 0) != null) return error.InvalidArgument;
+        var parent = try self.requireDirectory(io, parent_inode);
+        var prepared = try PreparedName.init(self.allocator, self.root.name_profile, name);
+        defer prepared.deinit(self.allocator);
+        if (try self.lookupPrepared(io, parent_inode, prepared.key) != null)
+            return error.PathAlreadyExists;
+        const inode = self.root.next_inode;
+        const following_inode = std.math.add(u64, inode, 1) catch return error.InodeExhausted;
+        const generation = try nextGeneration(self.root.generation);
+        const checkpoint = self.blobs.stagedUnits();
+        var rollback_before_publish = true;
+        errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
+
+        var file = blob_file.State.init(self.allocator, &self.blobs);
+        defer file.deinit();
+        _ = try file.write(io, target, 0);
+        const snapshot = try file.prepareSnapshot(io);
+        const record: filesystem_format.InodeRecord = .{
+            .metadata = metadata.Metadata.init(io, .symlink, 0o120777, uid, gid),
+            .generation = generation,
+            .nlink = 1,
+            .allocated_bytes = file.allocatedBytes(),
+            .parent_inode = 0,
+            .data = snapshot,
+        };
+        touchParent(&parent, timestamp(io));
+        var mutations: MutationAccumulator = .init(self.allocator);
+        defer mutations.deinit();
+        try mutations.putInode(parent_inode, parent);
+        try mutations.putInode(inode, record);
+        try mutations.putDentry(parent_inode, prepared.key, .{
+            .child_inode = inode,
+            .child_generation = generation,
+            .kind = .symlink,
+            .spelling = prepared.spelling,
+        });
+        var next_root = self.root;
+        next_root.generation = generation;
+        next_root.next_inode = following_inode;
+        next_root.record_count = std.math.add(u64, next_root.record_count, 2) catch
+            return error.FilesystemRecordCountOverflow;
+        rollback_before_publish = false;
+        try self.publish(io, next_root, &mutations, checkpoint);
+        return inode;
     }
 
     pub fn link(
@@ -196,7 +332,7 @@ pub const Filesystem = struct {
         next_root.generation = try nextGeneration(self.root.generation);
         next_root.record_count = std.math.add(u64, next_root.record_count, 1) catch
             return error.FilesystemRecordCountOverflow;
-        try self.publish(io, next_root, &mutations);
+        try self.publish(io, next_root, &mutations, null);
     }
 
     pub fn remove(self: *Filesystem, io: Io, parent_inode: u64, name: []const u8) !void {
@@ -256,7 +392,7 @@ pub const Filesystem = struct {
             try mutations.putInode(old_parent_inode, old_parent);
             var next_root = self.root;
             next_root.generation = try nextGeneration(self.root.generation);
-            try self.publish(io, next_root, &mutations);
+            try self.publish(io, next_root, &mutations, null);
             return .renamed;
         }
         const victim_dentry = try self.lookupPrepared(io, new_parent_inode, new_prepared.key);
@@ -340,7 +476,7 @@ pub const Filesystem = struct {
         next_root.generation = try nextGeneration(self.root.generation);
         next_root.record_count = std.math.sub(u64, next_root.record_count, removed_records) catch
             return error.InvalidBlobFilesystemGraph;
-        try self.publish(io, next_root, &mutations);
+        try self.publish(io, next_root, &mutations, null);
         return .renamed;
     }
 
@@ -398,7 +534,7 @@ pub const Filesystem = struct {
         next_root.next_inode = following_inode;
         next_root.record_count = std.math.add(u64, next_root.record_count, 2) catch
             return error.FilesystemRecordCountOverflow;
-        try self.publish(io, next_root, &mutations);
+        try self.publish(io, next_root, &mutations, null);
         return inode;
     }
 
@@ -456,7 +592,7 @@ pub const Filesystem = struct {
         next_root.generation = try nextGeneration(self.root.generation);
         next_root.record_count = std.math.sub(u64, next_root.record_count, removed_records) catch
             return error.InvalidBlobFilesystemGraph;
-        try self.publish(io, next_root, &mutations);
+        try self.publish(io, next_root, &mutations, null);
     }
 
     fn loadInode(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.InodeRecord {
@@ -476,6 +612,16 @@ pub const Filesystem = struct {
         if (record.metadata.kind != .directory) return error.NotDirectory;
         if (record.nlink == 0) return error.FileNotFound;
         return record;
+    }
+
+    fn requireRegularFile(self: *Filesystem, io: Io, inode: u64) !filesystem_format.InodeRecord {
+        const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        if (record.nlink == 0) return error.FileNotFound;
+        return switch (record.metadata.kind) {
+            .file => record,
+            .directory => error.IsDirectory,
+            .fifo, .symlink => error.InvalidArgument,
+        };
     }
 
     fn dentrySpellingEquals(
@@ -531,30 +677,25 @@ pub const Filesystem = struct {
         io: Io,
         next_root_value: filesystem_format.Root,
         mutations: *MutationAccumulator,
+        transaction_checkpoint: ?u64,
     ) !void {
-        const checkpoint = self.blobs.stagedUnits();
+        const checkpoint = transaction_checkpoint orelse self.blobs.stagedUnits();
+        var prepublication = true;
+        errdefer if (prepublication) self.rollback(io, checkpoint);
         const sorted = try mutations.sortedViews();
         defer self.allocator.free(sorted);
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
         var next_root = next_root_value;
-        next_root.metadata_root = maps.applyBatch(
+        next_root.metadata_root = try maps.applyBatch(
             io,
             self.root.metadata_root,
             self.root.generation,
             next_root.generation,
             sorted,
-        ) catch |err| {
-            self.rollback(io, checkpoint);
-            return err;
-        };
-        const root_bytes = filesystem_format.encodeRoot(next_root) catch |err| {
-            self.rollback(io, checkpoint);
-            return err;
-        };
-        const authority_ref = self.blobs.put(io, &root_bytes) catch |err| {
-            self.rollback(io, checkpoint);
-            return err;
-        };
+        );
+        const root_bytes = try filesystem_format.encodeRoot(next_root);
+        const authority_ref = try self.blobs.put(io, &root_bytes);
+        prepublication = false;
         self.blobs.commitAuthority(io, authority_ref) catch |err| {
             self.frozen = true;
             return err;
@@ -1140,6 +1281,271 @@ test "blob filesystem commits canonical namespace and reopens a valid graph" {
     try std.testing.expectEqualDeep(committed_root, filesystem.root);
     try std.testing.expectEqualDeep(committed_authority, filesystem.authority_ref);
     try std.testing.expectEqual(@as(u64, 2), (try filesystem.stat(std.testing.io, root_inode)).nlink);
+    try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem inode data and symlinks survive reopen" {
+    const blob_device = @import("blob_device.zig");
+    const storage_api = @import("v3/storage.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 64 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "inode-data",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        blobs,
+        .portable_v1,
+    );
+    var filesystem_open = true;
+    defer if (filesystem_open) filesystem.close(std.testing.io) catch {};
+
+    const root_inode = filesystem_format.root_inode;
+    const inode = try filesystem.createFile(std.testing.io, root_inode, "Data", 0o640, 11, 22);
+    const initial = try filesystem.stat(std.testing.io, inode);
+    const generation_before_empty_write = filesystem.root.generation;
+    try std.testing.expectEqual(@as(usize, 0), try filesystem.write(std.testing.io, inode, "", 0));
+    try std.testing.expectEqual(generation_before_empty_write, filesystem.root.generation);
+    try std.testing.expectEqualDeep(initial, try filesystem.stat(std.testing.io, inode));
+    var full_block: [blob_file.block_size]u8 = @splat('A');
+    try std.testing.expectEqual(full_block.len, try filesystem.write(std.testing.io, inode, &full_block, 0));
+    try std.testing.expectEqual(@as(usize, 3), try filesystem.write(std.testing.io, inode, "XYZ", 100));
+    const sparse_offset = 2 * blob_file.block_size + 17;
+    try std.testing.expectEqual(@as(usize, 4), try filesystem.write(
+        std.testing.io,
+        inode,
+        "tail",
+        sparse_offset,
+    ));
+
+    const sparse_size = sparse_offset + 4;
+    const sparse = try std.testing.allocator.alloc(u8, sparse_size);
+    defer std.testing.allocator.free(sparse);
+    try std.testing.expectEqual(sparse.len, try filesystem.read(std.testing.io, inode, sparse, 0));
+    try std.testing.expect(std.mem.allEqual(u8, sparse[0..100], 'A'));
+    try std.testing.expectEqualStrings("XYZ", sparse[100..103]);
+    try std.testing.expect(std.mem.allEqual(u8, sparse[103..blob_file.block_size], 'A'));
+    try std.testing.expect(std.mem.allEqual(u8, sparse[blob_file.block_size..sparse_offset], 0));
+    try std.testing.expectEqualStrings("tail", sparse[sparse_offset..]);
+
+    try filesystem.link(std.testing.io, inode, root_inode, "Alias");
+    const alias = (try filesystem.lookup(std.testing.io, root_inode, "alias")).?;
+    try std.testing.expectEqual(inode, alias.inode);
+    try std.testing.expectEqual(@as(usize, 1), try filesystem.write(std.testing.io, alias.inode, "!", 101));
+    var overwritten: [3]u8 = undefined;
+    try std.testing.expectEqual(overwritten.len, try filesystem.read(std.testing.io, inode, &overwritten, 100));
+    try std.testing.expectEqualStrings("X!Z", &overwritten);
+
+    try filesystem.truncate(std.testing.io, inode, 102);
+    try filesystem.truncate(std.testing.io, inode, blob_file.block_size + 200);
+    const grown_size = blob_file.block_size + 200;
+    const grown = try std.testing.allocator.alloc(u8, grown_size);
+    defer std.testing.allocator.free(grown);
+    @memset(grown, 0xff);
+    try std.testing.expectEqual(grown.len, try filesystem.read(std.testing.io, inode, grown, 0));
+    try std.testing.expect(std.mem.allEqual(u8, grown[0..100], 'A'));
+    try std.testing.expectEqualStrings("X!", grown[100..102]);
+    try std.testing.expect(std.mem.allEqual(u8, grown[102..], 0));
+
+    const updated = try filesystem.stat(std.testing.io, inode);
+    try std.testing.expectEqual(initial.generation, updated.generation);
+    try std.testing.expectEqual(@as(u64, 2), updated.nlink);
+    try std.testing.expectEqual(@as(u64, blob_file.block_size), updated.allocated_bytes);
+    try std.testing.expectEqual(@as(u64, grown_size), updated.data.?.logical_size);
+    try std.testing.expect(updated.data.?.generation > initial.data.?.generation);
+    try std.testing.expect(updated.metadata.mtime_ns >= initial.metadata.mtime_ns);
+    try std.testing.expect(updated.metadata.ctime_ns >= initial.metadata.ctime_ns);
+    try std.testing.expectEqual(initial.metadata.birthtime_ns, updated.metadata.birthtime_ns);
+    const atime_before = updated.metadata.atime_ns;
+    var one_byte: [1]u8 = undefined;
+    _ = try filesystem.read(std.testing.io, inode, &one_byte, 0);
+    try std.testing.expectEqual(atime_before, (try filesystem.stat(std.testing.io, inode)).metadata.atime_ns);
+
+    const fifo = try filesystem.createFifo(std.testing.io, root_inode, "Pipe", 0o600, 0, 0);
+    try std.testing.expectError(error.IsDirectory, filesystem.read(std.testing.io, root_inode, &one_byte, 0));
+    try std.testing.expectError(error.InvalidArgument, filesystem.read(std.testing.io, fifo, &one_byte, 0));
+    try std.testing.expectError(error.InvalidArgument, filesystem.write(std.testing.io, fifo, "x", 0));
+    try std.testing.expectError(error.InvalidArgument, filesystem.truncate(std.testing.io, fifo, 0));
+
+    const parent_before = try filesystem.stat(std.testing.io, root_inode);
+    const symlink = try filesystem.createSymlink(
+        std.testing.io,
+        root_inode,
+        "e\u{301}.LINK",
+        "../Target",
+        33,
+        44,
+    );
+    try std.testing.expectEqual(symlink, (try filesystem.lookup(std.testing.io, root_inode, "\u{e9}.link")).?.inode);
+    const symlink_record = try filesystem.stat(std.testing.io, symlink);
+    try std.testing.expectEqual(metadata.Kind.symlink, symlink_record.metadata.kind);
+    try std.testing.expectEqual(@as(u32, 0o120777), symlink_record.metadata.mode);
+    try std.testing.expectEqual(@as(u32, 33), symlink_record.metadata.uid);
+    try std.testing.expectEqual(@as(u32, 44), symlink_record.metadata.gid);
+    try std.testing.expectEqual(@as(u64, 1), symlink_record.nlink);
+    try std.testing.expectEqual(@as(u64, blob_file.block_size), symlink_record.allocated_bytes);
+    try std.testing.expectEqual(@as(u64, 9), symlink_record.data.?.logical_size);
+    const parent_after = try filesystem.stat(std.testing.io, root_inode);
+    try std.testing.expect(parent_after.metadata.mtime_ns >= parent_before.metadata.mtime_ns);
+    try std.testing.expect(parent_after.metadata.ctime_ns >= parent_before.metadata.ctime_ns);
+    var target: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 9), try filesystem.readSpecial(std.testing.io, symlink, &target, 0));
+    try std.testing.expectEqualStrings("../Target", target[0..9]);
+    try std.testing.expectEqual(@as(usize, 6), try filesystem.readSpecial(std.testing.io, symlink, &target, 3));
+    try std.testing.expectEqualStrings("Target", target[0..6]);
+    try std.testing.expectError(error.InvalidArgument, filesystem.read(std.testing.io, symlink, &one_byte, 0));
+    try std.testing.expectError(error.InvalidArgument, filesystem.write(std.testing.io, symlink, "x", 0));
+    try std.testing.expectError(error.InvalidArgument, filesystem.truncate(std.testing.io, symlink, 0));
+    try std.testing.expectError(error.InvalidArgument, filesystem.readSpecial(std.testing.io, inode, &target, 0));
+    try std.testing.expectError(
+        error.InvalidArgument,
+        filesystem.createSymlink(std.testing.io, root_inode, "Empty", "", 0, 0),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        filesystem.createSymlink(std.testing.io, root_inode, "Nul", "a\x00b", 0, 0),
+    );
+    const oversized_target: [Filesystem.max_symlink_target_bytes + 1]u8 = @splat('x');
+    try std.testing.expectError(
+        error.NameTooLong,
+        filesystem.createSymlink(std.testing.io, root_inode, "Long", &oversized_target, 0, 0),
+    );
+    try expectValidGraph(&filesystem, std.testing.io);
+
+    const committed_root = filesystem.root;
+    const committed_authority = filesystem.authority_ref;
+    try filesystem.close(std.testing.io);
+    filesystem_open = false;
+    const backing = try tmp.dir.openFile(std.testing.io, "inode-data", .{ .mode = .read_write });
+    var backing_open = true;
+    defer if (backing_open) backing.close(std.testing.io);
+    const storage = storage_api.Storage.initOwned(backing, device_size, .regular_file, 1, false);
+    const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
+    backing_open = false;
+    const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs);
+    filesystem_open = true;
+    try std.testing.expectEqualDeep(committed_root, filesystem.root);
+    try std.testing.expectEqualDeep(committed_authority, filesystem.authority_ref);
+    @memset(grown, 0xff);
+    try std.testing.expectEqual(grown.len, try filesystem.read(std.testing.io, alias.inode, grown, 0));
+    try std.testing.expect(std.mem.allEqual(u8, grown[0..100], 'A'));
+    try std.testing.expectEqualStrings("X!", grown[100..102]);
+    try std.testing.expect(std.mem.allEqual(u8, grown[102..], 0));
+    try std.testing.expectEqual(@as(usize, 9), try filesystem.readSpecial(std.testing.io, symlink, &target, 0));
+    try std.testing.expectEqualStrings("../Target", target[0..9]);
+    try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem data failure rolls back the full transaction tail" {
+    const blob_device = @import("blob_device.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 2 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "data-rollback",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        blobs,
+        .portable_v1,
+    );
+    defer filesystem.close(std.testing.io) catch {};
+    const inode = try filesystem.createFile(
+        std.testing.io,
+        filesystem_format.root_inode,
+        "data",
+        0o644,
+        0,
+        0,
+    );
+    _ = try filesystem.write(std.testing.io, inode, "old", 0);
+
+    const available_units = filesystem.blobs.header.unit_count - filesystem.blobs.stagedUnits();
+    const filler_units = available_units - 1;
+    const filler = try std.testing.allocator.alloc(u8, @intCast(filler_units * blob_format.allocation_unit));
+    defer std.testing.allocator.free(filler);
+    @memset(filler, 0x5a);
+    _ = try filesystem.blobs.put(std.testing.io, filler);
+    const checkpoint = filesystem.blobs.stagedUnits();
+    const root_before = filesystem.root;
+    const authority_before = filesystem.authority_ref;
+    const inode_before = try filesystem.stat(std.testing.io, inode);
+    try std.testing.expectError(error.BlobStoreFull, filesystem.write(std.testing.io, inode, "new", 0));
+    try std.testing.expectEqual(checkpoint, filesystem.blobs.stagedUnits());
+    try std.testing.expectEqualDeep(root_before, filesystem.root);
+    try std.testing.expectEqualDeep(authority_before, filesystem.authority_ref);
+    try std.testing.expectEqualDeep(inode_before, try filesystem.stat(std.testing.io, inode));
+    try std.testing.expect(!filesystem.frozen);
+    var contents: [3]u8 = undefined;
+    try std.testing.expectEqual(contents.len, try filesystem.read(std.testing.io, inode, &contents, 0));
+    try std.testing.expectEqualStrings("old", &contents);
+    try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem freezes on ambiguous data publication" {
+    const blob_device = @import("blob_device.zig");
+    const storage_api = @import("v3/storage.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 16 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "data-freeze",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(std.testing.allocator, std.testing.io, blobs, .legacy_raw);
+    var filesystem_open = true;
+    defer if (filesystem_open) filesystem.close(std.testing.io) catch {};
+    const inode = try filesystem.createFile(
+        std.testing.io,
+        filesystem_format.root_inode,
+        "data",
+        0o644,
+        0,
+        0,
+    );
+    _ = try filesystem.write(std.testing.io, inode, "old", 0);
+    const root_before = filesystem.root;
+    filesystem.blobs.sequence_floor = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.BlobStoreSequenceExhausted,
+        filesystem.write(std.testing.io, inode, "new", 0),
+    );
+    try std.testing.expect(filesystem.frozen);
+    try std.testing.expectEqualDeep(root_before, filesystem.root);
+    try std.testing.expectError(error.BlobFilesystemFrozen, filesystem.truncate(std.testing.io, inode, 0));
+    try filesystem.close(std.testing.io);
+    filesystem_open = false;
+
+    const backing = try tmp.dir.openFile(std.testing.io, "data-freeze", .{ .mode = .read_write });
+    var backing_open = true;
+    defer if (backing_open) backing.close(std.testing.io);
+    const storage = storage_api.Storage.initOwned(backing, device_size, .regular_file, 1, false);
+    const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
+    backing_open = false;
+    const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs);
+    filesystem_open = true;
+    var contents: [3]u8 = undefined;
+    try std.testing.expectEqual(contents.len, try filesystem.read(std.testing.io, inode, &contents, 0));
+    try std.testing.expectEqualStrings("old", &contents);
     try expectValidGraph(&filesystem, std.testing.io);
 }
 

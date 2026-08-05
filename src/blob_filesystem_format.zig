@@ -11,6 +11,7 @@ pub const inode_encoded_size: usize = 192;
 pub const orphan_encoded_size: usize = 16;
 pub const max_name_bytes: usize = name_profile.max_utf8_bytes;
 pub const max_lookup_name_bytes: usize = 4 * max_name_bytes;
+pub const max_symlink_target_bytes: usize = 4095;
 pub const max_key_size: usize = 1 + @sizeOf(u64) + max_lookup_name_bytes;
 pub const max_dentry_size: usize = 24 + max_name_bytes;
 pub const root_inode: u64 = 1;
