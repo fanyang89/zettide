@@ -48,7 +48,7 @@ pub const Head = struct {
                 root.first_key > root.last_key)
                 return error.InvalidBlobObjectHead;
             const required_blobs = try std.math.divCeil(u64, self.logical_size, blob_format.blob_size);
-            if (root.first_key != 0 or root.last_key + 1 != required_blobs)
+            if (required_blobs == 0 or root.first_key != 0 or root.last_key != required_blobs - 1)
                 return error.InvalidBlobObjectHead;
         } else if (self.logical_size != 0 or self.allocated_bytes != 0 or self.map_generation != 0) {
             return error.InvalidBlobObjectHead;
@@ -139,5 +139,20 @@ test "blob object head rejects corruption and inconsistent roots" {
 
     head.logical_size = blob_format.blob_size;
     head.allocated_bytes = blob_format.blob_size;
+    try std.testing.expectError(error.InvalidBlobObjectHead, encodeHead(head));
+}
+
+test "blob object head rejects max u64 last key without overflow" {
+    var head = Head.init(std.testing.io);
+    head.logical_size = blob_format.blob_size;
+    head.allocated_bytes = blob_format.blob_size;
+    head.map_generation = 1;
+    head.root = .{
+        .page = 0,
+        .level = 0,
+        .first_key = 0,
+        .last_key = std.math.maxInt(u64),
+        .digest = @splat(0),
+    };
     try std.testing.expectError(error.InvalidBlobObjectHead, encodeHead(head));
 }

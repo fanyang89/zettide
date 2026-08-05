@@ -115,7 +115,7 @@ pub const Object = struct {
         var maps = blob_map_store.MapStore.init(self.allocator, &self.blobs);
         const appended = appended_entries[0..inputs.len];
         const root = if (self.staged.root) |current|
-            maps.append(io, current, generation, appended, scratch) catch |err| {
+            maps.append(io, current, self.staged.map_generation, generation, appended, scratch) catch |err| {
                 self.frozen = true;
                 return err;
             }
@@ -221,8 +221,6 @@ fn loadHead(
     var entries: std.ArrayList(blob_map.LeafEntry) = .empty;
     errdefer entries.deinit(allocator);
     if (head.root) |root| {
-        if (root.page + blob_format.allocationUnits(blob_map.page_size) > blobs.committedUnits())
-            return error.UncommittedBlobMapRoot;
         const scratch = try allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
         defer allocator.free(scratch);
         var maps = blob_map_store.MapStore.init(allocator, blobs);
@@ -297,6 +295,59 @@ test "blob object appends commits reopens and reads" {
     try std.testing.expect(std.mem.allEqual(u8, output, 0x22));
 }
 
+test "blob object appends staged map generations across a leaf split" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 64 * 1024 * 1024;
+    const device = try @import("blob_device.zig").Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-object-staged-appends",
+        device_size,
+        4096,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var object = try Object.create(std.testing.allocator, std.testing.io, blobs);
+    var object_open = true;
+    defer if (object_open) object.close(std.testing.io) catch {};
+
+    const first = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_format.blob_size);
+    defer std.testing.allocator.free(first);
+    const second = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_format.blob_size);
+    defer std.testing.allocator.free(second);
+    @memset(first, 0x41);
+    @memset(second, 0x42);
+    const batch_count = 24;
+    const first_inputs: [batch_count][]const u8 = @splat(first);
+    const second_inputs: [batch_count][]const u8 = @splat(second);
+    try object.appendMany(std.testing.io, &first_inputs);
+    try object.appendMany(std.testing.io, &second_inputs);
+    try std.testing.expectEqual(@as(u8, 1), object.staged.root.?.level);
+    try std.testing.expectEqual(@as(u64, 3), object.staged.map_generation);
+    try object.commit(std.testing.io);
+    try object.close(std.testing.io);
+    object_open = false;
+
+    const file = try tmp.dir.openFile(std.testing.io, "blob-object-staged-appends", .{ .mode = .read_write });
+    var file_open = true;
+    defer if (file_open) file.close(std.testing.io);
+    const storage = @import("v3/storage.zig").Storage.initOwned(file, device_size, .regular_file, 1, false);
+    const reopened_device = try @import("blob_device.zig").Device.init(storage, 0, device_size, 4096);
+    file_open = false;
+    blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
+    object = try Object.open(std.testing.allocator, std.testing.io, blobs);
+    object_open = true;
+    try std.testing.expectEqual(@as(u64, 2 * batch_count * blob_format.blob_size), object.logicalSize());
+    try std.testing.expectEqual(@as(u8, 1), object.authority.root.?.level);
+
+    const output = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_format.blob_size);
+    defer std.testing.allocator.free(output);
+    for (0..2 * batch_count) |index| {
+        _ = try object.readBlob(std.testing.io, index, output);
+        try std.testing.expect(std.mem.allEqual(u8, output, if (index < batch_count) 0x41 else 0x42));
+    }
+}
+
 test "blob object falls back when the latest root is corrupt" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -317,11 +368,13 @@ test "blob object falls back when the latest root is corrupt" {
     try object.appendMany(std.testing.io, &inputs);
     try object.commit(std.testing.io);
     try std.testing.expectEqual(@as(u64, 3), object.authority.sequence);
-    const root_page = object.authority.root.?.page;
+    var malformed = object.authority;
+    malformed.root.?.page = std.math.maxInt(u64);
+    const malformed_bytes = try blob_object_format.encodeHead(malformed);
     try object.close(std.testing.io);
 
     const corrupt = try tmp.dir.openFile(std.testing.io, "blob-object-fallback", .{ .mode = .read_write });
-    try corrupt.writePositionalAll(std.testing.io, "x", try blob_format.slotOffset(root_page));
+    try corrupt.writePositionalAll(std.testing.io, &malformed_bytes, blob_object_format.head_a_offset);
     corrupt.close(std.testing.io);
 
     const file = try tmp.dir.openFile(std.testing.io, "blob-object-fallback", .{ .mode = .read_write });
