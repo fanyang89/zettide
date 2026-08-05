@@ -130,6 +130,7 @@ run_fio_case() {
     local size=$6
     local file_pattern=$7
     local mount_log="$log_dir/mount-$name.log"
+    local peak_inflight
     local -a fio_args=(
         fio
         --name="$name"
@@ -168,6 +169,11 @@ run_fio_case() {
         grep -q '^pool_transport_metrics ' "$mount_log"
         ! grep -q '^pipeline_metrics ' "$mount_log"
         ! grep -q '^member_transport_metrics ' "$mount_log"
+        if [[ $name == seq-write-1m-qd32-j1 ]]; then
+            peak_inflight=$(grep -o 'max_inflight=[0-9]*' "$mount_log")
+            peak_inflight=${peak_inflight#max_inflight=}
+            ((peak_inflight > 1))
+        fi
     else
         grep -q '^pipeline_metrics ' "$mount_log"
         grep -q '^member_transport_metrics index=0 ' "$mount_log"

@@ -14,6 +14,7 @@ const ReplicaOperation = union(enum) {
     read: struct { offset: u64, buffer: []u8 },
     read_many: struct { reads: []const storage_api.Read, results: []storage_api.ReadResult },
     write: struct { offset: u64, data: []const u8 },
+    write_many: []const storage_api.Write,
     sync,
 };
 
@@ -253,6 +254,33 @@ pub const PoolBlockDevice = struct {
         }
         _ = self.pipeline_metrics.direct_program_bytes.fetchAdd(data.len, .monotonic);
         _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(data.len * self.replica_count, .monotonic);
+        self.dirty.store(true, .release);
+    }
+
+    pub fn writeAllManyAt(self: *PoolBlockDevice, writes: []const storage_api.Write) !void {
+        if (self.isWriteFrozen()) return error.WriteFrozen;
+        var total_bytes: u64 = 0;
+        for (writes) |write| {
+            try self.validateByteIo(write.offset, write.bytes.len);
+            total_bytes = std.math.add(u64, total_bytes, write.bytes.len) catch
+                return error.InvalidPoolDataIo;
+        }
+        if (writes.len == 0) return;
+
+        var operations: [max_replica_count]ReplicaOperation = undefined;
+        for (operations[0..self.replica_count]) |*operation| operation.* = .{ .write_many = writes };
+        var errors: [max_replica_count]?anyerror = @splat(null);
+        self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]) catch |err| {
+            self.freezeWrites();
+            return err;
+        };
+        if (firstReplicaError(errors[0..self.replica_count])) |err| {
+            self.freezeWrites();
+            return err;
+        }
+        _ = self.pipeline_metrics.direct_program_bytes.fetchAdd(total_bytes, .monotonic);
+        const backing_bytes = std.math.mul(u64, total_bytes, self.replica_count) catch std.math.maxInt(u64);
+        _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(backing_bytes, .monotonic);
         self.dirty.store(true, .release);
     }
 
@@ -609,6 +637,9 @@ fn runReplicaOperation(
         .write => |write| replica.writeData(write.offset, write.data) catch |err| {
             result.* = err;
         },
+        .write_many => |writes| replica.writeDataMany(writes) catch |err| {
+            result.* = err;
+        },
         .sync => replica.sync() catch |err| {
             result.* = err;
         },
@@ -736,6 +767,83 @@ test "replicated writes run concurrently" {
     try std.testing.expectEqual(@as(u64, max_replica_count), metrics.backing_sync_calls);
     device.resetPipelineMetrics();
     try std.testing.expectEqual(@as(u64, 0), device.pipelineMetrics().littlefs_program_calls);
+}
+
+const BatchReplicaProbe = struct {
+    batch_calls: std.atomic.Value(u32) = .init(0),
+    single_calls: std.atomic.Value(u32) = .init(0),
+    write_count: std.atomic.Value(u32) = .init(0),
+    fail_batch: bool = false,
+
+    const vtable: ReplicaEndpoint.VTable = .{
+        .read_metadata = read,
+        .read_data = read,
+        .write_data = write,
+        .write_data_many = writeMany,
+        .write_metadata_durable = write,
+        .sync = sync,
+    };
+
+    fn fromContext(context: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(context));
+    }
+
+    fn read(_: *anyopaque, _: u64, buffer: []u8) anyerror!void {
+        @memset(buffer, 0);
+    }
+
+    fn write(context: *anyopaque, _: u64, _: []const u8) anyerror!void {
+        _ = fromContext(context).single_calls.fetchAdd(1, .monotonic);
+    }
+
+    fn writeMany(context: *anyopaque, writes: []const storage_api.Write) anyerror!void {
+        const self = fromContext(context);
+        _ = self.batch_calls.fetchAdd(1, .monotonic);
+        _ = self.write_count.fetchAdd(@intCast(writes.len), .monotonic);
+        if (self.fail_batch) return error.InjectedFault;
+    }
+
+    fn sync(_: *anyopaque) anyerror!void {}
+};
+
+test "replicated byte writes preserve batches for every member" {
+    var probes: [max_replica_count]BatchReplicaProbe = @splat(.{});
+    var replicas: [max_replica_count]ReplicaEndpoint = undefined;
+    for (&probes, &replicas) |*probe, *replica| replica.* = .init(probe, .{
+        .logical_capacity = 1024 * 1024,
+        .data_length = 1024 * 1024,
+    }, &BatchReplicaProbe.vtable);
+    const layout = try pool_layout.Layout.init(.replicated, 1, 1, container.default_block_size);
+    var device = try PoolBlockDevice.initBytes(std.testing.io, &replicas, layout, 1024 * 1024);
+    const first: [byte_io_alignment]u8 = @splat(0x11);
+    const second: [byte_io_alignment]u8 = @splat(0x22);
+    const writes = [_]storage_api.Write{
+        .{ .bytes = &first, .offset = 0 },
+        .{ .bytes = &second, .offset = byte_io_alignment },
+    };
+
+    const invalid = [_]storage_api.Write{
+        writes[0],
+        .{ .bytes = &second, .offset = 1024 * 1024 },
+    };
+    try std.testing.expectError(error.InvalidPoolDataIo, device.writeAllManyAt(&invalid));
+    for (&probes) |*probe| try std.testing.expectEqual(@as(u32, 0), probe.batch_calls.load(.monotonic));
+
+    try device.writeAllManyAt(&writes);
+    for (&probes) |*probe| {
+        try std.testing.expectEqual(@as(u32, 1), probe.batch_calls.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 0), probe.single_calls.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, writes.len), probe.write_count.load(.monotonic));
+    }
+    const metrics = device.pipelineMetrics();
+    try std.testing.expectEqual(@as(u64, 2 * byte_io_alignment), metrics.direct_program_bytes);
+    try std.testing.expectEqual(@as(u64, 2 * byte_io_alignment * max_replica_count), metrics.backing_write_bytes);
+
+    probes[2].fail_batch = true;
+    try std.testing.expectError(error.InjectedFault, device.writeAllManyAt(&writes));
+    try std.testing.expect(device.isWriteFrozen());
+    for (&probes) |*probe| try std.testing.expectEqual(@as(u32, 2), probe.batch_calls.load(.monotonic));
+    try std.testing.expectError(error.WriteFrozen, device.writeAllManyAt(&writes));
 }
 
 test "replicated reads require two matching members" {

@@ -15,6 +15,7 @@ pub const ReplicaEndpoint = struct {
         read_data: *const fn (*anyopaque, u64, []u8) anyerror!void,
         read_data_many: ?*const fn (*anyopaque, []const storage_api.Read, []storage_api.ReadResult) anyerror!void = null,
         write_data: *const fn (*anyopaque, u64, []const u8) anyerror!void,
+        write_data_many: ?*const fn (*anyopaque, []const storage_api.Write) anyerror!void = null,
         write_metadata_durable: *const fn (*anyopaque, u64, []const u8) anyerror!void,
         sync: *const fn (*anyopaque) anyerror!void,
     };
@@ -55,6 +56,12 @@ pub const ReplicaEndpoint = struct {
 
     pub fn writeData(self: ReplicaEndpoint, offset: u64, data: []const u8) anyerror!void {
         return self.vtable.write_data(self.context, offset, data);
+    }
+
+    pub fn writeDataMany(self: ReplicaEndpoint, writes: []const storage_api.Write) anyerror!void {
+        if (self.vtable.write_data_many) |write_many|
+            return write_many(self.context, writes);
+        for (writes) |write| try self.writeData(write.offset, write.bytes);
     }
 
     pub fn writeMetadataDurable(self: ReplicaEndpoint, offset: u64, data: []const u8) anyerror!void {

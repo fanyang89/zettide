@@ -217,6 +217,14 @@ fn writeAllAt(context_ptr: *anyopaque, io: Io, bytes: []const u8, offset: u64) !
     try context.device.writeAllAt(bytes, offset);
 }
 
+fn writeAllManyAt(context_ptr: *anyopaque, io: Io, writes: []const storage_api.Write) !void {
+    const context = contextFromOpaque(context_ptr);
+    try context.mutex.lock(io);
+    defer context.mutex.unlock(io);
+    if (!context.writable) return error.ReadOnlyPoolData;
+    try context.device.writeAllManyAt(writes);
+}
+
 fn syncData(context_ptr: *anyopaque, io: Io) !void {
     const context = contextFromOpaque(context_ptr);
     try context.mutex.lock(io);
@@ -287,6 +295,11 @@ fn claimedWriteData(context_ptr: *anyopaque, offset: u64, bytes: []const u8) !vo
     try claim.write(offset, bytes);
 }
 
+fn claimedWriteDataMany(context_ptr: *anyopaque, writes: []const storage_api.Write) !void {
+    const claim = claimedReplicaContext(context_ptr).data_claim orelse return error.ReadOnlyPoolData;
+    try claim.writeMany(writes);
+}
+
 fn claimedWriteMetadataDurable(_: *anyopaque, _: u64, _: []const u8) !void {
     return error.UnsupportedPoolDataOperation;
 }
@@ -301,6 +314,7 @@ const claimed_replica_vtable: ReplicaEndpoint.VTable = .{
     .read_data = claimedReadData,
     .read_data_many = claimedReadDataMany,
     .write_data = claimedWriteData,
+    .write_data_many = claimedWriteDataMany,
     .write_metadata_durable = claimedWriteMetadataDurable,
     .sync = claimedSync,
 };
@@ -342,6 +356,7 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .same_identity = sameIdentity,
     .read_at = readAt,
     .write_all_at = writeAllAt,
+    .write_all_many_at = writeAllManyAt,
     .sync_data = syncData,
     .sync = sync,
     .close = close,
@@ -413,6 +428,23 @@ test "Pool data storage supports aligned byte IO across protection modes" {
         try std.testing.expectEqual(large.len, try storage.readAt(std.testing.io, large, 2 * 1024 * 1024));
         try std.testing.expect(std.mem.allEqual(u8, large, 0x22));
 
+        const batch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(io_alignment), 2 * io_alignment);
+        defer std.testing.allocator.free(batch);
+        @memset(batch[0..io_alignment], 0x41);
+        @memset(batch[io_alignment..], 0x42);
+        const writes = [_]storage_api.Write{
+            .{ .bytes = batch[0..io_alignment], .offset = 4 * 1024 * 1024 },
+            .{ .bytes = batch[io_alignment..], .offset = 4 * 1024 * 1024 + io_alignment },
+        };
+        try storage.writeAllManyAt(std.testing.io, &writes);
+        @memset(batch, 0);
+        try std.testing.expectEqual(
+            batch.len,
+            try storage.readAt(std.testing.io, batch, 4 * 1024 * 1024),
+        );
+        try std.testing.expect(std.mem.allEqual(u8, batch[0..io_alignment], 0x41));
+        try std.testing.expect(std.mem.allEqual(u8, batch[io_alignment..], 0x42));
+
         const crossing = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(io_alignment), 2 * io_alignment);
         defer std.testing.allocator.free(crossing);
         @memset(crossing, 0x33);
@@ -470,10 +502,14 @@ test "Pool data write and sync failures freeze writes" {
     @memset(buffer, 0x44);
 
     var set = try openTestSet(tmp.dir, member_count, .writable);
-    var write_fault: member_api.FaultController = .{ .fail_write_at = 0 };
+    var write_fault: member_api.FaultController = .{ .fail_write_at = 1 };
     (try set.memberAt(2)).?.setFaultController(&write_fault);
     var storage = try create(std.testing.allocator, std.testing.io, &set, true);
-    try std.testing.expectError(error.InjectedFault, storage.writeAllAt(std.testing.io, buffer, 0));
+    const writes = [_]storage_api.Write{
+        .{ .bytes = buffer, .offset = 0 },
+        .{ .bytes = buffer, .offset = io_alignment },
+    };
+    try std.testing.expectError(error.InjectedFault, storage.writeAllManyAt(std.testing.io, &writes));
     try std.testing.expectError(error.WriteFrozen, storage.writeAllAt(std.testing.io, buffer, io_alignment));
     try std.testing.expectError(error.WriteFrozen, storage.close(std.testing.io));
     var reopened = try openTestSet(tmp.dir, member_count, .read_only);
@@ -514,6 +550,10 @@ test "Pool data construction ownership and read-only access are explicit" {
     const buffer = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(io_alignment), io_alignment);
     defer std.testing.allocator.free(buffer);
     try std.testing.expectError(error.ReadOnlyPoolData, storage.writeAllAt(std.testing.io, buffer, 0));
+    try std.testing.expectError(
+        error.ReadOnlyPoolData,
+        storage.writeAllManyAt(std.testing.io, &.{.{ .bytes = buffer, .offset = 0 }}),
+    );
     const alias = storage;
     try std.testing.expect(storage.sameIdentity(&alias));
     var copies = [_]storage_api.Storage{ storage, alias };

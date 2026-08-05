@@ -110,6 +110,10 @@ pub const DataClaim = struct {
         return self.member.writeDataClaimed(self.id, offset, bytes);
     }
 
+    pub fn writeMany(self: *const DataClaim, writes: []const storage_api.Write) !void {
+        return self.member.writeDataClaimedMany(self.id, writes);
+    }
+
     pub fn sync(self: *const DataClaim) !void {
         return self.member.syncDataClaimed(self.id);
     }
@@ -614,6 +618,41 @@ pub const Member = struct {
 
         try self.validateDataClaim(claim_id);
         try self.writeLocked(.data, offset, bytes);
+    }
+
+    fn writeDataClaimedMany(self: *Member, claim_id: u64, writes: []const storage_api.Write) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+
+        try self.validateDataClaim(claim_id);
+        if (self.isClosed()) return error.MemberClosed;
+        if (self.open_mode != .writable) return error.ReadOnlyMember;
+        if (self.isFrozen()) return error.WriteFrozen;
+        var batchable = self.fault == null;
+        for (writes) |request| {
+            _ = try self.position(.data, request.offset, request.bytes.len);
+            batchable = batchable and request.bytes.len != 0;
+        }
+        if (!batchable) {
+            for (writes) |request| try self.writeLocked(.data, request.offset, request.bytes);
+            return;
+        }
+
+        var index: usize = 0;
+        while (index < writes.len) {
+            const count = @min(writes.len - index, @as(usize, 32));
+            var absolute: [32]storage_api.Write = undefined;
+            for (writes[index..][0..count], absolute[0..count]) |request, *item| item.* = .{
+                .bytes = request.bytes,
+                .offset = try self.position(.data, request.offset, request.bytes.len),
+            };
+            self.dirty = true;
+            self.storage.writeAllManyAt(self.io, absolute[0..count]) catch |err| {
+                self.freeze();
+                return err;
+            };
+            index += count;
+        }
     }
 
     fn syncDataClaimed(self: *Member, claim_id: u64) !void {
@@ -1728,15 +1767,26 @@ test "data claims fence ordinary writers and reject stale owners" {
     try std.testing.expectError(error.DataClaimed, member.close());
 
     try data_claim.write(0, "claimed");
+    try data_claim.writeMany(&.{
+        .{ .offset = 8, .bytes = "batch-a" },
+        .{ .offset = 16, .bytes = "batch-b" },
+    });
     try data_claim.sync();
     const stale_claim = data_claim;
     try data_claim.release();
     var next_claim = try member.claimData();
     try std.testing.expectError(error.InvalidDataClaim, stale_claim.write(8, "stale"));
+    try std.testing.expectError(
+        error.InvalidDataClaim,
+        stale_claim.writeMany(&.{.{ .offset = 24, .bytes = "stale" }}),
+    );
     try next_claim.release();
     var actual: [7]u8 = undefined;
     try member.read(.data, 0, &actual);
     try std.testing.expectEqualStrings("claimed", &actual);
+    var batch_actual: [7]u8 = undefined;
+    try member.read(.data, 8, &batch_actual);
+    try std.testing.expectEqualStrings("batch-a", &batch_actual);
 
     member.fenceUnleasedCatalogWrites();
     try std.testing.expectError(error.DataGenerationLeaseRequired, member.write(.data, 0, "unleased"));
