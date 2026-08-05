@@ -64,10 +64,11 @@ pub const State = struct {
         try result.blocks.ensureUnusedCapacity(@intCast(entries.len));
         const block_count = try std.math.divCeil(u64, snapshot.logical_size, block_size);
         for (entries) |entry| {
+            entry.reference.validate(blobs.header.unit_count) catch
+                return error.InvalidBlobFileSnapshot;
             if (entry.logical_blob >= block_count or entry.reference.valid_bytes != block_size or
                 entry.reference.endUnit() > blobs.committedUnits())
                 return error.InvalidBlobFileSnapshot;
-            try entry.reference.validate(blobs.header.unit_count);
             const block = result.blocks.getOrPutAssumeCapacity(entry.logical_blob);
             if (block.found_existing) return error.InvalidBlobFileSnapshot;
             block.value_ptr.* = entry.reference;

@@ -318,8 +318,10 @@ pub fn validateDentryIdentity(
         .legacy_raw => if (!std.mem.eql(u8, lookup_name, record.spelling))
             return error.InvalidBlobFilesystemDentry,
         .portable_v1 => {
-            var prepared = name_profile.preparePortableV1(allocator, record.spelling) catch
-                return error.InvalidBlobFilesystemDentry;
+            var prepared = name_profile.preparePortableV1(allocator, record.spelling) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidBlobFilesystemDentry,
+            };
             defer prepared.deinit(allocator);
             if (prepared.key.len > max_lookup_name_bytes or
                 !std.mem.eql(u8, prepared.spelling, record.spelling) or
