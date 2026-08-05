@@ -122,13 +122,6 @@ pub const MapStore = struct {
 
             var entries: [blob_map.max_internal_entries]blob_map.InternalEntry = undefined;
             _ = try blob_map.decodeInternal(page, &entries);
-            for (entries[0..header.count]) |entry| _ = try pageReference(.{
-                .page = entry.child_page,
-                .level = header.level - 1,
-                .first_key = entry.first_key,
-                .last_key = entry.last_key,
-                .digest = entry.child_digest,
-            }, boundary);
             var selected: ?blob_map.InternalEntry = null;
             for (entries[0..header.count]) |entry| {
                 if (logical_blob >= entry.first_key and logical_blob <= entry.last_key) {
