@@ -125,6 +125,20 @@ QD1, QD32, and four jobs at QD32. It uses one 2 GiB file and four 512 MiB files.
 The Pool is cleanly reopened between write and read phases. Override the
 `zettide_raw_fuse_fio_*` variables to change sizes or timings.
 
+To rerun the same fio matrix against a retained Pool without backing up, wiping,
+or recreating the device, add its 32-digit hexadecimal `pool_id` to
+`zettide_raw_device` and run:
+
+```sh
+uv run ansible-playbook test/ansible/pool-fio.yml --limit zettide-tier1
+```
+
+The profile verifies the whole-disk serial number and Pool ID, creates missing
+workload files, and mounts the Pool separately for every fio case. Each measured
+mount uses `--metrics`, so its archived log contains workload-specific FUSE,
+pipeline, and member transport metrics. It does not modify partition tables or
+restore the original device image.
+
 ## Throughput
 
 The throughput profile compares a direct-I/O host filesystem baseline with

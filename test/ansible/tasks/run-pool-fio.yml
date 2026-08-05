@@ -1,0 +1,73 @@
+---
+- name: Initialize physical Pool fio configuration | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_pool_fio_config: "{{ zettide_raw_device | default({}) }}"
+
+- name: Require explicit physical Pool configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_pool_fio_config.path is defined
+      - zettide_pool_fio_config.serial is defined
+      - zettide_pool_fio_config.pool_id is defined
+      - zettide_pool_fio_config.path | length > 0
+      - zettide_pool_fio_config.serial | length > 0
+      - zettide_pool_fio_config.pool_id | length == 32
+      - ansible_play_hosts_all | length == 1
+    fail_msg: "Configure raw-device path, serial, and pool_id for the retained Pool."
+
+- name: Create physical Pool fio result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/pool-fio"
+    state: directory
+    mode: "0755"
+
+- name: Build Zettide for physical Pool fio | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+
+- name: Run physical Pool fio matrix | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-raw-device.lock
+      - bash
+      - test/physical-pool-fio.sh
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
+      - "{{ zettide_pool_fio_config.path }}"
+      - "{{ zettide_pool_fio_config.serial }}"
+      - "{{ zettide_pool_fio_config.pool_id }}"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    ZETTIDE_POOL_FIO_SINGLE_SIZE: "{{ zettide_pool_fio_single_size }}"
+    ZETTIDE_POOL_FIO_MULTI_SIZE: "{{ zettide_pool_fio_multi_size }}"
+    ZETTIDE_POOL_FIO_RUNTIME: "{{ zettide_pool_fio_runtime }}"
+    ZETTIDE_POOL_FIO_RAMP_TIME: "{{ zettide_pool_fio_ramp_time }}"
+    ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/pool-fio"
+  async: "{{ zettide_raw_timeout }}"
+  poll: 15
+  changed_when: true
+  failed_when: false
+  register: zettide_pool_fio_result
+
+- name: Record physical Pool fio matrix | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_pool_fio_result.rc | default(1) }}
+      {{ zettide_pool_fio_result.stdout | default('') }}
+      {{ zettide_pool_fio_result.stderr | default(zettide_pool_fio_result.msg | default('')) }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/pool-fio/ansible.log"
+    mode: "0644"
+
+- name: Require physical Pool fio matrix | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_pool_fio_result.rc | default(1) == 0
+    fail_msg: "Physical Pool fio failed; inspect the fetched pool-fio logs."

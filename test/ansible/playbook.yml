@@ -33,6 +33,10 @@
     zettide_raw_fuse_fio_multi_size: 512M
     zettide_raw_fuse_fio_runtime: 20
     zettide_raw_fuse_fio_ramp_time: 5
+    zettide_pool_fio_single_size: 2G
+    zettide_pool_fio_multi_size: 512M
+    zettide_pool_fio_runtime: 20
+    zettide_pool_fio_ramp_time: 5
     zettide_blob_workloads:
       - name: iops-4k
         size: 17179869184
@@ -71,6 +75,7 @@
       blob-store: tasks/run-blob-device.yml
       blob-object: tasks/run-blob-device.yml
       raw-device: tasks/run-raw-device.yml
+      pool-fio: tasks/run-pool-fio.yml
     zettide_packages:
       RedHat:
         - acl
@@ -244,7 +249,7 @@
       ansible.builtin.assert:
         that:
           - zettide_test_profile in zettide_profile_tasks
-        fail_msg: "Supported test profiles are tier1, io-verify, throughput, blob-device, blob-workload, blob-store, blob-object, and raw-device."
+        fail_msg: "Supported profiles include tier1, io-verify, throughput, blob profiles, raw-device, and pool-fio."
 
   tasks:
     - name: Create the remote workspace
