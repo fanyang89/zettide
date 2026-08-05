@@ -12,8 +12,9 @@ pub const checksum_count: usize = blob_size / checksum_unit;
 pub const minimum_device_size: u64 = arena_offset + blob_size;
 
 const magic = [8]u8{ 'Z', 'T', 'B', 'L', 'O', 'B', '0', '1' };
-const version: u16 = 2;
+const version: u16 = 3;
 const checksum_offset = header_size - @sizeOf(u32);
+const authority_present: u32 = 1;
 
 pub const Header = struct {
     sequence: u64,
@@ -21,6 +22,7 @@ pub const Header = struct {
     device_size: u64,
     unit_count: u64,
     committed_units: u64,
+    authority_root: ?BlobRef,
 
     pub fn init(io: std.Io, device_size: u64) !Header {
         if (device_size < minimum_device_size or device_size % blob_size != 0)
@@ -33,6 +35,7 @@ pub const Header = struct {
             .device_size = device_size,
             .unit_count = (device_size - arena_offset) / allocation_unit,
             .committed_units = 0,
+            .authority_root = null,
         };
     }
 
@@ -44,6 +47,10 @@ pub const Header = struct {
             self.unit_count != (self.device_size - arena_offset) / allocation_unit or
             self.committed_units > self.unit_count)
             return error.InvalidBlobStoreHeader;
+        if (self.authority_root) |root| {
+            root.validate(self.unit_count) catch return error.InvalidBlobStoreHeader;
+            if (root.endUnit() > self.committed_units) return error.InvalidBlobStoreHeader;
+        }
     }
 };
 
@@ -77,6 +84,13 @@ pub fn encodeHeader(header: Header) [header_size]u8 {
     std.mem.writeInt(u32, bytes[64..68], allocation_unit, .little);
     std.mem.writeInt(u64, bytes[72..80], header.unit_count, .little);
     std.mem.writeInt(u64, bytes[80..88], header.committed_units, .little);
+    if (header.authority_root) |root| {
+        std.mem.writeInt(u32, bytes[88..92], authority_present, .little);
+        std.mem.writeInt(u32, bytes[92..96], root.valid_bytes, .little);
+        std.mem.writeInt(u64, bytes[96..104], root.slot, .little);
+        for (root.checksums, 0..) |checksum, index|
+            std.mem.writeInt(u32, bytes[104 + index * 4 ..][0..4], checksum, .little);
+    }
     std.mem.writeInt(u32, bytes[checksum_offset..header_size], google_crc32c.value(bytes[0..checksum_offset]), .little);
     return bytes;
 }
@@ -91,16 +105,31 @@ pub fn decodeHeader(bytes: *const [header_size]u8) !Header {
         std.mem.readInt(u32, bytes[64..68], .little) != allocation_unit or
         !std.mem.allEqual(u8, bytes[12..16], 0) or
         !std.mem.allEqual(u8, bytes[68..72], 0) or
-        !std.mem.allEqual(u8, bytes[88..checksum_offset], 0) or
+        !std.mem.allEqual(u8, bytes[168..checksum_offset], 0) or
         std.mem.readInt(u32, bytes[checksum_offset..header_size], .little) !=
             google_crc32c.value(bytes[0..checksum_offset]))
         return error.InvalidBlobStoreHeader;
+    const flags = std.mem.readInt(u32, bytes[88..92], .little);
+    if (flags & ~authority_present != 0 or
+        (flags == 0 and !std.mem.allEqual(u8, bytes[92..168], 0)))
+        return error.InvalidBlobStoreHeader;
+    const authority_root: ?BlobRef = if (flags & authority_present != 0) .{
+        .slot = std.mem.readInt(u64, bytes[96..104], .little),
+        .valid_bytes = std.mem.readInt(u32, bytes[92..96], .little),
+        .checksums = checksums: {
+            var checksums: [checksum_count]u32 = undefined;
+            for (&checksums, 0..) |*checksum, index|
+                checksum.* = std.mem.readInt(u32, bytes[104 + index * 4 ..][0..4], .little);
+            break :checksums checksums;
+        },
+    } else null;
     return .{
         .sequence = std.mem.readInt(u64, bytes[16..24], .little),
         .uuid = bytes[24..40].*,
         .device_size = std.mem.readInt(u64, bytes[40..48], .little),
         .unit_count = std.mem.readInt(u64, bytes[72..80], .little),
         .committed_units = std.mem.readInt(u64, bytes[80..88], .little),
+        .authority_root = authority_root,
     };
 }
 
@@ -132,7 +161,13 @@ fn tryChecksumCount(valid_bytes: usize) usize {
 }
 
 test "blob store header round trips and rejects corruption" {
-    const header = try Header.init(std.testing.io, 8 * 1024 * 1024);
+    var header = try Header.init(std.testing.io, 8 * 1024 * 1024);
+    header.committed_units = 1;
+    header.authority_root = .{
+        .slot = 0,
+        .valid_bytes = 123,
+        .checksums = @splat(0x11223344),
+    };
     const encoded = encodeHeader(header);
     const decoded = try decodeHeader(&encoded);
     try decoded.validate(header.device_size);
@@ -141,6 +176,9 @@ test "blob store header round trips and rejects corruption" {
     var corrupt = encoded;
     corrupt[72] ^= 1;
     try std.testing.expectError(error.InvalidBlobStoreHeader, decodeHeader(&corrupt));
+
+    header.committed_units = 0;
+    try std.testing.expectError(error.InvalidBlobStoreHeader, header.validate(header.device_size));
 }
 
 test "blob store validates geometry and references" {

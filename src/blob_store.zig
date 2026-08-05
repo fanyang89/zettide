@@ -10,6 +10,9 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     device: blob_device.Device,
     header: format.Header,
+    headers: [2]?format.Header,
+    selected_header: u1,
+    sequence_floor: u64,
     staged_units: u64,
     mutex: Io.Mutex = .init,
     frozen: bool = false,
@@ -29,6 +32,16 @@ pub const Store = struct {
             .allocator = allocator,
             .device = owned_device,
             .header = header,
+            .headers = .{ .{
+                .sequence = 1,
+                .uuid = header.uuid,
+                .device_size = header.device_size,
+                .unit_count = header.unit_count,
+                .committed_units = 0,
+                .authority_root = null,
+            }, header },
+            .selected_header = 1,
+            .sequence_floor = header.sequence,
             .staged_units = header.committed_units,
         };
     }
@@ -40,12 +53,15 @@ pub const Store = struct {
         try validateAlignment(owned_device.alignment());
         const first = try readHeader(allocator, io, &owned_device, format.header_a_offset);
         const second = try readHeader(allocator, io, &owned_device, format.header_b_offset);
-        const header = try selectHeader(first, second, owned_device.capacity());
+        const selected = try selectHeader(first, second, owned_device.capacity());
         return .{
             .allocator = allocator,
             .device = owned_device,
-            .header = header,
-            .staged_units = header.committed_units,
+            .header = selected.header,
+            .headers = selected.headers,
+            .selected_header = selected.index,
+            .sequence_floor = selected.sequence_floor,
+            .staged_units = selected.header.committed_units,
         };
     }
 
@@ -60,6 +76,40 @@ pub const Store = struct {
 
     pub fn stagedUnits(self: *const Store) u64 {
         return self.staged_units;
+    }
+
+    pub fn authorityRoot(self: *const Store) ?format.BlobRef {
+        return self.header.authority_root;
+    }
+
+    pub fn authorityCandidates(self: *const Store) [2]?format.Header {
+        return self.headers;
+    }
+
+    /// Selects a physical header after its application authority has been validated.
+    pub fn selectAuthority(self: *Store, io: Io, candidate: format.Header) !void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        try self.requireWritable();
+        if (self.staged_units != self.header.committed_units) return error.BlobStoreHasStagedData;
+        for (self.headers, 0..) |physical, index| {
+            if (physical != null and std.meta.eql(physical.?, candidate)) {
+                self.header = candidate;
+                self.selected_header = @intCast(index);
+                self.staged_units = candidate.committed_units;
+                return;
+            }
+        }
+        return error.UnknownBlobStoreAuthority;
+    }
+
+    pub fn discardStaged(self: *Store, io: Io, checkpoint: u64) !void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        try self.requireWritable();
+        if (checkpoint < self.header.committed_units or checkpoint > self.staged_units)
+            return error.InvalidBlobStoreCheckpoint;
+        self.staged_units = checkpoint;
     }
 
     pub fn transportKind(self: *const Store) storage_api.TransportKind {
@@ -225,19 +275,35 @@ pub const Store = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         try self.requireWritable();
-        if (self.staged_units == self.header.committed_units) return;
+        try self.commitLocked(io, self.header.authority_root);
+    }
+
+    pub fn commitAuthority(self: *Store, io: Io, authority_root: format.BlobRef) !void {
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
+        try self.requireWritable();
+        try authority_root.validate(self.header.unit_count);
+        if (authority_root.endUnit() > self.staged_units) return error.UnpublishedBlobReference;
+        try self.commitLocked(io, authority_root);
+    }
+
+    fn commitLocked(self: *Store, io: Io, authority_root: ?format.BlobRef) !void {
+        if (self.staged_units == self.header.committed_units and
+            std.meta.eql(authority_root, self.header.authority_root)) return;
 
         self.device.syncData(io) catch |err| {
             self.frozen = true;
             return err;
         };
         var next = self.header;
-        next.sequence = std.math.add(u64, next.sequence, 1) catch {
+        next.sequence = std.math.add(u64, self.sequence_floor, 1) catch {
             self.frozen = true;
             return error.BlobStoreSequenceExhausted;
         };
         next.committed_units = self.staged_units;
-        const offset = if (next.sequence % 2 == 1) format.header_a_offset else format.header_b_offset;
+        next.authority_root = authority_root;
+        const target: u1 = self.selected_header ^ 1;
+        const offset = if (target == 0) format.header_a_offset else format.header_b_offset;
         writeHeader(self.allocator, io, &self.device, offset, next) catch |err| {
             self.frozen = true;
             return err;
@@ -247,6 +313,9 @@ pub const Store = struct {
             return err;
         };
         self.header = next;
+        self.headers[target] = next;
+        self.selected_header = target;
+        self.sequence_floor = next.sequence;
     }
 
     fn requireWritable(self: *const Store) !void {
@@ -284,7 +353,14 @@ fn readHeader(
     return format.decodeHeader(@ptrCast(bytes.ptr)) catch null;
 }
 
-fn selectHeader(first: ?format.Header, second: ?format.Header, device_size: u64) !format.Header {
+const SelectedHeader = struct {
+    header: format.Header,
+    headers: [2]?format.Header,
+    index: u1,
+    sequence_floor: u64,
+};
+
+fn selectHeader(first: ?format.Header, second: ?format.Header, device_size: u64) !SelectedHeader {
     const valid_first: ?format.Header = if (first) |header| value: {
         header.validate(device_size) catch break :value null;
         break :value header;
@@ -301,8 +377,18 @@ fn selectHeader(first: ?format.Header, second: ?format.Header, device_size: u64)
         valid_first.?.sequence == valid_second.?.sequence and
         !std.meta.eql(valid_first.?, valid_second.?))
         return error.AmbiguousBlobStoreAuthority;
-    if (valid_first) |header| if (valid_second == null or header.sequence > valid_second.?.sequence) return header;
-    return valid_second.?;
+    const selected_index: u1 = if (valid_first != null and
+        (valid_second == null or valid_first.?.sequence > valid_second.?.sequence)) 0 else 1;
+    const selected = if (selected_index == 0) valid_first.? else valid_second.?;
+    return .{
+        .header = selected,
+        .headers = .{ valid_first, valid_second },
+        .index = selected_index,
+        .sequence_floor = @max(
+            (valid_first orelse selected).sequence,
+            (valid_second orelse selected).sequence,
+        ),
+    };
 }
 
 test "blob store commits and reopens immutable blobs" {
@@ -397,6 +483,85 @@ test "blob store packs variable blobs into allocation units" {
         try std.testing.expectEqualSlices(u8, expected, output[0..amount]);
         try std.testing.expect(std.mem.allEqual(u8, output[amount..], 0));
     }
+}
+
+test "blob store publishes and reselects application authority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 8 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "authority-store",
+        device_size,
+        format.allocation_unit,
+    );
+    var store = try Store.create(std.testing.allocator, std.testing.io, device);
+    var store_open = true;
+    defer if (store_open) store.close(std.testing.io) catch {};
+
+    const first = try store.put(std.testing.io, "first root");
+    try store.commitAuthority(std.testing.io, first);
+    try std.testing.expectEqual(@as(u64, 3), store.header.sequence);
+    try std.testing.expectEqualDeep(first, store.authorityRoot().?);
+
+    const second = try store.put(std.testing.io, "second root");
+    try store.commitAuthority(std.testing.io, second);
+    try std.testing.expectEqual(@as(u64, 4), store.header.sequence);
+    try store.close(std.testing.io);
+    store_open = false;
+
+    const file = try tmp.dir.openFile(std.testing.io, "authority-store", .{ .mode = .read_write });
+    var file_open = true;
+    defer if (file_open) file.close(std.testing.io);
+    const storage = storage_api.Storage.initOwned(file, device_size, .regular_file, 1, false);
+    const reopened_device = try blob_device.Device.init(storage, 0, device_size, format.allocation_unit);
+    file_open = false;
+    store = try Store.open(std.testing.allocator, std.testing.io, reopened_device);
+    store_open = true;
+    try std.testing.expectEqualDeep(second, store.authorityRoot().?);
+
+    const candidates = store.authorityCandidates();
+    const previous = if (candidates[0].?.sequence == 3) candidates[0].? else candidates[1].?;
+    try store.selectAuthority(std.testing.io, previous);
+    try std.testing.expectEqualDeep(first, store.authorityRoot().?);
+    try std.testing.expectEqual(@as(u64, 1), store.stagedUnits());
+
+    const recovered = try store.put(std.testing.io, "recovered root");
+    try std.testing.expectEqual(second.slot, recovered.slot);
+    try store.commitAuthority(std.testing.io, recovered);
+    try std.testing.expectEqual(@as(u64, 5), store.header.sequence);
+    try std.testing.expectEqualDeep(recovered, store.authorityRoot().?);
+    const recovered_candidates = store.authorityCandidates();
+    try std.testing.expectEqual(@as(u64, 3), recovered_candidates[0].?.sequence);
+    try std.testing.expectEqualDeep(first, recovered_candidates[0].?.authority_root.?);
+    try std.testing.expectEqual(@as(u64, 5), recovered_candidates[1].?.sequence);
+}
+
+test "blob store discards an unpublished tail" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "discard-store",
+        4 * 1024 * 1024,
+        format.allocation_unit,
+    );
+    var store = try Store.create(std.testing.allocator, std.testing.io, device);
+    defer store.close(std.testing.io) catch {};
+
+    const checkpoint = store.stagedUnits();
+    const abandoned = try store.put(std.testing.io, "abandoned");
+    try store.discardStaged(std.testing.io, checkpoint);
+    const replacement = try store.put(std.testing.io, "replacement");
+    try std.testing.expectEqual(abandoned.slot, replacement.slot);
+    try std.testing.expect(!std.meta.eql(abandoned, replacement));
+    try store.commit(std.testing.io);
+    try std.testing.expectError(
+        error.InvalidBlobStoreCheckpoint,
+        store.discardStaged(std.testing.io, checkpoint),
+    );
 }
 
 test "blob store capacity and unpublished references are enforced" {
