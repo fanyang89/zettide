@@ -18,6 +18,7 @@ pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("en
 pub const endpoint_registry = @import("endpoint_registry.zig");
 pub const file_io = @import("file_io.zig");
 pub const filesystem_backend = @import("filesystem_backend.zig");
+pub const filesystem_target = @import("filesystem_target.zig");
 pub const littlefs_volume_adapter = @import("littlefs_volume_adapter.zig");
 pub const dufs_server = if (@import("builtin").os.tag == .linux) @import("dufs_server.zig") else struct {};
 pub const metadata = @import("metadata.zig");
@@ -66,6 +67,7 @@ test {
     _ = endpoint_registry;
     _ = file_io;
     _ = filesystem_backend;
+    _ = filesystem_target;
     _ = littlefs_volume_adapter;
     _ = dufs_server;
     _ = metadata;

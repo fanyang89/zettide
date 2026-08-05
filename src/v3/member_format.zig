@@ -23,6 +23,10 @@ pub const max_dynamic_member_count: u16 = 96;
 
 const magic = [8]u8{ 'D', 'D', 'V', 'M', 'E', 'M', '3', 0 };
 
+pub fn hasHeaderMagic(bytes: []const u8) bool {
+    return bytes.len >= magic.len and std.mem.eql(u8, bytes[0..magic.len], &magic);
+}
+
 pub const Label = struct {
     bytes: [127]u8 = @splat(0),
     length: u7 = 0,
@@ -161,7 +165,7 @@ pub fn encode(header: Header) ![encoded_size]u8 {
 pub fn decode(bytes: *const [encoded_size]u8) !Header {
     if (codec.getInt(u32, bytes, checksum_offset) != codec.crc32c(bytes[0..checksum_offset]))
         return error.ChecksumMismatch;
-    if (!std.mem.eql(u8, bytes[0x000..0x008], &magic)) return error.InvalidMagic;
+    if (!hasHeaderMagic(bytes)) return error.InvalidMagic;
     if (codec.getInt(u16, bytes, 0x008) != 3 or codec.getInt(u16, bytes, 0x00a) != 0)
         return error.UnsupportedFormatVersion;
     if (codec.getInt(u32, bytes, 0x00c) != encoded_size) return error.InvalidHeaderSize;

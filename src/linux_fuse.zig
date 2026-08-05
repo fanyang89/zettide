@@ -64,19 +64,28 @@ const Dentry = struct {
 const MountState = struct {
     filesystem: Filesystem,
     io: Io,
+    read_only: bool,
     update_access_time: bool,
     nodes: ?*Inode = null,
     node_index: std.AutoHashMapUnmanaged(c.fuse_ino_t, *Inode) = .empty,
     dentries: ?*Dentry = null,
     open_files: ?*FuseFileHandle = null,
+    open_directories: ?*FuseDirectoryHandle = null,
     reply_buffer: std.ArrayList(u8) = .empty,
     writeback_cache: bool = false,
     metrics: ?*Metrics,
 
-    fn init(filesystem: Filesystem, io: Io, update_access_time: bool, metrics: ?*Metrics) !MountState {
+    fn init(
+        filesystem: Filesystem,
+        io: Io,
+        read_only: bool,
+        update_access_time: bool,
+        metrics: ?*Metrics,
+    ) !MountState {
         var state = MountState{
             .filesystem = filesystem,
             .io = io,
+            .read_only = read_only,
             .update_access_time = update_access_time,
             .metrics = metrics,
         };
@@ -104,6 +113,18 @@ const MountState = struct {
     }
 
     fn deinit(self: *MountState) void {
+        while (self.open_files) |handle| {
+            self.open_files = handle.next;
+            handle.file.close() catch {};
+            handle.inode.open_count -= 1;
+            std.heap.c_allocator.destroy(handle);
+        }
+        while (self.open_directories) |handle| {
+            self.open_directories = handle.next;
+            handle.directory.close() catch {};
+            handle.inode.open_count -= 1;
+            std.heap.c_allocator.destroy(handle);
+        }
         var current_dentry = self.dentries;
         while (current_dentry) |dentry| {
             const next = dentry.next;
@@ -354,6 +375,17 @@ const MountState = struct {
         }
     }
 
+    fn unregisterOpenDirectory(self: *MountState, target: *FuseDirectoryHandle) void {
+        var link = &self.open_directories;
+        while (link.*) |handle| {
+            if (handle == target) {
+                link.* = handle.next;
+                return;
+            }
+            link = &handle.next;
+        }
+    }
+
     fn recordOperation(
         self: *MountState,
         operation: *OperationMetrics,
@@ -380,6 +412,7 @@ const FuseDirectoryHandle = struct {
     directory: DirectoryHandle,
     inode: *Inode,
     parent_id: c.fuse_ino_t,
+    next: ?*FuseDirectoryHandle,
 };
 
 pub const Session = struct {
@@ -415,6 +448,7 @@ pub const Session = struct {
         state.* = try MountState.init(
             filesystem,
             io,
+            options.read_only,
             options.update_access_time and !options.read_only,
             options.metrics,
         );
@@ -500,6 +534,7 @@ pub fn mount(filesystem: Filesystem, io: Io, mountpoint: []const u8, options: Se
     var state = try MountState.init(
         filesystem,
         io,
+        options.read_only,
         options.update_access_time and !options.read_only,
         options.metrics,
     );
@@ -1000,7 +1035,9 @@ fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.stru
     const handle = std.heap.c_allocator.create(FuseFileHandle) catch return replyError(req, c.ENOMEM);
     const host_flags = c.zettide_fuse_get_flags(fi);
     const options: filesystem_backend.OpenOptions = .{
-        .access = if (state.writeback_cache or host_flags & 3 != 0)
+        .access = if (state.read_only)
+            .read_only
+        else if (state.writeback_cache or host_flags & 3 != 0)
             .read_write
         else
             .read_only,
@@ -1146,6 +1183,8 @@ fn openDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_i
     };
     handle.inode = node;
     handle.parent_id = if (state.findEntryForInode(node)) |dentry| dentry.parent.id else c.FUSE_ROOT_ID;
+    handle.next = state.open_directories;
+    state.open_directories = handle;
     node.cached_info = handle.directory.info();
     node.open_count += 1;
     c.zettide_fuse_set_handle(fi.?, @intFromPtr(handle));
@@ -1209,6 +1248,7 @@ fn releaseDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_fil
     const handle = fuseDirectoryHandle(fi.?);
     const node = handle.inode;
     const result = handle.directory.close();
+    state.unregisterOpenDirectory(handle);
     node.open_count -= 1;
     std.heap.c_allocator.destroy(handle);
     state.maybeRemove(node);
@@ -1479,6 +1519,7 @@ test "cached portable aliases reconcile changed identities" {
     var state: MountState = .{
         .filesystem = undefined,
         .io = std.testing.io,
+        .read_only = false,
         .update_access_time = false,
         .metrics = null,
     };

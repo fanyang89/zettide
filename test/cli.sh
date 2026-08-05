@@ -45,6 +45,63 @@ formatted="$tmp/formatted.ddv"
 "$exe" info "$formatted" | grep -q '^Label: Format Test$'
 "$exe" check "$formatted" | grep -q '^Filesystem traversal succeeded:'
 
+explicit_littlefs="$tmp/explicit-littlefs.ddv"
+"$exe" format "$explicit_littlefs" --filesystem littlefs --size 8MiB >/dev/null
+"$exe" info "$explicit_littlefs" | grep -q '^Label: Zettide$'
+
+blob="$tmp/blob.ddv"
+"$exe" format "$blob" --filesystem blob --size 8MiB --name-profile portable-v1
+blob_info=$("$exe" info "$blob")
+[[ "$blob_info" == *"Filesystem: blob"* ]]
+[[ "$blob_info" == *"Capacity: 8.00MiB"* ]]
+[[ "$blob_info" == *"Name profile: portable-v1"* ]]
+"$exe" check "$blob" | grep -q '^Filesystem traversal succeeded:'
+
+blob_existing="$tmp/blob-existing.ddv"
+truncate -s 8MiB "$blob_existing"
+blob_plan=$("$exe" format "$blob_existing" --filesystem blob)
+[[ "$blob_plan" == *"Filesystem: blob"* ]]
+blob_token=$(printf '%s\n' "$blob_plan" | grep '^Confirm token: ' | cut -d' ' -f3)
+if "$exe" format "$blob_existing" --filesystem blob --name-profile portable-v1 --confirm "$blob_token" >/dev/null 2>&1; then
+    echo "blob format accepted a confirmation for another name profile" >&2
+    exit 1
+fi
+"$exe" format "$blob_existing" --filesystem blob --confirm "$blob_token" >/dev/null
+"$exe" info "$blob_existing" | grep -q '^Filesystem: blob$'
+
+if "$exe" format "$tmp/blob-label.ddv" --filesystem blob --size 8MiB --label unsupported >/dev/null 2>&1; then
+    echo "blob format accepted a label" >&2
+    exit 1
+fi
+if "$exe" format "$tmp/blob-encrypted.ddv" --filesystem blob --size 8MiB --encrypt --key-file missing >/dev/null 2>&1; then
+    echo "blob format accepted encryption" >&2
+    exit 1
+fi
+if "$exe" format "$tmp/blob-geometry.ddv" --filesystem blob --size 3145729 >/dev/null 2>&1; then
+    echo "blob format accepted invalid geometry" >&2
+    exit 1
+fi
+if "$exe" format "$tmp/unknown-filesystem.ddv" --filesystem unknown --size 8MiB >/dev/null 2>&1; then
+    echo "format accepted an unknown filesystem" >&2
+    exit 1
+fi
+if "$exe" format "$tmp/duplicate-filesystem.ddv" --filesystem littlefs --filesystem blob --size 8MiB >/dev/null 2>&1; then
+    echo "format accepted duplicate filesystem options" >&2
+    exit 1
+fi
+if "$exe" mount "$blob" "$tmp/not-mounted" --metrics >/dev/null 2>&1; then
+    echo "blob mount accepted metrics" >&2
+    exit 1
+fi
+if "$exe" serve dufs "$blob" --read-only >/dev/null 2>&1; then
+    echo "dufs accepted a blob filesystem" >&2
+    exit 1
+fi
+if "$exe" format /dev/null --filesystem blob >/dev/null 2>&1; then
+    echo "blob format accepted a non-regular target" >&2
+    exit 1
+fi
+
 existing="$tmp/existing.ddv"
 truncate -s 8MiB "$existing"
 plan=$("$exe" format "$existing" --label "Existing Test")

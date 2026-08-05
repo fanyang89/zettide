@@ -151,24 +151,26 @@ pub fn encodeRoot(root: Root) ![root_encoded_size]u8 {
 
 pub fn decodeRoot(bytes: *const [root_encoded_size]u8) !Root {
     if (!std.mem.eql(u8, bytes[0..8], &root_magic) or
-        getInt(u16, bytes, 8, .little) != root_version or
         getInt(u16, bytes, 10, .little) != root_encoded_size or
-        getInt(u64, bytes, 24, .little) != root_inode or
+        getInt(u32, bytes, root_checksum_offset, .little) != google_crc32c.value(bytes[0..root_checksum_offset]))
+        return error.InvalidBlobFilesystemRoot;
+    if (getInt(u16, bytes, 8, .little) != root_version)
+        return error.UnsupportedBlobFilesystemVersion;
+    if (getInt(u64, bytes, 24, .little) != root_inode or
         !std.mem.allEqual(u8, bytes[12..16], 0) or
         !std.mem.allEqual(u8, bytes[60..64], 0) or
         !std.mem.allEqual(u8, bytes[73..80], 0) or
-        !std.mem.allEqual(u8, bytes[112..root_checksum_offset], 0) or
-        getInt(u32, bytes, root_checksum_offset, .little) != google_crc32c.value(bytes[0..root_checksum_offset]))
+        !std.mem.allEqual(u8, bytes[112..root_checksum_offset], 0))
         return error.InvalidBlobFilesystemRoot;
     const root: Root = .{
         .generation = getInt(u64, bytes, 16, .little),
         .next_inode = getInt(u64, bytes, 32, .little),
         .record_count = getInt(u64, bytes, 40, .little),
         .orphan_count = getInt(u64, bytes, 48, .little),
-        .name_profile = name_profile.Profile.fromPersisted(
+        .name_profile = try name_profile.Profile.fromPersisted(
             getInt(u16, bytes, 56, .little),
             getInt(u16, bytes, 58, .little),
-        ) catch return error.InvalidBlobFilesystemRoot,
+        ),
         .metadata_root = .{
             .page = getInt(u64, bytes, 64, .little),
             .level = bytes[72],
@@ -400,6 +402,17 @@ test "blob filesystem root round trips and rejects corruption" {
     var corrupt = encoded;
     corrupt[80] ^= 1;
     try std.testing.expectError(error.InvalidBlobFilesystemRoot, decodeRoot(&corrupt));
+
+    var unsupported = encoded;
+    putInt(u16, &unsupported, 8, root_version + 1, .little);
+    try std.testing.expectError(error.InvalidBlobFilesystemRoot, decodeRoot(&unsupported));
+    putInt(u32, &unsupported, root_checksum_offset, google_crc32c.value(unsupported[0..root_checksum_offset]), .little);
+    try std.testing.expectError(error.UnsupportedBlobFilesystemVersion, decodeRoot(&unsupported));
+
+    var unsupported_profile = encoded;
+    putInt(u16, &unsupported_profile, 58, root.name_profile.persistedVersion() + 1, .little);
+    putInt(u32, &unsupported_profile, root_checksum_offset, google_crc32c.value(unsupported_profile[0..root_checksum_offset]), .little);
+    try std.testing.expectError(error.UnsupportedNameProfile, decodeRoot(&unsupported_profile));
 }
 
 test "blob filesystem inode records preserve sparse snapshots" {

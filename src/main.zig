@@ -4,6 +4,11 @@ const zettide = @import("zettide");
 const build_options = @import("build_options");
 const cli_crypto = @import("cli_crypto.zig");
 
+const FilesystemKind = enum {
+    littlefs,
+    blob,
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
@@ -77,6 +82,8 @@ fn serveCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
             return error.UnknownOption;
         }
     }
+    if (try zettide.filesystem_target.classifyPath(io, path) == .blob)
+        return error.UnsupportedFilesystemBackend;
     var secret: cli_crypto.Secret = undefined;
     var secret_loaded = false;
     if (credential_source) |source| {
@@ -524,12 +531,15 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
     if (args.len < 2) return error.InvalidArguments;
     var allow_other = false;
     var metrics = false;
+    var writable = true;
     var access_time: zettide.volume.AccessTimePolicy = .relatime;
     for (args[2..]) |option| {
         if (std.mem.eql(u8, option, "--allow-other")) {
             allow_other = true;
         } else if (std.mem.eql(u8, option, "--metrics")) {
             metrics = true;
+        } else if (std.mem.eql(u8, option, "--read-only")) {
+            writable = false;
         } else if (std.mem.eql(u8, option, "--noatime")) {
             access_time = .noatime;
         } else {
@@ -537,9 +547,32 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
         }
     }
     if (@import("builtin").os.tag != .linux) return error.MountNotImplemented;
+    if (try zettide.filesystem_target.classifyPath(io, args[0]) == .blob) {
+        if (metrics) return error.BlobMetricsNotSupported;
+        const native = try allocator.create(zettide.blob_filesystem.Filesystem);
+        defer allocator.destroy(native);
+        native.* = try zettide.filesystem_target.openBlobFilesystem(allocator, io, args[0], writable);
+        defer native.close(io) catch {};
+        const adapter = try allocator.create(zettide.blob_filesystem_adapter.Adapter);
+        defer allocator.destroy(adapter);
+        adapter.* = .init(native, io);
+        try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
+        try stdout.flush();
+        try zettide.linux_fuse.mount(
+            adapter.filesystem(),
+            io,
+            args[1],
+            .{
+                .allow_other = allow_other,
+                .read_only = !writable,
+                .update_access_time = access_time == .relatime,
+            },
+        );
+        return;
+    }
     const volume = try allocator.create(zettide.volume.Volume);
     defer allocator.destroy(volume);
-    try zettide.target.openVolumeInto(volume, io, allocator, args[0], true);
+    try zettide.target.openVolumeInto(volume, io, allocator, args[0], writable);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
     try volume.mountOptions(.{ .access_time = .noatime });
@@ -553,6 +586,7 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
         args[1],
         .{
             .allow_other = allow_other,
+            .read_only = !writable,
             .update_access_time = access_time == .relatime,
             .metrics = if (metrics) &fuse_metrics else null,
         },
@@ -705,6 +739,9 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
     const path = args[0];
     var size: ?u64 = null;
     var label: []const u8 = "Zettide";
+    var label_explicit = false;
+    var filesystem: FilesystemKind = .littlefs;
+    var filesystem_explicit = false;
     var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var confirmation: ?[]const u8 = null;
     var encrypt = false;
@@ -719,6 +756,18 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
             label = args[index];
+            label_explicit = true;
+        } else if (std.mem.eql(u8, args[index], "--filesystem")) {
+            if (filesystem_explicit) return error.DuplicateOption;
+            index += 1;
+            if (index == args.len) return error.MissingOptionValue;
+            filesystem = if (std.mem.eql(u8, args[index], "littlefs"))
+                .littlefs
+            else if (std.mem.eql(u8, args[index], "blob"))
+                .blob
+            else
+                return error.InvalidFilesystem;
+            filesystem_explicit = true;
         } else if (std.mem.eql(u8, args[index], "--name-profile")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -739,6 +788,11 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
         } else {
             return error.UnknownOption;
         }
+    }
+    if (filesystem == .blob) {
+        if (label_explicit) return error.BlobLabelNotSupported;
+        if (encrypt or credential_source != null) return error.BlobEncryptionNotSupported;
+        return blobFormatCommand(allocator, io, path, size, name_profile, confirmation, stdout);
     }
     if (encrypt != (credential_source != null))
         return if (encrypt) error.EncryptionCredentialRequired else error.EncryptionOptionRequiresEncrypt;
@@ -805,6 +859,87 @@ fn formatCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8,
     }
 }
 
+fn blobFormatCommand(
+    allocator: std.mem.Allocator,
+    io: Io,
+    path: []const u8,
+    size: ?u64,
+    name_profile: zettide.name_profile.Profile,
+    confirmation: ?[]const u8,
+    stdout: *Io.Writer,
+) !void {
+    const owner = currentOwner();
+    const format_options: zettide.blob_filesystem.Filesystem.FormatOptions = .{
+        .root_uid = owner.uid,
+        .root_gid = owner.gid,
+    };
+    if (confirmation) |supplied| {
+        var acquired = zettide.filesystem_target.acquireBlobFormat(
+            io,
+            allocator,
+            path,
+            name_profile,
+            format_options,
+        ) catch |err| switch (err) {
+            error.FileNotFound => return error.UnexpectedConfirmation,
+            else => return err,
+        };
+        defer acquired.deinit();
+        try printBlobFormatPlan(&acquired.plan, stdout);
+        if (size != null) return error.SizeOnlyValidForNewFile;
+        try acquired.apply(allocator, supplied, name_profile, format_options);
+        try stdout.print("Formatted {s}\n", .{path});
+        return;
+    }
+
+    const plan = zettide.filesystem_target.inspectBlobFormat(
+        io,
+        allocator,
+        path,
+        name_profile,
+        format_options,
+    ) catch |err| switch (err) {
+        error.FileNotFound => {
+            const target_size = size orelse return error.MissingSize;
+            try zettide.filesystem_target.formatNewBlobFile(
+                io,
+                allocator,
+                path,
+                target_size,
+                name_profile,
+                format_options,
+            );
+            try stdout.print("Formatted {s} ({Bi:.2})\n", .{ path, target_size });
+            return;
+        },
+        else => return err,
+    };
+    if (size != null) return error.SizeOnlyValidForNewFile;
+    try printBlobFormatPlan(&plan, stdout);
+    var token_buffer: [64]u8 = undefined;
+    if (plan.eligible)
+        try stdout.print("Confirm token: {s}\n", .{plan.tokenText(&token_buffer)});
+}
+
+fn printBlobFormatPlan(plan: *const zettide.filesystem_target.BlobFormatPlan, stdout: *Io.Writer) !void {
+    const target_plan = &plan.target_plan;
+    try stdout.print("Target: {s}\n", .{target_plan.path});
+    try stdout.writeAll("Filesystem: blob\n");
+    try stdout.print("Type: {s}\n", .{@tagName(target_plan.kind)});
+    try stdout.print("Capacity: {Bi:.2}\n", .{target_plan.capacity_bytes});
+    try stdout.print("Contains data: {s}\n", .{if (target_plan.contains_data) "yes" else "no"});
+    try stdout.print("Name profile: {s}\n", .{target_plan.name_profile.name()});
+    try stdout.print("Plan: {s}\n", .{if (plan.eligible) "ready" else "rejected"});
+}
+
+fn currentOwner() struct { uid: u32, gid: u32 } {
+    if (comptime @import("builtin").os.tag == .linux) return .{
+        .uid = @intCast(std.os.linux.getuid()),
+        .gid = @intCast(std.os.linux.getgid()),
+    };
+    return .{ .uid = 0, .gid = 0 };
+}
+
 fn printFormatPlan(plan: *const zettide.target.FormatPlan, stdout: *Io.Writer) !void {
     try stdout.print("Target: {s}\n", .{plan.path});
     try stdout.print("Type: {s}\n", .{@tagName(plan.kind)});
@@ -848,15 +983,26 @@ fn finishFormat(
 
 fn infoCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len != 1) return error.InvalidArguments;
+    if (try zettide.filesystem_target.classifyPath(io, args[0]) == .blob) {
+        var filesystem = try zettide.filesystem_target.openBlobFilesystem(allocator, io, args[0], false);
+        defer filesystem.close(io) catch {};
+        const header = filesystem.blobs.header;
+        try stdout.print("Path: {s}\n", .{args[0]});
+        try stdout.writeAll("Filesystem: blob\nUUID: ");
+        try printUuid(stdout, header.uuid);
+        try stdout.print("\nCapacity: {Bi:.2}\n", .{header.device_size});
+        try stdout.print("Block size: {d}\n", .{zettide.blob_format.allocation_unit});
+        try stdout.print("Blocks: {d}\n", .{header.unit_count});
+        try stdout.print("Name profile: {s}\n", .{filesystem.root.name_profile.name()});
+        try stdout.writeAll("Case-sensitive: yes\nEncrypted: no\n");
+        return;
+    }
     const header = try zettide.target.inspectVolumeHeader(io, allocator, args[0]);
 
     try stdout.print("Path: {s}\n", .{args[0]});
     try stdout.print("Label: {s}\n", .{header.labelSlice()});
     try stdout.writeAll("UUID: ");
-    for (header.uuid, 0..) |byte, index| {
-        if (index == 4 or index == 6 or index == 8 or index == 10) try stdout.writeByte('-');
-        try stdout.print("{x:0>2}", .{byte});
-    }
+    try printUuid(stdout, header.uuid);
     try stdout.print("\nCapacity: {Bi:.2}\n", .{header.logical_size});
     try stdout.print("Block size: {d}\n", .{header.block_size});
     try stdout.print("Blocks: {d}\n", .{header.block_count});
@@ -867,6 +1013,12 @@ fn infoCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
 
 fn checkCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, stdout: *Io.Writer) !void {
     if (args.len != 1) return error.InvalidArguments;
+    if (try zettide.filesystem_target.classifyPath(io, args[0]) == .blob) {
+        var filesystem = try zettide.filesystem_target.openBlobFilesystem(allocator, io, args[0], false);
+        defer filesystem.close(io) catch {};
+        try stdout.print("Filesystem traversal succeeded: {d} records\n", .{filesystem.root.record_count});
+        return;
+    }
     const volume = try allocator.create(zettide.volume.Volume);
     defer allocator.destroy(volume);
     try zettide.target.openVolumeInto(volume, io, allocator, args[0], false);
@@ -880,15 +1032,22 @@ fn checkCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
     try volume.close();
 }
 
+fn printUuid(writer: *Io.Writer, uuid: [16]u8) !void {
+    for (uuid, 0..) |byte, index| {
+        if (index == 4 or index == 6 or index == 8 or index == 10) try writer.writeByte('-');
+        try writer.print("{x:0>2}", .{byte});
+    }
+}
+
 fn usage(writer: *Io.Writer) !void {
     try writer.writeAll(
         \\Usage:
         \\  zettide key generate <path>
-        \\  zettide format <file|device> [--size <size>] [--label <label>] [--name-profile <profile>] [--encrypt (--key-file <path>|--passphrase)] [--confirm <token>]
+        \\  zettide format <file|device> [--filesystem littlefs|blob] [--size <size>] [--label <label>] [--name-profile <profile>] [--encrypt (--key-file <path>|--passphrase)] [--confirm <token>]
         \\  zettide create <container> --size <size> [--label <label>] [--name-profile <profile>] [--redo-journal-size <size>]
         \\  zettide info <container>
         \\  zettide check <container>
-        \\  zettide mount <container> <mountpoint> [--allow-other] [--metrics] [--noatime]
+        \\  zettide mount <container> <mountpoint> [--read-only] [--allow-other] [--metrics] [--noatime]
         \\  zettide unmount <mountpoint>
         \\  zettide device inspect <device>
         \\  zettide pool inspect --device <device>... [--name-profile <profile>]
@@ -900,6 +1059,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]...
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
+        \\Blob filesystems support regular files only; label, encryption, and metrics are unavailable.
         \\Name profiles are legacy-raw and portable-v1; legacy-raw is the default.
         \\
     );

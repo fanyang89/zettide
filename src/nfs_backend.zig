@@ -108,6 +108,19 @@ pub export fn zettide_nfs_export_open(
     const output = out_export orelse return status(.invalid_argument);
     const self = allocator.create(Export) catch return status(.internal);
     self.threaded = .init(allocator, .{ .environ = .empty });
+    const kind = zettide.filesystem_target.classifyPath(
+        self.threaded.io(),
+        std.mem.span(target_value),
+    ) catch |err| {
+        self.threaded.deinit();
+        allocator.destroy(self);
+        return statusFor(err, false);
+    };
+    if (kind == .blob) {
+        self.threaded.deinit();
+        allocator.destroy(self);
+        return status(.not_supported);
+    }
     zettide.target.openVolumeIntoOptions(
         &self.volume,
         self.threaded.io(),
@@ -676,7 +689,7 @@ fn statusFor(err: anyerror, stale_context: bool) c_int {
         error.FileTooLarge => .file_too_large,
         error.NameTooLong => .name_too_long,
         error.InputOutput, error.CorruptFilesystem, error.VolumeRequiresReopen => .input_output,
-        error.OperationNotSupported => .not_supported,
+        error.OperationNotSupported, error.UnsupportedFilesystemBackend => .not_supported,
         error.PermissionDenied => .permission_denied,
         error.DirectoryNotEmpty => .directory_not_empty,
         error.TooManyLinks => .too_many_links,

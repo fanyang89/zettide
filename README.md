@@ -183,6 +183,9 @@ pins, manifests, and log controls are documented in
 ```sh
 zettide format workspace.ddv --size 16GiB --label Workspace
 
+# Experimental regular-file BlobFilesystem backend.
+zettide format blob.ddv --filesystem blob --size 16GiB
+
 # Optional encrypted file-backed target using a generated 32-byte key.
 zettide key generate workspace.key
 zettide format private.ddv --size 16GiB --encrypt --key-file workspace.key
@@ -208,6 +211,7 @@ zettide serve dufs workspace.ddv -- -A -b 127.0.0.1 -p 5000
 
 Mounts use relatime by default. Pass `--noatime` to disable automatic
 access-time updates.
+Pass `--read-only` to open either regular-file filesystem backend read-only.
 Pass `--metrics` to print write-pipeline counters after unmount.
 `create --redo-journal-size <size>` appends a redo journal to a file-backed
 container; the journal must fit two maximum-size transactions.
@@ -226,6 +230,16 @@ zettide format /dev/disk/by-id/example --label Workspace --confirm <token>
 Formatting replaces the filesystem but does not securely erase every old data
 block. The confirmation token binds the target identity, geometry, path, label,
 complete content digest observed by the plan, and encryption KDF type.
+
+`format --filesystem blob` selects the BlobFilesystem backend; omitting
+`--filesystem` or selecting `littlefs` preserves the existing format and
+confirmation tokens. BlobFilesystem currently supports regular backing files
+only. New files require a size of at least 2 MiB aligned to 1 MiB. Existing
+files use a Blob-specific scan-bound confirmation token. The selected name
+profile and the current Linux UID/GID for the root directory are persisted.
+Linux FUSE mount, read-only mount, `info`, and `check` are supported.
+Labels, encryption, metrics, Pools, block devices, NFS, dufs, Windows mounts,
+and fallocate are not supported for BlobFilesystem.
 
 Encryption is available only when `format` creates a v3 single-member,
 unprotected regular-file target. Key files contain exactly 32 random bytes;

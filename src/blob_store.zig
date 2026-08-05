@@ -350,7 +350,10 @@ fn readHeader(
     const bytes = try allocator.alignedAlloc(u8, .fromByteUnits(4096), format.header_size);
     defer allocator.free(bytes);
     try device.readAt(io, bytes, offset);
-    return format.decodeHeader(@ptrCast(bytes.ptr)) catch null;
+    return format.decodeHeader(@ptrCast(bytes.ptr)) catch |err| switch (err) {
+        error.UnsupportedBlobStoreVersion => return err,
+        else => null,
+    };
 }
 
 const SelectedHeader = struct {

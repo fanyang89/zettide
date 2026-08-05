@@ -43,6 +43,10 @@ const encryption_magic = [8]u8{ 'D', 'D', 'V', 'E', 'N', 'C', '1', 0 };
 const redo_journal_offset: usize = 384;
 const redo_journal_magic = [8]u8{ 'D', 'D', 'V', 'R', 'E', 'D', 'O', '1' };
 
+pub fn hasHeaderMagic(bytes: []const u8) bool {
+    return bytes.len >= magic.len and std.mem.eql(u8, bytes[0..magic.len], &magic);
+}
+
 pub const RedoJournal = struct {
     offset: u64,
     length: u64,
@@ -198,7 +202,7 @@ pub const Header = struct {
     }
 
     pub fn decode(bytes: *const [header_size]u8) !Header {
-        if (!std.mem.eql(u8, bytes[0..magic.len], &magic)) return error.InvalidMagic;
+        if (!hasHeaderMagic(bytes)) return error.InvalidMagic;
         if (getInt(u32, bytes, 12) != header_size) return error.InvalidHeader;
         if (getInt(u32, bytes, checksum_offset) != checksum(bytes[0..checksum_offset]))
             return error.InvalidChecksum;

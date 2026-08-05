@@ -16,6 +16,10 @@ const version: u16 = 3;
 const checksum_offset = header_size - @sizeOf(u32);
 const authority_present: u32 = 1;
 
+pub fn hasHeaderMagic(bytes: []const u8) bool {
+    return bytes.len >= magic.len and std.mem.eql(u8, bytes[0..magic.len], &magic);
+}
+
 pub const Header = struct {
     sequence: u64,
     uuid: [16]u8,
@@ -96,18 +100,20 @@ pub fn encodeHeader(header: Header) [header_size]u8 {
 }
 
 pub fn decodeHeader(bytes: *const [header_size]u8) !Header {
-    if (!std.mem.eql(u8, bytes[0..8], &magic) or
-        std.mem.readInt(u16, bytes[8..10], .little) != version or
-        std.mem.readInt(u16, bytes[10..12], .little) != header_size or
+    if (!hasHeaderMagic(bytes) or
+        std.mem.readInt(u32, bytes[checksum_offset..header_size], .little) !=
+            google_crc32c.value(bytes[0..checksum_offset]))
+        return error.InvalidBlobStoreHeader;
+    if (std.mem.readInt(u16, bytes[8..10], .little) != version)
+        return error.UnsupportedBlobStoreVersion;
+    if (std.mem.readInt(u16, bytes[10..12], .little) != header_size or
         std.mem.readInt(u64, bytes[48..56], .little) != arena_offset or
         std.mem.readInt(u32, bytes[56..60], .little) != blob_size or
         std.mem.readInt(u32, bytes[60..64], .little) != checksum_unit or
         std.mem.readInt(u32, bytes[64..68], .little) != allocation_unit or
         !std.mem.allEqual(u8, bytes[12..16], 0) or
         !std.mem.allEqual(u8, bytes[68..72], 0) or
-        !std.mem.allEqual(u8, bytes[168..checksum_offset], 0) or
-        std.mem.readInt(u32, bytes[checksum_offset..header_size], .little) !=
-            google_crc32c.value(bytes[0..checksum_offset]))
+        !std.mem.allEqual(u8, bytes[168..checksum_offset], 0))
         return error.InvalidBlobStoreHeader;
     const flags = std.mem.readInt(u32, bytes[88..92], .little);
     if (flags & ~authority_present != 0 or
@@ -176,6 +182,17 @@ test "blob store header round trips and rejects corruption" {
     var corrupt = encoded;
     corrupt[72] ^= 1;
     try std.testing.expectError(error.InvalidBlobStoreHeader, decodeHeader(&corrupt));
+
+    var unsupported = encoded;
+    std.mem.writeInt(u16, unsupported[8..10], version + 1, .little);
+    try std.testing.expectError(error.InvalidBlobStoreHeader, decodeHeader(&unsupported));
+    std.mem.writeInt(
+        u32,
+        unsupported[checksum_offset..header_size],
+        google_crc32c.value(unsupported[0..checksum_offset]),
+        .little,
+    );
+    try std.testing.expectError(error.UnsupportedBlobStoreVersion, decodeHeader(&unsupported));
 
     header.committed_units = 0;
     try std.testing.expectError(error.InvalidBlobStoreHeader, header.validate(header.device_size));

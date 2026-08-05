@@ -56,6 +56,11 @@ pub const Filesystem = struct {
 
     const RuntimeReferenceKind = enum { open, pin };
 
+    pub const FormatOptions = struct {
+        root_uid: u32 = 0,
+        root_gid: u32 = 0,
+    };
+
     fn init(
         allocator: std.mem.Allocator,
         blobs: blob_store.Store,
@@ -81,6 +86,17 @@ pub const Filesystem = struct {
         blobs: blob_store.Store,
         profile: name_profile.Profile,
     ) !Filesystem {
+        return formatOptions(allocator, io, blobs, profile, .{});
+    }
+
+    /// Takes ownership of blobs, including on failure.
+    pub fn formatOptions(
+        allocator: std.mem.Allocator,
+        io: Io,
+        blobs: blob_store.Store,
+        profile: name_profile.Profile,
+        options: FormatOptions,
+    ) !Filesystem {
         var owned_blobs = blobs;
         errdefer owned_blobs.close(io) catch {};
         if (owned_blobs.authorityRoot() != null or owned_blobs.committedUnits() != 0 or
@@ -89,7 +105,13 @@ pub const Filesystem = struct {
 
         const inode_key = try filesystem_format.inodeKey(filesystem_format.root_inode);
         const inode_value = try filesystem_format.encodeInode(.{
-            .metadata = metadata.Metadata.init(io, .directory, 0o040755, 0, 0),
+            .metadata = metadata.Metadata.init(
+                io,
+                .directory,
+                0o040755,
+                options.root_uid,
+                options.root_gid,
+            ),
             .generation = 1,
             .nlink = 2,
             .allocated_bytes = 0,
