@@ -466,6 +466,18 @@ pub const Member = struct {
         if (amount != buffer.len) return error.TruncatedMember;
     }
 
+    pub fn transportKind(self: *const Member) storage_api.TransportKind {
+        return self.storage.transportKind();
+    }
+
+    pub fn transportStats(self: *Member) storage_api.TransportStats {
+        return self.storage.transportStats(self.io);
+    }
+
+    pub fn resetTransportStats(self: *Member) void {
+        self.storage.resetTransportStats(self.io);
+    }
+
     pub fn readMany(
         self: *Member,
         kind: RegionKind,

@@ -11,6 +11,7 @@ const pool_block_device = @import("v3/pool_block_device.zig");
 const pool_member_set = @import("v3/pool_member_set.zig");
 const ReplicaEndpoint = @import("v3/replica_endpoint.zig").ReplicaEndpoint;
 const pool_provision = @import("v3/pool_provision.zig");
+const storage_api = @import("v3/storage.zig");
 const name_profile = @import("name_profile.zig");
 pub const nfs_handle = @import("nfs_handle.zig");
 const volume_crypto = @import("volume_crypto.zig");
@@ -27,10 +28,23 @@ pub const MountOptions = struct {
 };
 
 pub const PipelineMetrics = struct {
+    logical_read_calls: u64,
+    logical_read_bytes: u64,
+    logical_read_elapsed_ns: u64,
+    logical_read_max_ns: u64,
     logical_write_calls: u64,
     logical_write_bytes: u64,
+    logical_write_elapsed_ns: u64,
+    logical_write_max_ns: u64,
     journaled: bool,
     block_device: block_device.PipelineMetrics,
+    member_count: usize = 0,
+    members: [3]MemberTransportMetrics = @splat(.{}),
+};
+
+pub const MemberTransportMetrics = struct {
+    kind: storage_api.TransportKind = .custom,
+    stats: storage_api.TransportStats = .{},
 };
 
 pub const Volume = struct {
@@ -66,6 +80,12 @@ pub const Volume = struct {
     crypto_allocator: ?std.mem.Allocator = null,
     logical_write_calls: std.atomic.Value(u64) = .init(0),
     logical_write_bytes: std.atomic.Value(u64) = .init(0),
+    logical_write_elapsed_ns: std.atomic.Value(u64) = .init(0),
+    logical_write_max_ns: std.atomic.Value(u64) = .init(0),
+    logical_read_calls: std.atomic.Value(u64) = .init(0),
+    logical_read_bytes: std.atomic.Value(u64) = .init(0),
+    logical_read_elapsed_ns: std.atomic.Value(u64) = .init(0),
+    logical_read_max_ns: std.atomic.Value(u64) = .init(0),
 
     pub const RedoJournalOptions = struct {
         length: u64,
@@ -347,6 +367,12 @@ pub const Volume = struct {
         result.crypto_allocator = if (crypto_context != null) allocator else null;
         result.logical_write_calls = .init(0);
         result.logical_write_bytes = .init(0);
+        result.logical_write_elapsed_ns = .init(0);
+        result.logical_write_max_ns = .init(0);
+        result.logical_read_calls = .init(0);
+        result.logical_read_bytes = .init(0);
+        result.logical_read_elapsed_ns = .init(0);
+        result.logical_read_max_ns = .init(0);
     }
 
     pub fn inspectPoolHeader(io: Io, set: *pool_member_set.PoolMemberSet) !container.Header {
@@ -443,6 +469,12 @@ pub const Volume = struct {
         result.crypto_allocator = null;
         result.logical_write_calls = .init(0);
         result.logical_write_bytes = .init(0);
+        result.logical_write_elapsed_ns = .init(0);
+        result.logical_write_max_ns = .init(0);
+        result.logical_read_calls = .init(0);
+        result.logical_read_bytes = .init(0);
+        result.logical_read_elapsed_ns = .init(0);
+        result.logical_read_max_ns = .init(0);
     }
 
     pub fn setFallbackOwner(self: *Volume, uid: u32, gid: u32) void {
@@ -601,13 +633,53 @@ pub const Volume = struct {
         if (first_error) |err| return err;
     }
 
-    pub fn pipelineMetrics(self: *const Volume) PipelineMetrics {
-        return .{
+    pub fn pipelineMetrics(self: *Volume) PipelineMetrics {
+        var result: PipelineMetrics = .{
+            .logical_read_calls = self.logical_read_calls.load(.acquire),
+            .logical_read_bytes = self.logical_read_bytes.load(.acquire),
+            .logical_read_elapsed_ns = self.logical_read_elapsed_ns.load(.acquire),
+            .logical_read_max_ns = self.logical_read_max_ns.load(.acquire),
             .logical_write_calls = self.logical_write_calls.load(.acquire),
             .logical_write_bytes = self.logical_write_bytes.load(.acquire),
+            .logical_write_elapsed_ns = self.logical_write_elapsed_ns.load(.acquire),
+            .logical_write_max_ns = self.logical_write_max_ns.load(.acquire),
             .journaled = self.backing == .file and self.device.isJournaled(),
-            .block_device = if (self.backing == .file) self.device.pipelineMetrics() else .{},
+            .block_device = if (self.backing == .file)
+                self.device.pipelineMetrics()
+            else
+                self.pool_device.pipelineMetrics(),
         };
+        if (self.backing == .pool) {
+            for (0..self.pool_set.?.suppliedCount()) |index| {
+                const member = (self.pool_set.?.memberAt(index) catch null) orelse continue;
+                result.members[result.member_count] = .{
+                    .kind = member.transportKind(),
+                    .stats = member.transportStats(),
+                };
+                result.member_count += 1;
+            }
+        }
+        return result;
+    }
+
+    pub fn resetPipelineMetrics(self: *Volume) void {
+        self.logical_read_calls.store(0, .release);
+        self.logical_read_bytes.store(0, .release);
+        self.logical_read_elapsed_ns.store(0, .release);
+        self.logical_read_max_ns.store(0, .release);
+        self.logical_write_calls.store(0, .release);
+        self.logical_write_bytes.store(0, .release);
+        self.logical_write_elapsed_ns.store(0, .release);
+        self.logical_write_max_ns.store(0, .release);
+        if (self.backing == .file) {
+            self.device.resetPipelineMetrics();
+            return;
+        }
+        self.pool_device.resetPipelineMetrics();
+        for (0..self.pool_set.?.suppliedCount()) |index| {
+            const member = (self.pool_set.?.memberAt(index) catch null) orelse continue;
+            member.resetTransportStats();
+        }
     }
 
     pub fn deinit(self: *Volume) void {
@@ -1465,6 +1537,7 @@ pub const Volume = struct {
     }
 
     pub fn readFile(self: *Volume, handle: *FileHandle, buffer: []u8, offset: u64) !usize {
+        const start = Io.Clock.awake.now(self.io).nanoseconds;
         var value_metadata: metadata.Metadata = undefined;
         const result = value: {
             var view = try self.beginView();
@@ -1481,10 +1554,16 @@ pub const Volume = struct {
             const timestamp: i64 = @intCast(Io.Clock.real.now(self.io).nanoseconds);
             self.updateAccessTimeFromMetadata(handle.object_id, value_metadata, timestamp) catch {};
         }
+        const elapsed: u64 = @intCast(Io.Clock.awake.now(self.io).nanoseconds - start);
+        _ = self.logical_read_calls.fetchAdd(1, .monotonic);
+        _ = self.logical_read_bytes.fetchAdd(result, .monotonic);
+        _ = self.logical_read_elapsed_ns.fetchAdd(elapsed, .monotonic);
+        block_device.recordAtomicMax(&self.logical_read_max_ns, elapsed);
         return result;
     }
 
     pub fn writeFile(self: *Volume, handle: *FileHandle, data: []const u8, offset: u64) !usize {
+        const start = Io.Clock.awake.now(self.io).nanoseconds;
         if (!handle.writable) return error.AccessDenied;
         try self.object_transaction_mutex.lock(self.io);
         defer self.object_transaction_mutex.unlock(self.io);
@@ -1505,6 +1584,9 @@ pub const Volume = struct {
         try mutation.commit();
         _ = self.logical_write_calls.fetchAdd(1, .monotonic);
         _ = self.logical_write_bytes.fetchAdd(result.amount, .monotonic);
+        const elapsed: u64 = @intCast(Io.Clock.awake.now(self.io).nanoseconds - start);
+        _ = self.logical_write_elapsed_ns.fetchAdd(elapsed, .monotonic);
+        block_device.recordAtomicMax(&self.logical_write_max_ns, elapsed);
         return result.amount;
     }
 
@@ -2456,6 +2538,10 @@ test "create, write, reopen, and check volume" {
     var buffer: [5]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 5), try volume.readFile(&reopened, &buffer, 0));
     try std.testing.expectEqualStrings("hello", &buffer);
+    const read_metrics = volume.pipelineMetrics();
+    try std.testing.expectEqual(@as(u64, 1), read_metrics.logical_read_calls);
+    try std.testing.expectEqual(@as(u64, 5), read_metrics.logical_read_bytes);
+    try std.testing.expect(read_metrics.logical_read_max_ns > 0);
     try volume.closeFile(&reopened);
 
     const result = try volume.check();

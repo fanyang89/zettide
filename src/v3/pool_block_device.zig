@@ -28,6 +28,7 @@ pub const PoolBlockDevice = struct {
     dirty: std.atomic.Value(bool) = .init(false),
     write_frozen: std.atomic.Value(bool) = .init(false),
     crypto: ?*const volume_crypto.Context = null,
+    pipeline_metrics: block_device.AtomicPipelineMetrics = .{},
 
     pub fn init(
         io: std.Io,
@@ -84,6 +85,14 @@ pub const PoolBlockDevice = struct {
     }
 
     pub fn read(self: *PoolBlockDevice, block: u32, offset: u32, buffer: []u8) !void {
+        const start = std.Io.Clock.awake.now(self.io).nanoseconds;
+        defer {
+            const elapsed: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds - start);
+            _ = self.pipeline_metrics.littlefs_read_calls.fetchAdd(1, .monotonic);
+            _ = self.pipeline_metrics.littlefs_read_bytes.fetchAdd(buffer.len, .monotonic);
+            _ = self.pipeline_metrics.littlefs_read_elapsed_ns.fetchAdd(elapsed, .monotonic);
+            block_device.recordAtomicMax(&self.pipeline_metrics.littlefs_read_max_ns, elapsed);
+        }
         const data_offset = try self.position(block, offset, buffer.len);
         if (self.kind == .unprotected) {
             if (self.crypto == null) return self.replicas[0].readData(data_offset, buffer);
@@ -120,6 +129,14 @@ pub const PoolBlockDevice = struct {
     }
 
     pub fn program(self: *PoolBlockDevice, block: u32, offset: u32, data: []const u8) !void {
+        const start = std.Io.Clock.awake.now(self.io).nanoseconds;
+        defer {
+            const elapsed: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds - start);
+            _ = self.pipeline_metrics.littlefs_program_calls.fetchAdd(1, .monotonic);
+            _ = self.pipeline_metrics.littlefs_program_bytes.fetchAdd(data.len, .monotonic);
+            _ = self.pipeline_metrics.littlefs_program_elapsed_ns.fetchAdd(elapsed, .monotonic);
+            block_device.recordAtomicMax(&self.pipeline_metrics.littlefs_program_max_ns, elapsed);
+        }
         if (self.isWriteFrozen()) return error.WriteFrozen;
         const data_offset = try self.position(block, offset, data.len);
         var ciphertext: [container.default_block_size]u8 = undefined;
@@ -140,12 +157,22 @@ pub const PoolBlockDevice = struct {
             self.freezeWrites();
             return err;
         }
+        _ = self.pipeline_metrics.direct_program_bytes.fetchAdd(data.len, .monotonic);
+        _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(data.len * self.replica_count, .monotonic);
         self.dirty.store(true, .release);
     }
 
     pub fn sync(self: *PoolBlockDevice) !void {
+        _ = self.pipeline_metrics.logical_sync_calls.fetchAdd(1, .monotonic);
         if (self.isWriteFrozen()) return error.WriteFrozen;
         if (!self.dirty.load(.acquire)) return;
+        const start = std.Io.Clock.awake.now(self.io).nanoseconds;
+        defer {
+            const elapsed: u64 = @intCast(std.Io.Clock.awake.now(self.io).nanoseconds - start);
+            _ = self.pipeline_metrics.backing_sync_calls.fetchAdd(self.replica_count, .monotonic);
+            _ = self.pipeline_metrics.backing_sync_elapsed_ns.fetchAdd(elapsed, .monotonic);
+            block_device.recordAtomicMax(&self.pipeline_metrics.backing_sync_max_ns, elapsed);
+        }
         var operations: [max_replica_count]ReplicaOperation = @splat(.sync);
         var errors: [max_replica_count]?anyerror = @splat(null);
         self.runReplicaOperations(operations[0..self.replica_count], errors[0..self.replica_count]) catch |err| {
@@ -157,6 +184,14 @@ pub const PoolBlockDevice = struct {
             return err;
         }
         self.dirty.store(false, .release);
+    }
+
+    pub fn pipelineMetrics(self: *const PoolBlockDevice) block_device.PipelineMetrics {
+        return self.pipeline_metrics.snapshot();
+    }
+
+    pub fn resetPipelineMetrics(self: *PoolBlockDevice) void {
+        self.pipeline_metrics.reset();
     }
 
     pub fn initializeEncryptedData(self: *PoolBlockDevice) !void {
@@ -592,6 +627,15 @@ test "replicated writes run concurrently" {
 
     try device.program(0, 0, "data");
     try std.testing.expectEqual(@as(u32, max_replica_count), entered.load(.acquire));
+    try device.sync();
+    const metrics = device.pipelineMetrics();
+    try std.testing.expectEqual(@as(u64, 1), metrics.littlefs_program_calls);
+    try std.testing.expectEqual(@as(u64, 4), metrics.littlefs_program_bytes);
+    try std.testing.expectEqual(@as(u64, 12), metrics.backing_write_bytes);
+    try std.testing.expectEqual(@as(u64, 1), metrics.logical_sync_calls);
+    try std.testing.expectEqual(@as(u64, max_replica_count), metrics.backing_sync_calls);
+    device.resetPipelineMetrics();
+    try std.testing.expectEqual(@as(u64, 0), device.pipelineMetrics().littlefs_program_calls);
 }
 
 test "replicated reads require two matching members" {

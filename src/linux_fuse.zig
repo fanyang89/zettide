@@ -20,6 +20,22 @@ const path_capacity = 4096;
 const name_capacity = 256;
 const cache_timeout = 1.0;
 
+pub const OperationMetrics = struct {
+    calls: u64 = 0,
+    bytes: u64 = 0,
+    errors: u64 = 0,
+    elapsed_ns: u64 = 0,
+    max_ns: u64 = 0,
+};
+
+pub const Metrics = struct {
+    read: OperationMetrics = .{},
+    write: OperationMetrics = .{},
+    flush: OperationMetrics = .{},
+    fsync: OperationMetrics = .{},
+    release: OperationMetrics = .{},
+};
+
 const Inode = struct {
     id: c.fuse_ino_t,
     identity: FileId,
@@ -55,12 +71,14 @@ const MountState = struct {
     open_files: ?*FuseFileHandle = null,
     reply_buffer: std.ArrayList(u8) = .empty,
     writeback_cache: bool = false,
+    metrics: ?*Metrics,
 
-    fn init(filesystem: Filesystem, io: Io, update_access_time: bool) !MountState {
+    fn init(filesystem: Filesystem, io: Io, update_access_time: bool, metrics: ?*Metrics) !MountState {
         var state = MountState{
             .filesystem = filesystem,
             .io = io,
             .update_access_time = update_access_time,
+            .metrics = metrics,
         };
         errdefer state.node_index.deinit(std.heap.c_allocator);
         const root_info = try filesystem.statPath("/");
@@ -321,6 +339,21 @@ const MountState = struct {
             link = &handle.next;
         }
     }
+
+    fn recordOperation(
+        self: *MountState,
+        operation: *OperationMetrics,
+        start_ns: i96,
+        bytes: usize,
+        failed: bool,
+    ) void {
+        const elapsed: u64 = @intCast(Io.Clock.awake.now(self.io).nanoseconds - start_ns);
+        operation.calls += 1;
+        operation.bytes += bytes;
+        operation.errors += @intFromBool(failed);
+        operation.elapsed_ns += elapsed;
+        operation.max_ns = @max(operation.max_ns, elapsed);
+    }
 };
 
 const FuseFileHandle = struct {
@@ -349,6 +382,7 @@ pub const Session = struct {
         allow_other: bool = false,
         read_only: bool = false,
         update_access_time: bool = true,
+        metrics: ?*Metrics = null,
         on_exit: ?*const fn (?*anyopaque) void = null,
         on_exit_context: ?*anyopaque = null,
     };
@@ -368,6 +402,7 @@ pub const Session = struct {
             filesystem,
             io,
             options.update_access_time and !options.read_only,
+            options.metrics,
         );
         errdefer state.deinit();
 
@@ -452,6 +487,7 @@ pub fn mount(filesystem: Filesystem, io: Io, mountpoint: []const u8, options: Se
         filesystem,
         io,
         options.update_access_time and !options.read_only,
+        options.metrics,
     );
     defer state.deinit();
     var argv = [_][*c]u8{
@@ -978,21 +1014,33 @@ fn read(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off_t, fi: ?
     _ = id;
     if (offset < 0) return replyError(req, c.EINVAL);
     const state = stateFor(req);
-    state.reply_buffer.resize(std.heap.c_allocator, size) catch return replyError(req, c.ENOMEM);
+    const start = Io.Clock.awake.now(state.io).nanoseconds;
+    state.reply_buffer.resize(std.heap.c_allocator, size) catch {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.read, start, 0, true);
+        return replyError(req, c.ENOMEM);
+    };
     const buffer = state.reply_buffer.items;
     const handle = fuseFileHandle(fi.?);
-    const amount = handle.file.read(buffer, @intCast(offset)) catch |err|
+    const amount = handle.file.read(buffer, @intCast(offset)) catch |err| {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.read, start, 0, true);
         return replyError(req, errnoValue(err));
+    };
     updateFileAccessTime(state, handle);
+    if (state.metrics) |metrics| state.recordOperation(&metrics.read, start, amount, false);
     _ = c.fuse_reply_buf(req, buffer.ptr, amount);
 }
 
 fn write(req: c.fuse_req_t, id: c.fuse_ino_t, data_raw: ?[*]const u8, size: usize, offset: c.off_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
     _ = id;
     if (offset < 0) return replyError(req, c.EINVAL);
+    const state = stateFor(req);
+    const start = Io.Clock.awake.now(state.io).nanoseconds;
     const handle = fuseFileHandle(fi.?);
-    const amount = handle.file.write(data_raw.?[0..size], @intCast(offset)) catch |err|
+    const amount = handle.file.write(data_raw.?[0..size], @intCast(offset)) catch |err| {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.write, start, 0, true);
         return replyError(req, errnoValue(err));
+    };
+    if (state.metrics) |metrics| state.recordOperation(&metrics.write, start, amount, false);
     _ = c.fuse_reply_write(req, amount);
 }
 
@@ -1028,19 +1076,35 @@ fn statFs(req: c.fuse_req_t, id: c.fuse_ino_t) callconv(.c) void {
 
 fn flush(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
     _ = id;
+    const state = stateFor(req);
+    const start = Io.Clock.awake.now(state.io).nanoseconds;
     const handle = fuseFileHandle(fi.?);
-    handle.file.sync() catch |err| return replyError(req, errnoValue(err));
+    handle.file.sync() catch |err| {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.flush, start, 0, true);
+        return replyError(req, errnoValue(err));
+    };
+    if (state.metrics) |metrics| state.recordOperation(&metrics.flush, start, 0, false);
     replyError(req, 0);
 }
 
 fn fsync(req: c.fuse_req_t, id: c.fuse_ino_t, datasync: c_int, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
+    _ = id;
     _ = datasync;
-    flush(req, id, fi);
+    const state = stateFor(req);
+    const start = Io.Clock.awake.now(state.io).nanoseconds;
+    const handle = fuseFileHandle(fi.?);
+    handle.file.sync() catch |err| {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.fsync, start, 0, true);
+        return replyError(req, errnoValue(err));
+    };
+    if (state.metrics) |metrics| state.recordOperation(&metrics.fsync, start, 0, false);
+    replyError(req, 0);
 }
 
 fn release(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {
     _ = id;
     const state = stateFor(req);
+    const start = Io.Clock.awake.now(state.io).nanoseconds;
     const handle = fuseFileHandle(fi.?);
     const node = handle.inode;
     const result = handle.file.close();
@@ -1048,7 +1112,11 @@ fn release(req: c.fuse_req_t, id: c.fuse_ino_t, fi: ?*c.struct_fuse_file_info) c
     node.open_count -= 1;
     std.heap.c_allocator.destroy(handle);
     state.maybeRemove(node);
-    result catch |err| return replyError(req, errnoValue(err));
+    result catch |err| {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.release, start, 0, true);
+        return replyError(req, errnoValue(err));
+    };
+    if (state.metrics) |metrics| state.recordOperation(&metrics.release, start, 0, false);
     replyError(req, 0);
 }
 

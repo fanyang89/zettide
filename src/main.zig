@@ -354,6 +354,7 @@ fn poolMountCommand(
     var path_count: usize = 0;
     var writable = true;
     var allow_other = false;
+    var metrics = false;
     var access_time: zettide.volume.AccessTimePolicy = .relatime;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -367,6 +368,8 @@ fn poolMountCommand(
             writable = false;
         } else if (std.mem.eql(u8, args[index], "--allow-other")) {
             allow_other = true;
+        } else if (std.mem.eql(u8, args[index], "--metrics")) {
+            metrics = true;
         } else if (std.mem.eql(u8, args[index], "--noatime")) {
             access_time = .noatime;
         } else {
@@ -382,6 +385,8 @@ fn poolMountCommand(
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
     try volume.mountOptions(.{ .access_time = .noatime });
+    if (metrics) volume.resetPipelineMetrics();
+    var fuse_metrics: zettide.linux_fuse.Metrics = .{};
     try stdout.print("Mounted pool at {s}; press Ctrl-C to stop\n", .{mountpoint});
     try stdout.flush();
     try zettide.linux_fuse.mount(
@@ -392,8 +397,15 @@ fn poolMountCommand(
             .allow_other = allow_other,
             .read_only = !writable,
             .update_access_time = access_time == .relatime,
+            .metrics = if (metrics) &fuse_metrics else null,
         },
     );
+    if (metrics) {
+        try volume.sync();
+        try printFuseMetrics(stdout, fuse_metrics);
+        try printPipelineMetrics(stdout, volume.pipelineMetrics());
+        try stdout.flush();
+    }
     try volume.close();
 }
 
@@ -531,6 +543,8 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
     try volume.mountOptions(.{ .access_time = .noatime });
+    if (metrics) volume.resetPipelineMetrics();
+    var fuse_metrics: zettide.linux_fuse.Metrics = .{};
     try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
     try stdout.flush();
     try zettide.linux_fuse.mount(
@@ -540,10 +554,12 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
         .{
             .allow_other = allow_other,
             .update_access_time = access_time == .relatime,
+            .metrics = if (metrics) &fuse_metrics else null,
         },
     );
     if (metrics) {
         try volume.sync();
+        try printFuseMetrics(stdout, fuse_metrics);
         try printPipelineMetrics(stdout, volume.pipelineMetrics());
         try stdout.flush();
     }
@@ -553,17 +569,25 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
 fn printPipelineMetrics(writer: *Io.Writer, metrics: zettide.volume.PipelineMetrics) !void {
     const block = metrics.block_device;
     try writer.print(
-        "pipeline_metrics logical_write_calls={} logical_write_bytes={} journaled={} littlefs_read_calls={} littlefs_read_bytes={} littlefs_read_elapsed_ns={} littlefs_program_calls={} littlefs_program_bytes={} littlefs_program_elapsed_ns={} direct_program_bytes={} redo_transactions={} redo_flushes={} redo_record_bytes={} redo_anchor_bytes={} checkpoints={} checkpoint_home_bytes={} backing_write_bytes={} logical_sync_calls={} backing_sync_calls={} backing_sync_elapsed_ns={}\n",
+        "pipeline_metrics logical_read_calls={} logical_read_bytes={} logical_read_elapsed_ns={} logical_read_max_ns={} logical_write_calls={} logical_write_bytes={} logical_write_elapsed_ns={} logical_write_max_ns={} journaled={} littlefs_read_calls={} littlefs_read_bytes={} littlefs_read_elapsed_ns={} littlefs_read_max_ns={} littlefs_program_calls={} littlefs_program_bytes={} littlefs_program_elapsed_ns={} littlefs_program_max_ns={} direct_program_bytes={} redo_transactions={} redo_flushes={} redo_record_bytes={} redo_anchor_bytes={} checkpoints={} checkpoint_home_bytes={} backing_write_bytes={} logical_sync_calls={} backing_sync_calls={} backing_sync_elapsed_ns={} backing_sync_max_ns={}\n",
         .{
+            metrics.logical_read_calls,
+            metrics.logical_read_bytes,
+            metrics.logical_read_elapsed_ns,
+            metrics.logical_read_max_ns,
             metrics.logical_write_calls,
             metrics.logical_write_bytes,
+            metrics.logical_write_elapsed_ns,
+            metrics.logical_write_max_ns,
             metrics.journaled,
             block.littlefs_read_calls,
             block.littlefs_read_bytes,
             block.littlefs_read_elapsed_ns,
+            block.littlefs_read_max_ns,
             block.littlefs_program_calls,
             block.littlefs_program_bytes,
             block.littlefs_program_elapsed_ns,
+            block.littlefs_program_max_ns,
             block.direct_program_bytes,
             block.redo_transactions,
             block.redo_flushes,
@@ -575,6 +599,53 @@ fn printPipelineMetrics(writer: *Io.Writer, metrics: zettide.volume.PipelineMetr
             block.logical_sync_calls,
             block.backing_sync_calls,
             block.backing_sync_elapsed_ns,
+            block.backing_sync_max_ns,
+        },
+    );
+    for (metrics.members[0..metrics.member_count], 0..) |member, index| {
+        const stats = member.stats;
+        try writer.print(
+            "member_transport_metrics index={} kind={s} queue_capacity={} submitted_sqes={} submit_calls={} completions={} current_inflight={} max_inflight={}\n",
+            .{
+                index,
+                @tagName(member.kind),
+                stats.queue_capacity,
+                stats.submitted_sqes,
+                stats.submit_calls,
+                stats.completions,
+                stats.current_inflight,
+                stats.max_inflight,
+            },
+        );
+    }
+}
+
+fn printFuseMetrics(writer: *Io.Writer, metrics: zettide.linux_fuse.Metrics) !void {
+    try writer.print(
+        "fuse_metrics read_calls={} read_bytes={} read_errors={} read_elapsed_ns={} read_max_ns={} write_calls={} write_bytes={} write_errors={} write_elapsed_ns={} write_max_ns={} flush_calls={} flush_errors={} flush_elapsed_ns={} flush_max_ns={} fsync_calls={} fsync_errors={} fsync_elapsed_ns={} fsync_max_ns={} release_calls={} release_errors={} release_elapsed_ns={} release_max_ns={}\n",
+        .{
+            metrics.read.calls,
+            metrics.read.bytes,
+            metrics.read.errors,
+            metrics.read.elapsed_ns,
+            metrics.read.max_ns,
+            metrics.write.calls,
+            metrics.write.bytes,
+            metrics.write.errors,
+            metrics.write.elapsed_ns,
+            metrics.write.max_ns,
+            metrics.flush.calls,
+            metrics.flush.errors,
+            metrics.flush.elapsed_ns,
+            metrics.flush.max_ns,
+            metrics.fsync.calls,
+            metrics.fsync.errors,
+            metrics.fsync.elapsed_ns,
+            metrics.fsync.max_ns,
+            metrics.release.calls,
+            metrics.release.errors,
+            metrics.release.elapsed_ns,
+            metrics.release.max_ns,
         },
     );
 }
@@ -822,7 +893,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide device inspect <device>
         \\  zettide pool inspect --device <device>... [--name-profile <profile>]
         \\  zettide pool initialize --device <device>... [--label <label>] [--name-profile <profile>] --confirm <token>
-        \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other] [--noatime]
+        \\  zettide pool mount <mountpoint> --device <device>... [--read-only] [--allow-other] [--metrics] [--noatime]
         \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>]
         \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>] --confirm <token>
         \\  zettide serve dufs <file|device> [--read-only] [--noatime] [--key-file <path>|--passphrase] [-- <dufs-options>...]

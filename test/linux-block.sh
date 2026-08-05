@@ -215,11 +215,15 @@ stop_pool_mount() {
     echo "pool unmount timeout" >&2
     return 1
 }
-start_pool_mount
+start_pool_mount --metrics
 sudo -n "$probe" expect-busy "${replica_loops[0]}"
 sudo -n cp "$work/expected" "$work/pool-mount/hello.txt"
 sudo -n sync -f "$work/pool-mount/hello.txt"
 stop_pool_mount
+grep -Eq '^fuse_metrics .*write_calls=[1-9][0-9]* ' "$work/pool-mount.log"
+grep -Eq '^pipeline_metrics .*logical_write_calls=[1-9][0-9]* .*littlefs_program_calls=[1-9][0-9]* ' \
+    "$work/pool-mount.log"
+[[ $(grep -c '^member_transport_metrics ' "$work/pool-mount.log") -eq 3 ]]
 start_pool_mount
 sudo -n cmp "$work/expected" "$work/pool-mount/hello.txt"
 stop_pool_mount

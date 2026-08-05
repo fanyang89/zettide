@@ -171,6 +171,34 @@ fn sync(context_ptr: *anyopaque, io: std.Io) !void {
         context.file.sync(io) catch |err| return mapOperationError(err);
 }
 
+fn transportKind(context_ptr: *anyopaque) storage_api.TransportKind {
+    const context: *const Context = @ptrCast(@alignCast(context_ptr));
+    return if (context.engine != null) .io_uring else .posix;
+}
+
+fn transportStats(context_ptr: *anyopaque, io: std.Io) storage_api.TransportStats {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    context.mutex.lockUncancelable(io);
+    defer context.mutex.unlock(io);
+    const engine = if (context.engine) |*value| value else return .{};
+    const stats = engine.getStats(io);
+    return .{
+        .queue_capacity = stats.queue_capacity,
+        .submitted_sqes = stats.submitted_sqes,
+        .submit_calls = stats.submit_calls,
+        .completions = stats.completions,
+        .current_inflight = stats.current_inflight,
+        .max_inflight = stats.max_inflight,
+    };
+}
+
+fn resetTransportStats(context_ptr: *anyopaque, io: std.Io) void {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    context.mutex.lockUncancelable(io);
+    defer context.mutex.unlock(io);
+    if (context.engine) |*engine| engine.resetStats(io);
+}
+
 fn close(context_ptr: *anyopaque, io: std.Io) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.mutex.lockUncancelable(io);
@@ -221,6 +249,9 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .sync_data = syncData,
     .sync = sync,
     .close = close,
+    .transport_kind = transportKind,
+    .transport_stats = transportStats,
+    .reset_transport_stats = resetTransportStats,
 };
 
 test "automatic raw transport only falls back when io_uring is unavailable" {
@@ -319,6 +350,13 @@ test "forced io_uring raw storage uses shared engine when available" {
     try std.testing.expectEqualStrings(expected[0..4], &first);
     try std.testing.expectEqualStrings(expected[4..8], &second);
     for (results) |result| try std.testing.expectEqual(@as(usize, 4), result.amount);
+    try std.testing.expectEqual(storage_api.TransportKind.io_uring, storage.transportKind());
+    const stats = storage.transportStats(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 5), stats.submitted_sqes);
+    try std.testing.expectEqual(stats.submitted_sqes, stats.completions);
+    try std.testing.expect(stats.max_inflight >= 1);
+    storage.resetTransportStats(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 0), storage.transportStats(std.testing.io).submitted_sqes);
 
     try storage.close(std.testing.io);
     storage_open = false;

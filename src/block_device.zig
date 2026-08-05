@@ -27,9 +27,11 @@ pub const PipelineMetrics = struct {
     littlefs_read_calls: u64 = 0,
     littlefs_read_bytes: u64 = 0,
     littlefs_read_elapsed_ns: u64 = 0,
+    littlefs_read_max_ns: u64 = 0,
     littlefs_program_calls: u64 = 0,
     littlefs_program_bytes: u64 = 0,
     littlefs_program_elapsed_ns: u64 = 0,
+    littlefs_program_max_ns: u64 = 0,
     direct_program_bytes: u64 = 0,
     redo_transactions: u64 = 0,
     redo_flushes: u64 = 0,
@@ -41,15 +43,18 @@ pub const PipelineMetrics = struct {
     logical_sync_calls: u64 = 0,
     backing_sync_calls: u64 = 0,
     backing_sync_elapsed_ns: u64 = 0,
+    backing_sync_max_ns: u64 = 0,
 };
 
-const AtomicPipelineMetrics = struct {
+pub const AtomicPipelineMetrics = struct {
     littlefs_read_calls: std.atomic.Value(u64) = .init(0),
     littlefs_read_bytes: std.atomic.Value(u64) = .init(0),
     littlefs_read_elapsed_ns: std.atomic.Value(u64) = .init(0),
+    littlefs_read_max_ns: std.atomic.Value(u64) = .init(0),
     littlefs_program_calls: std.atomic.Value(u64) = .init(0),
     littlefs_program_bytes: std.atomic.Value(u64) = .init(0),
     littlefs_program_elapsed_ns: std.atomic.Value(u64) = .init(0),
+    littlefs_program_max_ns: std.atomic.Value(u64) = .init(0),
     direct_program_bytes: std.atomic.Value(u64) = .init(0),
     redo_transactions: std.atomic.Value(u64) = .init(0),
     redo_flushes: std.atomic.Value(u64) = .init(0),
@@ -61,15 +66,18 @@ const AtomicPipelineMetrics = struct {
     logical_sync_calls: std.atomic.Value(u64) = .init(0),
     backing_sync_calls: std.atomic.Value(u64) = .init(0),
     backing_sync_elapsed_ns: std.atomic.Value(u64) = .init(0),
+    backing_sync_max_ns: std.atomic.Value(u64) = .init(0),
 
-    fn snapshot(self: *const AtomicPipelineMetrics) PipelineMetrics {
+    pub fn snapshot(self: *const AtomicPipelineMetrics) PipelineMetrics {
         return .{
             .littlefs_read_calls = self.littlefs_read_calls.load(.acquire),
             .littlefs_read_bytes = self.littlefs_read_bytes.load(.acquire),
             .littlefs_read_elapsed_ns = self.littlefs_read_elapsed_ns.load(.acquire),
+            .littlefs_read_max_ns = self.littlefs_read_max_ns.load(.acquire),
             .littlefs_program_calls = self.littlefs_program_calls.load(.acquire),
             .littlefs_program_bytes = self.littlefs_program_bytes.load(.acquire),
             .littlefs_program_elapsed_ns = self.littlefs_program_elapsed_ns.load(.acquire),
+            .littlefs_program_max_ns = self.littlefs_program_max_ns.load(.acquire),
             .direct_program_bytes = self.direct_program_bytes.load(.acquire),
             .redo_transactions = self.redo_transactions.load(.acquire),
             .redo_flushes = self.redo_flushes.load(.acquire),
@@ -81,9 +89,22 @@ const AtomicPipelineMetrics = struct {
             .logical_sync_calls = self.logical_sync_calls.load(.acquire),
             .backing_sync_calls = self.backing_sync_calls.load(.acquire),
             .backing_sync_elapsed_ns = self.backing_sync_elapsed_ns.load(.acquire),
+            .backing_sync_max_ns = self.backing_sync_max_ns.load(.acquire),
         };
     }
+
+    pub fn reset(self: *AtomicPipelineMetrics) void {
+        inline for (std.meta.fields(AtomicPipelineMetrics)) |field|
+            @field(self, field.name).store(0, .release);
+    }
 };
+
+pub fn recordAtomicMax(target: *std.atomic.Value(u64), value: u64) void {
+    var current = target.load(.monotonic);
+    while (value > current) {
+        current = target.cmpxchgWeak(current, value, .monotonic, .monotonic) orelse return;
+    }
+}
 
 const FlushResult = anyerror!void;
 
@@ -162,6 +183,7 @@ pub const FileBlockDevice = struct {
         _ = self.pipeline_metrics.littlefs_read_calls.fetchAdd(1, .monotonic);
         _ = self.pipeline_metrics.littlefs_read_bytes.fetchAdd(buffer.len, .monotonic);
         _ = self.pipeline_metrics.littlefs_read_elapsed_ns.fetchAdd(read_elapsed, .monotonic);
+        recordAtomicMax(&self.pipeline_metrics.littlefs_read_max_ns, read_elapsed);
     }
 
     pub fn program(self: *FileBlockDevice, block: u32, offset: u32, data: []const u8) !void {
@@ -190,6 +212,7 @@ pub const FileBlockDevice = struct {
         _ = self.pipeline_metrics.littlefs_program_calls.fetchAdd(1, .monotonic);
         _ = self.pipeline_metrics.littlefs_program_bytes.fetchAdd(write_data.len, .monotonic);
         _ = self.pipeline_metrics.littlefs_program_elapsed_ns.fetchAdd(program_elapsed, .monotonic);
+        recordAtomicMax(&self.pipeline_metrics.littlefs_program_max_ns, program_elapsed);
         if (self.redo == null) {
             _ = self.pipeline_metrics.direct_program_bytes.fetchAdd(write_data.len, .monotonic);
             _ = self.pipeline_metrics.backing_write_bytes.fetchAdd(write_data.len, .monotonic);
@@ -464,6 +487,10 @@ pub const FileBlockDevice = struct {
         return self.pipeline_metrics.snapshot();
     }
 
+    pub fn resetPipelineMetrics(self: *FileBlockDevice) void {
+        self.pipeline_metrics.reset();
+    }
+
     pub fn writebackState(self: *const FileBlockDevice) WritebackState {
         return .{
             .accepted_epoch = self.accepted_epoch.load(.acquire),
@@ -688,6 +715,7 @@ pub const FileBlockDevice = struct {
         const sync_elapsed: u64 = @intCast(Io.Clock.awake.now(self.io).nanoseconds - sync_start);
         _ = self.pipeline_metrics.backing_sync_calls.fetchAdd(1, .monotonic);
         _ = self.pipeline_metrics.backing_sync_elapsed_ns.fetchAdd(sync_elapsed, .monotonic);
+        recordAtomicMax(&self.pipeline_metrics.backing_sync_max_ns, sync_elapsed);
         if (action == .after) {
             self.freezeWrites();
             return error.InjectedFault;
