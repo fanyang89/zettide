@@ -10,7 +10,7 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     device: blob_device.Device,
     header: format.Header,
-    staged_slots: u64,
+    staged_units: u64,
     mutex: Io.Mutex = .init,
     frozen: bool = false,
 
@@ -18,6 +18,7 @@ pub const Store = struct {
     pub fn create(allocator: std.mem.Allocator, io: Io, device: blob_device.Device) !Store {
         var owned_device = device;
         errdefer owned_device.close(io) catch {};
+        try validateAlignment(owned_device.alignment());
         var header = try format.Header.init(io, owned_device.capacity());
         try writeHeader(allocator, io, &owned_device, format.header_a_offset, header);
         try owned_device.syncData(io);
@@ -28,7 +29,7 @@ pub const Store = struct {
             .allocator = allocator,
             .device = owned_device,
             .header = header,
-            .staged_slots = header.committed_slots,
+            .staged_units = header.committed_units,
         };
     }
 
@@ -36,6 +37,7 @@ pub const Store = struct {
     pub fn open(allocator: std.mem.Allocator, io: Io, device: blob_device.Device) !Store {
         var owned_device = device;
         errdefer owned_device.close(io) catch {};
+        try validateAlignment(owned_device.alignment());
         const first = try readHeader(allocator, io, &owned_device, format.header_a_offset);
         const second = try readHeader(allocator, io, &owned_device, format.header_b_offset);
         const header = try selectHeader(first, second, owned_device.capacity());
@@ -43,7 +45,7 @@ pub const Store = struct {
             .allocator = allocator,
             .device = owned_device,
             .header = header,
-            .staged_slots = header.committed_slots,
+            .staged_units = header.committed_units,
         };
     }
 
@@ -52,12 +54,12 @@ pub const Store = struct {
         self.* = undefined;
     }
 
-    pub fn committedSlots(self: *const Store) u64 {
-        return self.header.committed_slots;
+    pub fn committedUnits(self: *const Store) u64 {
+        return self.header.committed_units;
     }
 
-    pub fn stagedSlots(self: *const Store) u64 {
-        return self.staged_slots;
+    pub fn stagedUnits(self: *const Store) u64 {
+        return self.staged_units;
     }
 
     pub fn transportKind(self: *const Store) storage_api.TransportKind {
@@ -90,51 +92,65 @@ pub const Store = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         try self.requireWritable();
-        if (inputs.len > self.header.slot_count - self.staged_slots) return error.BlobStoreFull;
-        for (inputs) |input| if (input.len > format.blob_size) return error.BlobTooLarge;
+        var units: [blob_device.max_batch]u64 = undefined;
+        var total_units: u64 = 0;
+        for (inputs, units[0..inputs.len]) |input, *input_units| {
+            if (input.len == 0) return error.EmptyBlob;
+            if (input.len > format.blob_size) return error.BlobTooLarge;
+            input_units.* = format.allocationUnits(input.len);
+            total_units = std.math.add(u64, total_units, input_units.*) catch return error.BlobStoreFull;
+        }
+        if (total_units > self.header.unit_count - self.staged_units) return error.BlobStoreFull;
 
         var writes: [blob_device.max_batch]blob_device.Write = undefined;
         const alignment = self.device.alignment();
         const direct = for (inputs) |input| {
-            if (input.len != format.blob_size or @intFromPtr(input.ptr) % alignment != 0) break false;
+            if (input.len % alignment != 0 or @intFromPtr(input.ptr) % alignment != 0) break false;
         } else true;
         if (direct) {
-            for (inputs, references, writes[0..inputs.len], 0..) |input, *reference, *write, index| {
-                const slot = self.staged_slots + index;
+            var next_unit = self.staged_units;
+            for (inputs, references, writes[0..inputs.len], units[0..inputs.len]) |input, *reference, *write, input_units| {
                 reference.* = .{
-                    .slot = slot,
-                    .valid_bytes = format.blob_size,
+                    .slot = next_unit,
+                    .valid_bytes = @intCast(input.len),
                     .checksums = format.payloadChecksums(input),
                 };
-                write.* = .{ .bytes = input, .offset = try format.slotOffset(slot) };
+                write.* = .{ .bytes = input, .offset = try format.slotOffset(next_unit) };
+                next_unit += input_units;
             }
             self.device.writeAllManyAt(io, writes[0..inputs.len]) catch |err| {
                 self.frozen = true;
                 return err;
             };
-            self.staged_slots += inputs.len;
+            self.staged_units = next_unit;
             return;
         }
 
-        const bytes = try self.allocator.alignedAlloc(u8, .fromByteUnits(4096), inputs.len * format.blob_size);
+        const total_bytes = std.math.cast(usize, total_units * format.allocation_unit) orelse
+            return error.OutOfMemory;
+        const bytes = try self.allocator.alignedAlloc(u8, .fromByteUnits(format.allocation_unit), total_bytes);
         defer self.allocator.free(bytes);
-        for (inputs, references, writes[0..inputs.len], 0..) |input, *reference, *write, index| {
-            const slot = self.staged_slots + index;
-            const payload = bytes[index * format.blob_size ..][0..format.blob_size];
+        var next_unit = self.staged_units;
+        var byte_offset: usize = 0;
+        for (inputs, references, writes[0..inputs.len], units[0..inputs.len]) |input, *reference, *write, input_units| {
+            const stored_bytes: usize = @intCast(input_units * format.allocation_unit);
+            const payload = bytes[byte_offset..][0..stored_bytes];
             @memcpy(payload[0..input.len], input);
             @memset(payload[input.len..], 0);
             reference.* = .{
-                .slot = slot,
+                .slot = next_unit,
                 .valid_bytes = @intCast(input.len),
-                .checksums = format.payloadChecksums(payload),
+                .checksums = format.payloadChecksums(input),
             };
-            write.* = .{ .bytes = payload, .offset = try format.slotOffset(slot) };
+            write.* = .{ .bytes = payload, .offset = try format.slotOffset(next_unit) };
+            next_unit += input_units;
+            byte_offset += stored_bytes;
         }
         self.device.writeAllManyAt(io, writes[0..inputs.len]) catch |err| {
             self.frozen = true;
             return err;
         };
-        self.staged_slots += inputs.len;
+        self.staged_units = next_unit;
     }
 
     /// Reserves one slot but writes only an aligned digest-protected prefix.
@@ -142,10 +158,11 @@ pub const Store = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         try self.requireWritable();
-        if (self.staged_slots == self.header.slot_count) return error.BlobStoreFull;
         const alignment = self.device.alignment();
         if (data.len == 0 or data.len > format.blob_size or data.len % alignment != 0)
             return error.InvalidDigestOnlyBlob;
+        const units = format.allocationUnits(data.len);
+        if (units > self.header.unit_count - self.staged_units) return error.BlobStoreFull;
 
         var allocated: ?[]align(4096) u8 = null;
         defer if (allocated) |bytes| self.allocator.free(bytes);
@@ -157,26 +174,28 @@ pub const Store = struct {
             allocated = buffer;
             break :copied buffer;
         };
-        const slot = self.staged_slots;
+        const slot = self.staged_units;
         self.device.writeAllAt(io, bytes, try format.slotOffset(slot)) catch |err| {
             self.frozen = true;
             return err;
         };
-        self.staged_slots += 1;
+        self.staged_units += units;
         return slot;
     }
 
     /// Reads and verifies one complete slot. Returns the logical payload length.
     pub fn read(self: *Store, io: Io, reference: format.BlobRef, output: []u8) !usize {
-        if (output.len != format.blob_size) return error.InvalidBlobBuffer;
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         if (self.frozen) return error.BlobStoreFrozen;
-        try reference.validate(self.header.slot_count);
-        if (reference.slot >= self.staged_slots) return error.UnpublishedBlobReference;
-        try self.device.readAt(io, output, try format.slotOffset(reference.slot));
-        if (!std.mem.eql(u32, &reference.checksums, &format.payloadChecksums(output)))
+        try reference.validate(self.header.unit_count);
+        if (reference.endUnit() > self.staged_units) return error.UnpublishedBlobReference;
+        const stored_bytes: usize = @intCast(format.storedBytes(reference.valid_bytes));
+        if (output.len < stored_bytes) return error.InvalidBlobBuffer;
+        try self.device.readAt(io, output[0..stored_bytes], try format.slotOffset(reference.slot));
+        if (!std.mem.eql(u32, &reference.checksums, &format.payloadChecksums(output[0..reference.valid_bytes])))
             return error.BlobChecksumMismatch;
+        @memset(output[reference.valid_bytes..], 0);
         return reference.valid_bytes;
     }
 
@@ -193,7 +212,9 @@ pub const Store = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         if (self.frozen) return error.BlobStoreFrozen;
-        if (slot >= self.staged_slots) return error.UnpublishedBlobReference;
+        const units = format.allocationUnits(valid_bytes);
+        if (slot > self.staged_units or units > self.staged_units - slot)
+            return error.UnpublishedBlobReference;
         try self.device.readAt(io, output, try format.slotOffset(slot));
         var digest: [32]u8 = undefined;
         std.crypto.hash.Blake3.hash(output, &digest, .{});
@@ -204,7 +225,7 @@ pub const Store = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         try self.requireWritable();
-        if (self.staged_slots == self.header.committed_slots) return;
+        if (self.staged_units == self.header.committed_units) return;
 
         self.device.syncData(io) catch |err| {
             self.frozen = true;
@@ -215,7 +236,7 @@ pub const Store = struct {
             self.frozen = true;
             return error.BlobStoreSequenceExhausted;
         };
-        next.committed_slots = self.staged_slots;
+        next.committed_units = self.staged_units;
         const offset = if (next.sequence % 2 == 1) format.header_a_offset else format.header_b_offset;
         writeHeader(self.allocator, io, &self.device, offset, next) catch |err| {
             self.frozen = true;
@@ -232,6 +253,11 @@ pub const Store = struct {
         if (self.frozen) return error.BlobStoreFrozen;
     }
 };
+
+fn validateAlignment(alignment: u32) !void {
+    if (alignment > format.allocation_unit or format.allocation_unit % alignment != 0)
+        return error.InvalidBlobStoreAlignment;
+}
 
 fn writeHeader(
     allocator: std.mem.Allocator,
@@ -296,15 +322,15 @@ test "blob store commits and reopens immutable blobs" {
     const inputs = [_][]const u8{ "first", "second payload" };
     var references: [inputs.len]format.BlobRef = undefined;
     try store.putMany(std.testing.io, &inputs, &references);
-    try std.testing.expectEqual(@as(u64, 0), store.committedSlots());
-    try std.testing.expectEqual(@as(u64, 2), store.stagedSlots());
+    try std.testing.expectEqual(@as(u64, 0), store.committedUnits());
+    try std.testing.expectEqual(@as(u64, 2), store.stagedUnits());
 
     const output = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), format.blob_size);
     defer std.testing.allocator.free(output);
     const first_len = try store.read(std.testing.io, references[0], output);
     try std.testing.expectEqualStrings(inputs[0], output[0..first_len]);
     try store.commit(std.testing.io);
-    try std.testing.expectEqual(@as(u64, 2), store.committedSlots());
+    try std.testing.expectEqual(@as(u64, 2), store.committedUnits());
     try store.close(std.testing.io);
     store_open = false;
 
@@ -316,9 +342,61 @@ test "blob store commits and reopens immutable blobs" {
     file_open = false;
     store = try Store.open(std.testing.allocator, std.testing.io, device);
     store_open = true;
-    try std.testing.expectEqual(@as(u64, 2), store.committedSlots());
+    try std.testing.expectEqual(@as(u64, 2), store.committedUnits());
     const second_len = try store.read(std.testing.io, references[1], output);
     try std.testing.expectEqualStrings(inputs[1], output[0..second_len]);
+}
+
+test "blob store packs variable blobs into allocation units" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 8 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "variable-blob-store",
+        device_size,
+        format.allocation_unit,
+    );
+    var store = try Store.create(std.testing.allocator, std.testing.io, device);
+    var store_open = true;
+    defer if (store_open) store.close(std.testing.io) catch {};
+
+    const crossing = try std.testing.allocator.alloc(u8, format.allocation_unit + 1);
+    defer std.testing.allocator.free(crossing);
+    @memset(crossing, 0x22);
+    const checksum_sized = try std.testing.allocator.alloc(u8, format.checksum_unit);
+    defer std.testing.allocator.free(checksum_sized);
+    @memset(checksum_sized, 0x33);
+    const inputs = [_][]const u8{ "x", crossing, checksum_sized };
+    var references: [inputs.len]format.BlobRef = undefined;
+    try store.putMany(std.testing.io, &inputs, &references);
+    try std.testing.expectEqual(@as(u64, 0), references[0].slot);
+    try std.testing.expectEqual(@as(u64, 1), references[1].slot);
+    try std.testing.expectEqual(@as(u64, 3), references[2].slot);
+    try std.testing.expectEqual(@as(u64, 19), store.stagedUnits());
+    try store.commit(std.testing.io);
+    try store.close(std.testing.io);
+    store_open = false;
+
+    const file = try tmp.dir.openFile(std.testing.io, "variable-blob-store", .{ .mode = .read_write });
+    var file_open = true;
+    defer if (file_open) file.close(std.testing.io);
+    const storage = storage_api.Storage.initOwned(file, device_size, .regular_file, 1, false);
+    const reopened_device = try blob_device.Device.init(storage, 0, device_size, format.allocation_unit);
+    file_open = false;
+    store = try Store.open(std.testing.allocator, std.testing.io, reopened_device);
+    store_open = true;
+    try std.testing.expectEqual(@as(u64, 19), store.committedUnits());
+
+    const output = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(format.allocation_unit), format.blob_size);
+    defer std.testing.allocator.free(output);
+    for (inputs, references) |expected, reference| {
+        const amount = try store.read(std.testing.io, reference, output);
+        try std.testing.expectEqual(expected.len, amount);
+        try std.testing.expectEqualSlices(u8, expected, output[0..amount]);
+        try std.testing.expect(std.mem.allEqual(u8, output[amount..], 0));
+    }
 }
 
 test "blob store capacity and unpublished references are enforced" {
@@ -333,7 +411,11 @@ test "blob store capacity and unpublished references are enforced" {
     );
     var store = try Store.create(std.testing.allocator, std.testing.io, device);
     defer store.close(std.testing.io) catch {};
-    _ = try store.put(std.testing.io, "only slot");
+    try std.testing.expectError(error.EmptyBlob, store.put(std.testing.io, ""));
+    const full_blob = try std.testing.allocator.alloc(u8, format.blob_size);
+    defer std.testing.allocator.free(full_blob);
+    @memset(full_blob, 0x5a);
+    _ = try store.put(std.testing.io, full_blob);
     try std.testing.expectError(error.BlobStoreFull, store.put(std.testing.io, "full"));
 
     const output = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), format.blob_size);
@@ -344,6 +426,22 @@ test "blob store capacity and unpublished references are enforced" {
         .checksums = @splat(0),
     };
     try std.testing.expectError(error.InvalidBlobReference, store.read(std.testing.io, invalid, output));
+}
+
+test "blob store rejects device alignment larger than its allocation unit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "over-aligned-blob-store",
+        8 * 1024 * 1024,
+        2 * format.allocation_unit,
+    );
+    try std.testing.expectError(
+        error.InvalidBlobStoreAlignment,
+        Store.create(std.testing.allocator, std.testing.io, device),
+    );
 }
 
 test "blob store falls back to the previous valid header" {
@@ -370,7 +468,7 @@ test "blob store falls back to the previous valid header" {
     store = try Store.open(std.testing.allocator, std.testing.io, reopened_device);
     defer store.close(std.testing.io) catch {};
     try std.testing.expectEqual(@as(u64, 2), store.header.sequence);
-    try std.testing.expectEqual(@as(u64, 0), store.committedSlots());
+    try std.testing.expectEqual(@as(u64, 0), store.committedUnits());
 }
 
 test "blob store detects payload corruption" {

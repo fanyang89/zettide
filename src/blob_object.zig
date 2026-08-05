@@ -221,7 +221,8 @@ fn loadHead(
     var entries: std.ArrayList(blob_map.LeafEntry) = .empty;
     errdefer entries.deinit(allocator);
     if (head.root) |root| {
-        if (root.page >= blobs.committedSlots()) return error.UncommittedBlobMapRoot;
+        if (root.page + blob_format.allocationUnits(blob_map.page_size) > blobs.committedUnits())
+            return error.UncommittedBlobMapRoot;
         const scratch = try allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
         defer allocator.free(scratch);
         var maps = blob_map_store.MapStore.init(allocator, blobs);
@@ -229,9 +230,9 @@ fn loadHead(
         const expected = try std.math.divCeil(u64, head.logical_size, blob_format.blob_size);
         if (entries.items.len != expected) return error.InvalidBlobObjectMap;
         for (entries.items, 0..) |entry, index| {
-            if (entry.logical_blob != index or entry.reference.slot >= blobs.committedSlots())
+            if (entry.logical_blob != index or entry.reference.endUnit() > blobs.committedUnits())
                 return error.InvalidBlobObjectMap;
-            try entry.reference.validate(blobs.header.slot_count);
+            try entry.reference.validate(blobs.header.unit_count);
         }
     }
     return .{ .head = head, .entries = entries };
@@ -334,5 +335,8 @@ test "blob object falls back when the latest root is corrupt" {
     defer object.close(std.testing.io) catch {};
     try std.testing.expectEqual(@as(u64, 2), object.authority.sequence);
     try std.testing.expectEqual(@as(u64, 0), object.logicalSize());
-    try std.testing.expectEqual(@as(u64, 2), object.blobs.committedSlots());
+    try std.testing.expectEqual(
+        blob_format.allocationUnits(blob_format.blob_size) + blob_format.allocationUnits(blob_map.page_size),
+        object.blobs.committedUnits(),
+    );
 }

@@ -160,15 +160,15 @@ fn runReads(io: Io, store: *Store, buffers: []const []u8, config: Config) !u64 {
     var checksums: [zettide.blob_device.max_batch][format.checksum_count]u32 = undefined;
     for (buffers, checksums[0..buffers.len]) |buffer, *checksum|
         checksum.* = format.payloadChecksums(buffer);
-    var slot: u64 = 0;
+    var blob_index: u64 = 0;
     var validation_elapsed: u64 = 0;
-    const slot_count = config.size / format.blob_size;
-    while (slot < slot_count) : (slot += 1) {
-        const index: usize = @intCast(slot % buffers.len);
+    const blob_count = config.size / format.blob_size;
+    while (blob_index < blob_count) : (blob_index += 1) {
+        const index: usize = @intCast(blob_index % buffers.len);
         const buffer = buffers[index];
         const expected_byte: u8 = @intCast(index + 1);
         const reference: format.BlobRef = .{
-            .slot = slot,
+            .slot = blob_index * format.allocationUnits(format.blob_size),
             .valid_bytes = format.blob_size,
             .checksums = checksums[index],
         };
