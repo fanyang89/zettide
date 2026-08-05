@@ -82,6 +82,7 @@
       raw-device: tasks/run-raw-device.yml
       pool-fio: tasks/run-pool-fio.yml
       blob-fuse-fio: tasks/run-blob-fuse-fio.yml
+      blob-pool-fio: tasks/run-blob-pool-fio.yml
     zettide_packages:
       RedHat:
         - acl
@@ -165,6 +166,7 @@
         - kmod
         - perf
         - pkgconf-pkg-config
+        - psmisc
         - sysstat
         - util-linux
       Debian:
@@ -176,6 +178,7 @@
         - kmod
         - libfuse3-dev
         - pkg-config
+        - psmisc
         - sysstat
         - util-linux
 
@@ -257,7 +260,7 @@
       ansible.builtin.assert:
         that:
           - zettide_test_profile in zettide_profile_tasks
-        fail_msg: "Supported profiles include tier1, io-verify, throughput, blob profiles, blob-fuse-fio, raw-device, and pool-fio."
+        fail_msg: "Supported profiles include tier1, io-verify, throughput, blob profiles, Blob fio profiles, raw-device, and pool-fio."
 
   tasks:
     - name: Create the remote workspace
@@ -287,7 +290,7 @@
             argv:
               - modprobe
               - "{{ item }}"
-          loop: "{{ ['fuse'] if zettide_test_profile == 'blob-fuse-fio' else ['fuse', 'loop'] }}"
+          loop: "{{ ['fuse'] if zettide_test_profile in ['blob-fuse-fio', 'blob-pool-fio'] else ['fuse', 'loop'] }}"
           changed_when: false
 
         - name: Check the FUSE device
@@ -421,7 +424,6 @@
             src: "{{ zettide_remote_workspace.path }}/results.tar.gz"
             dest: "{{ zettide_results_root }}/{{ inventory_hostname }}-{{ ansible_facts['date_time']['iso8601_basic_short'] }}-{{ zettide_source_revision.stdout[:12] }}.tar.gz"
             flat: true
-          failed_when: false
           register: zettide_fetch_results
           when: zettide_archive_results.rc == 0
 
@@ -441,3 +443,13 @@
           delegate_to: localhost
           become: false
           run_once: true
+
+        - name: Require archived and fetched test results
+          ansible.builtin.assert:
+            that:
+              - zettide_archive_results.rc == 0
+              - not (zettide_fetch_results.skipped | default(false))
+              - not (zettide_fetch_results.failed | default(true))
+            fail_msg: >-
+              Remote test results were not archived and fetched. The remote
+              workspace was retained when possible.

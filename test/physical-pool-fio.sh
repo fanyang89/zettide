@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -eq 4 ]] || {
-    echo "usage: physical-pool-fio.sh CLI DEVICE SERIAL POOL_ID" >&2
+[[ $# -eq 4 || $# -eq 5 ]] || {
+    echo "usage: physical-pool-fio.sh CLI DEVICE SERIAL POOL_ID [littlefs|blob]" >&2
     exit 2
 }
 
@@ -10,6 +10,7 @@ cli=$1
 device=$2
 expected_serial=$3
 expected_pool_id=$4
+expected_filesystem=${5:-littlefs}
 log_dir=${ZETTIDE_TEST_LOG_DIR:?ZETTIDE_TEST_LOG_DIR is required}
 single_size=${ZETTIDE_POOL_FIO_SINGLE_SIZE:-2G}
 multi_size=${ZETTIDE_POOL_FIO_MULTI_SIZE:-512M}
@@ -22,6 +23,10 @@ ramp_time=${ZETTIDE_POOL_FIO_RAMP_TIME:-5}
 }
 [[ $runtime =~ ^[1-9][0-9]*$ && $ramp_time =~ ^[0-9]+$ ]] || {
     echo "fio runtime and ramp time must be integer seconds" >&2
+    exit 2
+}
+[[ $expected_filesystem == littlefs || $expected_filesystem == blob ]] || {
+    echo "unsupported Pool filesystem: $expected_filesystem" >&2
     exit 2
 }
 for command in fio fusermount3 lsblk mountpoint setsid timeout; do
@@ -159,8 +164,14 @@ run_fio_case() {
     "${fio_args[@]}"
     stop_pool_mount_clean
     grep -q '^fuse_metrics ' "$mount_log"
-    grep -q '^pipeline_metrics ' "$mount_log"
-    grep -q '^member_transport_metrics index=0 ' "$mount_log"
+    if [[ $expected_filesystem == blob ]]; then
+        grep -q '^pool_transport_metrics ' "$mount_log"
+        ! grep -q '^pipeline_metrics ' "$mount_log"
+        ! grep -q '^member_transport_metrics ' "$mount_log"
+    else
+        grep -q '^pipeline_metrics ' "$mount_log"
+        grep -q '^member_transport_metrics index=0 ' "$mount_log"
+    fi
 }
 
 prepare_single_file() {
@@ -205,6 +216,7 @@ check_identity
 grep -q '^Preflight: eligible$' "$log_dir/device-inspect.log"
 "$cli" pool inspect --device "$device" >"$log_dir/pool-inspect-before.log"
 grep -q "^Pool: $expected_pool_id$" "$log_dir/pool-inspect-before.log"
+grep -q "^Filesystem: $expected_filesystem$" "$log_dir/pool-inspect-before.log"
 grep -q '^Profile: unprotected$' "$log_dir/pool-inspect-before.log"
 grep -q '^Data policy: read_write$' "$log_dir/pool-inspect-before.log"
 grep -q '^Mountable: yes$' "$log_dir/pool-inspect-before.log"
@@ -232,5 +244,6 @@ run_fio_case randread-4k-qd32-j4 randread 4k 32 4 "$multi_size" 'multi.$jobnum.b
 check_identity
 "$cli" pool inspect --device "$device" >"$log_dir/pool-inspect-after.log"
 grep -q "^Pool: $expected_pool_id$" "$log_dir/pool-inspect-after.log"
+grep -q "^Filesystem: $expected_filesystem$" "$log_dir/pool-inspect-after.log"
 grep -q '^Mountable: yes$' "$log_dir/pool-inspect-after.log"
 echo "physical Pool fio passed"

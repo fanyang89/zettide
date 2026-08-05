@@ -175,6 +175,22 @@ mount uses `--metrics`, so its archived log contains workload-specific FUSE,
 pipeline, and member transport metrics. It does not modify partition tables or
 restore the original device image.
 
+To benchmark a temporary native Blob Pool on the same physical disk while
+preserving the retained LittleFS Pool, run:
+
+```sh
+uv run ansible-playbook test/ansible/blob-pool-fio.yml --limit zettide-tier1 \
+  -e 'zettide_blob_pool_fio_confirm=DESTROY:/dev/nvme1n1:PHYSICAL-DISK-SERIAL'
+```
+
+This profile requires the configured raw device to contain the expected
+mountable LittleFS Pool with no mounted descendants or open holders. It creates
+and byte-compares a sparse full-device backup on another filesystem, replaces
+the disk with an unprotected native Blob Pool, runs the physical Pool fio matrix,
+then restores and byte-compares the original image. A final read-only inspection
+must recover the original Pool ID and mountability. The backup is retained by
+default; a power loss or `SIGKILL` can still require manual restoration.
+
 ## Throughput
 
 The throughput profile compares a direct-I/O host filesystem baseline with
