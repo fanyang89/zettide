@@ -20,6 +20,18 @@ pub const OwnedEntry = struct {
     }
 };
 
+pub const Mutation = union(enum) {
+    put: metadata_map.LeafEntry,
+    remove: []const u8,
+
+    pub fn key(self: Mutation) []const u8 {
+        return switch (self) {
+            .put => |entry| entry.key,
+            .remove => |value| value,
+        };
+    }
+};
+
 const Node = struct {
     reference: filesystem_format.TreeRef,
     upper_key: []const u8,
@@ -135,6 +147,76 @@ pub const MapStore = struct {
             expected_upper = upper_buffer[0..entries[index].upper_key.len];
             current = entries[index].child;
         }
+    }
+
+    /// Applies one sorted mutation set and returns a single immutable replacement root.
+    pub fn applyBatch(
+        self: *MapStore,
+        io: Io,
+        root: filesystem_format.TreeRef,
+        root_generation: u64,
+        generation: u64,
+        mutations: []const Mutation,
+    ) !filesystem_format.TreeRef {
+        if (generation <= root_generation or mutations.len == 0)
+            return error.InvalidBlobMetadataMutation;
+        for (mutations, 0..) |mutation, index| {
+            _ = filesystem_format.decodeKey(mutation.key()) catch
+                return error.InvalidBlobMetadataMutation;
+            if (index != 0 and std.mem.order(u8, mutations[index - 1].key(), mutation.key()) != .lt)
+                return error.InvalidBlobMetadataMutation;
+        }
+
+        const existing = try self.loadAllAlloc(io, root, root_generation);
+        defer deinitEntries(self.allocator, existing);
+        var merged: std.ArrayList(metadata_map.LeafEntry) = .empty;
+        defer merged.deinit(self.allocator);
+        const maximum_entries = std.math.add(usize, existing.len, mutations.len) catch
+            return error.OutOfMemory;
+        try merged.ensureTotalCapacity(self.allocator, maximum_entries);
+
+        var existing_index: usize = 0;
+        var mutation_index: usize = 0;
+        while (existing_index < existing.len or mutation_index < mutations.len) {
+            if (mutation_index == mutations.len) {
+                merged.appendAssumeCapacity(existing[existing_index].view());
+                existing_index += 1;
+                continue;
+            }
+            if (existing_index == existing.len) {
+                switch (mutations[mutation_index]) {
+                    .put => |entry| merged.appendAssumeCapacity(entry),
+                    .remove => return error.BlobMetadataKeyNotFound,
+                }
+                mutation_index += 1;
+                continue;
+            }
+
+            const order = std.mem.order(u8, existing[existing_index].key, mutations[mutation_index].key());
+            switch (order) {
+                .lt => {
+                    merged.appendAssumeCapacity(existing[existing_index].view());
+                    existing_index += 1;
+                },
+                .eq => {
+                    switch (mutations[mutation_index]) {
+                        .put => |entry| merged.appendAssumeCapacity(entry),
+                        .remove => {},
+                    }
+                    existing_index += 1;
+                    mutation_index += 1;
+                },
+                .gt => {
+                    switch (mutations[mutation_index]) {
+                        .put => |entry| merged.appendAssumeCapacity(entry),
+                        .remove => return error.BlobMetadataKeyNotFound,
+                    }
+                    mutation_index += 1;
+                },
+            }
+        }
+        if (merged.items.len == 0) return error.EmptyBlobMetadataMap;
+        return self.build(io, generation, merged.items);
     }
 
     pub fn loadAllAlloc(
@@ -409,6 +491,23 @@ test "blob metadata map builds looks up enumerates and reopens" {
     defer deinitEntries(std.testing.allocator, prefixed);
     try std.testing.expectEqual(@as(usize, 1), prefixed.len);
     try std.testing.expectEqualSlices(u8, deep_entries[5].key, prefixed[0].key);
+
+    const replacement_value = try filesystem_format.encodeOrphan(.{ .generation = 4, .kind = .symlink });
+    const inserted_key = try filesystem_format.orphanKey(131);
+    const inserted_value = try filesystem_format.encodeOrphan(.{ .generation = 4, .kind = .fifo });
+    const mutations = [_]Mutation{
+        .{ .remove = &keys[0] },
+        .{ .put = .{ .key = &keys[64], .value = &replacement_value } },
+        .{ .put = .{ .key = &inserted_key, .value = &inserted_value } },
+    };
+    const updated_root = try maps.applyBatch(std.testing.io, root, 2, 4, &mutations);
+    try std.testing.expectEqual(@as(?[]u8, null), try maps.lookupAlloc(std.testing.io, updated_root, 4, &keys[0]));
+    const replacement = (try maps.lookupAlloc(std.testing.io, updated_root, 4, &keys[64])).?;
+    defer std.testing.allocator.free(replacement);
+    try std.testing.expectEqualSlices(u8, &replacement_value, replacement);
+    const updated = try maps.loadAllAlloc(std.testing.io, updated_root, 4);
+    defer deinitEntries(std.testing.allocator, updated);
+    try std.testing.expectEqual(entries.len, updated.len);
 
     try blobs.commit(std.testing.io);
     try blobs.close(std.testing.io);
