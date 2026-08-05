@@ -1,6 +1,7 @@
 const std = @import("std");
 const blob_file = @import("blob_file.zig");
 const blob_format = @import("blob_format.zig");
+const blob_map = @import("blob_map.zig");
 const filesystem_format = @import("blob_filesystem_format.zig");
 const metadata_map = @import("blob_metadata_map.zig");
 const metadata_map_store = @import("blob_metadata_map_store.zig");
@@ -459,7 +460,12 @@ pub const Filesystem = struct {
         var rollback_before_publish = true;
         errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
 
-        var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
+        var file = try blob_file.State.openKnownAllocated(
+            self.allocator,
+            &self.blobs,
+            record.data.?,
+            record.allocated_bytes,
+        );
         defer file.deinit();
         const amount = try file.write(io, data, offset);
         if (amount == 0) return 0;
@@ -487,7 +493,12 @@ pub const Filesystem = struct {
         var rollback_before_publish = true;
         errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
 
-        var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
+        var file = try blob_file.State.openKnownAllocated(
+            self.allocator,
+            &self.blobs,
+            record.data.?,
+            record.allocated_bytes,
+        );
         defer file.deinit();
         try file.truncate(io, size);
         record.data = try file.prepareSnapshot(io);
@@ -510,9 +521,7 @@ pub const Filesystem = struct {
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
         try self.authorizeDirectInode(io, inode, record);
         if (record.metadata.kind != .symlink) return error.InvalidArgument;
-        var file = try blob_file.State.open(self.allocator, io, &self.blobs, record.data.?);
-        defer file.deinit();
-        return file.read(io, output, offset);
+        return blob_file.readSnapshot(self.allocator, io, &self.blobs, record.data.?, output, offset);
     }
 
     pub fn createFile(
@@ -1883,6 +1892,53 @@ test "blob filesystem inode data and symlinks survive reopen" {
     try std.testing.expect(std.mem.allEqual(u8, grown[102..], 0));
     try std.testing.expectEqual(@as(usize, 9), try filesystem.readSpecial(std.testing.io, symlink, &target, 0));
     try std.testing.expectEqualStrings("../Target", target[0..9]);
+    try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem large file overwrite commits a path-sized delta" {
+    const blob_device = @import("blob_device.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "large-overwrite",
+        64 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        blobs,
+        .legacy_raw,
+    );
+    defer filesystem.close(std.testing.io) catch {};
+    const inode = try filesystem.createFile(
+        std.testing.io,
+        filesystem_format.root_inode,
+        "large",
+        0o644,
+        0,
+        0,
+    );
+    const block_count = blob_map.max_leaf_entries * blob_map.max_internal_entries + 1;
+    const contents = try std.testing.allocator.alloc(u8, block_count * blob_file.block_size);
+    defer std.testing.allocator.free(contents);
+    @memset(contents, 'a');
+    _ = try filesystem.write(std.testing.io, inode, contents, 0);
+    try std.testing.expectEqual(@as(u8, 2), (try filesystem.stat(std.testing.io, inode)).data.?.root.?.level);
+    const before = filesystem.blobs.committedUnits();
+    const replacement: [blob_file.block_size]u8 = @splat('b');
+    _ = try filesystem.write(
+        std.testing.io,
+        inode,
+        &replacement,
+        (block_count / 2) * blob_file.block_size,
+    );
+    const delta = filesystem.blobs.committedUnits() - before;
+    try std.testing.expect(delta < 32);
+    try std.testing.expect(delta < block_count / 100);
     try expectValidGraph(&filesystem, std.testing.io);
 }
 

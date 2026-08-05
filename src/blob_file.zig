@@ -72,6 +72,8 @@ pub const State = struct {
     logical_size: u64,
     root: ?blob_map.PageRef,
     blocks: std.AutoHashMap(u64, blob_format.BlobRef),
+    allocated_blocks: u64,
+    blocks_materialized: bool,
     pending: std.AutoHashMap(u64, ?blob_format.BlobRef),
     dirty: bool = false,
     prepared: ?Snapshot = null,
@@ -86,6 +88,8 @@ pub const State = struct {
             .logical_size = 0,
             .root = null,
             .blocks = .init(allocator),
+            .allocated_blocks = 0,
+            .blocks_materialized = true,
             .pending = .init(allocator),
         };
     }
@@ -106,6 +110,8 @@ pub const State = struct {
             .logical_size = snapshot.logical_size,
             .root = snapshot.root,
             .blocks = .init(allocator),
+            .allocated_blocks = 0,
+            .blocks_materialized = true,
             .pending = .init(allocator),
         };
         errdefer result.deinit();
@@ -127,7 +133,40 @@ pub const State = struct {
             if (block.found_existing) return error.InvalidBlobFileSnapshot;
             block.value_ptr.* = entry.reference;
         }
+        result.allocated_blocks = @intCast(entries.len);
         return result;
+    }
+
+    /// The inode record supplying `allocated_bytes` must already belong to a validated filesystem graph.
+    pub fn openKnownAllocated(
+        allocator: std.mem.Allocator,
+        blobs: *blob_store.Store,
+        snapshot: Snapshot,
+        allocated_bytes: u64,
+    ) !State {
+        if (snapshot.generation == 0 or snapshot.logical_size > std.math.maxInt(i64) or
+            allocated_bytes % block_size != 0)
+            return error.InvalidBlobFileSnapshot;
+        const allocated_blocks = allocated_bytes / block_size;
+        const block_count = try std.math.divCeil(u64, snapshot.logical_size, block_size);
+        if (allocated_blocks > block_count or (snapshot.root == null) != (allocated_blocks == 0))
+            return error.InvalidBlobFileSnapshot;
+        if (snapshot.root) |root| {
+            if (snapshot.logical_size == 0 or root.first_key > root.last_key or
+                root.last_key >= block_count or root.page >= blobs.committedUnits())
+                return error.InvalidBlobFileSnapshot;
+        }
+        return .{
+            .allocator = allocator,
+            .blobs = blobs,
+            .generation = snapshot.generation,
+            .logical_size = snapshot.logical_size,
+            .root = snapshot.root,
+            .blocks = .init(allocator),
+            .allocated_blocks = allocated_blocks,
+            .blocks_materialized = false,
+            .pending = .init(allocator),
+        };
     }
 
     pub fn deinit(self: *State) void {
@@ -141,7 +180,7 @@ pub const State = struct {
     }
 
     pub fn allocatedBytes(self: *const State) u64 {
-        return self.blocks.count() * block_size;
+        return std.math.mul(u64, self.allocated_blocks, block_size) catch unreachable;
     }
 
     pub fn read(self: *State, io: Io, output: []u8, offset: u64) !usize {
@@ -157,7 +196,7 @@ pub const State = struct {
             const block = position / block_size;
             const block_offset: usize = @intCast(position % block_size);
             const part = @min(amount - consumed, block_size - block_offset);
-            if (self.blocks.get(block)) |reference| {
+            if (try self.lookupCurrent(io, block)) |reference| {
                 const read_amount = try self.blobs.read(io, reference, scratch);
                 if (read_amount != block_size) return error.InvalidBlobFileBlock;
                 @memcpy(output[consumed..][0..part], scratch[block_offset..][0..part]);
@@ -176,7 +215,7 @@ pub const State = struct {
         if (data.len == 0) return 0;
         const span = std.math.add(usize, @intCast(offset % block_size), data.len) catch return error.FileTooLarge;
         const touched = try std.math.divCeil(usize, span, block_size);
-        try self.blocks.ensureUnusedCapacity(@intCast(touched));
+        if (self.blocks_materialized) try self.blocks.ensureUnusedCapacity(@intCast(touched));
         try self.pending.ensureUnusedCapacity(@intCast(touched));
 
         const buffers = try self.allocator.alignedAlloc(
@@ -202,7 +241,7 @@ pub const State = struct {
                 const part = @min(data.len - consumed, block_size - block_offset);
                 const buffer = buffers[count * block_size ..][0..block_size];
                 if (block_offset != 0 or part != block_size) {
-                    if (self.blocks.get(block)) |reference| {
+                    if (try self.lookupCurrent(io, block)) |reference| {
                         const read_amount = try self.blobs.read(io, reference, buffer);
                         if (read_amount != block_size) return error.InvalidBlobFileBlock;
                     } else {
@@ -220,8 +259,10 @@ pub const State = struct {
             };
             staged_data = true;
             for (block_indices[0..count], references[0..count]) |block, reference| {
-                self.blocks.putAssumeCapacity(block, reference);
+                const existed = (try self.lookupCurrent(io, block)) != null;
+                if (self.blocks_materialized) self.blocks.putAssumeCapacity(block, reference);
                 self.pending.putAssumeCapacity(block, reference);
+                if (!existed) self.allocated_blocks += 1;
             }
         }
         self.logical_size = @max(self.logical_size, end);
@@ -233,6 +274,7 @@ pub const State = struct {
         try self.requireMutable();
         if (size_value > std.math.maxInt(i64)) return error.FileTooLarge;
         if (size_value == self.logical_size) return;
+        try self.materializeCurrent(io);
         const shrinking = size_value < self.logical_size;
         const first_removed = try std.math.divCeil(u64, size_value, block_size);
         const keys = try self.allocator.alloc(u64, if (shrinking) self.blocks.count() else 0);
@@ -269,6 +311,7 @@ pub const State = struct {
             for (keys[0..removed_count]) |block| {
                 _ = self.blocks.remove(block);
                 self.pending.putAssumeCapacity(block, null);
+                self.allocated_blocks -= 1;
             }
         }
         self.logical_size = size_value;
@@ -322,7 +365,7 @@ pub const State = struct {
             ),
         };
         const block_count = try std.math.divCeil(u64, snapshot.logical_size, block_size);
-        if ((snapshot.root == null) != (self.blocks.count() == 0) or
+        if ((snapshot.root == null) != (self.allocated_blocks == 0) or
             (snapshot.root != null and (snapshot.root.?.first_key > snapshot.root.?.last_key or
                 snapshot.root.?.last_key >= block_count)))
             return error.InvalidBlobFileSnapshot;
@@ -363,6 +406,71 @@ pub const State = struct {
             .logical_size = self.logical_size,
             .root = self.root,
         };
+    }
+
+    fn lookupCurrent(self: *State, io: Io, key: u64) !?blob_format.BlobRef {
+        if (self.pending.get(key)) |reference| return reference;
+        if (self.blocks_materialized) return self.blocks.get(key);
+        const root = self.root orelse return null;
+        const scratch = try self.allocator.alignedAlloc(
+            u8,
+            .fromByteUnits(blob_format.allocation_unit),
+            blob_map.page_size,
+        );
+        defer self.allocator.free(scratch);
+        var maps = blob_map_store.MapStore.init(self.allocator, self.blobs);
+        const reference = try maps.lookup(io, root, self.generation, key, scratch) orelse return null;
+        reference.validate(self.blobs.header.unit_count) catch return error.InvalidBlobFileSnapshot;
+        if (reference.valid_bytes != block_size or reference.endUnit() > self.blobs.committedUnits())
+            return error.InvalidBlobFileSnapshot;
+        return reference;
+    }
+
+    fn materializeCurrent(self: *State, io: Io) !void {
+        if (self.blocks_materialized) return;
+        var blocks = std.AutoHashMap(u64, blob_format.BlobRef).init(self.allocator);
+        errdefer blocks.deinit();
+        if (self.root) |root| {
+            const scratch = try self.allocator.alignedAlloc(
+                u8,
+                .fromByteUnits(blob_format.allocation_unit),
+                blob_map.page_size,
+            );
+            defer self.allocator.free(scratch);
+            var maps = blob_map_store.MapStore.init(self.allocator, self.blobs);
+            const entries = try maps.loadAllAlloc(io, root, self.generation, scratch);
+            defer self.allocator.free(entries);
+            try blocks.ensureUnusedCapacity(@intCast(try std.math.add(
+                usize,
+                entries.len,
+                self.pending.count(),
+            )));
+            const block_count = try std.math.divCeil(u64, self.logical_size, block_size);
+            for (entries) |entry| {
+                entry.reference.validate(self.blobs.header.unit_count) catch
+                    return error.InvalidBlobFileSnapshot;
+                if (entry.logical_blob >= block_count or entry.reference.valid_bytes != block_size or
+                    entry.reference.endUnit() > self.blobs.committedUnits())
+                    return error.InvalidBlobFileSnapshot;
+                const block = blocks.getOrPutAssumeCapacity(entry.logical_blob);
+                if (block.found_existing) return error.InvalidBlobFileSnapshot;
+                block.value_ptr.* = entry.reference;
+            }
+        } else {
+            try blocks.ensureUnusedCapacity(@intCast(self.pending.count()));
+        }
+        var iterator = self.pending.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.*) |reference|
+                blocks.putAssumeCapacity(entry.key_ptr.*, reference)
+            else
+                _ = blocks.remove(entry.key_ptr.*);
+        }
+        if (blocks.count() != self.allocated_blocks) return error.InvalidBlobFileSnapshot;
+        std.debug.assert(self.blocks.count() == 0);
+        self.blocks.deinit();
+        self.blocks = blocks;
+        self.blocks_materialized = true;
     }
 
     fn requireUsable(self: *const State) !void {
@@ -460,12 +568,22 @@ test "blob file replaces one block with path copy and preserves old snapshot" {
         file.blocks.putAssumeCapacity(key, old_reference);
         file.pending.putAssumeCapacity(key, old_reference);
     }
+    file.allocated_blocks = entry_count;
     file.logical_size = entry_count * block_size;
     file.dirty = true;
     const old_snapshot = try file.prepareSnapshot(std.testing.io);
     try std.testing.expectEqual(@as(u8, 2), old_snapshot.root.?.level);
     try blobs.commit(std.testing.io);
     try file.acceptSnapshot(old_snapshot);
+    file.deinit();
+    file = try State.openKnownAllocated(
+        std.testing.allocator,
+        &blobs,
+        old_snapshot,
+        entry_count * block_size,
+    );
+    try std.testing.expect(!file.blocks_materialized);
+    try std.testing.expectEqual(@as(usize, 0), file.blocks.count());
 
     const replaced_key = entry_count / 2;
     const new_data: [block_size]u8 = @splat('n');
@@ -473,6 +591,15 @@ test "blob file replaces one block with path copy and preserves old snapshot" {
         new_data.len,
         try file.write(std.testing.io, &new_data, replaced_key * block_size),
     );
+    try std.testing.expect(!file.blocks_materialized);
+    try std.testing.expectEqual(@as(u64, entry_count * block_size), file.allocatedBytes());
+    var pending_byte: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try file.read(
+        std.testing.io,
+        &pending_byte,
+        replaced_key * block_size,
+    ));
+    try std.testing.expectEqual(@as(u8, 'n'), pending_byte[0]);
     const map_checkpoint = blobs.stagedUnits();
     const new_snapshot = try file.prepareSnapshot(std.testing.io);
     try std.testing.expectEqual(
@@ -481,6 +608,8 @@ test "blob file replaces one block with path copy and preserves old snapshot" {
     );
     try blobs.commit(std.testing.io);
     try file.acceptSnapshot(new_snapshot);
+    try std.testing.expect(!file.blocks_materialized);
+    try std.testing.expectEqual(@as(usize, 0), file.pending.count());
 
     var byte: [1]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 1), try readSnapshot(
@@ -501,6 +630,195 @@ test "blob file replaces one block with path copy and preserves old snapshot" {
         replaced_key * block_size,
     ));
     try std.testing.expectEqual(@as(u8, 'n'), byte[0]);
+}
+
+test "blob file lazy writes track allocation and expose pending partial blocks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-lazy-write",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var base = State.init(std.testing.allocator, &blobs);
+    defer base.deinit();
+    const original: [block_size]u8 = @splat('a');
+    _ = try base.write(std.testing.io, &original, block_size);
+    const snapshot = try base.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try base.acceptSnapshot(snapshot);
+
+    var file = try State.openKnownAllocated(std.testing.allocator, &blobs, snapshot, block_size);
+    defer file.deinit();
+    _ = try file.write(std.testing.io, "XY", block_size + 10);
+    try std.testing.expectEqual(@as(u64, block_size), file.allocatedBytes());
+    _ = try file.write(std.testing.io, "hole", 3 * block_size + 20);
+    try std.testing.expectEqual(@as(u64, 2 * block_size), file.allocatedBytes());
+    _ = try file.write(std.testing.io, "again", 3 * block_size + 20);
+    _ = try file.write(std.testing.io, "final", 3 * block_size + 20);
+    try std.testing.expectEqual(@as(u64, 2 * block_size), file.allocatedBytes());
+
+    var existing: [4]u8 = undefined;
+    _ = try file.read(std.testing.io, &existing, block_size + 9);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 'a', 'X', 'Y', 'a' }, &existing);
+    var inserted: [7]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 6), try file.read(std.testing.io, &inserted, 3 * block_size + 19));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 'f', 'i', 'n', 'a', 'l' }, inserted[0..6]);
+    try std.testing.expect(!file.blocks_materialized);
+}
+
+test "blob file lazy empty root materializes pending writes transactionally" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-lazy-empty-root",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    const empty: Snapshot = .{ .generation = 1, .logical_size = 0, .root = null };
+    var file = try State.openKnownAllocated(std.testing.allocator, &blobs, empty, 0);
+    defer file.deinit();
+    try file.pending.put(7, null);
+
+    const original: [3 * block_size]u8 = @splat('o');
+    _ = try file.write(std.testing.io, &original, 0);
+    _ = try file.write(std.testing.io, "OVER", block_size + 8);
+    try std.testing.expectEqual(@as(u64, 3 * block_size), file.allocatedBytes());
+    try file.truncate(std.testing.io, block_size + 12);
+    try std.testing.expect(file.blocks_materialized);
+    try std.testing.expectEqual(@as(u64, 2 * block_size), file.allocatedBytes());
+    try file.truncate(std.testing.io, 3 * block_size);
+    _ = try file.write(std.testing.io, "new", 2 * block_size + 7);
+    try std.testing.expectEqual(@as(u64, 3 * block_size), file.allocatedBytes());
+
+    const snapshot = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(snapshot);
+    var tail: [12]u8 = undefined;
+    try std.testing.expectEqual(tail.len, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        snapshot,
+        &tail,
+        2 * block_size,
+    ));
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 'n', 'e', 'w', 0, 0 },
+        &tail,
+    );
+    var reopened = try State.open(std.testing.allocator, std.testing.io, &blobs, snapshot);
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(usize, 3), reopened.blocks.count());
+    try std.testing.expectEqual(@as(u64, 3 * block_size), reopened.allocatedBytes());
+}
+
+test "blob file lazy truncate materializes and prevents removed block resurrection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-lazy-truncate",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var base = State.init(std.testing.allocator, &blobs);
+    defer base.deinit();
+    const data: [block_size]u8 = @splat('x');
+    _ = try base.write(std.testing.io, &data, 0);
+    _ = try base.write(std.testing.io, &data, 2 * block_size);
+    _ = try base.write(std.testing.io, &data, 4 * block_size);
+    const snapshot = try base.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try base.acceptSnapshot(snapshot);
+
+    var file = try State.openKnownAllocated(std.testing.allocator, &blobs, snapshot, 3 * block_size);
+    defer file.deinit();
+    try file.truncate(std.testing.io, 2 * block_size + 100);
+    try std.testing.expect(file.blocks_materialized);
+    try std.testing.expectEqual(@as(u64, 2 * block_size), file.allocatedBytes());
+    try file.truncate(std.testing.io, 5 * block_size);
+    var removed: [1]u8 = undefined;
+    _ = try file.read(std.testing.io, &removed, 4 * block_size);
+    try std.testing.expectEqual(@as(u8, 0), removed[0]);
+    _ = try file.write(std.testing.io, "new", 4 * block_size + 10);
+    try std.testing.expectEqual(@as(u64, 3 * block_size), file.allocatedBytes());
+    var rewritten: [5]u8 = undefined;
+    _ = try file.read(std.testing.io, &rewritten, 4 * block_size + 9);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 'n', 'e', 'w', 0 }, &rewritten);
+    const updated = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(updated);
+    var persisted: [5]u8 = undefined;
+    _ = try readSnapshot(std.testing.allocator, std.testing.io, &blobs, updated, &persisted, 4 * block_size + 9);
+    try std.testing.expectEqualSlices(u8, &rewritten, &persisted);
+}
+
+test "blob file lazy open rejects inconsistent allocation and root bounds" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-lazy-invalid",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    const empty: Snapshot = .{ .generation = 1, .logical_size = 0, .root = null };
+    try std.testing.expectError(error.InvalidBlobFileSnapshot, State.openKnownAllocated(
+        std.testing.allocator,
+        &blobs,
+        empty,
+        1,
+    ));
+    try std.testing.expectError(error.InvalidBlobFileSnapshot, State.openKnownAllocated(
+        std.testing.allocator,
+        &blobs,
+        empty,
+        block_size,
+    ));
+
+    const root: blob_map.PageRef = .{
+        .page = 0,
+        .level = 0,
+        .first_key = 0,
+        .last_key = 0,
+        .digest = @splat(0),
+    };
+    try std.testing.expectError(error.InvalidBlobFileSnapshot, State.openKnownAllocated(
+        std.testing.allocator,
+        &blobs,
+        .{ .generation = 1, .logical_size = block_size, .root = root },
+        0,
+    ));
+    try std.testing.expectError(error.InvalidBlobFileSnapshot, State.openKnownAllocated(
+        std.testing.allocator,
+        &blobs,
+        .{ .generation = 1, .logical_size = block_size, .root = root },
+        block_size,
+    ));
+    var invalid_range = root;
+    invalid_range.first_key = 1;
+    try std.testing.expectError(error.InvalidBlobFileSnapshot, State.openKnownAllocated(
+        std.testing.allocator,
+        &blobs,
+        .{ .generation = 1, .logical_size = block_size, .root = invalid_range },
+        block_size,
+    ));
 }
 
 test "blob file pending mutations retain final write and truncate state" {
@@ -617,6 +935,7 @@ test "blob file freezes when a later write batch cannot read a partial block" {
     var invalid_reference = try blobs.put(std.testing.io, &old_data);
     invalid_reference.checksums[0] ^= 1;
     try file.blocks.put(blob_device.max_batch, invalid_reference);
+    file.allocated_blocks = 1;
     file.logical_size = (blob_device.max_batch + 1) * block_size;
     const data = try std.testing.allocator.alloc(u8, blob_device.max_batch * block_size + 1);
     defer std.testing.allocator.free(data);
