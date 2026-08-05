@@ -542,6 +542,7 @@ pub const Store = struct {
                 data[consumed..][0..part],
                 chunk_offset,
                 layout,
+                head.stored_chunk_size,
             );
             try replacements.append(std.heap.c_allocator, .{
                 .index = index,
@@ -980,10 +981,23 @@ pub const Store = struct {
         data: []const u8,
         offset: u32,
         layout: ChunkLayout,
+        chunk_size: u32,
     ) !ChunkChange {
         const write_end: u32 = @intCast(@as(usize, offset) + data.len);
         const old_version = try self.findChunkVersionWithLayout(id, index, old_generation, layout);
-        const chunk = if (old_version) |version| try self.readChunkVersionAlloc(id, version, format.chunk_size, write_end) else value: {
+        if (offset == 0 and write_end == chunk_size) {
+            const old_size = if (old_version) |version|
+                try self.readChunkLength(id, version, chunk_size)
+            else
+                0;
+            try self.writeChunkVersion(id, .{
+                .index = index,
+                .generation = new_generation,
+                .layout = layout,
+            }, data);
+            return .{ .old_size = old_size, .new_size = write_end, .old_version = old_version };
+        }
+        const chunk = if (old_version) |version| try self.readChunkVersionAlloc(id, version, chunk_size, write_end) else value: {
             const bytes = try std.heap.c_allocator.alloc(u8, write_end);
             @memset(bytes[0..offset], 0);
             break :value ChunkData{ .bytes = bytes, .stored_length = 0 };
