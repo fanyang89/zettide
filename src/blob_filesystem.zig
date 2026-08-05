@@ -320,16 +320,15 @@ pub const Filesystem = struct {
         const references = self.runtimeReferences(kind);
         const count = references.get(inode) orelse return error.InvalidArgument;
         if (count == 0) return error.InvalidArgument;
-        const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
-        if (count > 1 or record.nlink != 0 or self.otherRuntimeReferences(kind).contains(inode)) {
-            if (count == 1) {
-                std.debug.assert(references.remove(inode));
-            } else {
-                references.getPtr(inode).?.* = count - 1;
-            }
-            return;
+        if (count == 1) {
+            std.debug.assert(references.remove(inode));
+        } else {
+            references.getPtr(inode).?.* = count - 1;
         }
+        if (count > 1 or self.otherRuntimeReferences(kind).contains(inode)) return;
 
+        const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
+        if (record.nlink != 0) return;
         try self.requireMutable();
         const orphan = (try self.loadOrphan(io, inode)) orelse
             return error.InvalidBlobFilesystemGraph;
@@ -348,7 +347,6 @@ pub const Filesystem = struct {
         next_root.orphan_count = std.math.sub(u64, next_root.orphan_count, 1) catch
             return error.InvalidBlobFilesystemGraph;
         try self.publish(io, next_root, &mutations, null);
-        std.debug.assert(references.remove(inode));
     }
 
     fn runtimeReferences(
@@ -410,8 +408,33 @@ pub const Filesystem = struct {
     pub fn write(self: *Filesystem, io: Io, inode: u64, data: []const u8, offset: u64) !usize {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
+        return self.writeUnlocked(io, inode, data, offset);
+    }
+
+    /// Appends at the committed logical end while holding the filesystem transaction lock.
+    pub fn append(self: *Filesystem, io: Io, inode: u64, data: []const u8) !usize {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        const record = try self.requireRegularFile(io, inode);
+        return self.writeRecordUnlocked(io, inode, record, data, record.data.?.logical_size);
+    }
+
+    fn writeUnlocked(self: *Filesystem, io: Io, inode: u64, data: []const u8, offset: u64) !usize {
         try self.requireMutable();
-        var record = try self.requireRegularFile(io, inode);
+        const record = try self.requireRegularFile(io, inode);
+        return self.writeRecordUnlocked(io, inode, record, data, offset);
+    }
+
+    fn writeRecordUnlocked(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        record_value: InodeRecord,
+        data: []const u8,
+        offset: u64,
+    ) !usize {
+        try self.requireMutable();
+        var record = record_value;
         const checkpoint = self.blobs.stagedUnits();
         var rollback_before_publish = true;
         errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
@@ -1869,6 +1892,14 @@ test "blob filesystem runtime references retain and reclaim unlinked inodes" {
     try std.testing.expectError(error.FileNotFound, filesystem.pinInode(std.testing.io, 99));
     try std.testing.expectError(error.InvalidArgument, filesystem.releaseInode(std.testing.io, root_inode));
     try std.testing.expectError(error.InvalidArgument, filesystem.unpinInode(std.testing.io, root_inode));
+
+    const read_failure = try filesystem.createFile(std.testing.io, root_inode, "read-failure", 0o600, 0, 0);
+    try filesystem.retainInode(std.testing.io, read_failure);
+    filesystem.blobs.frozen = true;
+    try std.testing.expectError(error.BlobStoreFrozen, filesystem.releaseInode(std.testing.io, read_failure));
+    try std.testing.expect(!filesystem.open_references.contains(read_failure));
+    filesystem.blobs.frozen = false;
+    try filesystem.unlink(std.testing.io, root_inode, "read-failure");
 
     const retained = try filesystem.createFile(std.testing.io, root_inode, "entry", 0o600, 1, 2);
     _ = try filesystem.write(std.testing.io, retained, "abcdef", 0);

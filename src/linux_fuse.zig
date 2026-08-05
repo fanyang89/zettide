@@ -174,6 +174,20 @@ const MountState = struct {
         return dentry;
     }
 
+    fn reconcileChild(self: *MountState, parent: *Inode, name: []const u8, info: NodeInfo) !*Dentry {
+        if (self.findChild(parent, name)) |existing| {
+            if (std.mem.eql(u8, &existing.inode.identity, &info.identity)) {
+                existing.inode.kind = info.metadata.kind;
+                existing.inode.cached_info = info;
+                return existing;
+            }
+            const stale_inode = existing.inode;
+            self.removeEntry(existing);
+            self.removeUnreferencedNode(stale_inode);
+        }
+        return self.addEntry(parent, name, info);
+    }
+
     fn addNode(self: *MountState, info: NodeInfo) !*Inode {
         const id = inodeNumber(info.identity);
         if (self.find(id) != null) return error.CorruptFilesystem;
@@ -575,8 +589,8 @@ fn lookup(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8) 
     const parent_path = state.pathFor(parent) orelse return replyError(req, c.ENOENT);
     joinPath(&path, std.mem.span(parent_path), name) catch |err| return replyError(req, errnoValue(err));
     const info = state.filesystem.statPath(&path) catch |err| return replyError(req, errnoValue(err));
-    const dentry = state.findChild(parent, name) orelse
-        state.addEntry(parent, name, info) catch |err| return replyError(req, errnoValue(err));
+    const dentry = state.reconcileChild(parent, name, info) catch |err|
+        return replyError(req, errnoValue(err));
     const node = dentry.inode;
     node.kind = info.metadata.kind;
     node.cached_info = info;
@@ -1168,16 +1182,17 @@ fn readDirectory(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off
             else
                 handle.parent_id;
         } else {
-            const dentry = state.findChild(handle.inode, name) orelse value: {
-                const directory_path = state.pathFor(handle.inode) orelse return replyError(req, c.ENOENT);
-                var child_path: [path_capacity:0]u8 = @splat(0);
-                joinPath(&child_path, std.mem.span(directory_path), name) catch |err|
-                    return replyError(req, errnoValue(err));
-                const child_info = state.filesystem.statPath(&child_path) catch |err|
-                    return replyError(req, errnoValue(err));
-                break :value state.addEntry(handle.inode, name, child_info) catch |err|
-                    return replyError(req, errnoValue(err));
+            const directory_path = state.pathFor(handle.inode) orelse return replyError(req, c.ENOENT);
+            var child_path: [path_capacity:0]u8 = @splat(0);
+            joinPath(&child_path, std.mem.span(directory_path), name) catch |err|
+                return replyError(req, errnoValue(err));
+            // Snapshot cookies stay stable, but stale names must never reuse an old cached inode.
+            const child_info = state.filesystem.statPath(&child_path) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return replyError(req, errnoValue(err)),
             };
+            const dentry = state.reconcileChild(handle.inode, name, child_info) catch |err|
+                return replyError(req, errnoValue(err));
             stat.st_ino = dentry.inode.id;
             stat.st_mode = kindMode(dentry.inode.kind);
         }
@@ -1394,7 +1409,13 @@ fn errnoValue(err: anyerror) c_int {
         error.IsDirectory => c.EISDIR,
         error.DirectoryNotEmpty => c.ENOTEMPTY,
         error.FileTooLarge => c.EFBIG,
-        error.InvalidArgument, error.InvalidMetadata => c.EINVAL,
+        error.InvalidArgument,
+        error.InvalidMetadata,
+        error.InvalidName,
+        error.InvalidUtf8,
+        error.UnassignedCodepoint,
+        error.ReservedName,
+        => c.EINVAL,
         error.NoSpaceLeft => c.ENOSPC,
         error.OutOfMemory => c.ENOMEM,
         error.NameTooLong => c.ENAMETOOLONG,
@@ -1424,6 +1445,75 @@ test "access time updates honor mount policy and relatime" {
 
 test "backend errors map to Linux errno values" {
     try std.testing.expectEqual(@as(c_int, c.EROFS), errnoValue(error.ReadOnlyVolume));
+    try std.testing.expectEqual(@as(c_int, c.EINVAL), errnoValue(error.InvalidName));
+    try std.testing.expectEqual(@as(c_int, c.EINVAL), errnoValue(error.InvalidUtf8));
+    try std.testing.expectEqual(@as(c_int, c.EINVAL), errnoValue(error.UnassignedCodepoint));
+    try std.testing.expectEqual(@as(c_int, c.EINVAL), errnoValue(error.ReservedName));
     try std.testing.expectEqual(@as(c_int, c.EOPNOTSUPP), errnoValue(error.UnsupportedOperation));
     try std.testing.expectEqual(@as(c_int, c.EOPNOTSUPP), errnoValue(error.OperationNotSupported));
+}
+
+test "cached portable aliases reconcile changed identities" {
+    const TestInfo = struct {
+        fn make(identity_byte: u8) NodeInfo {
+            return .{
+                .size = 0,
+                .allocated_bytes = 0,
+                .metadata = .{
+                    .kind = .file,
+                    .mode = 0o100644,
+                    .uid = 0,
+                    .gid = 0,
+                    .atime_ns = 0,
+                    .mtime_ns = 0,
+                    .ctime_ns = 0,
+                    .birthtime_ns = 0,
+                },
+                .file_id = null,
+                .identity = @splat(identity_byte),
+                .nlink = 1,
+            };
+        }
+    };
+
+    var state: MountState = .{
+        .filesystem = undefined,
+        .io = std.testing.io,
+        .update_access_time = false,
+        .metrics = null,
+    };
+    defer state.deinit();
+    const root = try std.heap.c_allocator.create(Inode);
+    try state.node_index.ensureUnusedCapacity(std.heap.c_allocator, 1);
+    root.* = .{
+        .id = c.FUSE_ROOT_ID,
+        .identity = @splat(1),
+        .file_id = null,
+        .kind = .directory,
+        .cached_info = null,
+        .lookup_count = 1,
+        .open_count = 0,
+        .children = .empty,
+        .dentries = null,
+        .previous = null,
+        .next = null,
+    };
+    state.node_index.putAssumeCapacityNoClobber(root.id, root);
+    state.nodes = root;
+
+    const old_info = TestInfo.make(0x10);
+    const old_node = (try state.addEntry(root, "Straße", old_info)).inode;
+    _ = try state.addEntry(root, "STRASSE", old_info);
+    const old_id = old_node.id;
+    const new_info = TestInfo.make(0x20);
+    try std.testing.expectEqualDeep(
+        new_info.identity,
+        (try state.reconcileChild(root, "STRASSE", new_info)).inode.identity,
+    );
+    try std.testing.expectEqualDeep(
+        new_info.identity,
+        (try state.reconcileChild(root, "Straße", new_info)).inode.identity,
+    );
+    try std.testing.expect(state.find(old_id) == null);
+    try std.testing.expectEqual(@as(usize, 2), root.children.count());
 }
