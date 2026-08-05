@@ -66,6 +66,42 @@ uv run ansible-playbook test/ansible/io-verify.yml --limit zettide-tier1
 Each run uses a host-wide lock and stores a timestamped result archive under
 `test-results/ansible/`.
 
+## Blob FUSE fio
+
+The Blob FUSE fio profile benchmarks only a regular-file BlobFilesystem image.
+It never reads raw devices or Pool configuration. Configure one or more explicit
+targets; there is no `/tmp` fallback:
+
+```ini
+[zettide_test]
+zettide-pm883 ansible_host=192.0.2.20 ansible_user=tester
+
+[zettide_test:vars]
+zettide_blob_fuse_targets=[{"name":"pm883","tmpdir":"/mnt/pm883"}]
+```
+
+Run the ReleaseSafe profile for the PM883-style target:
+
+```sh
+uv run ansible-playbook test/ansible/blob-fuse-fio.yml --limit zettide-pm883
+```
+
+Each target must be an existing writable absolute directory other than `/`,
+with at least 32 GiB free. A host-wide lock protects a unique temporary work
+directory under that target. The profile creates a 32 GiB sparse regular-file
+backing image and one 256 MiB test file, then runs one-job `io_uring` direct-I/O
+cases for 1 MiB sequential QD32 and 4 KiB random QD1/QD32 reads and writes. Each
+measured case runs for eight seconds after a two-second ramp and uses a fresh
+clean mount without recreating the image. Result archives contain fio JSON,
+per-case mount logs with `fuse_metrics`, and the final `zettide check` output.
+Read cases run before write cases so read baselines survive later COW pressure.
+FUSE metrics include I/O performed during the fio ramp. Faster writes can exhaust
+the shared 32 GiB COW image; ENOSPC fails the profile explicitly. Increase
+`zettide_blob_fuse_fio_backing_size` when needed. The file size, runtime, ramp,
+and async timeout are also configurable with `zettide_blob_fuse_fio_file_size`,
+`zettide_blob_fuse_fio_runtime`, `zettide_blob_fuse_fio_ramp_time`, and
+`zettide_blob_fuse_fio_timeout` in inventory or with `-e`.
+
 ## Physical raw device
 
 The raw-device profile temporarily destroys an entire physical disk. It checks

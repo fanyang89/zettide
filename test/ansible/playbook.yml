@@ -37,6 +37,11 @@
     zettide_pool_fio_multi_size: 512M
     zettide_pool_fio_runtime: 20
     zettide_pool_fio_ramp_time: 5
+    zettide_blob_fuse_fio_backing_size_effective: "{{ zettide_blob_fuse_fio_backing_size | default(34359738368) }}"
+    zettide_blob_fuse_fio_file_size_effective: "{{ zettide_blob_fuse_fio_file_size | default(268435456) }}"
+    zettide_blob_fuse_fio_runtime_effective: "{{ zettide_blob_fuse_fio_runtime | default(8) }}"
+    zettide_blob_fuse_fio_ramp_time_effective: "{{ zettide_blob_fuse_fio_ramp_time | default(2) }}"
+    zettide_blob_fuse_fio_timeout_effective: "{{ zettide_blob_fuse_fio_timeout | default(3600) }}"
     zettide_blob_workloads:
       - name: iops-4k
         size: 17179869184
@@ -76,6 +81,7 @@
       blob-object: tasks/run-blob-device.yml
       raw-device: tasks/run-raw-device.yml
       pool-fio: tasks/run-pool-fio.yml
+      blob-fuse-fio: tasks/run-blob-fuse-fio.yml
     zettide_packages:
       RedHat:
         - acl
@@ -155,6 +161,7 @@
         - fuse3-devel
         - gcc
         - git
+        - jq
         - kmod
         - perf
         - pkgconf-pkg-config
@@ -165,6 +172,7 @@
         - fio
         - fuse3
         - git
+        - jq
         - kmod
         - libfuse3-dev
         - pkg-config
@@ -249,7 +257,7 @@
       ansible.builtin.assert:
         that:
           - zettide_test_profile in zettide_profile_tasks
-        fail_msg: "Supported profiles include tier1, io-verify, throughput, blob profiles, raw-device, and pool-fio."
+        fail_msg: "Supported profiles include tier1, io-verify, throughput, blob profiles, blob-fuse-fio, raw-device, and pool-fio."
 
   tasks:
     - name: Create the remote workspace
@@ -279,9 +287,7 @@
             argv:
               - modprobe
               - "{{ item }}"
-          loop:
-            - fuse
-            - loop
+          loop: "{{ ['fuse'] if zettide_test_profile == 'blob-fuse-fio' else ['fuse', 'loop'] }}"
           changed_when: false
 
         - name: Check the FUSE device
@@ -346,7 +352,16 @@
               io_targets: "{{ zettide_io_targets | default([]) }}"
               throughput_targets: "{{ zettide_throughput_targets | default([]) }}"
               blob_device_targets: "{{ zettide_blob_device_targets | default([]) }}"
-              raw_device: "{{ zettide_raw_device | default({}) }}"
+              blob_fuse_targets: "{{ zettide_blob_fuse_targets | default([]) }}"
+              blob_fuse_fio:
+                backing_size: "{{ zettide_blob_fuse_fio_backing_size_effective }}"
+                file_size: "{{ zettide_blob_fuse_fio_file_size_effective }}"
+                runtime: "{{ zettide_blob_fuse_fio_runtime_effective }}"
+                ramp_time: "{{ zettide_blob_fuse_fio_ramp_time_effective }}"
+                timeout: "{{ zettide_blob_fuse_fio_timeout_effective }}"
+              raw_device: >-
+                {{ {} if zettide_test_profile == 'blob-fuse-fio'
+                   else zettide_raw_device | default({}) }}
               started_utc: "{{ ansible_facts['date_time']['iso8601'] }}"
 
         - name: Prepare pinned external suites
@@ -406,13 +421,18 @@
             src: "{{ zettide_remote_workspace.path }}/results.tar.gz"
             dest: "{{ zettide_results_root }}/{{ inventory_hostname }}-{{ ansible_facts['date_time']['iso8601_basic_short'] }}-{{ zettide_source_revision.stdout[:12] }}.tar.gz"
             flat: true
+          failed_when: false
+          register: zettide_fetch_results
           when: zettide_archive_results.rc == 0
 
         - name: Remove the remote workspace
           ansible.builtin.file:
             path: "{{ zettide_remote_workspace.path }}"
             state: absent
-          when: not zettide_keep_remote_workspace | bool
+          when:
+            - not zettide_keep_remote_workspace | bool
+            - zettide_archive_results.rc == 0
+            - not (zettide_fetch_results.failed | default(true))
 
         - name: Remove the controller staging directory
           ansible.builtin.file:

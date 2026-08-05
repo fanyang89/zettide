@@ -2,7 +2,8 @@
 
 Zettide is an experimental storage engine. Its current user-facing path mounts
 a [littlefs](https://github.com/littlefs-project/littlefs) filesystem from a
-sparse container file or an explicitly selected Linux raw-disk Pool.
+sparse container file or an explicitly selected Linux raw-disk Pool. An
+experimental BlobFilesystem backend mounts from regular-file containers.
 
 The project currently implements the portable container core and a foreground
 Linux FUSE3 mount adapter. The core cross-compiles for Windows; the native
@@ -212,7 +213,9 @@ zettide serve dufs workspace.ddv -- -A -b 127.0.0.1 -p 5000
 Mounts use relatime by default. Pass `--noatime` to disable automatic
 access-time updates.
 Pass `--read-only` to open either regular-file filesystem backend read-only.
-Pass `--metrics` to print write-pipeline counters after unmount.
+Pass `--metrics` to print FUSE operation counters after a clean unmount.
+LittleFS mounts additionally print write-pipeline and member transport counters;
+BlobFilesystem mounts do not.
 `create --redo-journal-size <size>` appends a redo journal to a file-backed
 container; the journal must fit two maximum-size transactions.
 
@@ -237,9 +240,10 @@ confirmation tokens. BlobFilesystem currently supports regular backing files
 only. New files require a size of at least 2 MiB aligned to 1 MiB. Existing
 files use a Blob-specific scan-bound confirmation token. The selected name
 profile and the current Linux UID/GID for the root directory are persisted.
-Linux FUSE mount, read-only mount, `info`, and `check` are supported.
-Labels, encryption, metrics, Pools, block devices, NFS, dufs, Windows mounts,
-and fallocate are not supported for BlobFilesystem.
+Linux FUSE mount, read-only mount, FUSE metrics, `info`, and `check` are
+supported.
+Labels, encryption, write-pipeline metrics, Pools, block devices, NFS, dufs,
+Windows mounts, and fallocate are not supported for BlobFilesystem.
 
 Encryption is available only when `format` creates a v3 single-member,
 unprotected regular-file target. Key files contain exactly 32 random bytes;

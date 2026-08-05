@@ -89,10 +89,6 @@ if "$exe" format "$tmp/duplicate-filesystem.ddv" --filesystem littlefs --filesys
     echo "format accepted duplicate filesystem options" >&2
     exit 1
 fi
-if "$exe" mount "$blob" "$tmp/not-mounted" --metrics >/dev/null 2>&1; then
-    echo "blob mount accepted metrics" >&2
-    exit 1
-fi
 if "$exe" serve dufs "$blob" --read-only >/dev/null 2>&1; then
     echo "dufs accepted a blob filesystem" >&2
     exit 1

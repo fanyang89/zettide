@@ -548,14 +548,15 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
     }
     if (@import("builtin").os.tag != .linux) return error.MountNotImplemented;
     if (try zettide.filesystem_target.classifyPath(io, args[0]) == .blob) {
-        if (metrics) return error.BlobMetricsNotSupported;
         const native = try allocator.create(zettide.blob_filesystem.Filesystem);
         defer allocator.destroy(native);
         native.* = try zettide.filesystem_target.openBlobFilesystem(allocator, io, args[0], writable);
-        defer native.close(io) catch {};
+        var native_open = true;
+        defer if (native_open) native.close(io) catch {};
         const adapter = try allocator.create(zettide.blob_filesystem_adapter.Adapter);
         defer allocator.destroy(adapter);
         adapter.* = .init(native, io);
+        var fuse_metrics: zettide.linux_fuse.Metrics = .{};
         try stdout.print("Mounted {s} at {s}; press Ctrl-C to stop\n", .{ args[0], args[1] });
         try stdout.flush();
         try zettide.linux_fuse.mount(
@@ -566,8 +567,15 @@ fn mountCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, 
                 .allow_other = allow_other,
                 .read_only = !writable,
                 .update_access_time = access_time == .relatime,
+                .metrics = if (metrics) &fuse_metrics else null,
             },
         );
+        native_open = false;
+        try native.close(io);
+        if (metrics) {
+            try printFuseMetrics(stdout, fuse_metrics);
+            try stdout.flush();
+        }
         return;
     }
     const volume = try allocator.create(zettide.volume.Volume);

@@ -208,11 +208,16 @@ fi
 # BlobFilesystem has a focused lifecycle smoke test; broader POSIX gates remain littlefs-only.
 image="$tmp/blob.ddv"
 "$exe" format "$image" --filesystem blob --size 16MiB >/dev/null
-start_mount
+start_mount --metrics
 [[ $(stat -c '%u:%g' "$mount_dir") == "$(id -u):$(id -g)" ]]
 printf 'blob smoke' >"$mount_dir/blob.txt"
 [[ $(<"$mount_dir/blob.txt") == "blob smoke" ]]
 stop_mount
+grep -q '^fuse_metrics ' "$log"
+if grep -Eq '^(pipeline_metrics|member_transport_metrics) ' "$log"; then
+    echo "blob mount printed LittleFS metrics" >&2
+    exit 1
+fi
 "$exe" check "$image" >/dev/null
 start_mount --read-only
 [[ $(<"$mount_dir/blob.txt") == "blob smoke" ]]
