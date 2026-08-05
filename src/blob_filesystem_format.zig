@@ -256,6 +256,10 @@ pub fn dentryKey(output: *[max_key_size]u8, parent_inode: u64, lookup_name: []co
     return output[0 .. 9 + lookup_name.len];
 }
 
+pub fn dentryPrefix(parent_inode: u64) ![9]u8 {
+    return fixedKey(.dentry, parent_inode);
+}
+
 pub fn decodeKey(key: []const u8) !DecodedKey {
     if (key.len < 9) return error.InvalidBlobFilesystemKey;
     const kind = std.enums.fromInt(KeyKind, key[0]) orelse return error.InvalidBlobFilesystemKey;
