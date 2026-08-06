@@ -191,6 +191,18 @@ then restores and byte-compares the original image. A final read-only inspection
 must recover the original Pool ID and mountability. The backup is retained by
 default; a power loss or `SIGKILL` can still require manual restoration.
 
+Use the NFSv3 frontend with the same physical Blob Pool, fio matrix, backup,
+and restoration lifecycle:
+
+```sh
+uv run ansible-playbook test/ansible/blob-pool-nfs-fio.yml --limit zettide-tier1 \
+  -e 'zettide_blob_pool_fio_confirm=DESTROY:/dev/nvme1n1:PHYSICAL-DISK-SERIAL'
+```
+
+The profile builds the pinned NFS-Ganesha V13 source and `FSAL_ZETTIDE`, then
+mounts each fio case through the loopback Linux NFSv3 client with 1 MiB read and
+write request sizes. It does not run FUSE during the measured workload.
+
 ## Throughput
 
 The throughput profile compares a direct-I/O host filesystem baseline with

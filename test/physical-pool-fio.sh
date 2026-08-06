@@ -16,6 +16,8 @@ single_size=${ZETTIDE_POOL_FIO_SINGLE_SIZE:-2G}
 multi_size=${ZETTIDE_POOL_FIO_MULTI_SIZE:-512M}
 runtime=${ZETTIDE_POOL_FIO_RUNTIME:-20}
 ramp_time=${ZETTIDE_POOL_FIO_RAMP_TIME:-5}
+frontend=${ZETTIDE_POOL_FIO_FRONTEND:-fuse}
+ganesha_build=${ZETTIDE_GANESHA_BUILD_DIR:-}
 
 [[ $EUID -eq 0 ]] || {
     echo "physical Pool fio requires root" >&2
@@ -29,7 +31,21 @@ ramp_time=${ZETTIDE_POOL_FIO_RAMP_TIME:-5}
     echo "unsupported Pool filesystem: $expected_filesystem" >&2
     exit 2
 }
-for command in fio fusermount3 lsblk mountpoint setsid timeout; do
+[[ $frontend == fuse || $frontend == nfs ]] || {
+    echo "unsupported Pool fio frontend: $frontend" >&2
+    exit 2
+}
+commands=(fio lsblk mountpoint timeout)
+if [[ $frontend == fuse ]]; then
+    commands+=(fusermount3 setsid)
+else
+    commands+=(mount mount.nfs pgrep python3 rpcbind rpcinfo umount)
+    [[ -n $ganesha_build ]] || {
+        echo "ZETTIDE_GANESHA_BUILD_DIR is required for the NFS frontend" >&2
+        exit 2
+    }
+fi
+for command in "${commands[@]}"; do
     command -v "$command" >/dev/null || {
         echo "$command is required" >&2
         exit 2
@@ -41,6 +57,30 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/zettide-physical-pool-fio.XXXXXX")
 mountpoint_path="$work/mount"
 mkdir "$mountpoint_path"
 mount_pid=""
+ganesha="$ganesha_build/ganesha.nfsd"
+ganesha_module="$ganesha_build/FSAL/FSAL_ZETTIDE/libfsalzettide.so"
+ganesha_pid=""
+ganesha_launcher_pid=""
+ganesha_pid_file="$work/ganesha.pid"
+ganesha_config="$work/ganesha.conf"
+rpcbind_started=false
+rpcbind_pid=""
+fio_command=(fio)
+if [[ $frontend == nfs ]]; then
+    fio_timeout=$((runtime + ramp_time + 120))
+    ((fio_timeout >= 600)) || fio_timeout=600
+    fio_command=(timeout --kill-after=10s "${fio_timeout}s" fio)
+fi
+
+choose_port() {
+    python3 - <<'PY'
+import socket
+
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+}
 
 check_identity() {
     local actual_type actual_serial
@@ -53,6 +93,30 @@ check_identity() {
 }
 
 stop_pool_mount() {
+    if [[ $frontend == nfs ]]; then
+        if mountpoint -q "$mountpoint_path"; then
+            timeout --kill-after=2s 30s umount "$mountpoint_path" >/dev/null 2>&1 ||
+                timeout --kill-after=2s 10s umount -fl "$mountpoint_path" >/dev/null 2>&1 || true
+        fi
+        if [[ -n $ganesha_pid ]]; then
+            kill -TERM "$ganesha_pid" 2>/dev/null || true
+            for ((attempt = 0; attempt < 300; attempt++)); do
+                kill -0 "$ganesha_pid" 2>/dev/null || break
+                sleep 0.1
+            done
+            kill -0 "$ganesha_pid" 2>/dev/null && kill -KILL "$ganesha_pid" 2>/dev/null || true
+            ganesha_pid=""
+        fi
+        if [[ -n $ganesha_launcher_pid ]]; then
+            wait "$ganesha_launcher_pid" 2>/dev/null || true
+            ganesha_launcher_pid=""
+        fi
+        if mountpoint -q "$mountpoint_path"; then
+            timeout --kill-after=2s 10s umount -fl "$mountpoint_path" >/dev/null 2>&1 || true
+        fi
+        ! mountpoint -q "$mountpoint_path"
+        return
+    fi
     if mountpoint -q "$mountpoint_path"; then
         timeout --kill-after=2s 30s "$cli" unmount "$mountpoint_path" >/dev/null 2>&1 ||
             timeout --kill-after=2s 10s fusermount3 -uz "$mountpoint_path" >/dev/null 2>&1 || true
@@ -76,6 +140,25 @@ stop_pool_mount() {
 }
 
 stop_pool_mount_clean() {
+    if [[ $frontend == nfs ]]; then
+        mountpoint -q "$mountpoint_path" || return 1
+        if ! timeout --kill-after=2s 30s umount "$mountpoint_path"; then
+            timeout --kill-after=2s 10s umount -fl "$mountpoint_path" || true
+            return 1
+        fi
+        [[ -n $ganesha_pid ]] || return 1
+        kill -TERM "$ganesha_pid"
+        for ((attempt = 0; attempt < 300; attempt++)); do
+            kill -0 "$ganesha_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -0 "$ganesha_pid" 2>/dev/null && return 1
+        ganesha_pid=""
+        wait "$ganesha_launcher_pid"
+        ganesha_launcher_pid=""
+        ! mountpoint -q "$mountpoint_path"
+        return
+    fi
     mountpoint -q "$mountpoint_path" || return 1
     timeout --kill-after=2s 30s "$cli" unmount "$mountpoint_path" >/dev/null
     for ((attempt = 0; attempt < 300; attempt++)); do
@@ -92,6 +175,36 @@ start_pool_mount() {
     local log=$1
     shift
     : >"$log"
+    if [[ $frontend == nfs ]]; then
+        rm -f "$ganesha_pid_file"
+        "$ganesha" -F -f "$ganesha_config" -L "$log" -p "$ganesha_pid_file" -N EVENT \
+            >"$log.console" 2>&1 &
+        ganesha_launcher_pid=$!
+        ganesha_pid=$ganesha_launcher_pid
+        for ((attempt = 0; attempt < 300; attempt++)); do
+            if [[ -s $ganesha_pid_file ]]; then
+                ganesha_pid=$(<"$ganesha_pid_file")
+                if kill -0 "$ganesha_pid" 2>/dev/null &&
+                    rpcinfo -p 127.0.0.1 2>/dev/null |
+                        grep -Eq "^[[:space:]]*100003[[:space:]]+3[[:space:]]+tcp[[:space:]]+$nfs_port([[:space:]]|$)"; then
+                    timeout --kill-after=2s 30s mount -t nfs \
+                        -o "vers=3,nolock,proto=tcp,port=$nfs_port,mountport=$mnt_port,rsize=1048576,wsize=1048576,noatime" \
+                        127.0.0.1:/zettide "$mountpoint_path"
+                    return
+                fi
+            fi
+            if ! kill -0 "$ganesha_launcher_pid" 2>/dev/null; then
+                cat "$log" >&2
+                cat "$log.console" >&2
+                return 1
+            fi
+            sleep 0.1
+        done
+        cat "$log" >&2
+        cat "$log.console" >&2
+        echo "NFS-Ganesha Pool mount readiness timeout" >&2
+        return 1
+    fi
     setsid "$cli" pool mount "$mountpoint_path" --device "$device" --allow-other --noatime "$@" \
         >"$log" 2>&1 &
     mount_pid=$!
@@ -115,11 +228,74 @@ finish() {
     trap - EXIT INT TERM
     set +e
     stop_pool_mount || result=1
-    rm -rf "$work"
+    if [[ $rpcbind_started == true && -n $rpcbind_pid ]]; then
+        kill -TERM "$rpcbind_pid" 2>/dev/null || result=1
+    fi
+    if mountpoint -q "$mountpoint_path"; then
+        echo "NFS mount remains active; preserving work directory: $work" >&2
+        result=1
+    else
+        rm -rf "$work"
+    fi
     exit "$result"
 }
 trap finish EXIT
 trap 'exit 130' INT TERM
+
+if [[ $frontend == nfs ]]; then
+    [[ -x $ganesha && -f $ganesha_module ]] || {
+        echo "NFS-Ganesha or FSAL_ZETTIDE is unavailable in $ganesha_build" >&2
+        exit 2
+    }
+    nfs_port=$(choose_port)
+    mnt_port=$(choose_port)
+    while [[ $mnt_port == "$nfs_port" ]]; do mnt_port=$(choose_port); done
+    cat >"$ganesha_config" <<EOF
+NFS_Core_Param {
+    NFS_Port = $nfs_port;
+    MNT_Port = $mnt_port;
+    Bind_Addr = 127.0.0.1;
+    Protocols = 3;
+    Enable_UDP = false;
+    Plugins_Dir = "$ganesha_build/FSAL/FSAL_ZETTIDE";
+    Allow_Set_Io_Flusher_Fail = true;
+}
+
+NFSv4 {
+    RecoveryRoot = "$work";
+}
+
+EXPORT {
+    Export_Id = 77;
+    Path = "/zettide";
+    Pseudo = "/zettide";
+    Access_Type = RW;
+    Squash = No_Root_Squash;
+    Protocols = 3;
+    Transports = TCP;
+    SecType = sys;
+
+    FSAL {
+        name = ZETTIDE;
+        Target = "$device";
+        Writable = true;
+    }
+}
+EOF
+    if ! rpcinfo -p 127.0.0.1 >/dev/null 2>&1; then
+        rpcbind -w
+        rpcbind_started=true
+        for ((attempt = 0; attempt < 100; attempt++)); do
+            rpcinfo -p 127.0.0.1 >/dev/null 2>&1 && break
+            sleep 0.05
+        done
+        rpcinfo -p 127.0.0.1 >/dev/null 2>&1 || {
+            echo "rpcbind failed to start" >&2
+            exit 1
+        }
+        rpcbind_pid=$(pgrep -xo rpcbind)
+    fi
+fi
 
 run_fio_case() {
     local name=$1
@@ -132,7 +308,7 @@ run_fio_case() {
     local mount_log="$log_dir/mount-$name.log"
     local peak_inflight
     local -a fio_args=(
-        fio
+        "${fio_command[@]}"
         --name="$name"
         --rw="$rw"
         --bs="$block_size"
@@ -164,6 +340,10 @@ run_fio_case() {
     fi
     "${fio_args[@]}"
     stop_pool_mount_clean
+    if [[ $frontend == nfs ]]; then
+        grep -q "Opened Zettide target $device (writable)" "$mount_log"
+        return
+    fi
     grep -q '^fuse_metrics ' "$mount_log"
     if [[ $expected_filesystem == blob ]]; then
         grep -q '^pool_transport_metrics ' "$mount_log"
@@ -190,7 +370,7 @@ run_fio_case() {
 }
 
 prepare_single_file() {
-    fio \
+    "${fio_command[@]}" \
         --name=prepare-single \
         --filename="$fio_dir/single.bin" \
         --rw=write \
@@ -208,7 +388,7 @@ prepare_single_file() {
 }
 
 prepare_multi_files() {
-    fio \
+    "${fio_command[@]}" \
         --name=prepare-multi \
         --filename_format="$fio_dir/multi.\$jobnum.bin" \
         --numjobs=4 \

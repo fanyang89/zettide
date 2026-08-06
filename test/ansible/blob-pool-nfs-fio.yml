@@ -1,0 +1,7 @@
+---
+- name: Benchmark NFSv3 over a temporary Blob Pool and restore the existing physical Pool
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: blob-pool-nfs-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe
