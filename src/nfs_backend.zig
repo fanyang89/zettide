@@ -42,16 +42,24 @@ const FilesystemOwner = union(enum) {
         path: []const u8,
         writable: bool,
     ) !void {
-        if (try zettide.filesystem_target.classifyPath(io, path) == .blob) {
-            self.* = .{ .blob = undefined };
-            self.blob.native = try zettide.filesystem_target.openBlobFilesystem(
-                allocator_value,
-                io,
-                path,
-                writable,
-            );
-            self.blob.adapter = .init(&self.blob.native, io);
-            return;
+        const target_stat = try std.Io.Dir.cwd().statFile(io, path, .{});
+        if (target_stat.kind == .block_device)
+            return self.openPoolInto(io, allocator_value, path, writable);
+
+        switch (try zettide.filesystem_target.classifyPath(io, path)) {
+            .blob => {
+                self.* = .{ .blob = undefined };
+                self.blob.native = try zettide.filesystem_target.openBlobFilesystem(
+                    allocator_value,
+                    io,
+                    path,
+                    writable,
+                );
+                self.blob.adapter = .init(&self.blob.native, io);
+                return;
+            },
+            .pool_member => return self.openPoolInto(io, allocator_value, path, writable),
+            .littlefs_container, .unknown => {},
         }
 
         self.* = .{ .littlefs = undefined };
@@ -65,6 +73,41 @@ const FilesystemOwner = union(enum) {
         );
         errdefer self.littlefs.deinit();
         try self.littlefs.mount();
+    }
+
+    fn openPoolInto(
+        self: *FilesystemOwner,
+        io: std.Io,
+        allocator_value: std.mem.Allocator,
+        path: []const u8,
+        writable: bool,
+    ) !void {
+        var set = try openSingleMemberPool(io, allocator_value, path, writable);
+        defer set.deinit();
+        switch (try set.filesystem()) {
+            .littlefs => {
+                self.* = .{ .littlefs = undefined };
+                try volume_mod.Volume.openPoolInto(
+                    &self.littlefs,
+                    io,
+                    allocator_value,
+                    &set,
+                    writable,
+                );
+                errdefer self.littlefs.deinit();
+                try self.littlefs.mount();
+            },
+            .blob => {
+                self.* = .{ .blob = undefined };
+                self.blob.native = try zettide.filesystem_target.openBlobPoolFilesystem(
+                    allocator_value,
+                    io,
+                    &set,
+                    writable,
+                );
+                self.blob.adapter = .init(&self.blob.native, io);
+            },
+        }
     }
 
     fn filesystem(self: *FilesystemOwner) filesystem_api.Filesystem {
@@ -81,6 +124,36 @@ const FilesystemOwner = union(enum) {
         };
     }
 };
+
+fn openSingleMemberPool(
+    io: std.Io,
+    allocator_value: std.mem.Allocator,
+    path: []const u8,
+    writable: bool,
+) !zettide.v3.pool_member_set.PoolMemberSet {
+    const target_stat = try std.Io.Dir.cwd().statFile(io, path, .{});
+    const storage = switch (target_stat.kind) {
+        .file => try zettide.v3.storage.Storage.openFile(io, std.Io.Dir.cwd(), path, writable),
+        .block_device => if (@import("builtin").os.tag == .linux)
+            (try zettide.v3.linux_block_device.openStorageOptions(
+                io,
+                allocator_value,
+                path,
+                writable,
+                true,
+            )).storage
+        else
+            return error.BlockDeviceNotImplemented,
+        else => return error.UnsupportedTargetType,
+    };
+    var storages = [_]zettide.v3.storage.Storage{storage};
+    return zettide.v3.pool_member_set.PoolMemberSet.openStorages(
+        io,
+        allocator_value,
+        &storages,
+        if (writable) .writable else .read_only,
+    );
+}
 
 const Export = struct {
     threaded: std.Io.Threaded,
@@ -1065,4 +1138,78 @@ test "direct NFS backend exports standalone BlobFilesystem" {
     try std.testing.expectEqualStrings("blob through NFS", contents[0..amount]);
     try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
     export_open = false;
+}
+
+test "direct NFS backend exports a single-member Blob Pool" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const member_name = "nfs-blob-pool-member";
+    var storages = [_]zettide.v3.storage.Storage{
+        try zettide.v3.storage.Storage.createFile(std.testing.io, tmp.dir, member_name, 16 * 1024 * 1024),
+    };
+    const outcome = try zettide.v3.pool_provision.create(
+        std.testing.io,
+        std.testing.allocator,
+        &storages,
+        .{ .protection = .unprotected, .filesystem = .blob },
+    );
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    var native = try zettide.filesystem_target.formatProvisionedBlobPool(
+        std.testing.allocator,
+        std.testing.io,
+        &provisioned,
+        .portable_v1,
+        .{},
+    );
+    try native.close(std.testing.io);
+
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    path_buffer[root_length] = '/';
+    @memcpy(path_buffer[root_length + 1 .. root_length + 1 + member_name.len], member_name);
+    const path_z = try std.testing.allocator.dupeZ(u8, path_buffer[0 .. root_length + 1 + member_name.len]);
+    defer std.testing.allocator.free(path_z);
+
+    var export_handle: *Export = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_open(path_z, true, &export_handle));
+    var root_handle: Handle = undefined;
+    var root_attributes: Attributes = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &root_handle, &root_attributes));
+    var file_handle: Handle = undefined;
+    var file_attributes: Attributes = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_create(
+        export_handle,
+        &root_handle,
+        "pool-data",
+        "pool-data".len,
+        0o600,
+        1,
+        2,
+        &file_handle,
+        &file_attributes,
+    ));
+    var amount: usize = 0;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_write(
+        export_handle,
+        &file_handle,
+        0,
+        "persistent",
+        "persistent".len,
+        &amount,
+    ));
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
+
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_open(path_z, false, &export_handle));
+    var contents: [16]u8 = undefined;
+    amount = 0;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_read(export_handle, &file_handle, 0, &contents, contents.len, &amount),
+    );
+    try std.testing.expectEqualStrings("persistent", contents[0..amount]);
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
 }
