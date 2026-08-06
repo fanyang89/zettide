@@ -805,6 +805,7 @@ static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 	struct zettide_fsal_export *export = handle->export;
 	fsal_status_t result = fsalstat(ERR_FSAL_NO_ERROR, 0);
 	uint64_t offset = write_arg->offset;
+	uint64_t stable_ticket = 0;
 	bool stable_requested = write_arg->fsal_stable;
 	bool stable_locked = false;
 	int index;
@@ -813,19 +814,20 @@ static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 	write_arg->io_amount = 0;
 	write_arg->fsal_stable = false;
 	if (stable_requested) {
+		stable_ticket = __atomic_fetch_add(
+			&handle->export->stable_next_ticket, 1, __ATOMIC_RELAXED);
 		pthread_mutex_lock(&handle->export->stable_mutex);
 		stable_locked = true;
-		while (handle->export->stable_syncing &&
-		       __atomic_load_n(
-			       &handle->export->stable_accepting_generation,
-			       __ATOMIC_ACQUIRE) !=
-			       handle->export->stable_generation + 1) {
-			uint64_t generation = handle->export->stable_generation;
-
-			while (generation == handle->export->stable_generation)
-				pthread_cond_wait(&handle->export->stable_cond,
-						  &handle->export->stable_mutex);
-		}
+		while (stable_ticket != handle->export->stable_serving_ticket ||
+		       (handle->export->stable_syncing &&
+			__atomic_load_n(
+				&handle->export->stable_accepting_generation,
+				__ATOMIC_ACQUIRE) !=
+				handle->export->stable_generation + 1))
+			pthread_cond_wait(&handle->export->stable_cond,
+					  &handle->export->stable_mutex);
+		handle->export->stable_serving_ticket++;
+		pthread_cond_broadcast(&handle->export->stable_cond);
 		handle->export->stable_writes++;
 	} else {
 		__atomic_add_fetch(&handle->export->unstable_writes, 1,

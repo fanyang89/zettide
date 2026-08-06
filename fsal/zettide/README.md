@@ -75,7 +75,8 @@ EXPORT {
 
 `Stable_Write_Batch_Us` controls how long a new batch accepts concurrent stable
 writes before one durable sync. A value of `0` disables the wait window without
-changing NFS stable-write semantics.
+changing NFS stable-write semantics. Stable writes enter batches in arrival
+order so sustained concurrency cannot starve an older request.
 
 For the initial local-only deployment, bind Ganesha to loopback, disable NLM,
 and mount with `vers=3,nolock`.

@@ -23,6 +23,8 @@ struct zettide_fsal_export {
 	uint64_t stable_generation;
 	uint64_t stable_accepting_generation;
 	uint64_t stable_success_generation;
+	uint64_t stable_next_ticket;
+	uint64_t stable_serving_ticket;
 	uint64_t stable_writes;
 	uint64_t unstable_writes;
 	uint64_t stable_batches;
