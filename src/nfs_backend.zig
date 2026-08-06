@@ -2,6 +2,7 @@ const std = @import("std");
 const zettide = @import("zettide");
 
 const allocator = std.heap.c_allocator;
+const filesystem_api = zettide.nfs_filesystem;
 const nfs_handle = zettide.volume.nfs_handle;
 const volume_mod = zettide.volume;
 
@@ -25,9 +26,66 @@ const Status = enum(c_int) {
     name_too_long = 16,
 };
 
+const BlobOwner = struct {
+    native: zettide.blob_filesystem.Filesystem,
+    adapter: zettide.nfs_blob_adapter.Adapter,
+};
+
+const FilesystemOwner = union(enum) {
+    littlefs: volume_mod.Volume,
+    blob: BlobOwner,
+
+    fn openInto(
+        self: *FilesystemOwner,
+        io: std.Io,
+        allocator_value: std.mem.Allocator,
+        path: []const u8,
+        writable: bool,
+    ) !void {
+        if (try zettide.filesystem_target.classifyPath(io, path) == .blob) {
+            self.* = .{ .blob = undefined };
+            self.blob.native = try zettide.filesystem_target.openBlobFilesystem(
+                allocator_value,
+                io,
+                path,
+                writable,
+            );
+            self.blob.adapter = .init(&self.blob.native, io);
+            return;
+        }
+
+        self.* = .{ .littlefs = undefined };
+        try zettide.target.openVolumeIntoOptions(
+            &self.littlefs,
+            io,
+            allocator_value,
+            path,
+            writable,
+            .{},
+        );
+        errdefer self.littlefs.deinit();
+        try self.littlefs.mount();
+    }
+
+    fn filesystem(self: *FilesystemOwner) filesystem_api.Filesystem {
+        return switch (self.*) {
+            .littlefs => |*volume| zettide.nfs_littlefs_adapter.filesystem(volume),
+            .blob => |*blob| blob.adapter.filesystem(),
+        };
+    }
+
+    fn close(self: *FilesystemOwner, io: std.Io) !void {
+        return switch (self.*) {
+            .littlefs => |*volume| volume.close(),
+            .blob => |*blob| blob.native.close(io),
+        };
+    }
+};
+
 const Export = struct {
     threaded: std.Io.Threaded,
-    volume: volume_mod.Volume,
+    owner: FilesystemOwner,
+    filesystem: filesystem_api.Filesystem,
     mutex: std.Io.Mutex = .init,
 
     fn io(self: *Export) std.Io {
@@ -45,7 +103,7 @@ const Export = struct {
 
 const Directory = struct {
     export_handle: *Export,
-    handle: volume_mod.DirectoryHandle,
+    handle: filesystem_api.Directory,
 };
 
 const Handle = extern struct {
@@ -108,37 +166,17 @@ pub export fn zettide_nfs_export_open(
     const output = out_export orelse return status(.invalid_argument);
     const self = allocator.create(Export) catch return status(.internal);
     self.threaded = .init(allocator, .{ .environ = .empty });
-    const kind = zettide.filesystem_target.classifyPath(
-        self.threaded.io(),
-        std.mem.span(target_value),
-    ) catch |err| {
-        self.threaded.deinit();
-        allocator.destroy(self);
-        return statusFor(err, false);
-    };
-    if (kind == .blob) {
-        self.threaded.deinit();
-        allocator.destroy(self);
-        return status(.not_supported);
-    }
-    zettide.target.openVolumeIntoOptions(
-        &self.volume,
+    self.owner.openInto(
         self.threaded.io(),
         allocator,
         std.mem.span(target_value),
         writable,
-        .{},
     ) catch |err| {
         self.threaded.deinit();
         allocator.destroy(self);
         return statusFor(err, false);
     };
-    self.volume.mount() catch |err| {
-        self.volume.deinit();
-        self.threaded.deinit();
-        allocator.destroy(self);
-        return statusFor(err, false);
-    };
+    self.filesystem = self.owner.filesystem();
     self.mutex = .init;
     output.* = self;
     return status(.ok);
@@ -147,7 +185,7 @@ pub export fn zettide_nfs_export_open(
 pub export fn zettide_nfs_export_close(export_handle: ?*Export) callconv(.c) c_int {
     const self = export_handle orelse return status(.invalid_argument);
     self.lock() catch return status(.internal);
-    const result = self.volume.close();
+    const result = self.owner.close(self.io());
     self.unlock();
     self.threaded.deinit();
     allocator.destroy(self);
@@ -163,12 +201,11 @@ pub export fn zettide_nfs_statfs(
     const output = out_info orelse return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const available_blocks = self.volume.availableBlocks() catch |err| return statusFor(err, false);
-    const block_size = self.volume.header.block_size;
+    const info = self.filesystem.spaceInfo() catch |err| return statusFor(err, false);
     output.* = .{
-        .total_bytes = @as(u64, self.volume.header.block_count) * block_size,
-        .free_bytes = available_blocks * block_size,
-        .available_bytes = available_blocks * block_size,
+        .total_bytes = info.total_blocks * info.block_size,
+        .free_bytes = info.free_blocks * info.block_size,
+        .available_bytes = info.available_blocks * info.block_size,
     };
     return status(.ok);
 }
@@ -183,8 +220,7 @@ pub export fn zettide_nfs_root(
     const output_attributes = out_attributes orelse return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const identity = self.volume.rootDirectoryIdentity() catch |err| return statusFor(err, false);
-    const info = self.volume.statDirectoryIdentity(identity) catch |err| return statusFor(err, false);
+    const info = self.filesystem.root() catch |err| return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
 }
@@ -206,7 +242,7 @@ pub export fn zettide_nfs_lookup(
     defer self.unlock();
     const decoded = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
     if (decoded.kind != .directory) return status(.not_directory);
-    const info = self.volume.lookupAt(decoded.identity, name_value[0..name_length]) catch |err|
+    const info = self.filesystem.lookup(node(decoded), name_value[0..name_length]) catch |err|
         return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
@@ -226,9 +262,7 @@ pub export fn zettide_nfs_lookup_parent(
     defer self.unlock();
     const decoded = decodeExisting(self, directory_value) catch |err| return statusFor(err, true);
     if (decoded.kind != .directory) return status(.not_directory);
-    const parent_identity = self.volume.parentDirectoryIdentity(decoded.identity) catch |err|
-        return statusFor(err, true);
-    const info = self.volume.statDirectoryIdentity(parent_identity) catch |err|
+    const info = self.filesystem.parent(node(decoded)) catch |err|
         return statusFor(err, true);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
@@ -245,7 +279,7 @@ pub export fn zettide_nfs_getattr(
     self.lock() catch return status(.internal);
     defer self.unlock();
     const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
-    const info = self.volume.statIdentity(decoded) catch |err| return statusFor(err, true);
+    const info = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
     output.* = attributes(info);
     return status(.ok);
 }
@@ -267,18 +301,12 @@ pub export fn zettide_nfs_setattr(
 
     if (changes.mask & set_size != 0) {
         if (decoded.kind != .file) return status(.invalid_argument);
-        var file: volume_mod.FileHandle = undefined;
-        self.volume.openObject(&file, decoded.identity, volume_mod.c.LFS_O_RDWR) catch |err|
-            return statusFor(err, true);
-        self.volume.truncateFile(&file, changes.size) catch |err| {
-            self.volume.closeFile(&file) catch {};
+        _ = self.filesystem.truncate(node(decoded), changes.size) catch |err|
             return statusFor(err, false);
-        };
-        self.volume.closeFile(&file) catch |err| return statusFor(err, false);
     }
 
     if (changes.mask & (set_mode | set_uid | set_gid | set_atime | set_mtime) != 0) {
-        const current = self.volume.statIdentity(decoded) catch |err| return statusFor(err, true);
+        const current = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
         var value = current.metadata;
         if (changes.mask & set_mode != 0)
             value.mode = (value.mode & ~@as(u32, 0o7777)) | (changes.mode & 0o7777);
@@ -287,10 +315,10 @@ pub export fn zettide_nfs_setattr(
         if (changes.mask & set_atime != 0) value.atime_ns = changes.atime_ns;
         if (changes.mask & set_mtime != 0) value.mtime_ns = changes.mtime_ns;
         value.ctime_ns = @intCast(std.Io.Clock.real.now(self.io()).nanoseconds);
-        _ = self.volume.setMetadataIdentity(decoded, value) catch |err| return statusFor(err, true);
+        _ = self.filesystem.setMetadata(node(decoded), value) catch |err| return statusFor(err, true);
     }
 
-    const info = self.volume.statIdentity(decoded) catch |err| return statusFor(err, true);
+    const info = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
     output.* = attributes(info);
     return status(.ok);
 }
@@ -316,12 +344,8 @@ pub export fn zettide_nfs_read(
         output.* = 0;
         return status(.ok);
     }
-    var file: volume_mod.FileHandle = undefined;
-    self.volume.openObject(&file, decoded.identity, volume_mod.c.LFS_O_RDONLY) catch |err|
-        return statusFor(err, true);
-    defer self.volume.closeFile(&file) catch {};
     const bytes = @as([*]u8, @ptrCast(buffer.?))[0..buffer_length];
-    output.* = self.volume.readFile(&file, bytes, offset) catch |err| return statusFor(err, true);
+    output.* = self.filesystem.read(node(decoded), bytes, offset) catch |err| return statusFor(err, true);
     return status(.ok);
 }
 
@@ -345,21 +369,11 @@ pub export fn zettide_nfs_create(
     defer self.unlock();
     const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
     if (decoded_parent.kind != .directory) return status(.not_directory);
-    var file: volume_mod.FileHandle = undefined;
-    self.volume.openFileAt(
-        &file,
-        decoded_parent.identity,
+    const info = self.filesystem.createFile(
+        node(decoded_parent),
         name_value[0..name_length],
-        volume_mod.c.LFS_O_CREAT | volume_mod.c.LFS_O_EXCL | volume_mod.c.LFS_O_RDWR,
-        0o100000 | (mode & 0o7777),
-        uid,
-        gid,
+        .{ .mode = mode, .uid = uid, .gid = gid },
     ) catch |err| return statusFor(err, false);
-    const info = self.volume.statFile(&file) catch |err| {
-        self.volume.closeFile(&file) catch {};
-        return statusFor(err, false);
-    };
-    self.volume.closeFile(&file) catch |err| return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
 }
@@ -385,13 +399,9 @@ pub export fn zettide_nfs_write(
         output.* = 0;
         return status(.ok);
     }
-    var file: volume_mod.FileHandle = undefined;
-    self.volume.openObject(&file, decoded.identity, volume_mod.c.LFS_O_RDWR) catch |err|
-        return statusFor(err, true);
-    defer self.volume.closeFile(&file) catch {};
     const bytes = @as([*]const u8, @ptrCast(data.?))[0..data_length];
-    output.* = self.volume.writeFile(&file, bytes, offset) catch |err| return statusFor(err, true);
-    self.volume.syncFile(&file) catch |err| return statusFor(err, false);
+    output.* = self.filesystem.write(node(decoded), bytes, offset) catch |err| return statusFor(err, true);
+    self.filesystem.sync() catch |err| return statusFor(err, false);
     return status(.ok);
 }
 
@@ -399,7 +409,7 @@ pub export fn zettide_nfs_sync(export_handle: ?*Export) callconv(.c) c_int {
     const self = export_handle orelse return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    self.volume.sync() catch |err| return statusFor(err, false);
+    self.filesystem.sync() catch |err| return statusFor(err, false);
     return status(.ok);
 }
 
@@ -423,12 +433,10 @@ pub export fn zettide_nfs_mkdir(
     defer self.unlock();
     const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
     if (decoded_parent.kind != .directory) return status(.not_directory);
-    const info = self.volume.makeDirectoryAt(
-        decoded_parent.identity,
+    const info = self.filesystem.makeDirectory(
+        node(decoded_parent),
         name_value[0..name_length],
-        0o40000 | (mode & 0o7777),
-        uid,
-        gid,
+        .{ .mode = mode, .uid = uid, .gid = gid },
     ) catch |err| return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
@@ -456,8 +464,8 @@ pub export fn zettide_nfs_symlink(
     defer self.unlock();
     const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
     if (decoded_parent.kind != .directory) return status(.not_directory);
-    const info = self.volume.makeSymlinkAt(
-        decoded_parent.identity,
+    const info = self.filesystem.makeSymlink(
+        node(decoded_parent),
         name_value[0..name_length],
         target_value[0..target_length],
         uid,
@@ -487,7 +495,7 @@ pub export fn zettide_nfs_readlink(
         return status(.ok);
     }
     const bytes = @as([*]u8, @ptrCast(buffer.?))[0..buffer_length];
-    output.* = self.volume.readObject(decoded.identity, bytes, 0) catch |err| return statusFor(err, true);
+    output.* = self.filesystem.readlink(node(decoded), bytes) catch |err| return statusFor(err, true);
     return status(.ok);
 }
 
@@ -512,9 +520,9 @@ pub export fn zettide_nfs_link(
     if (decoded_source.kind == .directory) return status(.is_directory);
     const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
     if (decoded_parent.kind != .directory) return status(.not_directory);
-    const info = self.volume.linkObjectAt(
-        decoded_source.identity,
-        decoded_parent.identity,
+    const info = self.filesystem.link(
+        node(decoded_source),
+        node(decoded_parent),
         name_value[0..name_length],
     ) catch |err| return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
@@ -534,7 +542,7 @@ pub export fn zettide_nfs_remove(
     defer self.unlock();
     const decoded_parent = decodeExisting(self, parent_value) catch |err| return statusFor(err, true);
     if (decoded_parent.kind != .directory) return status(.not_directory);
-    self.volume.removeAt(decoded_parent.identity, name_value[0..name_length]) catch |err|
+    self.filesystem.remove(node(decoded_parent), name_value[0..name_length]) catch |err|
         return statusFor(err, false);
     return status(.ok);
 }
@@ -560,10 +568,10 @@ pub export fn zettide_nfs_rename(
     const decoded_new_parent = decodeExisting(self, new_parent_value) catch |err| return statusFor(err, true);
     if (decoded_old_parent.kind != .directory or decoded_new_parent.kind != .directory)
         return status(.not_directory);
-    _ = self.volume.renameAt(
-        decoded_old_parent.identity,
+    self.filesystem.rename(
+        node(decoded_old_parent),
         old_name_value[0..old_name_length],
-        decoded_new_parent.identity,
+        node(decoded_new_parent),
         new_name_value[0..new_name_length],
         no_replace,
     ) catch |err| return statusFor(err, false);
@@ -584,15 +592,12 @@ pub export fn zettide_nfs_directory_open(
     const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
     if (decoded.kind != .directory) return status(.not_directory);
     const directory = allocator.create(Directory) catch return status(.internal);
-    directory.* = .{ .export_handle = self, .handle = .{} };
-    self.volume.openDirectoryIdentity(&directory.handle, decoded.identity) catch |err| {
-        allocator.destroy(directory);
-        return statusFor(err, true);
-    };
-    if (cookie != 0) self.volume.seekDirectory(&directory.handle, cookie) catch |err| {
-        self.volume.closeDirectory(&directory.handle) catch {};
-        allocator.destroy(directory);
-        return statusFor(err, false);
+    directory.* = .{
+        .export_handle = self,
+        .handle = self.filesystem.openDirectory(allocator, node(decoded), cookie) catch |err| {
+            allocator.destroy(directory);
+            return statusFor(err, true);
+        },
     };
     output.* = directory;
     return status(.ok);
@@ -608,8 +613,8 @@ pub export fn zettide_nfs_directory_read(
     const has_entry = out_has_entry orelse return status(.invalid_argument);
     self.export_handle.lock() catch return status(.internal);
     defer self.export_handle.unlock();
-    var entry: volume_mod.DirectoryEntry = undefined;
-    has_entry.* = self.export_handle.volume.readDirectoryEntry(&self.handle, &entry) catch |err|
+    var entry: filesystem_api.DirectoryEntry = undefined;
+    has_entry.* = self.handle.read(&entry) catch |err|
         return statusFor(err, false);
     if (!has_entry.*) return status(.ok);
     output.* = .{
@@ -618,9 +623,9 @@ pub export fn zettide_nfs_directory_read(
         .handle = undefined,
         .attributes = attributes(entry.info),
     };
-    const name = entry.nameSlice();
+    const name = entry.name();
     @memcpy(output.name[0..name.len], name);
-    output.handle.bytes = nfs_handle.encode(self.export_handle.volume.volumeUuid(), .{
+    output.handle.bytes = nfs_handle.encode(self.export_handle.filesystem.filesystem_id, .{
         .kind = entry.info.metadata.kind,
         .identity = entry.info.identity,
     });
@@ -630,7 +635,7 @@ pub export fn zettide_nfs_directory_read(
 pub export fn zettide_nfs_directory_close(directory: ?*Directory) callconv(.c) c_int {
     const self = directory orelse return status(.invalid_argument);
     self.export_handle.lock() catch return status(.internal);
-    const result = self.export_handle.volume.closeDirectory(&self.handle);
+    const result = self.handle.close();
     self.export_handle.unlock();
     allocator.destroy(self);
     result catch |err| return statusFor(err, false);
@@ -638,24 +643,24 @@ pub export fn zettide_nfs_directory_close(directory: ?*Directory) callconv(.c) c
 }
 
 fn decodeExisting(self: *Export, handle: *const Handle) !nfs_handle.Handle {
-    const decoded = nfs_handle.decode(self.volume.volumeUuid(), &handle.bytes) catch
+    const decoded = nfs_handle.decode(self.filesystem.filesystem_id, &handle.bytes) catch
         return error.StaleFileHandle;
-    _ = self.volume.statIdentity(decoded) catch |err| switch (err) {
+    _ = self.filesystem.stat(node(decoded)) catch |err| switch (err) {
         error.FileNotFound => return error.StaleFileHandle,
         else => return err,
     };
     return decoded;
 }
 
-fn fillResult(self: *Export, info: volume_mod.NodeInfo, handle: *Handle, attrs: *Attributes) void {
-    handle.bytes = nfs_handle.encode(self.volume.volumeUuid(), .{
+fn fillResult(self: *Export, info: filesystem_api.NodeInfo, handle: *Handle, attrs: *Attributes) void {
+    handle.bytes = nfs_handle.encode(self.filesystem.filesystem_id, .{
         .kind = info.metadata.kind,
         .identity = info.identity,
     });
     attrs.* = attributes(info);
 }
 
-fn attributes(info: volume_mod.NodeInfo) Attributes {
+fn attributes(info: filesystem_api.NodeInfo) Attributes {
     return .{
         .kind = @intFromEnum(info.metadata.kind),
         .reserved = @splat(0),
@@ -670,6 +675,10 @@ fn attributes(info: volume_mod.NodeInfo) Attributes {
         .ctime_ns = info.metadata.ctime_ns,
         .birthtime_ns = info.metadata.birthtime_ns,
     };
+}
+
+fn node(handle: nfs_handle.Handle) filesystem_api.Node {
+    return .{ .kind = handle.kind, .identity = handle.identity };
 }
 
 fn status(value: Status) c_int {
@@ -947,6 +956,113 @@ test "direct NFS backend resolves and reads stable handles" {
     try std.testing.expect(found_payload);
     try std.testing.expectEqual(status(.ok), zettide_nfs_directory_close(directory));
     directory_open = false;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
+    export_open = false;
+}
+
+test "direct NFS backend exports standalone BlobFilesystem" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &path_buffer);
+    const suffix = "/nfs-blob.img";
+    @memcpy(path_buffer[root_length .. root_length + suffix.len], suffix);
+    const path = path_buffer[0 .. root_length + suffix.len];
+    try zettide.filesystem_target.formatNewBlobFile(
+        std.testing.io,
+        std.testing.allocator,
+        path,
+        8 * 1024 * 1024,
+        .portable_v1,
+        .{},
+    );
+    const path_z = try std.testing.allocator.dupeZ(u8, path);
+    defer std.testing.allocator.free(path_z);
+
+    var export_handle: *Export = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_open(path_z, true, &export_handle));
+    var export_open = true;
+    defer if (export_open) {
+        _ = zettide_nfs_export_close(export_handle);
+    };
+    var root_handle: Handle = undefined;
+    var root_attributes: Attributes = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &root_handle, &root_attributes));
+    try std.testing.expectEqual(@intFromEnum(zettide.metadata.Kind.directory), root_attributes.kind);
+
+    var file_handle: Handle = undefined;
+    var file_attributes: Attributes = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_create(
+        export_handle,
+        &root_handle,
+        "payload",
+        "payload".len,
+        0o640,
+        10,
+        20,
+        &file_handle,
+        &file_attributes,
+    ));
+    var written: usize = 0;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_write(
+        export_handle,
+        &file_handle,
+        0,
+        "blob through NFS",
+        "blob through NFS".len,
+        &written,
+    ));
+    try std.testing.expectEqual(@as(usize, "blob through NFS".len), written);
+
+    var directory_handle: Handle = undefined;
+    var directory_attributes: Attributes = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_mkdir(
+        export_handle,
+        &root_handle,
+        "directory",
+        "directory".len,
+        0o755,
+        10,
+        20,
+        &directory_handle,
+        &directory_attributes,
+    ));
+    var parent_handle: Handle = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_lookup_parent(
+        export_handle,
+        &directory_handle,
+        &parent_handle,
+        &root_attributes,
+    ));
+    try std.testing.expectEqualSlices(u8, &root_handle.bytes, &parent_handle.bytes);
+
+    var directory: *Directory = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_directory_open(export_handle, &root_handle, 0, &directory));
+    var found_payload = false;
+    while (true) {
+        var entry: DirectoryEntry = undefined;
+        var has_entry = false;
+        try std.testing.expectEqual(status(.ok), zettide_nfs_directory_read(directory, &entry, &has_entry));
+        if (!has_entry) break;
+        found_payload = found_payload or std.mem.eql(u8, std.mem.sliceTo(&entry.name, 0), "payload");
+    }
+    try std.testing.expect(found_payload);
+    try std.testing.expectEqual(status(.ok), zettide_nfs_directory_close(directory));
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
+    export_open = false;
+
+    try std.testing.expectEqual(status(.ok), zettide_nfs_export_open(path_z, false, &export_handle));
+    export_open = true;
+    var reopened_root: Handle = undefined;
+    try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &reopened_root, &root_attributes));
+    try std.testing.expectEqualSlices(u8, &root_handle.bytes, &reopened_root.bytes);
+    var contents: [32]u8 = undefined;
+    var amount: usize = 0;
+    try std.testing.expectEqual(
+        status(.ok),
+        zettide_nfs_read(export_handle, &file_handle, 0, &contents, contents.len, &amount),
+    );
+    try std.testing.expectEqualStrings("blob through NFS", contents[0..amount]);
     try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
     export_open = false;
 }
