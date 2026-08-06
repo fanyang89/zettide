@@ -702,6 +702,7 @@ test "blob filesystem adapter file identity and namespace round trip" {
     const truncate_id = truncate_option.fileId();
     try truncate_option.close();
     try fs.pinFile(truncate_id);
+    try fs.sync();
     const truncate_inode = (try decodeIdentity(&native, truncate_id)).inode;
     native.blobs.frozen = true;
     try std.testing.expectError(error.BlobStoreFrozen, fs.unpinFile(truncate_id));

@@ -313,6 +313,8 @@ pub const State = struct {
         if (data.len == 0) return 0;
         const span = std.math.add(usize, @intCast(offset % block_size), data.len) catch return error.FileTooLarge;
         const touched = try std.math.divCeil(usize, span, block_size);
+        if (touched > self.blobs.header.unit_count - self.blobs.stagedUnits())
+            return error.BlobStoreFull;
         if (self.blocks_materialized) try self.blocks.ensureUnusedCapacity(@intCast(touched));
         try self.pending.ensureUnusedCapacity(@intCast(touched));
         const old_block_count = try std.math.divCeil(u64, self.logical_size, block_size);
@@ -404,6 +406,8 @@ pub const State = struct {
         }
         const partial_upsert: usize = if (shrinking and size_value % block_size != 0 and
             self.blocks.contains(size_value / block_size)) 1 else 0;
+        if (partial_upsert != 0 and self.blobs.stagedUnits() == self.blobs.header.unit_count)
+            return error.BlobStoreFull;
         try self.pending.ensureUnusedCapacity(@intCast(removed_count + partial_upsert));
         if (shrinking and size_value % block_size != 0) {
             const block = size_value / block_size;
@@ -1325,6 +1329,38 @@ test "blob file map capacity failure preserves checkpoints for outer rollback" {
         0,
     ));
     try std.testing.expectEqualStrings("old", &contents);
+}
+
+test "blob file partial truncate preflights capacity without freezing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-truncate-capacity",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var file = State.init(std.testing.allocator, &blobs);
+    defer file.deinit();
+
+    const contents: [block_size]u8 = @splat('x');
+    _ = try file.write(std.testing.io, &contents, 0);
+    const snapshot = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(snapshot);
+
+    const unit_count = blobs.header.unit_count;
+    blobs.header.unit_count = blobs.stagedUnits();
+    try std.testing.expectError(error.BlobStoreFull, file.truncate(std.testing.io, block_size - 1));
+    try std.testing.expect(!file.frozen);
+    try std.testing.expectEqual(@as(u64, block_size), file.size());
+    blobs.header.unit_count = unit_count;
+    var first: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try file.read(std.testing.io, &first, 0));
+    try std.testing.expectEqual(@as(u8, 'x'), first[0]);
 }
 
 test "blob file snapshot reads empty sparse partial multi-block and EOF ranges" {

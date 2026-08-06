@@ -19,6 +19,7 @@ pub const Filesystem = struct {
     writable: bool,
     open_references: std.AutoHashMap(u64, u64),
     inode_pins: std.AutoHashMap(u64, u64),
+    dirty_files: std.AutoHashMap(u64, DirtyFile),
     transaction_mutex: Io.Mutex = .init,
     dirty: bool = false,
     frozen: bool = false,
@@ -58,6 +59,11 @@ pub const Filesystem = struct {
 
     const RuntimeReferenceKind = enum { open, pin };
 
+    const DirtyFile = struct {
+        state: blob_file.State,
+        record: InodeRecord,
+    };
+
     pub const FormatOptions = struct {
         root_uid: u32 = 0,
         root_gid: u32 = 0,
@@ -78,6 +84,7 @@ pub const Filesystem = struct {
             .writable = writable,
             .open_references = std.AutoHashMap(u64, u64).init(allocator),
             .inode_pins = std.AutoHashMap(u64, u64).init(allocator),
+            .dirty_files = std.AutoHashMap(u64, DirtyFile).init(allocator),
         };
     }
 
@@ -183,6 +190,7 @@ pub const Filesystem = struct {
             first_error = err;
         };
         var blobs = self.blobs;
+        self.deinitDirtyFiles();
         self.open_references.deinit();
         self.inode_pins.deinit();
         self.* = undefined;
@@ -195,8 +203,20 @@ pub const Filesystem = struct {
     pub fn sync(self: *Filesystem, io: Io) !void {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
+        return self.syncUnlocked(io);
+    }
+
+    fn syncUnlocked(self: *Filesystem, io: Io) !void {
         if (self.frozen) return error.BlobFilesystemFrozen;
         if (!self.writable or !self.dirty) return;
+        if (self.dirty_files.count() != 0) {
+            var mutations: MutationAccumulator = .init(self.allocator);
+            defer mutations.deinit();
+            var next_root = self.root;
+            next_root.generation = try nextGeneration(self.root.generation);
+            try self.publish(io, next_root, &mutations, null);
+            return;
+        }
         self.blobs.commitAuthority(io, self.authority_ref) catch |err| {
             self.frozen = true;
             return err;
@@ -207,6 +227,11 @@ pub const Filesystem = struct {
     pub fn stat(self: *Filesystem, io: Io, inode: u64) !InodeRecord {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
+        if (self.dirty_files.getPtr(inode)) |dirty_file| {
+            const record = dirtyFileVisibleRecord(dirty_file);
+            try self.authorizeDirectInode(io, inode, record);
+            return record;
+        }
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
         try self.authorizeDirectInode(io, inode, record);
         return record;
@@ -222,6 +247,11 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         const inode = try self.resolvePathUnlocked(io, path);
+        if (self.dirty_files.getPtr(inode)) |dirty_file| {
+            const record = dirtyFileVisibleRecord(dirty_file);
+            if (record.nlink == 0) return error.InvalidBlobFilesystemGraph;
+            return record;
+        }
         const record = (try self.loadInode(io, inode)) orelse
             return error.InvalidBlobFilesystemGraph;
         if (record.nlink == 0) return error.InvalidBlobFilesystemGraph;
@@ -449,6 +479,10 @@ pub const Filesystem = struct {
     pub fn read(self: *Filesystem, io: Io, inode: u64, output: []u8, offset: u64) !usize {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
+        if (self.dirty_files.getPtr(inode)) |dirty_file| {
+            try self.authorizeDirectInode(io, inode, dirty_file.record);
+            return dirty_file.state.read(io, output, offset);
+        }
         const record = try self.requireRegularFile(io, inode);
         return blob_file.readSnapshotAt(
             self.allocator,
@@ -471,52 +505,55 @@ pub const Filesystem = struct {
     pub fn append(self: *Filesystem, io: Io, inode: u64, data: []const u8) !usize {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
-        const record = try self.requireRegularFile(io, inode);
-        return self.writeRecordUnlocked(io, inode, record, data, record.data.?.logical_size);
+        try self.requireMutable();
+        if (data.len == 0) {
+            _ = try self.requireRegularFile(io, inode);
+            return 0;
+        }
+        const was_cached = self.dirty_files.contains(inode);
+        const dirty_file = try self.dirtyFile(io, inode);
+        return self.writeDirtyFile(io, inode, dirty_file, data, dirty_file.state.size(), was_cached);
     }
 
     fn writeUnlocked(self: *Filesystem, io: Io, inode: u64, data: []const u8, offset: u64) !usize {
         try self.requireMutable();
-        const record = try self.requireRegularFile(io, inode);
-        return self.writeRecordUnlocked(io, inode, record, data, offset);
+        if (data.len == 0) {
+            _ = try self.requireRegularFile(io, inode);
+            return 0;
+        }
+        const was_cached = self.dirty_files.contains(inode);
+        const dirty_file = try self.dirtyFile(io, inode);
+        return self.writeDirtyFile(io, inode, dirty_file, data, offset, was_cached);
     }
 
-    fn writeRecordUnlocked(
+    fn writeDirtyFile(
         self: *Filesystem,
         io: Io,
         inode: u64,
-        record_value: InodeRecord,
+        dirty_file: *DirtyFile,
         data: []const u8,
         offset: u64,
+        was_cached: bool,
     ) !usize {
         try self.requireMutable();
-        var record = record_value;
         const checkpoint = self.blobs.stagedUnits();
-        var rollback_before_publish = true;
-        errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
-
-        var file = try blob_file.State.openKnownAllocatedAt(
-            self.allocator,
-            &self.blobs,
-            self.visibleUnits(),
-            record.data.?,
-            record.allocated_bytes,
-        );
-        defer file.deinit();
-        const amount = try file.write(io, data, offset);
-        if (amount == 0) return 0;
-        record.data = try file.prepareSnapshot(io);
-        record.allocated_bytes = file.allocatedBytes();
+        const amount = dirty_file.state.write(io, data, offset) catch |err| {
+            if (dirty_file.state.frozen or self.blobs.frozen) {
+                self.frozen = true;
+            } else {
+                self.rollback(io, checkpoint);
+            }
+            if (!was_cached) {
+                dirty_file.state.deinit();
+                std.debug.assert(self.dirty_files.remove(inode));
+            }
+            return err;
+        };
+        std.debug.assert(amount != 0);
         const now = timestamp(io);
-        record.metadata.mtime_ns = now;
-        record.metadata.ctime_ns = now;
-        var mutations: MutationAccumulator = .init(self.allocator);
-        defer mutations.deinit();
-        try mutations.putInode(inode, record);
-        var next_root = self.root;
-        next_root.generation = try nextGeneration(self.root.generation);
-        rollback_before_publish = false;
-        try self.publishVisible(io, next_root, &mutations, checkpoint);
+        dirty_file.record.metadata.mtime_ns = now;
+        dirty_file.record.metadata.ctime_ns = now;
+        self.dirty = true;
         return amount;
     }
 
@@ -524,32 +561,25 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         try self.requireMutable();
-        var record = try self.requireRegularFile(io, inode);
+        const was_cached = self.dirty_files.contains(inode);
+        const dirty_file = try self.dirtyFile(io, inode);
         const checkpoint = self.blobs.stagedUnits();
-        var rollback_before_publish = true;
-        errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
-
-        var file = try blob_file.State.openKnownAllocatedAt(
-            self.allocator,
-            &self.blobs,
-            self.visibleUnits(),
-            record.data.?,
-            record.allocated_bytes,
-        );
-        defer file.deinit();
-        try file.truncate(io, size);
-        record.data = try file.prepareSnapshot(io);
-        record.allocated_bytes = file.allocatedBytes();
+        dirty_file.state.truncate(io, size) catch |err| {
+            if (dirty_file.state.frozen or self.blobs.frozen) {
+                self.frozen = true;
+            } else {
+                self.rollback(io, checkpoint);
+            }
+            if (!was_cached) {
+                dirty_file.state.deinit();
+                std.debug.assert(self.dirty_files.remove(inode));
+            }
+            return err;
+        };
         const now = timestamp(io);
-        record.metadata.mtime_ns = now;
-        record.metadata.ctime_ns = now;
-        var mutations: MutationAccumulator = .init(self.allocator);
-        defer mutations.deinit();
-        try mutations.putInode(inode, record);
-        var next_root = self.root;
-        next_root.generation = try nextGeneration(self.root.generation);
-        rollback_before_publish = false;
-        try self.publish(io, next_root, &mutations, checkpoint);
+        dirty_file.record.metadata.mtime_ns = now;
+        dirty_file.record.metadata.ctime_ns = now;
+        self.dirty = true;
     }
 
     pub fn readSpecial(self: *Filesystem, io: Io, inode: u64, output: []u8, offset: u64) !usize {
@@ -989,6 +1019,7 @@ pub const Filesystem = struct {
     }
 
     fn loadInode(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.InodeRecord {
+        if (self.dirty_files.getPtr(inode)) |dirty_file| return dirty_file.record;
         const key = filesystem_format.inodeKey(inode) catch return error.FileNotFound;
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
         const value = try maps.lookupAllocAt(
@@ -1004,6 +1035,44 @@ pub const Filesystem = struct {
             return error.InvalidBlobFilesystemGraph;
         return filesystem_format.decodeInode(@ptrCast(value.ptr)) catch
             return error.InvalidBlobFilesystemGraph;
+    }
+
+    fn dirtyFile(self: *Filesystem, io: Io, inode: u64) !*DirtyFile {
+        if (self.dirty_files.getPtr(inode)) |dirty_file| {
+            try self.authorizeDirectInode(io, inode, dirty_file.record);
+            return dirty_file;
+        }
+        const record = try self.requireRegularFile(io, inode);
+        var state = try blob_file.State.openKnownAllocatedAt(
+            self.allocator,
+            &self.blobs,
+            self.visibleUnits(),
+            record.data.?,
+            record.allocated_bytes,
+        );
+        errdefer state.deinit();
+        const result = try self.dirty_files.getOrPut(inode);
+        std.debug.assert(!result.found_existing);
+        result.value_ptr.* = .{ .state = state, .record = record };
+        return result.value_ptr;
+    }
+
+    fn dirtyFileVisibleRecord(dirty_file: *const DirtyFile) InodeRecord {
+        var record = dirty_file.record;
+        record.data.?.logical_size = dirty_file.state.size();
+        record.allocated_bytes = dirty_file.state.allocatedBytes();
+        return record;
+    }
+
+    fn clearDirtyFiles(self: *Filesystem) void {
+        var iterator = self.dirty_files.valueIterator();
+        while (iterator.next()) |dirty_file| dirty_file.state.deinit();
+        self.dirty_files.clearRetainingCapacity();
+    }
+
+    fn deinitDirtyFiles(self: *Filesystem) void {
+        self.clearDirtyFiles();
+        self.dirty_files.deinit();
     }
 
     fn loadOrphan(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.OrphanRecord {
@@ -1165,44 +1234,30 @@ pub const Filesystem = struct {
         mutations: *MutationAccumulator,
         transaction_checkpoint: ?u64,
     ) !void {
-        return self.publishWithDurability(
-            io,
-            next_root_value,
-            mutations,
-            transaction_checkpoint,
-            .durable,
-        );
-    }
-
-    fn publishVisible(
-        self: *Filesystem,
-        io: Io,
-        next_root_value: filesystem_format.Root,
-        mutations: *MutationAccumulator,
-        transaction_checkpoint: ?u64,
-    ) !void {
-        return self.publishWithDurability(
-            io,
-            next_root_value,
-            mutations,
-            transaction_checkpoint,
-            .visible,
-        );
-    }
-
-    const PublicationDurability = enum { visible, durable };
-
-    fn publishWithDurability(
-        self: *Filesystem,
-        io: Io,
-        next_root_value: filesystem_format.Root,
-        mutations: *MutationAccumulator,
-        transaction_checkpoint: ?u64,
-        durability: PublicationDurability,
-    ) !void {
         const checkpoint = transaction_checkpoint orelse self.blobs.stagedUnits();
         var prepublication = true;
         errdefer if (prepublication) self.rollback(io, checkpoint);
+        const has_dirty_files = self.dirty_files.count() != 0;
+        if (has_dirty_files) {
+            const dirty_inodes = try self.allocator.alloc(u64, self.dirty_files.count());
+            defer self.allocator.free(dirty_inodes);
+            var iterator = self.dirty_files.keyIterator();
+            var index: usize = 0;
+            while (iterator.next()) |inode| : (index += 1) dirty_inodes[index] = inode.*;
+            std.mem.sort(u64, dirty_inodes, {}, std.sort.asc(u64));
+            errdefer self.frozen = true;
+            for (dirty_inodes) |inode| {
+                if (try mutations.removesInode(inode)) continue;
+                const dirty_file = self.dirty_files.getPtr(inode).?;
+                const snapshot = try dirty_file.state.prepareSnapshot(io);
+                try mutations.putInodeData(
+                    inode,
+                    dirty_file.record,
+                    snapshot,
+                    dirty_file.state.allocatedBytes(),
+                );
+            }
+        }
         const sorted = try mutations.sortedViews();
         defer self.allocator.free(sorted);
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
@@ -1218,13 +1273,14 @@ pub const Filesystem = struct {
         const root_bytes = try filesystem_format.encodeRoot(next_root);
         const authority_ref = try self.blobs.put(io, &root_bytes);
         prepublication = false;
-        if (durability == .durable) self.blobs.commitAuthority(io, authority_ref) catch |err| {
+        self.blobs.commitAuthority(io, authority_ref) catch |err| {
             self.frozen = true;
             return err;
         };
         self.root = next_root;
         self.authority_ref = authority_ref;
-        self.dirty = durability == .visible;
+        if (has_dirty_files) self.clearDirtyFiles();
+        self.dirty = false;
     }
 
     fn rollback(self: *Filesystem, io: Io, checkpoint: u64) void {
@@ -1331,9 +1387,40 @@ const MutationAccumulator = struct {
         try self.set(&key, &value);
     }
 
+    fn putInodeData(
+        self: *MutationAccumulator,
+        inode: u64,
+        fallback: filesystem_format.InodeRecord,
+        snapshot: blob_file.Snapshot,
+        allocated_bytes: u64,
+    ) !void {
+        const key = try filesystem_format.inodeKey(inode);
+        var record = fallback;
+        for (self.items.items) |item| {
+            if (!std.mem.eql(u8, item.key, &key)) continue;
+            const value = item.value orelse return;
+            if (value.len != filesystem_format.inode_encoded_size)
+                return error.InvalidBlobFilesystemGraph;
+            record = filesystem_format.decodeInode(@ptrCast(value.ptr)) catch
+                return error.InvalidBlobFilesystemGraph;
+            break;
+        }
+        record.data = snapshot;
+        record.allocated_bytes = allocated_bytes;
+        try self.putInode(inode, record);
+    }
+
     fn removeInode(self: *MutationAccumulator, inode: u64) !void {
         const key = try filesystem_format.inodeKey(inode);
         try self.set(&key, null);
+    }
+
+    fn removesInode(self: *const MutationAccumulator, inode: u64) !bool {
+        const key = try filesystem_format.inodeKey(inode);
+        for (self.items.items) |item| {
+            if (std.mem.eql(u8, item.key, &key)) return item.value == null;
+        }
+        return false;
     }
 
     fn putOrphan(self: *MutationAccumulator, inode: u64, record: filesystem_format.OrphanRecord) !void {
@@ -2050,6 +2137,7 @@ test "blob filesystem large file overwrite stages a path-sized delta" {
     defer std.testing.allocator.free(contents);
     @memset(contents, 'a');
     _ = try filesystem.write(std.testing.io, inode, contents, 0);
+    try filesystem.sync(std.testing.io);
     try std.testing.expectEqual(@as(u8, 2), (try filesystem.stat(std.testing.io, inode)).data.?.root.?.level);
     const before = filesystem.blobs.stagedUnits();
     const replacement: [blob_file.block_size]u8 = @splat('b');
@@ -2059,6 +2147,7 @@ test "blob filesystem large file overwrite stages a path-sized delta" {
         &replacement,
         (block_count / 2) * blob_file.block_size,
     );
+    try filesystem.sync(std.testing.io);
     const delta = filesystem.blobs.stagedUnits() - before;
     try std.testing.expect(delta < 32);
     try std.testing.expect(delta < block_count / 100);
@@ -2100,7 +2189,7 @@ test "blob filesystem defers writes until sync while keeping them visible" {
     try std.testing.expectEqual(durable_units, filesystem.blobs.committedUnits());
     try std.testing.expect(filesystem.blobs.stagedUnits() > durable_units);
     try std.testing.expectEqualDeep(durable_authority, filesystem.blobs.authorityRoot().?);
-    try std.testing.expect(!std.meta.eql(filesystem.authority_ref, durable_authority));
+    try std.testing.expectEqualDeep(durable_authority, filesystem.authority_ref);
     var visible: [4]u8 = undefined;
     try std.testing.expectEqual(visible.len, try filesystem.read(std.testing.io, inode, &visible, 0));
     try std.testing.expectEqualStrings("new!", &visible);
@@ -2266,6 +2355,19 @@ test "blob filesystem runtime references retain and reclaim unlinked inodes" {
     try filesystem.unpinInode(std.testing.io, directory);
     try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, directory));
     try expectFilesystemCounts(&filesystem, std.testing.io, 7, 0);
+
+    const failed_release = try filesystem.createFile(std.testing.io, root_inode, "failed-release", 0o600, 0, 0);
+    try filesystem.retainInode(std.testing.io, failed_release);
+    _ = try filesystem.write(std.testing.io, failed_release, "old", 0);
+    try filesystem.unlink(std.testing.io, root_inode, "failed-release");
+    _ = try filesystem.write(std.testing.io, failed_release, "new", 0);
+    filesystem.writable = false;
+    try std.testing.expectError(error.ReadOnlyFilesystem, filesystem.releaseInode(std.testing.io, failed_release));
+    try std.testing.expect(!filesystem.open_references.contains(failed_release));
+    try std.testing.expectError(error.FileNotFound, filesystem.read(std.testing.io, failed_release, &contents, 0));
+    filesystem.writable = true;
+    try std.testing.expectError(error.FileNotFound, filesystem.write(std.testing.io, failed_release, "x", 0));
+    try filesystem.sync(std.testing.io);
 }
 
 test "blob filesystem writable open recovers persisted orphans in one transaction" {
@@ -2353,7 +2455,7 @@ test "blob filesystem writable open recovers persisted orphans in one transactio
     try expectFilesystemCounts(&filesystem, std.testing.io, 1, 0);
 }
 
-test "blob filesystem map capacity failure rolls back the full data transaction tail" {
+test "blob filesystem map capacity failure freezes deferred data transaction" {
     const blob_device = @import("blob_device.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2382,6 +2484,22 @@ test "blob filesystem map capacity failure rolls back the full data transaction 
         0,
     );
     _ = try filesystem.write(std.testing.io, inode, "old", 0);
+    try filesystem.sync(std.testing.io);
+
+    const unit_count = filesystem.blobs.header.unit_count;
+    filesystem.blobs.header.unit_count = filesystem.blobs.stagedUnits();
+    try std.testing.expectError(error.BlobStoreFull, filesystem.write(std.testing.io, inode, "failed", 0));
+    try std.testing.expectEqual(@as(u32, 0), filesystem.dirty_files.count());
+    try std.testing.expect(!filesystem.frozen);
+    filesystem.blobs.header.unit_count = unit_count;
+
+    try filesystem.truncate(std.testing.io, inode, 3);
+    try std.testing.expectEqual(@as(u32, 1), filesystem.dirty_files.count());
+    filesystem.blobs.header.unit_count = filesystem.blobs.stagedUnits();
+    try std.testing.expectError(error.BlobStoreFull, filesystem.write(std.testing.io, inode, "failed", 0));
+    try std.testing.expectEqual(@as(u32, 1), filesystem.dirty_files.count());
+    filesystem.blobs.header.unit_count = unit_count;
+    try filesystem.sync(std.testing.io);
 
     const available_units = filesystem.blobs.header.unit_count - filesystem.blobs.stagedUnits();
     const filler_units = available_units - 1;
@@ -2392,16 +2510,14 @@ test "blob filesystem map capacity failure rolls back the full data transaction 
     const checkpoint = filesystem.blobs.stagedUnits();
     const root_before = filesystem.root;
     const authority_before = filesystem.authority_ref;
-    const inode_before = try filesystem.stat(std.testing.io, inode);
-    try std.testing.expectError(error.BlobStoreFull, filesystem.write(std.testing.io, inode, "new", 0));
-    try std.testing.expectEqual(checkpoint, filesystem.blobs.stagedUnits());
+    try std.testing.expectEqual(@as(usize, 3), try filesystem.write(std.testing.io, inode, "new", 0));
+    try std.testing.expectError(error.BlobStoreFull, filesystem.sync(std.testing.io));
+    try std.testing.expectEqual(checkpoint + 1, filesystem.blobs.stagedUnits());
     try std.testing.expectEqualDeep(root_before, filesystem.root);
     try std.testing.expectEqualDeep(authority_before, filesystem.authority_ref);
-    try std.testing.expectEqualDeep(inode_before, try filesystem.stat(std.testing.io, inode));
-    try std.testing.expect(!filesystem.frozen);
+    try std.testing.expect(filesystem.frozen);
     var contents: [3]u8 = undefined;
-    try std.testing.expectEqual(contents.len, try filesystem.read(std.testing.io, inode, &contents, 0));
-    try std.testing.expectEqualStrings("old", &contents);
+    try std.testing.expectError(error.BlobFileFrozen, filesystem.read(std.testing.io, inode, &contents, 0));
     try expectValidGraph(&filesystem, std.testing.io);
 }
 
@@ -2440,7 +2556,7 @@ test "blob filesystem freezes on ambiguous data publication" {
         filesystem.sync(std.testing.io),
     );
     try std.testing.expect(filesystem.frozen);
-    try std.testing.expect(!std.meta.eql(durable_root, filesystem.root));
+    try std.testing.expectEqualDeep(durable_root, filesystem.root);
     try std.testing.expectError(error.BlobFilesystemFrozen, filesystem.truncate(std.testing.io, inode, 0));
     try std.testing.expectError(error.BlobFilesystemFrozen, filesystem.close(std.testing.io));
     filesystem_open = false;
