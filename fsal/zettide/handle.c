@@ -765,10 +765,12 @@ static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 	struct zettide_fsal_handle *handle = zettide_handle(obj_hdl);
 	fsal_status_t result = fsalstat(ERR_FSAL_NO_ERROR, 0);
 	uint64_t offset = write_arg->offset;
+	bool stable_requested = write_arg->fsal_stable;
 	int index;
 
 	(void)bypass;
 	write_arg->io_amount = 0;
+	write_arg->fsal_stable = false;
 	for (index = 0; index < write_arg->iov_count; index++) {
 		size_t amount = 0;
 		int status = zettide_nfs_write(handle->export->backend,
@@ -785,7 +787,13 @@ static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 		if (amount != write_arg->iov[index].iov_len)
 			break;
 	}
-	write_arg->fsal_stable = !FSAL_IS_ERROR(result);
+	if (!FSAL_IS_ERROR(result) && stable_requested) {
+		int status = zettide_nfs_sync(handle->export->backend);
+		if (status != ZETTIDE_NFS_OK)
+			result = zettide_status(status);
+		else
+			write_arg->fsal_stable = true;
+	}
 	done_cb(obj_hdl, result, write_arg, caller_arg);
 }
 

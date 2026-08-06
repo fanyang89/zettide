@@ -390,6 +390,8 @@ pub export fn zettide_nfs_setattr(
         value.ctime_ns = @intCast(std.Io.Clock.real.now(self.io()).nanoseconds);
         _ = self.filesystem.setMetadata(node(decoded), value) catch |err| return statusFor(err, true);
     }
+    if (changes.mask != 0)
+        self.filesystem.sync() catch |err| return statusFor(err, false);
 
     const info = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
     output.* = attributes(info);
@@ -447,6 +449,7 @@ pub export fn zettide_nfs_create(
         name_value[0..name_length],
         .{ .mode = mode, .uid = uid, .gid = gid },
     ) catch |err| return statusFor(err, false);
+    self.filesystem.sync() catch |err| return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
 }
@@ -474,7 +477,6 @@ pub export fn zettide_nfs_write(
     }
     const bytes = @as([*]const u8, @ptrCast(data.?))[0..data_length];
     output.* = self.filesystem.write(node(decoded), bytes, offset) catch |err| return statusFor(err, true);
-    self.filesystem.sync() catch |err| return statusFor(err, false);
     return status(.ok);
 }
 
@@ -511,6 +513,7 @@ pub export fn zettide_nfs_mkdir(
         name_value[0..name_length],
         .{ .mode = mode, .uid = uid, .gid = gid },
     ) catch |err| return statusFor(err, false);
+    self.filesystem.sync() catch |err| return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
 }
@@ -544,6 +547,7 @@ pub export fn zettide_nfs_symlink(
         uid,
         gid,
     ) catch |err| return statusFor(err, false);
+    self.filesystem.sync() catch |err| return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
 }
@@ -598,6 +602,7 @@ pub export fn zettide_nfs_link(
         node(decoded_parent),
         name_value[0..name_length],
     ) catch |err| return statusFor(err, false);
+    self.filesystem.sync() catch |err| return statusFor(err, false);
     fillResult(self, info, output_handle, output_attributes);
     return status(.ok);
 }
@@ -617,6 +622,7 @@ pub export fn zettide_nfs_remove(
     if (decoded_parent.kind != .directory) return status(.not_directory);
     self.filesystem.remove(node(decoded_parent), name_value[0..name_length]) catch |err|
         return statusFor(err, false);
+    self.filesystem.sync() catch |err| return statusFor(err, false);
     return status(.ok);
 }
 
@@ -648,6 +654,7 @@ pub export fn zettide_nfs_rename(
         new_name_value[0..new_name_length],
         no_replace,
     ) catch |err| return statusFor(err, false);
+    self.filesystem.sync() catch |err| return statusFor(err, false);
     return status(.ok);
 }
 
@@ -1086,6 +1093,9 @@ test "direct NFS backend exports standalone BlobFilesystem" {
         &written,
     ));
     try std.testing.expectEqual(@as(usize, "blob through NFS".len), written);
+    try std.testing.expect(export_handle.owner.blob.native.dirty);
+    try std.testing.expectEqual(status(.ok), zettide_nfs_sync(export_handle));
+    try std.testing.expect(!export_handle.owner.blob.native.dirty);
 
     var directory_handle: Handle = undefined;
     var directory_attributes: Attributes = undefined;
