@@ -23,6 +23,7 @@ pub const littlefs_volume_adapter = @import("littlefs_volume_adapter.zig");
 pub const dufs_server = if (@import("builtin").os.tag == .linux) @import("dufs_server.zig") else struct {};
 pub const metadata = @import("metadata.zig");
 pub const name_profile = @import("name_profile.zig");
+pub const nfs_filesystem = @import("nfs_filesystem.zig");
 pub const object_format = @import("object_format.zig");
 pub const object_store = @import("object_store.zig");
 pub const redo_journal = @import("redo_journal.zig");
@@ -72,6 +73,7 @@ test {
     _ = dufs_server;
     _ = metadata;
     _ = name_profile;
+    _ = nfs_filesystem;
     _ = object_format;
     _ = object_store;
     _ = redo_journal;
