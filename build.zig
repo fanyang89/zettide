@@ -176,6 +176,35 @@ pub fn build(b: *std.Build) void {
     const run_blob_store_benchmark_tests = b.addRunArtifact(blob_store_benchmark_tests);
     unit_step.dependOn(&run_blob_store_benchmark_tests.step);
 
+    const blob_metadata_map_benchmark_module = b.createModule(.{
+        .root_source_file = b.path("benchmarks/blob_metadata_map.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = portable_core }},
+    });
+    const blob_metadata_map_benchmark = b.addExecutable(.{
+        .name = "zettide-blob-metadata-map-benchmark",
+        .root_module = blob_metadata_map_benchmark_module,
+    });
+    const run_blob_metadata_map_benchmark = b.addRunArtifact(blob_metadata_map_benchmark);
+    if (b.args) |args| run_blob_metadata_map_benchmark.addArgs(args);
+    const blob_metadata_map_benchmark_step = b.step(
+        "bench-blob-metadata-map",
+        "Benchmark incremental Blob metadata updates",
+    );
+    blob_metadata_map_benchmark_step.dependOn(&run_blob_metadata_map_benchmark.step);
+    const install_blob_metadata_map_benchmark = b.addInstallArtifact(blob_metadata_map_benchmark, .{});
+    const build_blob_metadata_map_benchmark_step = b.step(
+        "build-bench-blob-metadata-map",
+        "Build the Blob metadata map benchmark",
+    );
+    build_blob_metadata_map_benchmark_step.dependOn(&install_blob_metadata_map_benchmark.step);
+
+    const blob_metadata_map_benchmark_tests = b.addTest(.{ .root_module = blob_metadata_map_benchmark_module });
+    const run_blob_metadata_map_benchmark_tests = b.addRunArtifact(blob_metadata_map_benchmark_tests);
+    unit_step.dependOn(&run_blob_metadata_map_benchmark_tests.step);
+
     const blob_object_benchmark_module = b.createModule(.{
         .root_source_file = b.path("benchmarks/blob_object.zig"),
         .target = target,
