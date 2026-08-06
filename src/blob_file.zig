@@ -277,6 +277,8 @@ pub const State = struct {
         const touched = try std.math.divCeil(usize, span, block_size);
         if (self.blocks_materialized) try self.blocks.ensureUnusedCapacity(@intCast(touched));
         try self.pending.ensureUnusedCapacity(@intCast(touched));
+        const old_block_count = try std.math.divCeil(u64, self.logical_size, block_size);
+        const old_is_dense = self.allocated_blocks == old_block_count;
 
         const buffers = try self.allocator.alignedAlloc(
             u8,
@@ -312,6 +314,9 @@ pub const State = struct {
                     } else {
                         @memset(buffer, 0);
                     }
+                    existence_known[count] = true;
+                } else if (old_is_dense) {
+                    existed[count] = block < old_block_count;
                     existence_known[count] = true;
                 }
                 @memcpy(buffer[block_offset..][0..part], data[consumed..][0..part]);
@@ -506,18 +511,21 @@ pub const State = struct {
     ) !void {
         std.debug.assert(keys.len == known.len and keys.len == existed.len);
         if (keys.len == 0) return;
+        var all_known = true;
         for (keys, 0..) |key, index| {
             if (index != 0) std.debug.assert(key == keys[0] + index);
-            if (known[index]) continue;
-            if (self.pending.get(key)) |reference| {
-                existed[index] = reference != null;
-                known[index] = true;
-            } else if (self.blocks_materialized) {
-                existed[index] = self.blocks.contains(key);
-                known[index] = true;
+            if (!known[index]) {
+                if (self.pending.get(key)) |reference| {
+                    existed[index] = reference != null;
+                    known[index] = true;
+                } else if (self.blocks_materialized) {
+                    existed[index] = self.blocks.contains(key);
+                    known[index] = true;
+                }
             }
+            all_known = all_known and known[index];
         }
-        if (self.blocks_materialized or self.root == null) return;
+        if (all_known or self.blocks_materialized or self.root == null) return;
 
         const scratch = try self.allocator.alignedAlloc(
             u8,
@@ -801,7 +809,7 @@ test "blob file lazy writes track allocation and expose pending partial blocks" 
     try std.testing.expect(!file.blocks_materialized);
 }
 
-test "blob file lazy rewrites batch allocation lookups across device batches" {
+test "blob file dense rewrites skip allocation lookups across device batches" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const device = try blob_device.Device.createFile(
@@ -835,6 +843,66 @@ test "blob file lazy rewrites batch allocation lookups across device batches" {
         block_count * block_size,
     );
     defer file.deinit();
+    file.root.?.digest[0] ^= 1;
+    @memset(data, 'b');
+    try std.testing.expectEqual(data.len, try file.write(std.testing.io, data, 0));
+    try std.testing.expectEqual(@as(u64, block_count * block_size), file.allocatedBytes());
+    try std.testing.expect(!file.blocks_materialized);
+    file.root.?.digest = snapshot.root.?.digest;
+    const updated = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(updated);
+    var boundary: [2]u8 = undefined;
+    _ = try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        updated,
+        &boundary,
+        blob_device.max_batch * block_size - 1,
+    );
+    try std.testing.expectEqualSlices(u8, "bb", &boundary);
+}
+
+test "blob file sparse rewrites batch allocation lookups across map leaves" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-lazy-sparse-batch-rewrite",
+        16 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    const block_count = blob_map.max_leaf_entries + 5;
+    const block: [block_size]u8 = @splat('a');
+    var base = State.init(std.testing.allocator, &blobs);
+    defer base.deinit();
+    var allocated_blocks: u64 = 0;
+    for (0..block_count) |index| {
+        if (index % 7 == 0) continue;
+        _ = try base.write(std.testing.io, &block, index * block_size);
+        allocated_blocks += 1;
+    }
+    const snapshot = try base.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try base.acceptSnapshot(snapshot);
+
+    var file = try State.openKnownAllocated(
+        std.testing.allocator,
+        &blobs,
+        snapshot,
+        allocated_blocks * block_size,
+    );
+    defer file.deinit();
+    const data = try std.testing.allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(block_size),
+        block_count * block_size,
+    );
+    defer std.testing.allocator.free(data);
     @memset(data, 'b');
     try std.testing.expectEqual(data.len, try file.write(std.testing.io, data, 0));
     try std.testing.expectEqual(@as(u64, block_count * block_size), file.allocatedBytes());
@@ -849,7 +917,7 @@ test "blob file lazy rewrites batch allocation lookups across device batches" {
         &blobs,
         updated,
         &boundary,
-        blob_device.max_batch * block_size - 1,
+        blob_map.max_leaf_entries * block_size - 1,
     );
     try std.testing.expectEqualSlices(u8, "bb", &boundary);
 }
