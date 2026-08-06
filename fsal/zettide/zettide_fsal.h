@@ -2,6 +2,8 @@
 #ifndef FSAL_ZETTIDE_INTERNAL_H
 #define FSAL_ZETTIDE_INTERNAL_H
 
+#include <pthread.h>
+
 #include "fsal.h"
 #include "nfs_backend.h"
 
@@ -15,6 +17,20 @@ struct zettide_fsal_export {
 	struct zettide_nfs_export *backend;
 	char *target;
 	bool writable;
+	uint32_t stable_write_batch_us;
+	pthread_mutex_t stable_mutex;
+	pthread_cond_t stable_cond;
+	uint64_t stable_generation;
+	uint64_t stable_accepting_generation;
+	uint64_t stable_success_generation;
+	uint64_t stable_writes;
+	uint64_t unstable_writes;
+	uint64_t stable_batches;
+	uint64_t stable_joins;
+	uint64_t stable_syncs;
+	uint64_t commit_calls;
+	int stable_status;
+	bool stable_syncing;
 };
 
 struct zettide_fsal_handle {

@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <string.h>
 
 #include "FSAL/fsal_commonlib.h"
@@ -16,6 +17,15 @@ static void zettide_release_export(struct fsal_export *exp_hdl)
 	struct zettide_fsal_export *export =
 		container_of(exp_hdl, struct zettide_fsal_export, export);
 
+	LogEvent(COMPONENT_FSAL,
+		 "zettide_write_metrics stable_writes=%" PRIu64
+		 " unstable_writes=%" PRIu64 " stable_batches=%" PRIu64
+		 " stable_joins=%" PRIu64 " stable_syncs=%" PRIu64
+		 " commit_calls=%" PRIu64,
+		 export->stable_writes, export->unstable_writes,
+		 export->stable_batches, export->stable_joins,
+		 export->stable_syncs, export->commit_calls);
+
 	if (export->backend != NULL) {
 		int status = zettide_nfs_export_close(export->backend);
 		if (status != ZETTIDE_NFS_OK) {
@@ -27,6 +37,8 @@ static void zettide_release_export(struct fsal_export *exp_hdl)
 	}
 
 	fsal_detach_export(exp_hdl->fsal, &exp_hdl->exports);
+	pthread_cond_destroy(&export->stable_cond);
+	pthread_mutex_destroy(&export->stable_mutex);
 	free_export_ops(exp_hdl);
 	gsh_free(export->target);
 	gsh_free(export);
@@ -134,6 +146,8 @@ static struct config_item zettide_export_params[] = {
 	CONF_ITEM_STR("Target", 1, MAXPATHLEN, NULL, zettide_fsal_export,
 		      target),
 	CONF_ITEM_BOOL("Writable", false, zettide_fsal_export, writable),
+	CONF_ITEM_UI32("Stable_Write_Batch_Us", 0, 999999, 200,
+		       zettide_fsal_export, stable_write_batch_us),
 	CONFIG_EOL,
 };
 
@@ -154,9 +168,24 @@ fsal_status_t zettide_create_export(struct fsal_module *fsal_hdl,
 	struct zettide_fsal_export *export = gsh_calloc(1, sizeof(*export));
 	fsal_status_t result;
 	int status;
+	bool mutex_initialized = false;
+	bool cond_initialized = false;
 
 	fsal_export_init(&export->export);
 	zettide_export_ops_init(&export->export.exp_ops);
+	status = pthread_mutex_init(&export->stable_mutex, NULL);
+	if (status != 0) {
+		result = posix2fsal_status(status);
+		goto fail;
+	}
+	mutex_initialized = true;
+	status = pthread_cond_init(&export->stable_cond, NULL);
+	if (status != 0) {
+		result = posix2fsal_status(status);
+		goto fail;
+	}
+	cond_initialized = true;
+
 	if (load_config_from_node(parse_node, &zettide_export_block, export,
 				  true, err_type) != 0) {
 		result = fsalstat(ERR_FSAL_INVAL, EINVAL);
@@ -187,6 +216,10 @@ fail_backend:
 	(void)zettide_nfs_export_close(export->backend);
 	export->backend = NULL;
 fail:
+	if (cond_initialized)
+		pthread_cond_destroy(&export->stable_cond);
+	if (mutex_initialized)
+		pthread_mutex_destroy(&export->stable_mutex);
 	free_export_ops(&export->export);
 	gsh_free(export->target);
 	gsh_free(export);

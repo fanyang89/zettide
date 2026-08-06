@@ -109,6 +109,7 @@ EXPORT {
         name = ZETTIDE;
         Target = "$image";
         Writable = $writable;
+        Stable_Write_Batch_Us = 200;
     }
 }
 EOF
@@ -196,6 +197,7 @@ sync -f "$mount_dir"
 
 sudo -n timeout --kill-after=2s 15s umount "$mount_dir"
 stop_ganesha
+grep -q 'zettide_write_metrics stable_writes=' "$log"
 start_ganesha
 mount_export
 

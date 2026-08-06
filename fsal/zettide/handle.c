@@ -765,19 +765,72 @@ done:
 	done_cb(obj_hdl, result, read_arg, caller_arg);
 }
 
+static void zettide_stable_batch_delay(uint32_t microseconds)
+{
+	struct timespec remaining = {
+		.tv_sec = 0,
+		.tv_nsec = (long)microseconds * 1000,
+	};
+
+	while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
+	}
+}
+
+static void zettide_complete_stable_batch(struct zettide_fsal_export *export,
+					  int status)
+{
+	export->stable_status = status;
+	export->stable_generation++;
+	if (status == ZETTIDE_NFS_OK)
+		export->stable_success_generation = export->stable_generation;
+	export->stable_syncing = false;
+	__atomic_store_n(&export->stable_accepting_generation, 0,
+			 __ATOMIC_RELEASE);
+	pthread_cond_broadcast(&export->stable_cond);
+}
+
+static int zettide_stable_batch_status(struct zettide_fsal_export *export,
+				       uint64_t target_generation)
+{
+	return export->stable_success_generation >= target_generation
+		       ? ZETTIDE_NFS_OK
+		       : export->stable_status;
+}
+
 static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 			   fsal_async_cb done_cb, struct fsal_io_arg *write_arg,
 			   void *caller_arg)
 {
 	struct zettide_fsal_handle *handle = zettide_handle(obj_hdl);
+	struct zettide_fsal_export *export = handle->export;
 	fsal_status_t result = fsalstat(ERR_FSAL_NO_ERROR, 0);
 	uint64_t offset = write_arg->offset;
 	bool stable_requested = write_arg->fsal_stable;
+	bool stable_locked = false;
 	int index;
 
 	(void)bypass;
 	write_arg->io_amount = 0;
 	write_arg->fsal_stable = false;
+	if (stable_requested) {
+		pthread_mutex_lock(&handle->export->stable_mutex);
+		stable_locked = true;
+		while (handle->export->stable_syncing &&
+		       __atomic_load_n(
+			       &handle->export->stable_accepting_generation,
+			       __ATOMIC_ACQUIRE) !=
+			       handle->export->stable_generation + 1) {
+			uint64_t generation = handle->export->stable_generation;
+
+			while (generation == handle->export->stable_generation)
+				pthread_cond_wait(&handle->export->stable_cond,
+						  &handle->export->stable_mutex);
+		}
+		handle->export->stable_writes++;
+	} else {
+		__atomic_add_fetch(&handle->export->unstable_writes, 1,
+				   __ATOMIC_RELAXED);
+	}
 	for (index = 0; index < write_arg->iov_count; index++) {
 		size_t amount = 0;
 		int status = zettide_nfs_write(handle->export->backend,
@@ -795,12 +848,58 @@ static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 			break;
 	}
 	if (!FSAL_IS_ERROR(result) && stable_requested) {
-		int status = zettide_nfs_sync(handle->export->backend);
+		uint64_t generation = handle->export->stable_generation;
+		uint64_t target_generation = generation + 1;
+		int status;
+
+		if (!handle->export->stable_syncing) {
+			handle->export->stable_syncing = true;
+			handle->export->stable_batches++;
+			if (handle->export->stable_write_batch_us != 0) {
+				uint64_t *accepting_generation =
+					&export->stable_accepting_generation;
+				uint64_t expected_generation = target_generation;
+
+				__atomic_store_n(accepting_generation,
+						 target_generation, __ATOMIC_RELEASE);
+				pthread_mutex_unlock(
+					&handle->export->stable_mutex);
+				stable_locked = false;
+				zettide_stable_batch_delay(
+					handle->export->stable_write_batch_us);
+				__atomic_compare_exchange_n(accepting_generation,
+							    &expected_generation, 0,
+							    false, __ATOMIC_RELEASE,
+							    __ATOMIC_RELAXED);
+				pthread_mutex_lock(
+					&handle->export->stable_mutex);
+				stable_locked = true;
+			}
+			if (generation == handle->export->stable_generation &&
+			    handle->export->stable_syncing) {
+				status = zettide_nfs_sync(handle->export->backend);
+				handle->export->stable_syncs++;
+				zettide_complete_stable_batch(handle->export,
+							      status);
+			} else {
+				status = zettide_stable_batch_status(
+					handle->export, target_generation);
+			}
+		} else {
+			handle->export->stable_joins++;
+			while (generation == handle->export->stable_generation)
+				pthread_cond_wait(&handle->export->stable_cond,
+						  &handle->export->stable_mutex);
+			status = zettide_stable_batch_status(
+				handle->export, target_generation);
+		}
 		if (status != ZETTIDE_NFS_OK)
 			result = zettide_status(status);
 		else
 			write_arg->fsal_stable = true;
 	}
+	if (stable_locked)
+		pthread_mutex_unlock(&handle->export->stable_mutex);
 	done_cb(obj_hdl, result, write_arg, caller_arg);
 }
 
@@ -808,9 +907,22 @@ static fsal_status_t zettide_commit2(struct fsal_obj_handle *obj_hdl,
 				     off_t offset, size_t length)
 {
 	struct zettide_fsal_handle *handle = zettide_handle(obj_hdl);
+	int status;
+
 	(void)offset;
 	(void)length;
-	return zettide_status(zettide_nfs_sync(handle->export->backend));
+	pthread_mutex_lock(&handle->export->stable_mutex);
+	handle->export->commit_calls++;
+	if (handle->export->stable_syncing)
+		__atomic_store_n(&handle->export->stable_accepting_generation, 0,
+				 __ATOMIC_RELEASE);
+	status = zettide_nfs_sync(handle->export->backend);
+	if (handle->export->stable_syncing) {
+		handle->export->stable_syncs++;
+		zettide_complete_stable_batch(handle->export, status);
+	}
+	pthread_mutex_unlock(&handle->export->stable_mutex);
+	return zettide_status(status);
 }
 
 static fsal_status_t zettide_close(struct fsal_obj_handle *obj_hdl)

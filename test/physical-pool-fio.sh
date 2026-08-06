@@ -279,6 +279,7 @@ EXPORT {
         name = ZETTIDE;
         Target = "$device";
         Writable = true;
+        Stable_Write_Batch_Us = 200;
     }
 }
 EOF
@@ -342,6 +343,7 @@ run_fio_case() {
     stop_pool_mount_clean
     if [[ $frontend == nfs ]]; then
         grep -q "Opened Zettide target $device (writable)" "$mount_log"
+        grep -q 'zettide_write_metrics stable_writes=' "$mount_log"
         return
     fi
     grep -q '^fuse_metrics ' "$mount_log"
