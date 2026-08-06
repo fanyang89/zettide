@@ -194,8 +194,13 @@ fn validateTransport(
     operation_count: u64,
 ) !void {
     if (config.file_io == .io_uring and kind != .io_uring) return error.IoUringBackendNotSelected;
+    const batch_depth = @min(config.batch_depth, zettide.blob_device.max_batch);
+    const minimum_sqes = if (config.operation == .write)
+        try std.math.divCeil(u64, operation_count, batch_depth)
+    else
+        operation_count;
     if (kind == .io_uring and (stats.queue_capacity != 32 or
-        stats.submitted_sqes < operation_count or
+        stats.submitted_sqes < minimum_sqes or
         stats.submitted_sqes != stats.completions or
         stats.current_inflight != 0))
         return error.InvalidIoUringBenchmarkStats;

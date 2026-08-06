@@ -160,7 +160,14 @@ test "regular file io_uring storage batches reads and writes" {
     try storage.writeAllManyAt(std.testing.io, &writes);
     const write_stats = storage.transportStats(std.testing.io);
     try std.testing.expectEqual(storage_api.TransportKind.io_uring, storage.transportKind());
-    try std.testing.expectEqual(@as(u64, linux_io_uring.queue_entries), write_stats.max_inflight);
+    try std.testing.expect(write_stats.submitted_sqes == 1 or
+        write_stats.submitted_sqes == linux_io_uring.queue_entries or
+        write_stats.submitted_sqes == linux_io_uring.queue_entries + 1);
+    const expected_write_inflight: u64 = if (write_stats.submitted_sqes == linux_io_uring.queue_entries)
+        linux_io_uring.queue_entries
+    else
+        1;
+    try std.testing.expectEqual(expected_write_inflight, write_stats.max_inflight);
     try std.testing.expectEqual(write_stats.submitted_sqes, write_stats.completions);
     try std.testing.expectEqual(@as(u64, 0), write_stats.current_inflight);
     try storage.syncData(std.testing.io);

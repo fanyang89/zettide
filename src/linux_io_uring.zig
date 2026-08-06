@@ -33,6 +33,7 @@ pub const Engine = struct {
     current_inflight: u64 = 0,
     active: bool = true,
     file_registered: bool = true,
+    writev_supported: bool,
 
     /// Initializes an engine that borrows fd; the caller retains ownership.
     pub fn init(fd: linux.fd_t) !Engine {
@@ -47,7 +48,10 @@ pub const Engine = struct {
         var files = [_]linux.fd_t{fd};
         try ring.register_files(&files);
         errdefer ring.unregister_files() catch {};
-        return .{ .ring = ring };
+        return .{
+            .ring = ring,
+            .writev_supported = probe.is_supported(.WRITEV),
+        };
     }
 
     /// The owner must ensure no operation is active or waiting before deinit.
@@ -183,6 +187,13 @@ pub const Engine = struct {
 
         var index: usize = 0;
         while (index < writes.len) {
+            const batch_count = @min(writes.len - index, queue_entries);
+            const batch = writes[index..][0..batch_count];
+            if (self.writev_supported and contiguousWrites(batch)) {
+                try self.writeAllVectoredLocked(batch);
+                index += batch_count;
+                continue;
+            }
             var tokens: [queue_entries]u64 = undefined;
             var lengths: [queue_entries]usize = undefined;
             var amounts: [queue_entries]usize = @splat(0);
@@ -369,7 +380,84 @@ pub const Engine = struct {
             index += amount;
         }
     }
+
+    fn writeAllVectoredLocked(self: *Engine, writes: anytype) !void {
+        std.debug.assert(writes.len > 1 and writes.len <= queue_entries);
+        var iovecs: [queue_entries]std.posix.iovec_const = undefined;
+        for (writes, iovecs[0..writes.len]) |write, *iovec| iovec.* = .{
+            .base = write.bytes.ptr,
+            .len = write.bytes.len,
+        };
+        var first: usize = 0;
+        var offset = writes[0].offset;
+        while (first < writes.len) {
+            try self.requireActive();
+            const token = self.nextToken();
+            const sqe = self.ring.writev(token, 0, iovecs[first..writes.len], offset) catch |err| {
+                self.fail();
+                return err;
+            };
+            sqe.flags |= linux.IOSQE_FIXED_FILE;
+            const amount = self.completeWritev(token) catch |err| switch (err) {
+                error.OperationInterrupted => continue,
+                error.WritevNotSupported => {
+                    self.writev_supported = false;
+                    var scalar_offset = offset;
+                    for (iovecs[first..writes.len]) |iovec| {
+                        try self.writeAllLocked(iovec.base[0..iovec.len], scalar_offset);
+                        scalar_offset = std.math.add(u64, scalar_offset, iovec.len) catch
+                            return self.invalidCompletion();
+                    }
+                    return;
+                },
+                else => return err,
+            };
+            if (amount == 0) return self.invalidCompletion();
+            offset = std.math.add(u64, offset, amount) catch return self.invalidCompletion();
+            if (!consumeIovecs(iovecs[0..writes.len], &first, amount)) return self.invalidCompletion();
+        }
+    }
+
+    fn completeWritev(self: *Engine, token: u64) !usize {
+        try self.submitBatch(1);
+        const completion = self.copyCompletion() catch |err| {
+            self.failAfterDrain();
+            return err;
+        };
+        if (completion.user_data != token) return self.invalidCompletion();
+        if (completion.res < 0) {
+            const err: linux.E = @enumFromInt(-completion.res);
+            if (err == .OPNOTSUPP) return error.WritevNotSupported;
+            return completionError(err);
+        }
+        return @intCast(completion.res);
+    }
 };
+
+fn contiguousWrites(writes: anytype) bool {
+    if (writes.len <= 1) return false;
+    for (writes) |write| if (write.bytes.len == 0) return false;
+    for (writes[1..], writes[0 .. writes.len - 1]) |current, previous| {
+        const expected = std.math.add(u64, previous.offset, previous.bytes.len) catch return false;
+        if (current.offset != expected) return false;
+    }
+    return true;
+}
+
+fn consumeIovecs(iovecs: []std.posix.iovec_const, first: *usize, amount: usize) bool {
+    var remaining = amount;
+    while (remaining != 0 and first.* < iovecs.len) {
+        if (remaining < iovecs[first.*].len) {
+            iovecs[first.*].base += remaining;
+            iovecs[first.*].len -= remaining;
+            remaining = 0;
+        } else {
+            remaining -= iovecs[first.*].len;
+            first.* += 1;
+        }
+    }
+    return remaining == 0;
+}
 
 const BatchTracker = struct {
     tokens: []const u64,
@@ -406,6 +494,33 @@ fn completionError(err: linux.E) anyerror {
         .INVAL => error.InvalidIo,
         else => error.IoUringCompletion,
     };
+}
+
+test "vectored write cursor consumes partial and complete iovecs" {
+    const bytes = "abcdefghijkl";
+    var iovecs = [_]std.posix.iovec_const{
+        .{ .base = bytes.ptr, .len = 3 },
+        .{ .base = bytes.ptr + 3, .len = 4 },
+        .{ .base = bytes.ptr + 7, .len = 5 },
+    };
+    var first: usize = 0;
+    try std.testing.expect(consumeIovecs(&iovecs, &first, 2));
+    try std.testing.expectEqual(@as(usize, 0), first);
+    try std.testing.expectEqual(@as(usize, 1), iovecs[0].len);
+    try std.testing.expectEqual(bytes.ptr + 2, iovecs[0].base);
+    try std.testing.expect(consumeIovecs(&iovecs, &first, 5));
+    try std.testing.expectEqual(@as(usize, 2), first);
+    try std.testing.expectEqual(@as(usize, 5), iovecs[2].len);
+    try std.testing.expect(consumeIovecs(&iovecs, &first, 5));
+    try std.testing.expectEqual(iovecs.len, first);
+
+    iovecs = .{
+        .{ .base = bytes.ptr, .len = 3 },
+        .{ .base = bytes.ptr + 3, .len = 4 },
+        .{ .base = bytes.ptr + 7, .len = 5 },
+    };
+    first = 0;
+    try std.testing.expect(!consumeIovecs(&iovecs, &first, bytes.len + 1));
 }
 
 test "io_uring batch tracker accepts deterministic out-of-order completions" {
@@ -487,4 +602,37 @@ test "borrowed-fd engine supports partial and exact reads and metrics reset" {
     const batch_stats = engine.getStats(std.testing.io);
     try std.testing.expectEqual(@as(u64, reads.len), batch_stats.submitted_sqes);
     try std.testing.expectEqual(@as(u64, reads.len), batch_stats.max_inflight);
+
+    const TestWrite = struct { bytes: []const u8, offset: u64 };
+    const write_bytes = [_][2]u8{ "ab".*, "cd".*, "ef".*, "gh".* };
+    var writes: [write_bytes.len]TestWrite = undefined;
+    for (&writes, &write_bytes, 0..) |*write, *bytes, index| write.* = .{
+        .bytes = bytes,
+        .offset = 16 + index * bytes.len,
+    };
+    const writev_was_supported = engine.writev_supported;
+    engine.resetStats(std.testing.io);
+    try engine.writeAllManyAt(std.testing.io, &writes);
+    const contiguous_stats = engine.getStats(std.testing.io);
+    const expected_contiguous_sqes: u64 = if (engine.writev_supported)
+        1
+    else if (writev_was_supported)
+        writes.len + 1
+    else
+        writes.len;
+    try std.testing.expectEqual(expected_contiguous_sqes, contiguous_stats.submitted_sqes);
+    try std.testing.expectEqual(expected_contiguous_sqes, contiguous_stats.completions);
+    var contiguous: [8]u8 = undefined;
+    try std.testing.expectEqual(contiguous.len, try file.readPositionalAll(std.testing.io, &contiguous, 16));
+    try std.testing.expectEqualStrings("abcdefgh", &contiguous);
+
+    for (&writes, &write_bytes, 0..) |*write, *bytes, index| write.* = .{
+        .bytes = bytes,
+        .offset = 32 + index * (bytes.len + 1),
+    };
+    engine.resetStats(std.testing.io);
+    try engine.writeAllManyAt(std.testing.io, &writes);
+    const gapped_stats = engine.getStats(std.testing.io);
+    try std.testing.expectEqual(@as(u64, writes.len), gapped_stats.submitted_sqes);
+    try std.testing.expectEqual(@as(u64, writes.len), gapped_stats.max_inflight);
 }

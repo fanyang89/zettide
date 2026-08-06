@@ -249,11 +249,16 @@ fn validateTransport(
         @as(u64, config.batch_depth),
         @as(u64, zettide.blob_device.max_batch),
     );
+    const minimum_sqes = if (config.operation == .write)
+        try std.math.divCeil(u64, operation_count, expected_inflight)
+    else
+        operation_count;
     if (stats.queue_capacity != 32 or
-        stats.submitted_sqes < operation_count or
+        stats.submitted_sqes < minimum_sqes or
         stats.submitted_sqes != stats.completions or
         stats.current_inflight != 0 or
-        stats.max_inflight != expected_inflight)
+        (stats.max_inflight != expected_inflight and
+            !(config.operation == .write and stats.max_inflight == 1)))
         return error.InvalidIoUringBenchmarkStats;
 }
 
