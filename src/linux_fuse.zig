@@ -405,6 +405,7 @@ const MountState = struct {
 const FuseFileHandle = struct {
     file: FileHandle,
     inode: *Inode,
+    sync_on_write: bool,
     next: ?*FuseFileHandle,
 };
 
@@ -1020,6 +1021,7 @@ fn create(req: c.fuse_req_t, parent_id: c.fuse_ino_t, name_raw: ?[*:0]const u8, 
     };
     const node = dentry.inode;
     handle.inode = node;
+    handle.sync_on_write = host_flags & (c.O_SYNC | c.O_DSYNC) != 0;
     handle.next = state.open_files;
     state.open_files = handle;
     node.open_count += 1;
@@ -1053,6 +1055,7 @@ fn openInternal(req: c.fuse_req_t, state: *MountState, node: *Inode, fi: *c.stru
         return replyError(req, errnoValue(err));
     };
     handle.inode = node;
+    handle.sync_on_write = host_flags & (c.O_SYNC | c.O_DSYNC) != 0;
     handle.next = state.open_files;
     state.open_files = handle;
     node.open_count += 1;
@@ -1088,6 +1091,10 @@ fn write(req: c.fuse_req_t, id: c.fuse_ino_t, data_raw: ?[*]const u8, size: usiz
     const start = Io.Clock.awake.now(state.io).nanoseconds;
     const handle = fuseFileHandle(fi.?);
     const amount = handle.file.write(data_raw.?[0..size], @intCast(offset)) catch |err| {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.write, start, 0, true);
+        return replyError(req, errnoValue(err));
+    };
+    if (handle.sync_on_write) handle.file.sync() catch |err| {
         if (state.metrics) |metrics| state.recordOperation(&metrics.write, start, 0, true);
         return replyError(req, errnoValue(err));
     };

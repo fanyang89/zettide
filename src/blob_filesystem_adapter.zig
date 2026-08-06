@@ -466,8 +466,9 @@ fn openDirectory(
     return .{ .context = context, .allocator = allocator, .vtable = &directory_vtable };
 }
 
-fn sync(_: *anyopaque) !void {
-    // Every BlobFilesystem mutation publishes through a durable BlobStore authority commit.
+fn sync(raw: *anyopaque) !void {
+    const value = adapter(raw);
+    return value.native.sync(value.io) catch |err| return frontendError(err);
 }
 
 fn spaceInfo(raw: *anyopaque) !backend.SpaceInfo {
@@ -530,7 +531,9 @@ fn fallocateFile(raw: *anyopaque, offset: u64, length: u64) !void {
 }
 
 fn syncFile(raw: *anyopaque) !void {
-    _ = try validateFileIdentity(fileContext(raw));
+    const context = fileContext(raw);
+    _ = try validateFileIdentity(context);
+    return context.native.sync(context.io) catch |err| return frontendError(err);
 }
 
 fn setFileMetadata(raw: *anyopaque, new_metadata: metadata.Metadata) !void {
@@ -598,7 +601,10 @@ fn tellDirectory(raw: *anyopaque) !u32 {
     return directoryContext(raw).cookie;
 }
 
-fn syncDirectory(_: *anyopaque) !void {}
+fn syncDirectory(raw: *anyopaque) !void {
+    const context = directoryContext(raw);
+    return context.native.sync(context.io) catch |err| return frontendError(err);
+}
 
 fn closeDirectory(raw: *anyopaque) !void {
     const context = directoryContext(raw);

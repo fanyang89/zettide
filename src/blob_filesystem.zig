@@ -20,6 +20,7 @@ pub const Filesystem = struct {
     open_references: std.AutoHashMap(u64, u64),
     inode_pins: std.AutoHashMap(u64, u64),
     transaction_mutex: Io.Mutex = .init,
+    dirty: bool = false,
     frozen: bool = false,
 
     pub const LookupResult = struct {
@@ -177,11 +178,30 @@ pub const Filesystem = struct {
     }
 
     pub fn close(self: *Filesystem, io: Io) !void {
+        var first_error: ?anyerror = null;
+        if (self.writable and self.dirty) self.sync(io) catch |err| {
+            first_error = err;
+        };
         var blobs = self.blobs;
         self.open_references.deinit();
         self.inode_pins.deinit();
         self.* = undefined;
-        try blobs.close(io);
+        blobs.close(io) catch |err| if (first_error == null) {
+            first_error = err;
+        };
+        if (first_error) |err| return err;
+    }
+
+    pub fn sync(self: *Filesystem, io: Io) !void {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        if (self.frozen) return error.BlobFilesystemFrozen;
+        if (!self.writable or !self.dirty) return;
+        self.blobs.commitAuthority(io, self.authority_ref) catch |err| {
+            self.frozen = true;
+            return err;
+        };
+        self.dirty = false;
     }
 
     pub fn stat(self: *Filesystem, io: Io, inode: u64) !InodeRecord {
@@ -447,7 +467,7 @@ pub const Filesystem = struct {
         return self.writeUnlocked(io, inode, data, offset);
     }
 
-    /// Appends at the committed logical end while holding the filesystem transaction lock.
+    /// Appends at the visible logical end while holding the filesystem transaction lock.
     pub fn append(self: *Filesystem, io: Io, inode: u64, data: []const u8) !usize {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
@@ -496,7 +516,7 @@ pub const Filesystem = struct {
         var next_root = self.root;
         next_root.generation = try nextGeneration(self.root.generation);
         rollback_before_publish = false;
-        try self.publish(io, next_root, &mutations, checkpoint);
+        try self.publishVisible(io, next_root, &mutations, checkpoint);
         return amount;
     }
 
@@ -1145,6 +1165,41 @@ pub const Filesystem = struct {
         mutations: *MutationAccumulator,
         transaction_checkpoint: ?u64,
     ) !void {
+        return self.publishWithDurability(
+            io,
+            next_root_value,
+            mutations,
+            transaction_checkpoint,
+            .durable,
+        );
+    }
+
+    fn publishVisible(
+        self: *Filesystem,
+        io: Io,
+        next_root_value: filesystem_format.Root,
+        mutations: *MutationAccumulator,
+        transaction_checkpoint: ?u64,
+    ) !void {
+        return self.publishWithDurability(
+            io,
+            next_root_value,
+            mutations,
+            transaction_checkpoint,
+            .visible,
+        );
+    }
+
+    const PublicationDurability = enum { visible, durable };
+
+    fn publishWithDurability(
+        self: *Filesystem,
+        io: Io,
+        next_root_value: filesystem_format.Root,
+        mutations: *MutationAccumulator,
+        transaction_checkpoint: ?u64,
+        durability: PublicationDurability,
+    ) !void {
         const checkpoint = transaction_checkpoint orelse self.blobs.stagedUnits();
         var prepublication = true;
         errdefer if (prepublication) self.rollback(io, checkpoint);
@@ -1163,12 +1218,13 @@ pub const Filesystem = struct {
         const root_bytes = try filesystem_format.encodeRoot(next_root);
         const authority_ref = try self.blobs.put(io, &root_bytes);
         prepublication = false;
-        self.blobs.commitAuthority(io, authority_ref) catch |err| {
+        if (durability == .durable) self.blobs.commitAuthority(io, authority_ref) catch |err| {
             self.frozen = true;
             return err;
         };
         self.root = next_root;
         self.authority_ref = authority_ref;
+        self.dirty = durability == .visible;
     }
 
     fn rollback(self: *Filesystem, io: Io, checkpoint: u64) void {
@@ -1962,7 +2018,7 @@ test "blob filesystem inode data and symlinks survive reopen" {
     try expectValidGraph(&filesystem, std.testing.io);
 }
 
-test "blob filesystem large file overwrite commits a path-sized delta" {
+test "blob filesystem large file overwrite stages a path-sized delta" {
     const blob_device = @import("blob_device.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1995,7 +2051,7 @@ test "blob filesystem large file overwrite commits a path-sized delta" {
     @memset(contents, 'a');
     _ = try filesystem.write(std.testing.io, inode, contents, 0);
     try std.testing.expectEqual(@as(u8, 2), (try filesystem.stat(std.testing.io, inode)).data.?.root.?.level);
-    const before = filesystem.blobs.committedUnits();
+    const before = filesystem.blobs.stagedUnits();
     const replacement: [blob_file.block_size]u8 = @splat('b');
     _ = try filesystem.write(
         std.testing.io,
@@ -2003,10 +2059,81 @@ test "blob filesystem large file overwrite commits a path-sized delta" {
         &replacement,
         (block_count / 2) * blob_file.block_size,
     );
-    const delta = filesystem.blobs.committedUnits() - before;
+    const delta = filesystem.blobs.stagedUnits() - before;
     try std.testing.expect(delta < 32);
     try std.testing.expect(delta < block_count / 100);
     try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem defers writes until sync while keeping them visible" {
+    const blob_device = @import("blob_device.zig");
+    const storage_api = @import("v3/storage.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 16 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "deferred-writes",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(std.testing.allocator, std.testing.io, blobs, .legacy_raw);
+    defer filesystem.close(std.testing.io) catch {};
+    const inode = try filesystem.createFile(
+        std.testing.io,
+        filesystem_format.root_inode,
+        "data",
+        0o644,
+        0,
+        0,
+    );
+    _ = try filesystem.write(std.testing.io, inode, "old", 0);
+    try filesystem.sync(std.testing.io);
+    const durable_units = filesystem.blobs.committedUnits();
+    const durable_authority = filesystem.blobs.authorityRoot().?;
+
+    _ = try filesystem.write(std.testing.io, inode, "new", 0);
+    _ = try filesystem.write(std.testing.io, inode, "!", 3);
+    try std.testing.expect(filesystem.dirty);
+    try std.testing.expectEqual(durable_units, filesystem.blobs.committedUnits());
+    try std.testing.expect(filesystem.blobs.stagedUnits() > durable_units);
+    try std.testing.expectEqualDeep(durable_authority, filesystem.blobs.authorityRoot().?);
+    try std.testing.expect(!std.meta.eql(filesystem.authority_ref, durable_authority));
+    var visible: [4]u8 = undefined;
+    try std.testing.expectEqual(visible.len, try filesystem.read(std.testing.io, inode, &visible, 0));
+    try std.testing.expectEqualStrings("new!", &visible);
+
+    const crash_image = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "deferred-writes",
+        std.testing.allocator,
+        .limited(device_size + 1),
+    );
+    defer std.testing.allocator.free(crash_image);
+    const crash_file = try tmp.dir.createFile(std.testing.io, "deferred-crash", .{ .read = true });
+    try crash_file.writeStreamingAll(std.testing.io, crash_image);
+    crash_file.close(std.testing.io);
+    const crash_backing = try tmp.dir.openFile(std.testing.io, "deferred-crash", .{ .mode = .read_write });
+    const crash_storage = storage_api.Storage.initOwned(crash_backing, device_size, .regular_file, 1, false);
+    const crash_device = try blob_device.Device.init(
+        crash_storage,
+        0,
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const crash_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, crash_device);
+    var crashed = try Filesystem.open(std.testing.allocator, std.testing.io, crash_blobs, false);
+    defer crashed.close(std.testing.io) catch {};
+    var old: [3]u8 = undefined;
+    try std.testing.expectEqual(old.len, try crashed.read(std.testing.io, inode, &old, 0));
+    try std.testing.expectEqualStrings("old", &old);
+
+    try filesystem.sync(std.testing.io);
+    try std.testing.expect(!filesystem.dirty);
+    try std.testing.expectEqual(filesystem.blobs.stagedUnits(), filesystem.blobs.committedUnits());
+    try std.testing.expectEqualDeep(filesystem.authority_ref, filesystem.blobs.authorityRoot().?);
 }
 
 test "blob filesystem runtime references retain and reclaim unlinked inodes" {
@@ -2304,16 +2431,18 @@ test "blob filesystem freezes on ambiguous data publication" {
         0,
     );
     _ = try filesystem.write(std.testing.io, inode, "old", 0);
-    const root_before = filesystem.root;
+    try filesystem.sync(std.testing.io);
+    const durable_root = filesystem.root;
     filesystem.blobs.sequence_floor = std.math.maxInt(u64);
+    _ = try filesystem.write(std.testing.io, inode, "new", 0);
     try std.testing.expectError(
         error.BlobStoreSequenceExhausted,
-        filesystem.write(std.testing.io, inode, "new", 0),
+        filesystem.sync(std.testing.io),
     );
     try std.testing.expect(filesystem.frozen);
-    try std.testing.expectEqualDeep(root_before, filesystem.root);
+    try std.testing.expect(!std.meta.eql(durable_root, filesystem.root));
     try std.testing.expectError(error.BlobFilesystemFrozen, filesystem.truncate(std.testing.io, inode, 0));
-    try filesystem.close(std.testing.io);
+    try std.testing.expectError(error.BlobFilesystemFrozen, filesystem.close(std.testing.io));
     filesystem_open = false;
 
     const backing = try tmp.dir.openFile(std.testing.io, "data-freeze", .{ .mode = .read_write });
