@@ -6,19 +6,22 @@
 - name: Require explicit physical Blob Pool configuration | {{ zettide_optimize }}
   ansible.builtin.assert:
     that:
+      - >-
+        (zettide_blob_pool_fio_backup_original | default(true) | string | lower)
+        in ['true', 'false', '1', '0']
       - zettide_blob_pool_fio_config.path is defined
       - zettide_blob_pool_fio_config.serial is defined
-      - zettide_blob_pool_fio_config.pool_id is defined
-      - zettide_blob_pool_fio_config.backup_dir is defined
+      - not (zettide_blob_pool_fio_backup_original | default(true) | bool) or zettide_blob_pool_fio_config.pool_id is defined
+      - not (zettide_blob_pool_fio_backup_original | default(true) | bool) or zettide_blob_pool_fio_config.backup_dir is defined
       - zettide_blob_pool_fio_config.path | length > 0
       - zettide_blob_pool_fio_config.serial | length > 0
-      - zettide_blob_pool_fio_config.pool_id | length == 32
-      - zettide_blob_pool_fio_config.backup_dir | length > 0
+      - not (zettide_blob_pool_fio_backup_original | default(true) | bool) or zettide_blob_pool_fio_config.pool_id | default('') | length == 32
+      - not (zettide_blob_pool_fio_backup_original | default(true) | bool) or zettide_blob_pool_fio_config.backup_dir | default('') | length > 0
       - ansible_play_hosts_all | length == 1
       - zettide_blob_pool_fio_confirm | default('') ==
         'DESTROY:' ~ zettide_blob_pool_fio_config.path ~ ':' ~ zettide_blob_pool_fio_config.serial
     fail_msg: >-
-      Configure path, serial, pool_id, and backup_dir, then pass
+      Configure path and serial, plus pool_id and backup_dir when backups are enabled, then pass
       -e zettide_blob_pool_fio_confirm=DESTROY:<path>:<serial>.
 
 - name: Create physical Blob Pool fio result directory | {{ zettide_optimize }}
@@ -193,12 +196,14 @@
       - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
       - "{{ zettide_blob_pool_fio_config.path }}"
       - "{{ zettide_blob_pool_fio_config.serial }}"
-      - "{{ zettide_blob_pool_fio_config.pool_id }}"
-      - "{{ zettide_blob_pool_fio_config.backup_dir }}/zettide-blob-pool-fio-{{ inventory_hostname }}-{{ ansible_facts['date_time']['iso8601_basic_short'] }}-{{ zettide_source_revision.stdout[:12] }}.img"
+      - "{{ zettide_blob_pool_fio_config.pool_id | default('-') if zettide_blob_pool_fio_backup_original | default(true) | bool else '-' }}"
+      - "{{ (zettide_blob_pool_fio_config.backup_dir | default('')) ~ '/zettide-blob-pool-fio-' ~ inventory_hostname ~ '-' ~ ansible_facts['date_time']['iso8601_basic_short'] ~ '-' ~ zettide_source_revision.stdout[:12] ~ '.img' if zettide_blob_pool_fio_backup_original | default(true) | bool else '-' }}"
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
   environment:
     ZETTIDE_BLOB_POOL_FIO_CONFIRM: "{{ zettide_blob_pool_fio_confirm }}"
+    ZETTIDE_BLOB_POOL_FIO_BACKUP_ORIGINAL: >-
+      {{ '1' if zettide_blob_pool_fio_backup_original | default(true) | bool else '0' }}
     ZETTIDE_RAW_KEEP_BACKUP: "{{ '1' if zettide_raw_keep_backup | bool else '0' }}"
     ZETTIDE_POOL_FIO_SINGLE_SIZE: "{{ zettide_pool_fio_single_size }}"
     ZETTIDE_POOL_FIO_MULTI_SIZE: "{{ zettide_pool_fio_multi_size }}"
@@ -227,5 +232,5 @@
     that:
       - zettide_blob_pool_fio_result.rc | default(1) == 0
     fail_msg: >-
-      Physical Blob Pool fio failed. The full-device backup is retained; inspect
-      the fetched blob-pool-fio logs before intervening.
+      Physical Blob Pool fio failed. Inspect the fetched blob-pool-fio logs
+      before intervening; a backup exists only when backup mode is enabled.

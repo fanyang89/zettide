@@ -191,8 +191,12 @@ then restores and byte-compares the original image. A final read-only inspection
 must recover the original Pool ID and mountability. The backup is retained by
 default; a power loss or `SIGKILL` can still require manual restoration.
 
-Use the NFSv3 frontend with the same physical Blob Pool, fio matrix, backup,
-and restoration lifecycle:
+Set `zettide_blob_pool_fio_backup_original=false` in inventory for a dedicated
+test disk. The profile then skips the original Pool checks, full-device backup,
+and restoration, and leaves the tested Blob Pool on the device. Serial matching,
+idle-device checks, and the explicit destructive confirmation remain required.
+
+Use the NFSv3 frontend with the same physical Blob Pool and fio matrix:
 
 ```sh
 uv run ansible-playbook test/ansible/blob-pool-nfs-fio.yml --limit zettide-tier1 \

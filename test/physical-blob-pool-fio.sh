@@ -13,13 +13,18 @@ original_pool_id=$4
 backup=$5
 log_dir=${ZETTIDE_TEST_LOG_DIR:?ZETTIDE_TEST_LOG_DIR is required}
 keep_backup=${ZETTIDE_RAW_KEEP_BACKUP:-1}
+backup_original=${ZETTIDE_BLOB_POOL_FIO_BACKUP_ORIGINAL:-1}
 confirmation=${ZETTIDE_BLOB_POOL_FIO_CONFIRM:-}
 
 [[ $EUID -eq 0 ]] || {
     echo "physical Blob Pool fio requires root" >&2
     exit 2
 }
-[[ $original_pool_id =~ ^[0-9a-f]{32}$ ]] || {
+[[ $backup_original == 0 || $backup_original == 1 ]] || {
+    echo "ZETTIDE_BLOB_POOL_FIO_BACKUP_ORIGINAL must be 0 or 1" >&2
+    exit 2
+}
+[[ $backup_original == 0 || $original_pool_id =~ ^[0-9a-f]{32}$ ]] || {
     echo "original Pool ID must be 32 lowercase hexadecimal digits" >&2
     exit 2
 }
@@ -107,7 +112,7 @@ finish() {
     trap - EXIT INT TERM
     set +e
 
-    if [[ $device_modified == true && $backup_ready == true ]]; then
+    if [[ $backup_original == 1 && $device_modified == true && $backup_ready == true ]]; then
         if check_identity && require_idle_device && set_device_writable &&
             dd if="$backup" of="$device" bs=16M iflag=fullblock conv=fsync status=none &&
             blockdev --rereadpt "$device" &&
@@ -130,6 +135,7 @@ finish() {
     {
         echo "device=$device"
         echo "serial=$expected_serial"
+        echo "backup_original=$backup_original"
         echo "original_pool_id=$original_pool_id"
         echo "blob_pool_id=$blob_pool_id"
         echo "backup=$backup"
@@ -156,47 +162,51 @@ trap 'exit 130' INT TERM
 }
 check_identity
 require_idle_device
-[[ ! -e $backup ]] || {
-    echo "refusing to overwrite backup: $backup" >&2
-    exit 2
-}
-
-backup_dir=$(dirname "$backup")
-[[ -d $backup_dir && -w $backup_dir ]] || {
-    echo "backup directory is not writable: $backup_dir" >&2
-    exit 2
-}
-capacity=$(blockdev --getsize64 "$device")
-available=$(df --output=avail -B1 "$backup_dir" | tail -n 1 | tr -d '[:space:]')
-((available > capacity)) || {
-    echo "backup filesystem requires more than $capacity bytes free" >&2
-    exit 2
-}
-backup_source=$(findmnt --noheadings --output SOURCE --target "$backup_dir")
-while read -r descendant; do
-    [[ $backup_source != "$descendant" ]] || {
-        echo "backup directory must not reside on the raw device" >&2
+if [[ $backup_original == 1 ]]; then
+    [[ ! -e $backup ]] || {
+        echo "refusing to overwrite backup: $backup" >&2
         exit 2
     }
-done < <(lsblk --noheadings --paths --raw --output NAME "$device")
 
-"$cli" pool inspect --device "$device" >"$log_dir/original-pool-inspect-before.log"
-grep -q "^Pool: $original_pool_id$" "$log_dir/original-pool-inspect-before.log"
-grep -q '^Filesystem: littlefs$' "$log_dir/original-pool-inspect-before.log"
-grep -q '^Mountable: yes$' "$log_dir/original-pool-inspect-before.log"
+    backup_dir=$(dirname "$backup")
+    [[ -d $backup_dir && -w $backup_dir ]] || {
+        echo "backup directory is not writable: $backup_dir" >&2
+        exit 2
+    }
+    capacity=$(blockdev --getsize64 "$device")
+    available=$(df --output=avail -B1 "$backup_dir" | tail -n 1 | tr -d '[:space:]')
+    ((available > capacity)) || {
+        echo "backup filesystem requires more than $capacity bytes free" >&2
+        exit 2
+    }
+    backup_source=$(findmnt --noheadings --output SOURCE --target "$backup_dir")
+    while read -r descendant; do
+        [[ $backup_source != "$descendant" ]] || {
+            echo "backup directory must not reside on the raw device" >&2
+            exit 2
+        }
+    done < <(lsblk --noheadings --paths --raw --output NAME "$device")
 
-set_device_read_only
-dd if="$device" of="$backup" bs=16M iflag=fullblock conv=sparse,fsync status=none
-[[ $(stat --format=%s "$backup") -eq $capacity ]] || {
-    echo "raw-device backup image has the wrong size" >&2
-    exit 1
-}
-cmp --bytes="$capacity" "$device" "$backup"
-backup_ready=true
+    "$cli" pool inspect --device "$device" >"$log_dir/original-pool-inspect-before.log"
+    grep -q "^Pool: $original_pool_id$" "$log_dir/original-pool-inspect-before.log"
+    grep -q '^Filesystem: littlefs$' "$log_dir/original-pool-inspect-before.log"
+    grep -q '^Mountable: yes$' "$log_dir/original-pool-inspect-before.log"
+
+    set_device_read_only
+    dd if="$device" of="$backup" bs=16M iflag=fullblock conv=sparse,fsync status=none
+    [[ $(stat --format=%s "$backup") -eq $capacity ]] || {
+        echo "raw-device backup image has the wrong size" >&2
+        exit 1
+    }
+    cmp --bytes="$capacity" "$device" "$backup"
+    backup_ready=true
+fi
 
 check_identity
 require_idle_device
-[[ $(blockdev --getro "$device") == 1 ]]
+if [[ $backup_original == 1 ]]; then
+    [[ $(blockdev --getro "$device") == 1 ]]
+fi
 set_device_writable
 check_identity
 require_idle_device
@@ -238,4 +248,8 @@ grep -q '^Mountable: yes$' "$log_dir/blob-inspect.log"
 
 bash test/physical-pool-fio.sh "$cli" "$device" "$expected_serial" "$blob_pool_id" blob
 test_succeeded=true
-echo "physical Blob Pool fio passed; restoring $original_pool_id"
+if [[ $backup_original == 1 ]]; then
+    echo "physical Blob Pool fio passed; restoring $original_pool_id"
+else
+    echo "physical Blob Pool fio passed; retained $blob_pool_id"
+fi
