@@ -18,6 +18,7 @@ runtime=${ZETTIDE_POOL_FIO_RUNTIME:-20}
 ramp_time=${ZETTIDE_POOL_FIO_RAMP_TIME:-5}
 frontend=${ZETTIDE_POOL_FIO_FRONTEND:-fuse}
 ganesha_build=${ZETTIDE_GANESHA_BUILD_DIR:-}
+nfs_stable_write_batch_us=${ZETTIDE_NFS_STABLE_WRITE_BATCH_US:-200}
 
 [[ $EUID -eq 0 ]] || {
     echo "physical Pool fio requires root" >&2
@@ -33,6 +34,10 @@ ganesha_build=${ZETTIDE_GANESHA_BUILD_DIR:-}
 }
 [[ $frontend == fuse || $frontend == nfs ]] || {
     echo "unsupported Pool fio frontend: $frontend" >&2
+    exit 2
+}
+[[ $nfs_stable_write_batch_us =~ ^[0-9]+$ ]] && ((nfs_stable_write_batch_us <= 999999)) || {
+    echo "ZETTIDE_NFS_STABLE_WRITE_BATCH_US must be between 0 and 999999" >&2
     exit 2
 }
 commands=(fio lsblk mountpoint timeout)
@@ -279,7 +284,7 @@ EXPORT {
         name = ZETTIDE;
         Target = "$device";
         Writable = true;
-        Stable_Write_Batch_Us = 200;
+        Stable_Write_Batch_Us = $nfs_stable_write_batch_us;
     }
 }
 EOF
