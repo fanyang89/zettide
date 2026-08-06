@@ -23,6 +23,18 @@ pub fn readSnapshot(
     output: []u8,
     offset: u64,
 ) !usize {
+    return readSnapshotAt(allocator, io, blobs, blobs.committedUnits(), snapshot, output, offset);
+}
+
+pub fn readSnapshotAt(
+    allocator: std.mem.Allocator,
+    io: Io,
+    blobs: *blob_store.Store,
+    readable_units: u64,
+    snapshot: Snapshot,
+    output: []u8,
+    offset: u64,
+) !usize {
     if (snapshot.generation == 0 or snapshot.logical_size > std.math.maxInt(i64) or
         (snapshot.root != null and snapshot.logical_size == 0))
         return error.InvalidBlobFileSnapshot;
@@ -56,10 +68,11 @@ pub fn readSnapshot(
         const end_block = @min(requested_end_block, first_block + blob_device.max_batch);
         var entries: [blob_device.max_batch]blob_map.LeafEntry = undefined;
         const loaded = if (snapshot.root) |root|
-            try maps.loadRange(
+            try maps.loadRangeAt(
                 io,
                 root,
                 snapshot.generation,
+                readable_units,
                 first_block,
                 end_block,
                 map_scratch,
@@ -88,7 +101,7 @@ pub fn readSnapshot(
                     pending_error = error.InvalidBlobFileSnapshot;
                     break;
                 };
-                if (ref.valid_bytes != block_size or ref.endUnit() > blobs.committedUnits()) {
+                if (ref.valid_bytes != block_size or ref.endUnit() > readable_units) {
                     pending_error = error.InvalidBlobFileSnapshot;
                     break;
                 }
@@ -131,6 +144,7 @@ pub const State = struct {
     generation: u64,
     logical_size: u64,
     root: ?blob_map.PageRef,
+    readable_units: u64,
     blocks: std.AutoHashMap(u64, blob_format.BlobRef),
     allocated_blocks: u64,
     blocks_materialized: bool,
@@ -138,6 +152,7 @@ pub const State = struct {
     dirty: bool = false,
     prepared: ?Snapshot = null,
     prepared_checkpoint: ?u64 = null,
+    prepared_readable_units: ?u64 = null,
     frozen: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, blobs: *blob_store.Store) State {
@@ -147,6 +162,7 @@ pub const State = struct {
             .generation = 1,
             .logical_size = 0,
             .root = null,
+            .readable_units = 0,
             .blocks = .init(allocator),
             .allocated_blocks = 0,
             .blocks_materialized = true,
@@ -160,6 +176,16 @@ pub const State = struct {
         blobs: *blob_store.Store,
         snapshot: Snapshot,
     ) !State {
+        return openAt(allocator, io, blobs, blobs.committedUnits(), snapshot);
+    }
+
+    pub fn openAt(
+        allocator: std.mem.Allocator,
+        io: Io,
+        blobs: *blob_store.Store,
+        readable_units: u64,
+        snapshot: Snapshot,
+    ) !State {
         if (snapshot.generation == 0 or snapshot.logical_size > std.math.maxInt(i64) or
             (snapshot.root != null and snapshot.logical_size == 0))
             return error.InvalidBlobFileSnapshot;
@@ -169,6 +195,7 @@ pub const State = struct {
             .generation = snapshot.generation,
             .logical_size = snapshot.logical_size,
             .root = snapshot.root,
+            .readable_units = readable_units,
             .blocks = .init(allocator),
             .allocated_blocks = 0,
             .blocks_materialized = true,
@@ -179,7 +206,7 @@ pub const State = struct {
         const scratch = try allocator.alignedAlloc(u8, .fromByteUnits(blob_format.allocation_unit), blob_map.page_size);
         defer allocator.free(scratch);
         var maps = blob_map_store.MapStore.init(allocator, blobs);
-        const entries = try maps.loadAllAlloc(io, root, snapshot.generation, scratch);
+        const entries = try maps.loadAllAllocAt(io, root, snapshot.generation, readable_units, scratch);
         defer allocator.free(entries);
         try result.blocks.ensureUnusedCapacity(@intCast(entries.len));
         const block_count = try std.math.divCeil(u64, snapshot.logical_size, block_size);
@@ -187,7 +214,7 @@ pub const State = struct {
             entry.reference.validate(blobs.header.unit_count) catch
                 return error.InvalidBlobFileSnapshot;
             if (entry.logical_blob >= block_count or entry.reference.valid_bytes != block_size or
-                entry.reference.endUnit() > blobs.committedUnits())
+                entry.reference.endUnit() > readable_units)
                 return error.InvalidBlobFileSnapshot;
             const block = result.blocks.getOrPutAssumeCapacity(entry.logical_blob);
             if (block.found_existing) return error.InvalidBlobFileSnapshot;
@@ -204,6 +231,16 @@ pub const State = struct {
         snapshot: Snapshot,
         allocated_bytes: u64,
     ) !State {
+        return openKnownAllocatedAt(allocator, blobs, blobs.committedUnits(), snapshot, allocated_bytes);
+    }
+
+    pub fn openKnownAllocatedAt(
+        allocator: std.mem.Allocator,
+        blobs: *blob_store.Store,
+        readable_units: u64,
+        snapshot: Snapshot,
+        allocated_bytes: u64,
+    ) !State {
         if (snapshot.generation == 0 or snapshot.logical_size > std.math.maxInt(i64) or
             allocated_bytes % block_size != 0)
             return error.InvalidBlobFileSnapshot;
@@ -213,7 +250,7 @@ pub const State = struct {
             return error.InvalidBlobFileSnapshot;
         if (snapshot.root) |root| {
             if (snapshot.logical_size == 0 or root.first_key > root.last_key or
-                root.last_key >= block_count or root.page >= blobs.committedUnits())
+                root.last_key >= block_count or root.page >= readable_units)
                 return error.InvalidBlobFileSnapshot;
         }
         return .{
@@ -222,6 +259,7 @@ pub const State = struct {
             .generation = snapshot.generation,
             .logical_size = snapshot.logical_size,
             .root = snapshot.root,
+            .readable_units = readable_units,
             .blocks = .init(allocator),
             .allocated_blocks = allocated_blocks,
             .blocks_materialized = false,
@@ -430,10 +468,11 @@ pub const State = struct {
         const snapshot: Snapshot = .{
             .generation = generation,
             .logical_size = self.logical_size,
-            .root = try maps.applyBatch(
+            .root = try maps.applyBatchAt(
                 io,
                 self.root,
                 self.generation,
+                self.readable_units,
                 generation,
                 mutations,
                 null,
@@ -447,6 +486,7 @@ pub const State = struct {
             return error.InvalidBlobFileSnapshot;
         self.prepared = snapshot;
         self.prepared_checkpoint = checkpoint;
+        self.prepared_readable_units = self.blobs.stagedUnits();
         map_pages_owned = false;
         return snapshot;
     }
@@ -459,8 +499,10 @@ pub const State = struct {
         if (!std.meta.eql(prepared, snapshot)) return error.BlobFileSnapshotMismatch;
         self.generation = snapshot.generation;
         self.root = snapshot.root;
+        self.readable_units = self.prepared_readable_units.?;
         self.prepared = null;
         self.prepared_checkpoint = null;
+        self.prepared_readable_units = null;
         self.dirty = false;
         self.pending.clearRetainingCapacity();
     }
@@ -474,6 +516,7 @@ pub const State = struct {
         try self.blobs.discardStaged(io, checkpoint);
         self.prepared = null;
         self.prepared_checkpoint = null;
+        self.prepared_readable_units = null;
     }
 
     fn currentSnapshot(self: *const State) Snapshot {
@@ -495,9 +538,16 @@ pub const State = struct {
         );
         defer self.allocator.free(scratch);
         var maps = blob_map_store.MapStore.init(self.allocator, self.blobs);
-        const reference = try maps.lookup(io, root, self.generation, key, scratch) orelse return null;
+        const reference = try maps.lookupAt(
+            io,
+            root,
+            self.generation,
+            self.readable_units,
+            key,
+            scratch,
+        ) orelse return null;
         reference.validate(self.blobs.header.unit_count) catch return error.InvalidBlobFileSnapshot;
-        if (reference.valid_bytes != block_size or reference.endUnit() > self.blobs.committedUnits())
+        if (reference.valid_bytes != block_size or reference.endUnit() > self.readable_units)
             return error.InvalidBlobFileSnapshot;
         return reference;
     }
@@ -538,10 +588,11 @@ pub const State = struct {
         const end_key = keys[0] + keys.len;
         var first_key = keys[0];
         while (first_key < end_key) {
-            const loaded = try maps.loadRange(
+            const loaded = try maps.loadRangeAt(
                 io,
                 self.root.?,
                 self.generation,
+                self.readable_units,
                 first_key,
                 end_key,
                 scratch,
@@ -552,7 +603,7 @@ pub const State = struct {
                 entry.reference.validate(self.blobs.header.unit_count) catch
                     return error.InvalidBlobFileSnapshot;
                 if (entry.reference.valid_bytes != block_size or
-                    entry.reference.endUnit() > self.blobs.committedUnits())
+                    entry.reference.endUnit() > self.readable_units)
                     return error.InvalidBlobFileSnapshot;
                 const index: usize = @intCast(entry.logical_blob - keys[0]);
                 if (!known[index]) {
@@ -576,7 +627,13 @@ pub const State = struct {
             );
             defer self.allocator.free(scratch);
             var maps = blob_map_store.MapStore.init(self.allocator, self.blobs);
-            const entries = try maps.loadAllAlloc(io, root, self.generation, scratch);
+            const entries = try maps.loadAllAllocAt(
+                io,
+                root,
+                self.generation,
+                self.readable_units,
+                scratch,
+            );
             defer self.allocator.free(entries);
             try blocks.ensureUnusedCapacity(@intCast(try std.math.add(
                 usize,
@@ -588,7 +645,7 @@ pub const State = struct {
                 entry.reference.validate(self.blobs.header.unit_count) catch
                     return error.InvalidBlobFileSnapshot;
                 if (entry.logical_blob >= block_count or entry.reference.valid_bytes != block_size or
-                    entry.reference.endUnit() > self.blobs.committedUnits())
+                    entry.reference.endUnit() > self.readable_units)
                     return error.InvalidBlobFileSnapshot;
                 const block = blocks.getOrPutAssumeCapacity(entry.logical_blob);
                 if (block.found_existing) return error.InvalidBlobFileSnapshot;

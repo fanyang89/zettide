@@ -258,7 +258,13 @@ pub const Filesystem = struct {
 
         const prefix = try filesystem_format.dentryPrefix(inode);
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
-        const stored = try maps.loadPrefixAlloc(io, self.root.metadata_root, self.root.generation, &prefix);
+        const stored = try maps.loadPrefixAllocAt(
+            io,
+            self.root.metadata_root,
+            self.root.generation,
+            self.visibleUnits(),
+            &prefix,
+        );
         defer metadata_map_store.deinitEntries(self.allocator, stored);
         const entries = try self.allocator.alloc(DirectoryEntry, stored.len);
         errdefer self.allocator.free(entries);
@@ -424,7 +430,15 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         const record = try self.requireRegularFile(io, inode);
-        return blob_file.readSnapshot(self.allocator, io, &self.blobs, record.data.?, output, offset);
+        return blob_file.readSnapshotAt(
+            self.allocator,
+            io,
+            &self.blobs,
+            self.visibleUnits(),
+            record.data.?,
+            output,
+            offset,
+        );
     }
 
     pub fn write(self: *Filesystem, io: Io, inode: u64, data: []const u8, offset: u64) !usize {
@@ -461,9 +475,10 @@ pub const Filesystem = struct {
         var rollback_before_publish = true;
         errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
 
-        var file = try blob_file.State.openKnownAllocated(
+        var file = try blob_file.State.openKnownAllocatedAt(
             self.allocator,
             &self.blobs,
+            self.visibleUnits(),
             record.data.?,
             record.allocated_bytes,
         );
@@ -494,9 +509,10 @@ pub const Filesystem = struct {
         var rollback_before_publish = true;
         errdefer if (rollback_before_publish) self.rollback(io, checkpoint);
 
-        var file = try blob_file.State.openKnownAllocated(
+        var file = try blob_file.State.openKnownAllocatedAt(
             self.allocator,
             &self.blobs,
+            self.visibleUnits(),
             record.data.?,
             record.allocated_bytes,
         );
@@ -522,7 +538,15 @@ pub const Filesystem = struct {
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
         try self.authorizeDirectInode(io, inode, record);
         if (record.metadata.kind != .symlink) return error.InvalidArgument;
-        return blob_file.readSnapshot(self.allocator, io, &self.blobs, record.data.?, output, offset);
+        return blob_file.readSnapshotAt(
+            self.allocator,
+            io,
+            &self.blobs,
+            self.visibleUnits(),
+            record.data.?,
+            output,
+            offset,
+        );
     }
 
     pub fn createFile(
@@ -947,7 +971,13 @@ pub const Filesystem = struct {
     fn loadInode(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.InodeRecord {
         const key = filesystem_format.inodeKey(inode) catch return error.FileNotFound;
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
-        const value = try maps.lookupAlloc(io, self.root.metadata_root, self.root.generation, &key) orelse
+        const value = try maps.lookupAllocAt(
+            io,
+            self.root.metadata_root,
+            self.root.generation,
+            self.visibleUnits(),
+            &key,
+        ) orelse
             return null;
         defer self.allocator.free(value);
         if (value.len != filesystem_format.inode_encoded_size)
@@ -959,7 +989,13 @@ pub const Filesystem = struct {
     fn loadOrphan(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.OrphanRecord {
         const key = filesystem_format.orphanKey(inode) catch return error.FileNotFound;
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
-        const value = try maps.lookupAlloc(io, self.root.metadata_root, self.root.generation, &key) orelse
+        const value = try maps.lookupAllocAt(
+            io,
+            self.root.metadata_root,
+            self.root.generation,
+            self.visibleUnits(),
+            &key,
+        ) orelse
             return null;
         defer self.allocator.free(value);
         if (value.len != filesystem_format.orphan_encoded_size)
@@ -1046,7 +1082,13 @@ pub const Filesystem = struct {
         var key_buffer: [filesystem_format.max_key_size]u8 = undefined;
         const key = try filesystem_format.dentryKey(&key_buffer, parent_inode, key_name);
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
-        const value = try maps.lookupAlloc(io, self.root.metadata_root, self.root.generation, key) orelse
+        const value = try maps.lookupAllocAt(
+            io,
+            self.root.metadata_root,
+            self.root.generation,
+            self.visibleUnits(),
+            key,
+        ) orelse
             return error.FileNotFound;
         defer self.allocator.free(value);
         const dentry = filesystem_format.decodeDentry(value) catch
@@ -1058,7 +1100,13 @@ pub const Filesystem = struct {
         var key_buffer: [filesystem_format.max_key_size]u8 = undefined;
         const key = try filesystem_format.dentryKey(&key_buffer, parent_inode, key_name);
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
-        const value = try maps.lookupAlloc(io, self.root.metadata_root, self.root.generation, key) orelse
+        const value = try maps.lookupAllocAt(
+            io,
+            self.root.metadata_root,
+            self.root.generation,
+            self.visibleUnits(),
+            key,
+        ) orelse
             return null;
         defer self.allocator.free(value);
         const dentry = filesystem_format.decodeDentry(value) catch
@@ -1069,7 +1117,13 @@ pub const Filesystem = struct {
     fn directoryIsEmpty(self: *Filesystem, io: Io, inode: u64) !bool {
         const prefix = try filesystem_format.dentryPrefix(inode);
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
-        const entries = try maps.loadPrefixAlloc(io, self.root.metadata_root, self.root.generation, &prefix);
+        const entries = try maps.loadPrefixAllocAt(
+            io,
+            self.root.metadata_root,
+            self.root.generation,
+            self.visibleUnits(),
+            &prefix,
+        );
         defer metadata_map_store.deinitEntries(self.allocator, entries);
         return entries.len == 0;
     }
@@ -1098,10 +1152,11 @@ pub const Filesystem = struct {
         defer self.allocator.free(sorted);
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
         var next_root = next_root_value;
-        next_root.metadata_root = try maps.applyBatch(
+        next_root.metadata_root = try maps.applyBatchAt(
             io,
             self.root.metadata_root,
             self.root.generation,
+            self.visibleUnits(),
             next_root.generation,
             sorted,
         );
@@ -1125,7 +1180,12 @@ pub const Filesystem = struct {
     fn recoverOrphans(self: *Filesystem, io: Io) !void {
         if (self.root.orphan_count == 0) return;
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
-        const entries = try maps.loadAllAlloc(io, self.root.metadata_root, self.root.generation);
+        const entries = try maps.loadAllAllocAt(
+            io,
+            self.root.metadata_root,
+            self.root.generation,
+            self.visibleUnits(),
+        );
         defer metadata_map_store.deinitEntries(self.allocator, entries);
         var mutations: MutationAccumulator = .init(self.allocator);
         defer mutations.deinit();
@@ -1153,6 +1213,10 @@ pub const Filesystem = struct {
     fn requireMutable(self: *const Filesystem) !void {
         if (!self.writable) return error.ReadOnlyFilesystem;
         if (self.frozen) return error.BlobFilesystemFrozen;
+    }
+
+    fn visibleUnits(self: *const Filesystem) u64 {
+        return self.authority_ref.slot;
     }
 };
 
@@ -1310,9 +1374,10 @@ fn loadCandidate(
     if (amount != filesystem_format.root_encoded_size) return error.InvalidBlobFilesystemAuthority;
     const root = try filesystem_format.decodeRoot(@ptrCast(buffer.ptr));
     var maps = metadata_map_store.MapStore.init(allocator, blobs);
-    const entries = try maps.loadAllAlloc(io, root.metadata_root, root.generation);
+    const readable_units = authority_ref.slot;
+    const entries = try maps.loadAllAllocAt(io, root.metadata_root, root.generation, readable_units);
     defer metadata_map_store.deinitEntries(allocator, entries);
-    try validateGraph(allocator, io, blobs, root, entries);
+    try validateGraph(allocator, io, blobs, root, readable_units, entries);
     return root;
 }
 
@@ -1321,6 +1386,7 @@ fn validateGraph(
     io: Io,
     blobs: *blob_store.Store,
     root: filesystem_format.Root,
+    readable_units: u64,
     entries: []const metadata_map_store.OwnedEntry,
 ) !void {
     if (entries.len != root.record_count) return error.InvalidBlobFilesystemGraph;
@@ -1343,7 +1409,7 @@ fn validateGraph(
             if (result.found_existing) return error.InvalidBlobFilesystemGraph;
             result.value_ptr.* = record;
             if (record.data) |snapshot| {
-                var file = try blob_file.State.open(allocator, io, blobs, snapshot);
+                var file = try blob_file.State.openAt(allocator, io, blobs, readable_units, snapshot);
                 defer file.deinit();
                 if (file.allocatedBytes() != record.allocated_bytes)
                     return error.InvalidBlobFilesystemGraph;
@@ -2703,9 +2769,21 @@ test "blob close chain consumes ownership when backend close fails" {
 
 fn expectValidGraph(filesystem: *Filesystem, io: Io) !void {
     var maps = metadata_map_store.MapStore.init(std.testing.allocator, &filesystem.blobs);
-    const entries = try maps.loadAllAlloc(io, filesystem.root.metadata_root, filesystem.root.generation);
+    const entries = try maps.loadAllAllocAt(
+        io,
+        filesystem.root.metadata_root,
+        filesystem.root.generation,
+        filesystem.visibleUnits(),
+    );
     defer metadata_map_store.deinitEntries(std.testing.allocator, entries);
-    try validateGraph(std.testing.allocator, io, &filesystem.blobs, filesystem.root, entries);
+    try validateGraph(
+        std.testing.allocator,
+        io,
+        &filesystem.blobs,
+        filesystem.root,
+        filesystem.visibleUnits(),
+        entries,
+    );
 }
 
 fn expectFilesystemCounts(

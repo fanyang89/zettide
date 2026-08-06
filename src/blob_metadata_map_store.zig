@@ -108,6 +108,17 @@ pub const MapStore = struct {
         root_generation: u64,
         key: []const u8,
     ) !?[]u8 {
+        return self.lookupAllocAt(io, root, root_generation, self.blobs.stagedUnits(), key);
+    }
+
+    pub fn lookupAllocAt(
+        self: *MapStore,
+        io: Io,
+        root: filesystem_format.TreeRef,
+        root_generation: u64,
+        readable_units: u64,
+        key: []const u8,
+    ) !?[]u8 {
         _ = filesystem_format.decodeKey(key) catch return error.InvalidBlobFilesystemKey;
         const scratch = try self.allocator.alignedAlloc(
             u8,
@@ -121,7 +132,7 @@ pub const MapStore = struct {
         var is_root = true;
         var maximum_generation = root_generation;
         while (true) {
-            try self.readPage(io, current, scratch);
+            try self.readPage(io, current, readable_units, scratch);
             const page: *const [metadata_map.page_size]u8 = @ptrCast(scratch.ptr);
             const header = try validateHeader(page, current, maximum_generation, is_root);
             is_root = false;
@@ -158,6 +169,25 @@ pub const MapStore = struct {
         generation: u64,
         mutations: []const Mutation,
     ) !filesystem_format.TreeRef {
+        return self.applyBatchAt(
+            io,
+            root,
+            root_generation,
+            self.blobs.stagedUnits(),
+            generation,
+            mutations,
+        );
+    }
+
+    pub fn applyBatchAt(
+        self: *MapStore,
+        io: Io,
+        root: filesystem_format.TreeRef,
+        root_generation: u64,
+        readable_units: u64,
+        generation: u64,
+        mutations: []const Mutation,
+    ) !filesystem_format.TreeRef {
         if (generation <= root_generation or mutations.len == 0)
             return error.InvalidBlobMetadataMutation;
         for (mutations, 0..) |mutation, index| {
@@ -167,7 +197,7 @@ pub const MapStore = struct {
                 return error.InvalidBlobMetadataMutation;
         }
 
-        const existing = try self.loadAllAlloc(io, root, root_generation);
+        const existing = try self.loadAllAllocAt(io, root, root_generation, readable_units);
         defer deinitEntries(self.allocator, existing);
         var merged: std.ArrayList(metadata_map.LeafEntry) = .empty;
         defer merged.deinit(self.allocator);
@@ -225,6 +255,16 @@ pub const MapStore = struct {
         root: filesystem_format.TreeRef,
         root_generation: u64,
     ) ![]OwnedEntry {
+        return self.loadAllAllocAt(io, root, root_generation, self.blobs.stagedUnits());
+    }
+
+    pub fn loadAllAllocAt(
+        self: *MapStore,
+        io: Io,
+        root: filesystem_format.TreeRef,
+        root_generation: u64,
+        readable_units: u64,
+    ) ![]OwnedEntry {
         const scratch = try self.allocator.alignedAlloc(
             u8,
             .fromByteUnits(blob_format.allocation_unit),
@@ -236,7 +276,7 @@ pub const MapStore = struct {
             for (result.items) |entry| entry.deinit(self.allocator);
             result.deinit(self.allocator);
         }
-        try self.collectPage(io, root, root_generation, null, true, scratch, &result);
+        try self.collectPage(io, root, readable_units, root_generation, null, true, scratch, &result);
         return result.toOwnedSlice(self.allocator);
     }
 
@@ -247,7 +287,24 @@ pub const MapStore = struct {
         root_generation: u64,
         prefix: []const u8,
     ) ![]OwnedEntry {
-        const all = try self.loadAllAlloc(io, root, root_generation);
+        return self.loadPrefixAllocAt(
+            io,
+            root,
+            root_generation,
+            self.blobs.stagedUnits(),
+            prefix,
+        );
+    }
+
+    pub fn loadPrefixAllocAt(
+        self: *MapStore,
+        io: Io,
+        root: filesystem_format.TreeRef,
+        root_generation: u64,
+        readable_units: u64,
+        prefix: []const u8,
+    ) ![]OwnedEntry {
+        const all = try self.loadAllAllocAt(io, root, root_generation, readable_units);
         var matching: usize = 0;
         for (all) |entry| if (std.mem.startsWith(u8, entry.key, prefix)) {
             matching += 1;
@@ -274,13 +331,14 @@ pub const MapStore = struct {
         self: *MapStore,
         io: Io,
         reference: filesystem_format.TreeRef,
+        readable_units: u64,
         maximum_generation: u64,
         expected_upper: ?[]const u8,
         is_root: bool,
         scratch: []u8,
         result: *std.ArrayList(OwnedEntry),
     ) !void {
-        try self.readPage(io, reference, scratch);
+        try self.readPage(io, reference, readable_units, scratch);
         const page: *const [metadata_map.page_size]u8 = @ptrCast(scratch.ptr);
         const header = try validateHeader(page, reference, maximum_generation, is_root);
         if (header.kind == .leaf) {
@@ -323,6 +381,7 @@ pub const MapStore = struct {
             try self.collectPage(
                 io,
                 child.reference,
+                readable_units,
                 header.generation,
                 child.upper_key,
                 false,
@@ -336,9 +395,13 @@ pub const MapStore = struct {
         self: *MapStore,
         io: Io,
         reference: filesystem_format.TreeRef,
+        readable_units: u64,
         scratch: []u8,
     ) !void {
         if (scratch.len != metadata_map.page_size) return error.InvalidBlobBuffer;
+        const units = blob_format.allocationUnits(metadata_map.page_size);
+        if (reference.page > readable_units or units > readable_units - reference.page)
+            return error.UnpublishedBlobReference;
         try self.blobs.readDigestVerified(io, reference.page, metadata_map.page_size, &reference.digest, scratch);
     }
 
@@ -451,7 +514,20 @@ test "blob metadata map builds looks up enumerates and reopens" {
     }
     var maps = MapStore.init(std.testing.allocator, &blobs);
     const root = try maps.build(std.testing.io, 2, &entries);
+    const root_readable_units = blobs.stagedUnits();
     try std.testing.expectEqual(@as(u8, 1), root.level);
+    try std.testing.expectError(
+        error.UnpublishedBlobReference,
+        maps.lookupAllocAt(std.testing.io, root, 2, root.page, &keys[64]),
+    );
+    const bounded_lookup = (try maps.lookupAllocAt(
+        std.testing.io,
+        root,
+        2,
+        root_readable_units,
+        &keys[64],
+    )).?;
+    std.testing.allocator.free(bounded_lookup);
     const lookup = (try maps.lookupAlloc(std.testing.io, root, 2, &keys[64])).?;
     defer std.testing.allocator.free(lookup);
     try std.testing.expectEqualSlices(u8, &values[64], lookup);

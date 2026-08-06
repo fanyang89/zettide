@@ -94,12 +94,23 @@ pub const MapStore = struct {
         logical_blob: u64,
         scratch: []u8,
     ) !?blob_format.BlobRef {
-        const boundary = self.blobs.committedUnits();
+        return self.lookupAt(io, root, root_generation, self.blobs.committedUnits(), logical_blob, scratch);
+    }
+
+    pub fn lookupAt(
+        self: *MapStore,
+        io: Io,
+        root: blob_map.PageRef,
+        root_generation: u64,
+        readable_units: u64,
+        logical_blob: u64,
+        scratch: []u8,
+    ) !?blob_format.BlobRef {
         var current = root;
         var maximum_generation = root_generation;
         var is_root = true;
         while (true) {
-            const header = try self.readPage(io, current, boundary, maximum_generation, is_root, scratch);
+            const header = try self.readPage(io, current, readable_units, maximum_generation, is_root, scratch);
             const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
             is_root = false;
             maximum_generation = header.generation;
@@ -136,7 +147,7 @@ pub const MapStore = struct {
                 .first_key = child.first_key,
                 .last_key = child.last_key,
                 .digest = child.child_digest,
-            }, boundary);
+            }, readable_units);
         }
     }
 
@@ -155,14 +166,36 @@ pub const MapStore = struct {
         scratch: []u8,
         output: []blob_map.LeafEntry,
     ) !LoadedRange {
+        return self.loadRangeAt(
+            io,
+            root,
+            root_generation,
+            self.blobs.committedUnits(),
+            first_key,
+            end_key,
+            scratch,
+            output,
+        );
+    }
+
+    pub fn loadRangeAt(
+        self: *MapStore,
+        io: Io,
+        root: blob_map.PageRef,
+        root_generation: u64,
+        readable_units: u64,
+        first_key: u64,
+        end_key: u64,
+        scratch: []u8,
+        output: []blob_map.LeafEntry,
+    ) !LoadedRange {
         if (first_key >= end_key or end_key - first_key > output.len)
             return error.InvalidBlobMapRange;
-        const boundary = self.blobs.committedUnits();
         var current = root;
         var maximum_generation = root_generation;
         var is_root = true;
         while (true) {
-            const header = try self.readPage(io, current, boundary, maximum_generation, is_root, scratch);
+            const header = try self.readPage(io, current, readable_units, maximum_generation, is_root, scratch);
             const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
             is_root = false;
             maximum_generation = header.generation;
@@ -202,7 +235,7 @@ pub const MapStore = struct {
                 .first_key = child.first_key,
                 .last_key = child.last_key,
                 .digest = child.child_digest,
-            }, boundary);
+            }, readable_units);
         }
     }
 
@@ -216,8 +249,21 @@ pub const MapStore = struct {
         entries: []const blob_map.LeafEntry,
         scratch: []u8,
     ) !blob_map.PageRef {
-        const checkpoint = self.blobs.stagedUnits();
-        errdefer self.blobs.discardStaged(io, checkpoint) catch {};
+        return self.appendAt(io, root, root_generation, self.blobs.stagedUnits(), generation, entries, scratch);
+    }
+
+    pub fn appendAt(
+        self: *MapStore,
+        io: Io,
+        root: blob_map.PageRef,
+        root_generation: u64,
+        readable_units: u64,
+        generation: u64,
+        entries: []const blob_map.LeafEntry,
+        scratch: []u8,
+    ) !blob_map.PageRef {
+        const write_checkpoint = self.blobs.stagedUnits();
+        errdefer self.blobs.discardStaged(io, write_checkpoint) catch {};
         if (generation <= root_generation or entries.len == 0 or entries.len > blob_map.max_leaf_entries or
             entries[0].logical_blob <= root.last_key)
             return error.InvalidBlobMapAppend;
@@ -226,7 +272,7 @@ pub const MapStore = struct {
         const updated = try self.appendPage(
             io,
             root,
-            checkpoint,
+            readable_units,
             root_generation,
             true,
             generation,
@@ -261,8 +307,31 @@ pub const MapStore = struct {
         remove_range: ?KeyRange,
         scratch: []u8,
     ) !?blob_map.PageRef {
-        const checkpoint = self.blobs.stagedUnits();
-        errdefer self.blobs.discardStaged(io, checkpoint) catch {};
+        return self.applyBatchAt(
+            io,
+            root,
+            root_generation,
+            self.blobs.stagedUnits(),
+            generation,
+            mutations,
+            remove_range,
+            scratch,
+        );
+    }
+
+    pub fn applyBatchAt(
+        self: *MapStore,
+        io: Io,
+        root: ?blob_map.PageRef,
+        root_generation: u64,
+        readable_units: u64,
+        generation: u64,
+        mutations: []const Mutation,
+        remove_range: ?KeyRange,
+        scratch: []u8,
+    ) !?blob_map.PageRef {
+        const write_checkpoint = self.blobs.stagedUnits();
+        errdefer self.blobs.discardStaged(io, write_checkpoint) catch {};
         if (generation <= root_generation) return error.InvalidBlobMapMutation;
         if (scratch.len != blob_map.page_size) return error.InvalidBlobBuffer;
         if (remove_range) |range| if (range.end) |end| if (range.first >= end)
@@ -272,7 +341,7 @@ pub const MapStore = struct {
                 return error.UnsortedBlobMapMutations;
             if (mutation == .upsert) {
                 const reference = mutation.upsert.reference;
-                try validateEntryReference(reference, self.blobs.header.unit_count, checkpoint);
+                try validateEntryReference(reference, self.blobs.header.unit_count, write_checkpoint);
             }
         }
 
@@ -280,7 +349,7 @@ pub const MapStore = struct {
             try self.rewritePage(
                 io,
                 reference,
-                checkpoint,
+                readable_units,
                 root_generation,
                 true,
                 generation,
@@ -303,10 +372,31 @@ pub const MapStore = struct {
 
         var result = forest.items[0];
         while (result.level != 0) {
-            const child = (try self.onlyChild(io, result, generation, scratch)) orelse break;
-            result = try self.copyPageAtGeneration(io, child, checkpoint, generation, scratch);
+            const child = (try self.onlyChild(
+                io,
+                result,
+                readable_units,
+                write_checkpoint,
+                generation,
+                scratch,
+            )) orelse break;
+            result = try self.copyPageAtGeneration(
+                io,
+                child,
+                readable_units,
+                write_checkpoint,
+                generation,
+                scratch,
+            );
         }
-        result = try self.ensurePageGeneration(io, result, checkpoint, generation, scratch);
+        result = try self.ensurePageGeneration(
+            io,
+            result,
+            readable_units,
+            write_checkpoint,
+            generation,
+            scratch,
+        );
         return result;
     }
 
@@ -317,12 +407,23 @@ pub const MapStore = struct {
         root_generation: u64,
         scratch: []u8,
     ) ![]blob_map.LeafEntry {
+        return self.loadAllAllocAt(io, root, root_generation, self.blobs.committedUnits(), scratch);
+    }
+
+    pub fn loadAllAllocAt(
+        self: *MapStore,
+        io: Io,
+        root: blob_map.PageRef,
+        root_generation: u64,
+        readable_units: u64,
+        scratch: []u8,
+    ) ![]blob_map.LeafEntry {
         var entries: std.ArrayList(blob_map.LeafEntry) = .empty;
         errdefer entries.deinit(self.allocator);
         try self.collectPage(
             io,
             root,
-            self.blobs.committedUnits(),
+            readable_units,
             root_generation,
             true,
             scratch,
@@ -598,55 +699,89 @@ pub const MapStore = struct {
         self: *MapStore,
         io: Io,
         reference: blob_map.PageRef,
+        readable_units: u64,
+        write_checkpoint: u64,
         generation: u64,
         scratch: []u8,
     ) !?blob_map.PageRef {
-        const header = try self.readPage(io, reference, self.blobs.stagedUnits(), generation, true, scratch);
+        const boundary = pageBoundary(reference, readable_units, write_checkpoint, self.blobs.stagedUnits());
+        const header = try self.readPage(io, reference, boundary, generation, true, scratch);
         if (header.kind != .internal or header.count != 1) return null;
         const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
         var entries: [blob_map.max_internal_entries]blob_map.InternalEntry = undefined;
         _ = try blob_map.decodeInternal(page, &entries);
-        return try pageReference(.{
+        const child: blob_map.PageRef = .{
             .page = entries[0].child_page,
             .level = header.level - 1,
             .first_key = entries[0].first_key,
             .last_key = entries[0].last_key,
             .digest = entries[0].child_digest,
-        }, self.blobs.stagedUnits());
+        };
+        return try pageReference(
+            child,
+            pageBoundary(child, readable_units, write_checkpoint, self.blobs.stagedUnits()),
+        );
     }
 
     fn ensurePageGeneration(
         self: *MapStore,
         io: Io,
         reference: blob_map.PageRef,
-        boundary: u64,
+        readable_units: u64,
+        write_checkpoint: u64,
         generation: u64,
         scratch: []u8,
     ) !blob_map.PageRef {
-        const source_boundary = if (reference.page < boundary) boundary else self.blobs.stagedUnits();
+        const source_boundary = pageBoundary(
+            reference,
+            readable_units,
+            write_checkpoint,
+            self.blobs.stagedUnits(),
+        );
         const header = try self.readPage(io, reference, source_boundary, generation, false, scratch);
         if (header.generation == generation) return reference;
-        return self.copyDecodedPageAtGeneration(io, header, source_boundary, generation, scratch);
+        return self.copyDecodedPageAtGeneration(
+            io,
+            header,
+            readable_units,
+            write_checkpoint,
+            generation,
+            scratch,
+        );
     }
 
     fn copyPageAtGeneration(
         self: *MapStore,
         io: Io,
         reference: blob_map.PageRef,
-        boundary: u64,
+        readable_units: u64,
+        write_checkpoint: u64,
         generation: u64,
         scratch: []u8,
     ) !blob_map.PageRef {
-        const source_boundary = if (reference.page < boundary) boundary else self.blobs.stagedUnits();
+        const source_boundary = pageBoundary(
+            reference,
+            readable_units,
+            write_checkpoint,
+            self.blobs.stagedUnits(),
+        );
         const header = try self.readPage(io, reference, source_boundary, generation, false, scratch);
-        return self.copyDecodedPageAtGeneration(io, header, source_boundary, generation, scratch);
+        return self.copyDecodedPageAtGeneration(
+            io,
+            header,
+            readable_units,
+            write_checkpoint,
+            generation,
+            scratch,
+        );
     }
 
     fn copyDecodedPageAtGeneration(
         self: *MapStore,
         io: Io,
         header: blob_map.Header,
-        source_boundary: u64,
+        readable_units: u64,
+        write_checkpoint: u64,
         generation: u64,
         scratch: []u8,
     ) !blob_map.PageRef {
@@ -658,13 +793,19 @@ pub const MapStore = struct {
         } else internal: {
             var entries: [blob_map.max_internal_entries]blob_map.InternalEntry = undefined;
             _ = try blob_map.decodeInternal(source, &entries);
-            for (entries[0..header.count]) |entry| _ = try pageReference(.{
-                .page = entry.child_page,
-                .level = header.level - 1,
-                .first_key = entry.first_key,
-                .last_key = entry.last_key,
-                .digest = entry.child_digest,
-            }, source_boundary);
+            for (entries[0..header.count]) |entry| {
+                const child: blob_map.PageRef = .{
+                    .page = entry.child_page,
+                    .level = header.level - 1,
+                    .first_key = entry.first_key,
+                    .last_key = entry.last_key,
+                    .digest = entry.child_digest,
+                };
+                _ = try pageReference(
+                    child,
+                    pageBoundary(child, readable_units, write_checkpoint, self.blobs.stagedUnits()),
+                );
+            }
             break :internal try blob_map.encodeInternal(header.level, generation, entries[0..header.count]);
         };
         return self.writePage(io, header.level, header.first_key, header.last_key, &page);
@@ -820,6 +961,15 @@ fn pageReference(reference: blob_map.PageRef, boundary: u64) !blob_map.PageRef {
     return reference;
 }
 
+fn pageBoundary(
+    reference: blob_map.PageRef,
+    readable_units: u64,
+    write_checkpoint: u64,
+    staged_units: u64,
+) u64 {
+    return if (reference.page < write_checkpoint) readable_units else staged_units;
+}
+
 fn growLevel(level: u8) !u8 {
     if (level == std.math.maxInt(u8)) return error.BlobMapTreeTooDeep;
     return level + 1;
@@ -955,11 +1105,20 @@ test "blob map store builds and queries multiple levels" {
         },
     };
     const root = try maps.build(std.testing.io, 7, &entries);
+    const root_readable_units = blobs.stagedUnits();
     try std.testing.expectEqual(@as(u8, 1), root.level);
-    try blobs.commit(std.testing.io);
-
     const scratch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
     defer std.testing.allocator.free(scratch);
+    try std.testing.expectError(
+        error.UnpublishedBlobReference,
+        maps.lookupAt(std.testing.io, root, 7, root.page, 84, scratch),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1042),
+        (try maps.lookupAt(std.testing.io, root, 7, root_readable_units, 84, scratch)).?.slot,
+    );
+    try blobs.commit(std.testing.io);
+
     const found = (try maps.lookup(std.testing.io, root, 7, 84, scratch)).?;
     try std.testing.expectEqual(@as(u64, 1042), found.slot);
     try std.testing.expect((try maps.lookup(std.testing.io, root, 7, 85, scratch)) == null);
@@ -1160,6 +1319,8 @@ test "blob map batch applies sparse mutations ranges and root contraction" {
     var entries: [91]blob_map.LeafEntry = undefined;
     for (&entries, 0..) |*entry, key| entry.* = testStoredEntry(key, data, 1);
     const root = try maps.build(std.testing.io, 1, &entries);
+    const root_readable_units = blobs.stagedUnits();
+    _ = try blobs.put(std.testing.io, "unrelated staged payload");
     const scratch = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), blob_map.page_size);
     defer std.testing.allocator.free(scratch);
 
@@ -1171,10 +1332,11 @@ test "blob map batch applies sparse mutations ranges and root contraction" {
         .{ .upsert = testStoredEntry(100, data, 5) },
         .{ .remove = 200 },
     };
-    const ranged = (try maps.applyBatch(
+    const ranged = (try maps.applyBatchAt(
         std.testing.io,
         root,
         1,
+        root_readable_units,
         2,
         &mutations,
         .{ .first = 2, .end = 90 },
