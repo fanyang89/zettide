@@ -34,6 +34,13 @@ cmake -S /path/to/nfs-ganesha/src -B /path/to/ganesha-build \
 cmake --build /path/to/ganesha-build --target fsalzettide
 ```
 
+Run the real NFSv3 RPC integration gate against that build:
+
+```sh
+zig build test-nfs-ganesha -Dnfs-ganesha-tests=required \
+  -Dganesha-build-dir=/path/to/ganesha-build
+```
+
 Ganesha `V13.0` requires either D-Bus or gRPC for declarations used by its
 statistics source, so keep D-Bus enabled even when its administration API is
 not used.

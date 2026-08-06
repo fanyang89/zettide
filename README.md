@@ -107,6 +107,8 @@ zig build test-spdk-storage
 zig build test-fuse -Dfuse-tests=required
 zig build test-dufs -Dfuse-tests=required
 zig build test-smb3-linux -Dsmb3-tests=required
+zig build test-nfs-ganesha -Dnfs-ganesha-tests=required \
+  -Dganesha-build-dir=/path/to/ganesha-build
 zig build test-posix-baseline -Dfuse-tests=required
 zig build test-posix-quick -Dfuse-tests=required -Dexternal-tests=required
 zig build test-libfuse -Dexternal-tests=required
@@ -155,6 +157,14 @@ SMB3 and verifies write, rename, read-only access, unmount, and persistence. The
 gate does not install a product SMB service or modify the system Samba
 configuration. Its current scope and exclusions are documented in
 `docs/smb3-profile.md`.
+
+`test-nfs-ganesha` rebuilds `FSAL_ZETTIDE` in a separately configured pinned
+NFS-Ganesha V13 tree, starts an isolated loopback NFSv3 export on temporary
+ports, and mounts it through the Linux NFS client. The gate verifies stable
+file IDs, hard links, symlinks, rename, truncate, persistence across a server
+restart, and read-only reopening. It requires mount tools, rpcbind,
+passwordless sudo, and `-Dganesha-build-dir` pointing to the build described in
+`fsal/zettide/README.md`.
 
 `test-fio` runs deterministic CRC32C verification over buffered synchronous I/O
 to small files and multi-chunk sequential and random files. It verifies every

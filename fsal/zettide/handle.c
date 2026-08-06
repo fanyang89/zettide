@@ -35,7 +35,14 @@ static uint64_t load_u64(const uint8_t *bytes)
 
 static uint64_t zettide_fileid(const struct zettide_nfs_handle *wire)
 {
-	return load_u64(&wire->bytes[24]) ^ load_u64(&wire->bytes[32]);
+	uint64_t fileid = UINT64_C(14695981039346656037);
+	size_t index;
+
+	for (index = 24; index < 40; index++) {
+		fileid ^= wire->bytes[index];
+		fileid *= UINT64_C(1099511628211);
+	}
+	return fileid == 0 ? 1 : fileid;
 }
 
 static struct timespec zettide_timespec(int64_t nanoseconds)
