@@ -169,10 +169,19 @@ run_fio_case() {
         grep -q '^pool_transport_metrics ' "$mount_log"
         ! grep -q '^pipeline_metrics ' "$mount_log"
         ! grep -q '^member_transport_metrics ' "$mount_log"
-        if [[ $name == seq-write-1m-qd32-j1 || $name == seq-read-1m-qd32-j1 ]]; then
+        if [[ $name == seq-read-1m-qd32-j1 ]]; then
             peak_inflight=$(grep -o 'max_inflight=[0-9]*' "$mount_log")
             peak_inflight=${peak_inflight#max_inflight=}
             ((peak_inflight > 1))
+        elif [[ $name == seq-write-1m-qd32-j1 ]]; then
+            peak_inflight=$(grep -o 'max_inflight=[0-9]*' "$mount_log")
+            peak_inflight=${peak_inflight#max_inflight=}
+            ((peak_inflight == 1))
+            submitted_sqes=$(grep -o 'submitted_sqes=[0-9]*' "$mount_log")
+            submitted_sqes=${submitted_sqes#submitted_sqes=}
+            write_calls=$(grep -o 'write_calls=[0-9]*' "$mount_log")
+            write_calls=${write_calls#write_calls=}
+            ((submitted_sqes < write_calls * 128))
         fi
     else
         grep -q '^pipeline_metrics ' "$mount_log"
