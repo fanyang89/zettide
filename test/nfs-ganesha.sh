@@ -109,7 +109,7 @@ EXPORT {
         name = ZETTIDE;
         Target = "$image";
         Writable = $writable;
-        Stable_Write_Batch_Us = 200;
+        Stable_Write_Batch_Us = 1000;
     }
 }
 EOF

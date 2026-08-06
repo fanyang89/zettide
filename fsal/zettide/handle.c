@@ -857,7 +857,10 @@ static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 		if (!handle->export->stable_syncing) {
 			handle->export->stable_syncing = true;
 			handle->export->stable_batches++;
-			if (handle->export->stable_write_batch_us != 0) {
+			if (handle->export->stable_write_batch_us != 0 &&
+			    __atomic_load_n(&handle->export->stable_next_ticket,
+					    __ATOMIC_RELAXED) !=
+				    handle->export->stable_serving_ticket) {
 				uint64_t *accepting_generation =
 					&export->stable_accepting_generation;
 				uint64_t expected_generation = target_generation;
