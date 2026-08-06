@@ -68,14 +68,14 @@ EXPORT {
         name = ZETTIDE;
         Target = "/path/to/workspace.ddv";
         Writable = true;
-        Stable_Write_Batch_Us = 1000;
+        Stable_Write_Batch_Us = 4000;
     }
 }
 ```
 
-`Stable_Write_Batch_Us` controls how long a backlogged batch accepts concurrent
-stable writes before one durable sync. A batch with no queued writer syncs
-immediately. A value of `0` disables the wait window without changing NFS
+`Stable_Write_Batch_Us` limits how long a batch waits for its initial backlog to
+enter before one durable sync. A drained batch or a batch with no queued writer
+syncs immediately. A value of `0` disables the wait window without changing NFS
 stable-write semantics. Stable writes enter batches in arrival order so
 sustained concurrency cannot starve an older request.
 

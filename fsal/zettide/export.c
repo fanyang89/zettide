@@ -146,7 +146,7 @@ static struct config_item zettide_export_params[] = {
 	CONF_ITEM_STR("Target", 1, MAXPATHLEN, NULL, zettide_fsal_export,
 		      target),
 	CONF_ITEM_BOOL("Writable", false, zettide_fsal_export, writable),
-	CONF_ITEM_UI32("Stable_Write_Batch_Us", 0, 999999, 1000,
+	CONF_ITEM_UI32("Stable_Write_Batch_Us", 0, 999999, 4000,
 		       zettide_fsal_export, stable_write_batch_us),
 	CONFIG_EOL,
 };
@@ -159,6 +159,21 @@ static struct config_block zettide_export_block = {
 	.blk_desc.u.blk.params = zettide_export_params,
 	.blk_desc.u.blk.commit = noop_conf_commit,
 };
+
+static int zettide_stable_cond_init(pthread_cond_t *cond)
+{
+	pthread_condattr_t attr;
+	int status;
+
+	status = pthread_condattr_init(&attr);
+	if (status != 0)
+		return status;
+	status = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+	if (status == 0)
+		status = pthread_cond_init(cond, &attr);
+	pthread_condattr_destroy(&attr);
+	return status;
+}
 
 fsal_status_t zettide_create_export(struct fsal_module *fsal_hdl,
 				    void *parse_node,
@@ -179,7 +194,7 @@ fsal_status_t zettide_create_export(struct fsal_module *fsal_hdl,
 		goto fail;
 	}
 	mutex_initialized = true;
-	status = pthread_cond_init(&export->stable_cond, NULL);
+	status = zettide_stable_cond_init(&export->stable_cond);
 	if (status != 0) {
 		result = posix2fsal_status(status);
 		goto fail;

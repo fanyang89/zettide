@@ -765,14 +765,27 @@ done:
 	done_cb(obj_hdl, result, read_arg, caller_arg);
 }
 
-static void zettide_stable_batch_delay(uint32_t microseconds)
+static void zettide_wait_for_stable_backlog(
+	struct zettide_fsal_export *export, uint64_t target_ticket,
+	uint64_t generation, uint32_t microseconds)
 {
-	struct timespec remaining = {
-		.tv_sec = 0,
-		.tv_nsec = (long)microseconds * 1000,
-	};
+	struct timespec deadline;
+	uint64_t nanoseconds;
+	int status;
 
-	while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
+	if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+		return;
+	nanoseconds = (uint64_t)deadline.tv_nsec +
+		      (uint64_t)microseconds * 1000;
+	deadline.tv_sec += nanoseconds / 1000000000;
+	deadline.tv_nsec = nanoseconds % 1000000000;
+	while (export->stable_serving_ticket != target_ticket &&
+	       generation == export->stable_generation &&
+	       export->stable_syncing) {
+		status = pthread_cond_timedwait(&export->stable_cond,
+						&export->stable_mutex, &deadline);
+		if (status != 0)
+			break;
 	}
 }
 
@@ -820,10 +833,12 @@ static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 		stable_locked = true;
 		while (stable_ticket != handle->export->stable_serving_ticket ||
 		       (handle->export->stable_syncing &&
-			__atomic_load_n(
-				&handle->export->stable_accepting_generation,
-				__ATOMIC_ACQUIRE) !=
-				handle->export->stable_generation + 1))
+			(__atomic_load_n(
+				 &handle->export->stable_accepting_generation,
+				 __ATOMIC_ACQUIRE) !=
+				 handle->export->stable_generation + 1 ||
+			 stable_ticket ==
+				 handle->export->stable_accepting_until_ticket)))
 			pthread_cond_wait(&handle->export->stable_cond,
 					  &handle->export->stable_mutex);
 		handle->export->stable_serving_ticket++;
@@ -855,30 +870,30 @@ static void zettide_write2(struct fsal_obj_handle *obj_hdl, bool bypass,
 		int status;
 
 		if (!handle->export->stable_syncing) {
+			uint64_t target_ticket = __atomic_load_n(
+				&handle->export->stable_next_ticket,
+				__ATOMIC_RELAXED);
+
 			handle->export->stable_syncing = true;
 			handle->export->stable_batches++;
 			if (handle->export->stable_write_batch_us != 0 &&
-			    __atomic_load_n(&handle->export->stable_next_ticket,
-					    __ATOMIC_RELAXED) !=
+			    target_ticket !=
 				    handle->export->stable_serving_ticket) {
 				uint64_t *accepting_generation =
 					&export->stable_accepting_generation;
 				uint64_t expected_generation = target_generation;
 
+				handle->export->stable_accepting_until_ticket =
+					target_ticket;
 				__atomic_store_n(accepting_generation,
 						 target_generation, __ATOMIC_RELEASE);
-				pthread_mutex_unlock(
-					&handle->export->stable_mutex);
-				stable_locked = false;
-				zettide_stable_batch_delay(
+				zettide_wait_for_stable_backlog(
+					handle->export, target_ticket, generation,
 					handle->export->stable_write_batch_us);
 				__atomic_compare_exchange_n(accepting_generation,
 							    &expected_generation, 0,
 							    false, __ATOMIC_RELEASE,
 							    __ATOMIC_RELAXED);
-				pthread_mutex_lock(
-					&handle->export->stable_mutex);
-				stable_locked = true;
 			}
 			if (generation == handle->export->stable_generation &&
 			    handle->export->stable_syncing) {

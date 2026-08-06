@@ -22,6 +22,7 @@ struct zettide_fsal_export {
 	pthread_cond_t stable_cond;
 	uint64_t stable_generation;
 	uint64_t stable_accepting_generation;
+	uint64_t stable_accepting_until_ticket;
 	uint64_t stable_success_generation;
 	uint64_t stable_next_ticket;
 	uint64_t stable_serving_ticket;

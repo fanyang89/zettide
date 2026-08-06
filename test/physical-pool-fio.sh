@@ -18,7 +18,7 @@ runtime=${ZETTIDE_POOL_FIO_RUNTIME:-20}
 ramp_time=${ZETTIDE_POOL_FIO_RAMP_TIME:-5}
 frontend=${ZETTIDE_POOL_FIO_FRONTEND:-fuse}
 ganesha_build=${ZETTIDE_GANESHA_BUILD_DIR:-}
-nfs_stable_write_batch_us=${ZETTIDE_NFS_STABLE_WRITE_BATCH_US:-1000}
+nfs_stable_write_batch_us=${ZETTIDE_NFS_STABLE_WRITE_BATCH_US:-4000}
 
 [[ $EUID -eq 0 ]] || {
     echo "physical Pool fio requires root" >&2
