@@ -68,7 +68,7 @@ EXPORT {
         name = ZETTIDE;
         Target = "/path/to/workspace.ddv";
         Writable = true;
-        Stable_Write_Batch_Us = 4000;
+        Stable_Write_Batch_Us = 20000;
     }
 }
 ```

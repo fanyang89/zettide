@@ -210,7 +210,7 @@
     ZETTIDE_POOL_FIO_RUNTIME: "{{ zettide_pool_fio_runtime }}"
     ZETTIDE_POOL_FIO_RAMP_TIME: "{{ zettide_pool_fio_ramp_time }}"
     ZETTIDE_POOL_FIO_FRONTEND: "{{ 'nfs' if zettide_test_profile == 'blob-pool-nfs-fio' else 'fuse' }}"
-    ZETTIDE_NFS_STABLE_WRITE_BATCH_US: "{{ zettide_nfs_stable_write_batch_us | default(4000) }}"
+    ZETTIDE_NFS_STABLE_WRITE_BATCH_US: "{{ zettide_nfs_stable_write_batch_us | default(20000) }}"
     ZETTIDE_GANESHA_BUILD_DIR: "{{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build"
     ZETTIDE_TEST_LOG_DIR: >-
       {{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/blob-pool-fio

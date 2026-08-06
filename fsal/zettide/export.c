@@ -146,7 +146,7 @@ static struct config_item zettide_export_params[] = {
 	CONF_ITEM_STR("Target", 1, MAXPATHLEN, NULL, zettide_fsal_export,
 		      target),
 	CONF_ITEM_BOOL("Writable", false, zettide_fsal_export, writable),
-	CONF_ITEM_UI32("Stable_Write_Batch_Us", 0, 999999, 4000,
+	CONF_ITEM_UI32("Stable_Write_Batch_Us", 0, 999999, 20000,
 		       zettide_fsal_export, stable_write_batch_us),
 	CONFIG_EOL,
 };

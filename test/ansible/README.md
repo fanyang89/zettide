@@ -207,7 +207,7 @@ The profile builds the pinned NFS-Ganesha V13 source and `FSAL_ZETTIDE`, then
 mounts each fio case through the loopback Linux NFSv3 client with 1 MiB read and
 write request sizes. It does not run FUSE during the measured workload. Override
 `zettide_nfs_stable_write_batch_us` to test a different stable-write batching
-window; the default is 4000 microseconds and drained batches sync early.
+window; the default is 20000 microseconds and drained batches sync early.
 
 ## Throughput
 
