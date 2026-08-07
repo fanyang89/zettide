@@ -159,7 +159,7 @@ const Export = struct {
     threaded: std.Io.Threaded,
     owner: FilesystemOwner,
     filesystem: filesystem_api.Filesystem,
-    mutex: std.Io.Mutex = .init,
+    mutex: std.Io.RwLock = .init,
 
     fn io(self: *Export) std.Io {
         return self.threaded.io();
@@ -171,6 +171,20 @@ const Export = struct {
 
     fn unlock(self: *Export) void {
         self.mutex.unlock(self.io());
+    }
+
+    fn lockDataRead(self: *Export) !void {
+        switch (self.owner) {
+            .littlefs => try self.lock(),
+            .blob => try self.mutex.lockShared(self.io()),
+        }
+    }
+
+    fn unlockDataRead(self: *Export) void {
+        switch (self.owner) {
+            .littlefs => self.unlock(),
+            .blob => self.mutex.unlockShared(self.io()),
+        }
     }
 };
 
@@ -410,8 +424,8 @@ pub export fn zettide_nfs_read(
     const handle_value = handle orelse return status(.invalid_argument);
     const output = out_read orelse return status(.invalid_argument);
     if (buffer_length != 0 and buffer == null) return status(.invalid_argument);
-    self.lock() catch return status(.internal);
-    defer self.unlock();
+    self.lockDataRead() catch return status(.internal);
+    defer self.unlockDataRead();
     const decoded = decodeDataHandle(self, handle_value) catch |err| return statusFor(err, true);
     if (decoded.kind != .file) {
         _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);

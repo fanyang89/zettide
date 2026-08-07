@@ -20,7 +20,7 @@ pub const Filesystem = struct {
     open_references: std.AutoHashMap(u64, u64),
     inode_pins: std.AutoHashMap(u64, u64),
     dirty_files: std.AutoHashMap(u64, DirtyFile),
-    transaction_mutex: Io.Mutex = .init,
+    transaction_mutex: Io.RwLock = .init,
     dirty: bool = false,
     frozen: bool = false,
 
@@ -482,6 +482,7 @@ pub const Filesystem = struct {
         return self.readUnlocked(io, inode, null, output, offset);
     }
 
+    /// Concurrent calls require the filesystem allocator to be thread-safe.
     pub fn readAtGeneration(
         self: *Filesystem,
         io: Io,
@@ -490,8 +491,8 @@ pub const Filesystem = struct {
         output: []u8,
         offset: u64,
     ) !usize {
-        try self.transaction_mutex.lock(io);
-        defer self.transaction_mutex.unlock(io);
+        try self.transaction_mutex.lockShared(io);
+        defer self.transaction_mutex.unlockShared(io);
         return self.readUnlocked(io, inode, generation, output, offset);
     }
 

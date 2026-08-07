@@ -14,7 +14,7 @@ pub const Store = struct {
     selected_header: u1,
     sequence_floor: u64,
     staged_units: u64,
-    mutex: Io.Mutex = .init,
+    mutex: Io.RwLock = .init,
     frozen: bool = false,
 
     /// Takes ownership of device, including on failure.
@@ -253,8 +253,8 @@ pub const Store = struct {
     pub fn readMany(self: *Store, io: Io, reads: []const Read, results: []ReadResult) !void {
         if (reads.len == 0 or reads.len != results.len or reads.len > blob_device.max_batch)
             return error.InvalidBlobBatch;
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
+        try self.mutex.lockShared(io);
+        defer self.mutex.unlockShared(io);
         if (self.frozen) return error.BlobStoreFrozen;
         var device_reads: [blob_device.max_batch]blob_device.Read = undefined;
         for (results) |*result| result.* = .{};
@@ -298,8 +298,8 @@ pub const Store = struct {
     ) !void {
         if (output.len != valid_bytes or valid_bytes == 0)
             return error.InvalidBlobBuffer;
-        try self.mutex.lock(io);
-        defer self.mutex.unlock(io);
+        try self.mutex.lockShared(io);
+        defer self.mutex.unlockShared(io);
         if (self.frozen) return error.BlobStoreFrozen;
         const units = format.allocationUnits(valid_bytes);
         if (slot > self.staged_units or units > self.staged_units - slot)
