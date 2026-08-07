@@ -92,20 +92,7 @@ fn decodeLeafImpl(bytes: *const [page_size]u8, entries: []LeafEntry, verify_chec
     if (header.kind != .leaf or header.level != 0 or entries.len < header.count)
         return error.InvalidBlobMapPage;
     for (entries[0..header.count], 0..) |*entry, index| {
-        const offset = header_size + index * leaf_entry_size;
-        entry.* = .{
-            .logical_blob = std.mem.readInt(u64, bytes[offset..][0..8], .little),
-            .reference = .{
-                .slot = std.mem.readInt(u64, bytes[offset + 8 ..][0..8], .little),
-                .valid_bytes = std.mem.readInt(u32, bytes[offset + 16 ..][0..4], .little),
-                .checksums = undefined,
-            },
-        };
-        if (!std.mem.allEqual(u8, bytes[offset + 20 ..][0..4], 0) or
-            entry.reference.valid_bytes > blob_format.blob_size)
-            return error.InvalidBlobMapPage;
-        for (&entry.reference.checksums, 0..) |*checksum, checksum_index|
-            checksum.* = std.mem.readInt(u32, bytes[offset + 24 + checksum_index * 4 ..][0..4], .little);
+        entry.* = try decodeLeafEntry(bytes, index);
         if (index != 0 and entries[index - 1].logical_blob >= entry.logical_blob)
             return error.InvalidBlobMapPage;
     }
@@ -113,6 +100,25 @@ fn decodeLeafImpl(bytes: *const [page_size]u8, entries: []LeafEntry, verify_chec
         entries[header.count - 1].logical_blob != header.last_key)
         return error.InvalidBlobMapPage;
     return header;
+}
+
+pub fn lookupLeafVerified(bytes: *const [page_size]u8, logical_blob: u64) !?blob_format.BlobRef {
+    const header = try decodeHeaderVerified(bytes);
+    if (header.kind != .leaf or header.level != 0) return error.InvalidBlobMapPage;
+    var previous: ?u64 = null;
+    var selected: ?blob_format.BlobRef = null;
+    var first: u64 = 0;
+    var last: u64 = 0;
+    for (0..header.count) |index| {
+        const entry = try decodeLeafEntry(bytes, index);
+        if (previous) |key| if (key >= entry.logical_blob) return error.InvalidBlobMapPage;
+        if (index == 0) first = entry.logical_blob;
+        last = entry.logical_blob;
+        previous = entry.logical_blob;
+        if (entry.logical_blob == logical_blob) selected = entry.reference;
+    }
+    if (first != header.first_key or last != header.last_key) return error.InvalidBlobMapPage;
+    return selected;
 }
 
 pub fn encodeInternal(level: u8, generation: u64, entries: []const InternalEntry) ![page_size]u8 {
@@ -157,21 +163,33 @@ fn decodeInternalImpl(bytes: *const [page_size]u8, entries: []InternalEntry, ver
     if (header.kind != .internal or header.level == 0 or entries.len < header.count)
         return error.InvalidBlobMapPage;
     for (entries[0..header.count], 0..) |*entry, index| {
-        const offset = header_size + index * internal_entry_size;
-        entry.* = .{
-            .first_key = std.mem.readInt(u64, bytes[offset..][0..8], .little),
-            .last_key = std.mem.readInt(u64, bytes[offset + 8 ..][0..8], .little),
-            .child_page = std.mem.readInt(u64, bytes[offset + 16 ..][0..8], .little),
-            .child_digest = bytes[offset + 24 ..][0..digest_size].*,
-        };
-        if (entry.first_key > entry.last_key or
-            (index != 0 and entries[index - 1].last_key >= entry.first_key))
+        entry.* = try decodeInternalEntry(bytes, index);
+        if (index != 0 and entries[index - 1].last_key >= entry.first_key)
             return error.InvalidBlobMapPage;
     }
     if (entries[0].first_key != header.first_key or
         entries[header.count - 1].last_key != header.last_key)
         return error.InvalidBlobMapPage;
     return header;
+}
+
+pub fn selectInternalVerified(bytes: *const [page_size]u8, logical_blob: u64) !?InternalEntry {
+    const header = try decodeHeaderVerified(bytes);
+    if (header.kind != .internal or header.level == 0) return error.InvalidBlobMapPage;
+    var previous_last: ?u64 = null;
+    var selected: ?InternalEntry = null;
+    var first: u64 = 0;
+    var last: u64 = 0;
+    for (0..header.count) |index| {
+        const entry = try decodeInternalEntry(bytes, index);
+        if (previous_last) |key| if (key >= entry.first_key) return error.InvalidBlobMapPage;
+        if (index == 0) first = entry.first_key;
+        last = entry.last_key;
+        previous_last = entry.last_key;
+        if (logical_blob >= entry.first_key and logical_blob <= entry.last_key) selected = entry;
+    }
+    if (first != header.first_key or last != header.last_key) return error.InvalidBlobMapPage;
+    return selected;
 }
 
 pub fn decodeHeader(bytes: *const [page_size]u8) !Header {
@@ -206,6 +224,36 @@ fn decodeHeaderImpl(bytes: *const [page_size]u8, verify_checksum: bool) !Header 
     return header;
 }
 
+fn decodeLeafEntry(bytes: *const [page_size]u8, index: usize) !LeafEntry {
+    const offset = header_size + index * leaf_entry_size;
+    var entry: LeafEntry = .{
+        .logical_blob = std.mem.readInt(u64, bytes[offset..][0..8], .little),
+        .reference = .{
+            .slot = std.mem.readInt(u64, bytes[offset + 8 ..][0..8], .little),
+            .valid_bytes = std.mem.readInt(u32, bytes[offset + 16 ..][0..4], .little),
+            .checksums = undefined,
+        },
+    };
+    if (!std.mem.allEqual(u8, bytes[offset + 20 ..][0..4], 0) or
+        entry.reference.valid_bytes > blob_format.blob_size)
+        return error.InvalidBlobMapPage;
+    for (&entry.reference.checksums, 0..) |*checksum, checksum_index|
+        checksum.* = std.mem.readInt(u32, bytes[offset + 24 + checksum_index * 4 ..][0..4], .little);
+    return entry;
+}
+
+fn decodeInternalEntry(bytes: *const [page_size]u8, index: usize) !InternalEntry {
+    const offset = header_size + index * internal_entry_size;
+    const entry: InternalEntry = .{
+        .first_key = std.mem.readInt(u64, bytes[offset..][0..8], .little),
+        .last_key = std.mem.readInt(u64, bytes[offset + 8 ..][0..8], .little),
+        .child_page = std.mem.readInt(u64, bytes[offset + 16 ..][0..8], .little),
+        .child_digest = bytes[offset + 24 ..][0..digest_size].*,
+    };
+    if (entry.first_key > entry.last_key) return error.InvalidBlobMapPage;
+    return entry;
+}
+
 pub fn pageDigest(bytes: *const [page_size]u8) Digest {
     var digest: Digest = undefined;
     std.crypto.hash.Blake3.hash(bytes, &digest, .{});
@@ -238,6 +286,8 @@ test "blob map leaf page round trips" {
     try std.testing.expectEqual(Kind.leaf, header.kind);
     try std.testing.expectEqual(@as(u64, 9), header.generation);
     try std.testing.expectEqualDeep(references, decoded[0..references.len].*);
+    try std.testing.expectEqualDeep(references[0].reference, (try lookupLeafVerified(&encoded, 3)).?);
+    try std.testing.expect((try lookupLeafVerified(&encoded, 5)) == null);
     _ = pageDigest(&encoded);
 
     var stale_checksum = encoded;
@@ -256,10 +306,13 @@ test "blob map internal page round trips and rejects corruption" {
     const header = try decodeInternal(&encoded, &decoded);
     try std.testing.expectEqual(@as(u8, 1), header.level);
     try std.testing.expectEqualDeep(entries, decoded[0..entries.len].*);
+    try std.testing.expectEqualDeep(entries[1], (try selectInternalVerified(&encoded, 50)).?);
+    try std.testing.expect((try selectInternalVerified(&encoded, 90)) == null);
 
     var corrupt = encoded;
     corrupt[header_size] ^= 1;
     try std.testing.expectError(error.InvalidBlobMapPage, decodeInternal(&corrupt, &decoded));
+    try std.testing.expectError(error.InvalidBlobMapPage, selectInternalVerified(&corrupt, 1));
 }
 
 test "blob map pages reject unsorted entries" {

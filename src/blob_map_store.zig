@@ -122,31 +122,10 @@ pub const MapStore = struct {
             maximum_generation = header.generation;
             if (logical_blob < current.first_key or logical_blob > current.last_key) return null;
             if (header.kind == .leaf) {
-                var entries = uninitialized([blob_map.max_leaf_entries]blob_map.LeafEntry);
-                _ = try blob_map.decodeLeafVerified(page, &entries);
-                var low: usize = 0;
-                var high: usize = header.count;
-                while (low < high) {
-                    const middle = low + (high - low) / 2;
-                    if (entries[middle].logical_blob < logical_blob)
-                        low = middle + 1
-                    else
-                        high = middle;
-                }
-                if (low == header.count or entries[low].logical_blob != logical_blob) return null;
-                return entries[low].reference;
+                return try blob_map.lookupLeafVerified(page, logical_blob);
             }
 
-            var entries = uninitialized([blob_map.max_internal_entries]blob_map.InternalEntry);
-            _ = try blob_map.decodeInternalVerified(page, &entries);
-            var selected: ?blob_map.InternalEntry = null;
-            for (entries[0..header.count]) |entry| {
-                if (logical_blob >= entry.first_key and logical_blob <= entry.last_key) {
-                    selected = entry;
-                    break;
-                }
-            }
-            const child = selected orelse return null;
+            const child = try blob_map.selectInternalVerified(page, logical_blob) orelse return null;
             current = try pageReference(.{
                 .page = child.child_page,
                 .level = header.level - 1,
