@@ -1,6 +1,7 @@
 const std = @import("std");
 const blob_device = @import("blob_device.zig");
 const format = @import("blob_format.zig");
+const blob_map = @import("blob_map.zig");
 const google_crc32c = @import("crc32c");
 const storage_api = @import("v3/storage.zig");
 
@@ -9,12 +10,32 @@ const Io = std.Io;
 const digest_cache_ways = 4;
 const digest_cache_sets = 4096;
 const digest_cache_entries = digest_cache_ways * digest_cache_sets;
+const block_cache_ways = 4;
+const block_cache_sets = 131_072;
+const block_cache_entries = block_cache_ways * block_cache_sets;
+const block_cache_shards = 64;
+const block_cache_disabled = std.math.maxInt(usize);
 
 const DigestCacheEntry = struct {
     slot: u64 = 0,
     digest: [32]u8 = @splat(0),
     valid: bool = false,
     bytes: [format.allocation_unit]u8 = undefined,
+};
+
+pub const CachedBlockMapping = union(enum) {
+    miss,
+    hole,
+    present: format.BlobRef,
+};
+
+const BlockCacheEntry = struct {
+    epoch: u64 = 0,
+    root: blob_map.PageRef = undefined,
+    generation: u64 = 0,
+    readable_units: u64 = 0,
+    block: u64 = 0,
+    mapping: CachedBlockMapping = .miss,
 };
 
 pub const Store = struct {
@@ -29,6 +50,11 @@ pub const Store = struct {
     digest_cache_mutex: Io.RwLock = .init,
     digest_cache: ?[]DigestCacheEntry = null,
     digest_cache_next: usize = 0,
+    block_cache_init_mutex: Io.Mutex = .init,
+    block_cache_locks: [block_cache_shards]Io.RwLock = @splat(.init),
+    block_cache_victims: [block_cache_shards]std.atomic.Value(usize) = @splat(.init(0)),
+    block_cache_ptr: std.atomic.Value(usize) = .init(0),
+    block_cache_epoch: std.atomic.Value(u64) = .init(1),
     frozen: bool = false,
 
     /// Takes ownership of device, including on failure.
@@ -82,9 +108,14 @@ pub const Store = struct {
     pub fn close(self: *Store, io: Io) !void {
         const allocator = self.allocator;
         const digest_cache = self.digest_cache;
+        const block_cache_ptr = self.block_cache_ptr.load(.acquire);
         var device = self.device;
         self.* = undefined;
         if (digest_cache) |entries| allocator.free(entries);
+        if (block_cache_ptr != 0 and block_cache_ptr != block_cache_disabled) {
+            const entries: []BlockCacheEntry = @as([*]BlockCacheEntry, @ptrFromInt(block_cache_ptr))[0..block_cache_entries];
+            allocator.free(entries);
+        }
         try device.close(io);
     }
 
@@ -401,6 +432,117 @@ pub const Store = struct {
             for (entries) |*entry| entry.valid = false;
         }
         self.digest_cache_next = 0;
+        self.clearBlockCache(io);
+    }
+
+    pub fn cachedBlockMapping(
+        self: *Store,
+        io: Io,
+        root: blob_map.PageRef,
+        generation: u64,
+        readable_units: u64,
+        block: u64,
+    ) CachedBlockMapping {
+        const entries = self.blockCacheEntries() orelse return .miss;
+        const set = blockCacheSet(root, generation, readable_units, block);
+        const shard = blockCacheShard(set);
+        self.block_cache_locks[shard].lockSharedUncancelable(io);
+        defer self.block_cache_locks[shard].unlockShared(io);
+        const epoch = self.block_cache_epoch.load(.acquire);
+        for (entries[set..][0..block_cache_ways]) |entry| {
+            if (entry.epoch == epoch and entry.mapping != .miss and entry.generation == generation and
+                entry.readable_units == readable_units and entry.block == block and
+                std.meta.eql(entry.root, root))
+            {
+                const mapping = entry.mapping;
+                return if (self.block_cache_epoch.load(.acquire) == epoch) mapping else .miss;
+            }
+        }
+        return .miss;
+    }
+
+    pub fn blockCacheEpoch(self: *Store) u64 {
+        return self.block_cache_epoch.load(.acquire);
+    }
+
+    pub fn cacheBlockMapping(
+        self: *Store,
+        io: Io,
+        root: blob_map.PageRef,
+        generation: u64,
+        readable_units: u64,
+        block: u64,
+        reference: ?format.BlobRef,
+        expected_epoch: u64,
+    ) void {
+        const entries = self.ensureBlockCache(io) orelse return;
+        const set = blockCacheSet(root, generation, readable_units, block);
+        const shard = blockCacheShard(set);
+        self.block_cache_locks[shard].lockUncancelable(io);
+        defer self.block_cache_locks[shard].unlock(io);
+        const epoch = self.block_cache_epoch.load(.acquire);
+        if (epoch != expected_epoch) return;
+        var target: ?*BlockCacheEntry = null;
+        for (entries[set..][0..block_cache_ways]) |*entry| {
+            if (entry.epoch == epoch and entry.mapping != .miss and entry.generation == generation and
+                entry.readable_units == readable_units and entry.block == block and
+                std.meta.eql(entry.root, root))
+            {
+                target = entry;
+                break;
+            }
+            if (entry.epoch != epoch or entry.mapping == .miss) {
+                target = entry;
+                break;
+            }
+        }
+        const selected = target orelse &entries[set + self.block_cache_victims[shard].fetchAdd(1, .monotonic) % block_cache_ways];
+        selected.* = .{
+            .epoch = epoch,
+            .root = root,
+            .generation = generation,
+            .readable_units = readable_units,
+            .block = block,
+            .mapping = if (reference) |value| .{ .present = value } else .hole,
+        };
+    }
+
+    fn blockCacheEntries(self: *Store) ?[]BlockCacheEntry {
+        const pointer = self.block_cache_ptr.load(.acquire);
+        if (pointer == 0 or pointer == block_cache_disabled) return null;
+        return @as([*]BlockCacheEntry, @ptrFromInt(pointer))[0..block_cache_entries];
+    }
+
+    fn ensureBlockCache(self: *Store, io: Io) ?[]BlockCacheEntry {
+        if (self.blockCacheEntries()) |entries| return entries;
+        if (self.block_cache_ptr.load(.acquire) == block_cache_disabled) return null;
+        self.block_cache_init_mutex.lockUncancelable(io);
+        defer self.block_cache_init_mutex.unlock(io);
+        if (self.blockCacheEntries()) |entries| return entries;
+        if (self.block_cache_ptr.load(.acquire) == block_cache_disabled) return null;
+        const allocated = self.allocator.alloc(BlockCacheEntry, block_cache_entries) catch {
+            self.block_cache_ptr.store(block_cache_disabled, .release);
+            return null;
+        };
+        for (allocated) |*entry| entry.* = .{};
+        self.block_cache_ptr.store(@intFromPtr(allocated.ptr), .release);
+        return allocated;
+    }
+
+    fn clearBlockCache(self: *Store, io: Io) void {
+        if (self.block_cache_epoch.fetchAdd(1, .acq_rel) != std.math.maxInt(u64)) return;
+        for (&self.block_cache_locks) |*lock| lock.lockUncancelable(io);
+        defer {
+            var index = self.block_cache_locks.len;
+            while (index != 0) {
+                index -= 1;
+                self.block_cache_locks[index].unlock(io);
+            }
+        }
+        if (self.blockCacheEntries()) |entries| {
+            for (entries) |*entry| entry.mapping = .miss;
+        }
+        self.block_cache_epoch.store(1, .release);
     }
 
     pub fn commit(self: *Store, io: Io) !void {
@@ -458,6 +600,16 @@ pub const Store = struct {
 fn digestCacheSet(slot: u64, digest: *const [32]u8) usize {
     const hash = std.mem.readInt(u64, digest[0..8], .little) ^ slot;
     return @as(usize, @intCast(hash % digest_cache_sets)) * digest_cache_ways;
+}
+
+fn blockCacheSet(root: blob_map.PageRef, generation: u64, readable_units: u64, block: u64) usize {
+    const digest = std.mem.readInt(u64, root.digest[0..8], .little);
+    const hash = digest ^ root.page ^ generation ^ readable_units ^ block;
+    return @as(usize, @intCast(hash % block_cache_sets)) * block_cache_ways;
+}
+
+fn blockCacheShard(set: usize) usize {
+    return (set / block_cache_ways) % block_cache_shards;
 }
 
 fn validateAlignment(alignment: u32) !void {
@@ -732,7 +884,40 @@ test "blob store discards an unpublished tail" {
     const first_slot = try store.putDigestOnly(std.testing.io, &first_page);
     var output: [format.allocation_unit]u8 align(format.allocation_unit) = undefined;
     try store.readDigestVerified(std.testing.io, first_slot, output.len, &first_digest, &output, true);
+    const root: blob_map.PageRef = .{
+        .page = first_slot,
+        .level = 0,
+        .first_key = 7,
+        .last_key = 7,
+        .digest = first_digest,
+    };
+    const cached_reference: format.BlobRef = .{
+        .slot = first_slot,
+        .valid_bytes = format.allocation_unit,
+        .checksums = @splat(0x1234),
+    };
+    store.cacheBlockMapping(
+        std.testing.io,
+        root,
+        3,
+        store.stagedUnits(),
+        7,
+        cached_reference,
+        store.blockCacheEpoch(),
+    );
+    try std.testing.expectEqualDeep(
+        CachedBlockMapping{ .present = cached_reference },
+        store.cachedBlockMapping(std.testing.io, root, 3, store.stagedUnits(), 7),
+    );
+    try std.testing.expectEqualDeep(
+        CachedBlockMapping.miss,
+        store.cachedBlockMapping(std.testing.io, root, 4, store.stagedUnits(), 7),
+    );
     try store.discardStaged(std.testing.io, page_checkpoint);
+    try std.testing.expectEqualDeep(
+        CachedBlockMapping.miss,
+        store.cachedBlockMapping(std.testing.io, root, 3, first_slot + 1, 7),
+    );
     const second_slot = try store.putDigestOnly(std.testing.io, &second_page);
     try std.testing.expectEqual(first_slot, second_slot);
     try std.testing.expectError(
