@@ -46,6 +46,9 @@ pub fn readSnapshotAt(
     if (offset >= snapshot.logical_size or output.len == 0) return 0;
 
     const amount: usize = @intCast(@min(@as(u64, output.len), snapshot.logical_size - offset));
+    if (amount == block_size and offset % block_size == 0) {
+        return readSnapshotBlock(allocator, io, blobs, readable_units, snapshot, output[0..amount], offset / block_size);
+    }
     const map_scratch = try allocator.alignedAlloc(u8, .fromByteUnits(blob_format.allocation_unit), blob_map.page_size);
     defer allocator.free(map_scratch);
     const touched_blocks = try std.math.divCeil(
@@ -136,6 +139,74 @@ pub fn readSnapshotAt(
         if (pending_error) |err| return err;
     }
     return amount;
+}
+
+fn readSnapshotBlock(
+    allocator: std.mem.Allocator,
+    io: Io,
+    blobs: *blob_store.Store,
+    readable_units: u64,
+    snapshot: Snapshot,
+    output: []u8,
+    block: u64,
+) !usize {
+    const root = snapshot.root orelse {
+        @memset(output, 0);
+        return output.len;
+    };
+    const cache_epoch = blobs.blockCacheEpoch();
+    const mapping = switch (blobs.cachedBlockMapping(io, root, snapshot.generation, readable_units, block)) {
+        .miss => loaded: {
+            const map_scratch = try allocator.alignedAlloc(
+                u8,
+                .fromByteUnits(blob_format.allocation_unit),
+                blob_map.page_size,
+            );
+            defer allocator.free(map_scratch);
+            var maps = blob_map_store.MapStore.init(allocator, blobs);
+            var entries: [1]blob_map.LeafEntry = undefined;
+            const loaded = try maps.loadRangeAt(
+                io,
+                root,
+                snapshot.generation,
+                readable_units,
+                block,
+                block + 1,
+                map_scratch,
+                &entries,
+            );
+            if (loaded.end_key != block + 1 or loaded.count > 1 or
+                (loaded.count == 1 and entries[0].logical_blob != block))
+                return error.InvalidBlobFileSnapshot;
+            const reference = if (loaded.count == 1) entries[0].reference else null;
+            if (reference) |ref| try validateBlockReference(blobs, readable_units, ref);
+            blobs.cacheBlockMapping(io, root, snapshot.generation, readable_units, block, reference, cache_epoch);
+            break :loaded if (reference) |ref| blob_store.CachedBlockMapping{ .present = ref } else .hole;
+        },
+        .hole => .hole,
+        .present => |reference| blob_store.CachedBlockMapping{ .present = reference },
+    };
+    const reference = switch (mapping) {
+        .hole => {
+            @memset(output, 0);
+            return output.len;
+        },
+        .present => |value| value,
+        .miss => unreachable,
+    };
+    try validateBlockReference(blobs, readable_units, reference);
+    const scratch = try allocator.alignedAlloc(u8, .fromByteUnits(block_size), block_size);
+    defer allocator.free(scratch);
+    const amount = try blobs.read(io, reference, scratch);
+    if (amount != block_size) return error.InvalidBlobFileBlock;
+    @memcpy(output, scratch);
+    return output.len;
+}
+
+fn validateBlockReference(blobs: *blob_store.Store, readable_units: u64, reference: blob_format.BlobRef) !void {
+    reference.validate(blobs.header.unit_count) catch return error.InvalidBlobFileSnapshot;
+    if (reference.valid_bytes != block_size or reference.endUnit() > readable_units)
+        return error.InvalidBlobFileSnapshot;
 }
 
 pub const State = struct {
@@ -1495,12 +1566,30 @@ test "blob file snapshot point reads preserve corruption validation" {
         0,
     ));
     try std.testing.expectEqual(@as(u8, 'x'), byte[0]);
+    var block_output: [block_size]u8 = undefined;
+    try std.testing.expectEqual(block_output.len, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        snapshot,
+        &block_output,
+        0,
+    ));
+    try std.testing.expectEqualSlices(u8, &data, &block_output);
+    try std.testing.expectEqual(block_output.len, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        snapshot,
+        &block_output,
+        0,
+    ));
     try std.testing.expectError(error.InvalidBlobFileSnapshot, readSnapshot(
         std.testing.allocator,
         std.testing.io,
         &blobs,
         snapshot,
-        &byte,
+        &block_output,
         (entries.len - 1) * block_size,
     ));
 
@@ -1511,7 +1600,7 @@ test "blob file snapshot point reads preserve corruption validation" {
         std.testing.io,
         &blobs,
         out_of_range,
-        &byte,
+        &block_output,
         0,
     ));
     var wrong_generation = snapshot;
@@ -1521,7 +1610,7 @@ test "blob file snapshot point reads preserve corruption validation" {
         std.testing.io,
         &blobs,
         wrong_generation,
-        &byte,
+        &block_output,
         0,
     ));
     var wrong_digest = snapshot;
@@ -1531,7 +1620,7 @@ test "blob file snapshot point reads preserve corruption validation" {
         std.testing.io,
         &blobs,
         wrong_digest,
-        &byte,
+        &block_output,
         0,
     ));
 
@@ -1547,7 +1636,7 @@ test "blob file snapshot point reads preserve corruption validation" {
         std.testing.io,
         &blobs,
         .{ .generation = 10, .logical_size = block_size, .root = checksum_root },
-        &byte,
+        &block_output,
         0,
     ));
 
@@ -1569,7 +1658,61 @@ test "blob file snapshot point reads preserve corruption validation" {
             .last_key = 0,
             .digest = blob_map.pageDigest(&bad_page),
         } },
-        &byte,
+        &block_output,
         0,
     ));
+}
+
+test "blob file aligned snapshot fast path preserves EOF and holes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-fast-read",
+        32 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var file = State.init(std.testing.allocator, &blobs);
+    defer file.deinit();
+    const data: [block_size]u8 = @splat('f');
+    try std.testing.expectEqual(data.len, try file.write(std.testing.io, &data, 0));
+    try file.truncate(std.testing.io, 2 * block_size);
+    const snapshot = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(snapshot);
+
+    var output: [2 * block_size]u8 = @splat(0xa5);
+    try std.testing.expectEqual(block_size, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        .{ .generation = snapshot.generation, .logical_size = block_size, .root = snapshot.root },
+        &output,
+        0,
+    ));
+    try std.testing.expectEqualSlices(u8, &data, output[0..block_size]);
+    try std.testing.expect(std.mem.allEqual(u8, output[block_size..], 0xa5));
+
+    try std.testing.expectEqual(block_size, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        snapshot,
+        output[0..block_size],
+        block_size,
+    ));
+    try std.testing.expect(std.mem.allEqual(u8, output[0..block_size], 0));
+    @memset(output[0..block_size], 0xa5);
+    try std.testing.expectEqual(block_size, try readSnapshot(
+        std.testing.allocator,
+        std.testing.io,
+        &blobs,
+        snapshot,
+        output[0..block_size],
+        block_size,
+    ));
+    try std.testing.expect(std.mem.allEqual(u8, output[0..block_size], 0));
 }
