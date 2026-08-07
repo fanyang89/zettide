@@ -370,7 +370,7 @@ pub export fn zettide_nfs_setattr(
     if (changes.mask & ~set_mask != 0) return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
+    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
 
     if (changes.mask & set_size != 0) {
         if (decoded.kind != .file) return status(.invalid_argument);
@@ -413,8 +413,10 @@ pub export fn zettide_nfs_read(
     self.lock() catch return status(.internal);
     defer self.unlock();
     const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
-    if (decoded.kind == .directory) return status(.is_directory);
-    if (decoded.kind != .file) return status(.invalid_argument);
+    if (decoded.kind != .file) {
+        _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
+        return if (decoded.kind == .directory) status(.is_directory) else status(.invalid_argument);
+    }
     if (buffer_length == 0) {
         _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
         output.* = 0;
@@ -470,8 +472,10 @@ pub export fn zettide_nfs_write(
     self.lock() catch return status(.internal);
     defer self.unlock();
     const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
-    if (decoded.kind == .directory) return status(.is_directory);
-    if (decoded.kind != .file) return status(.invalid_argument);
+    if (decoded.kind != .file) {
+        _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
+        return if (decoded.kind == .directory) status(.is_directory) else status(.invalid_argument);
+    }
     if (data_length == 0) {
         _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
         output.* = 0;
@@ -1162,6 +1166,14 @@ test "direct NFS backend exports standalone BlobFilesystem" {
     var reopened_root: Handle = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &reopened_root, &root_attributes));
     try std.testing.expectEqualSlices(u8, &root_handle.bytes, &reopened_root.bytes);
+    try std.testing.expectEqual(
+        status(.stale),
+        zettide_nfs_write(export_handle, &stale_handle, 0, "stale", "stale".len, &stale_amount),
+    );
+    try std.testing.expectEqual(
+        status(.read_only),
+        zettide_nfs_write(export_handle, &file_handle, 0, "read only", "read only".len, &stale_amount),
+    );
     var contents: [32]u8 = undefined;
     var amount: usize = 0;
     try std.testing.expectEqual(
