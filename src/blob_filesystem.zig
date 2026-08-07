@@ -11,6 +11,17 @@ const name_profile = @import("name_profile.zig");
 
 const Io = std.Io;
 
+const inode_cache_ways = 4;
+const inode_cache_sets = 256;
+const inode_cache_entries = inode_cache_ways * inode_cache_sets;
+
+const InodeCacheEntry = struct {
+    root_generation: u64 = 0,
+    inode: u64 = 0,
+    record: filesystem_format.InodeRecord = undefined,
+    valid: bool = false,
+};
+
 pub const Filesystem = struct {
     allocator: std.mem.Allocator,
     blobs: blob_store.Store,
@@ -21,6 +32,9 @@ pub const Filesystem = struct {
     inode_pins: std.AutoHashMap(u64, u64),
     dirty_files: std.AutoHashMap(u64, DirtyFile),
     transaction_mutex: Io.RwLock = .init,
+    inode_cache_mutex: Io.RwLock = .init,
+    inode_cache: ?[]InodeCacheEntry = null,
+    inode_cache_next: usize = 0,
     dirty: bool = false,
     frozen: bool = false,
 
@@ -189,11 +203,14 @@ pub const Filesystem = struct {
         if (self.writable and self.dirty) self.sync(io) catch |err| {
             first_error = err;
         };
+        const allocator = self.allocator;
         var blobs = self.blobs;
+        const inode_cache = self.inode_cache;
         self.deinitDirtyFiles();
         self.open_references.deinit();
         self.inode_pins.deinit();
         self.* = undefined;
+        if (inode_cache) |entries| allocator.free(entries);
         blobs.close(io) catch |err| if (first_error == null) {
             first_error = err;
         };
@@ -1066,6 +1083,8 @@ pub const Filesystem = struct {
 
     fn loadInode(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.InodeRecord {
         if (self.dirty_files.getPtr(inode)) |dirty_file| return dirty_file.record;
+        if (self.blobs.frozen) return error.BlobStoreFrozen;
+        if (self.readInodeCache(io, self.root.generation, inode)) |record| return record;
         const key = filesystem_format.inodeKey(inode) catch return error.FileNotFound;
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
         const value = try maps.lookupAllocAt(
@@ -1079,8 +1098,62 @@ pub const Filesystem = struct {
         defer self.allocator.free(value);
         if (value.len != filesystem_format.inode_encoded_size)
             return error.InvalidBlobFilesystemGraph;
-        return filesystem_format.decodeInode(@ptrCast(value.ptr)) catch
+        const record = filesystem_format.decodeInode(@ptrCast(value.ptr)) catch
             return error.InvalidBlobFilesystemGraph;
+        self.writeInodeCache(io, self.root.generation, inode, record);
+        return record;
+    }
+
+    fn readInodeCache(
+        self: *Filesystem,
+        io: Io,
+        root_generation: u64,
+        inode: u64,
+    ) ?filesystem_format.InodeRecord {
+        self.inode_cache_mutex.lockSharedUncancelable(io);
+        defer self.inode_cache_mutex.unlockShared(io);
+        const entries = self.inode_cache orelse return null;
+        const set = inodeCacheSet(root_generation, inode);
+        for (entries[set..][0..inode_cache_ways]) |entry| {
+            if (entry.valid and entry.root_generation == root_generation and entry.inode == inode)
+                return entry.record;
+        }
+        return null;
+    }
+
+    fn writeInodeCache(
+        self: *Filesystem,
+        io: Io,
+        root_generation: u64,
+        inode: u64,
+        record: filesystem_format.InodeRecord,
+    ) void {
+        self.inode_cache_mutex.lockUncancelable(io);
+        defer self.inode_cache_mutex.unlock(io);
+        const entries = self.inode_cache orelse created: {
+            const allocated = self.allocator.alloc(InodeCacheEntry, inode_cache_entries) catch return;
+            for (allocated) |*entry| entry.* = .{};
+            self.inode_cache = allocated;
+            break :created allocated;
+        };
+        const set = inodeCacheSet(root_generation, inode);
+        var target: ?*InodeCacheEntry = null;
+        for (entries[set..][0..inode_cache_ways]) |*entry| {
+            if (entry.valid and entry.root_generation == root_generation and entry.inode == inode)
+                return;
+            if (!entry.valid and target == null) target = entry;
+        }
+        const selected = target orelse selected: {
+            const entry = &entries[set + self.inode_cache_next % inode_cache_ways];
+            self.inode_cache_next +%= 1;
+            break :selected entry;
+        };
+        selected.* = .{
+            .root_generation = root_generation,
+            .inode = inode,
+            .record = record,
+            .valid = true,
+        };
     }
 
     fn dirtyFile(self: *Filesystem, io: Io, inode: u64, generation: ?u64) !*DirtyFile {
@@ -1397,6 +1470,11 @@ pub const Filesystem = struct {
         return self.authority_ref.slot;
     }
 };
+
+fn inodeCacheSet(root_generation: u64, inode: u64) usize {
+    const mixed = inode ^ (root_generation *% 0x9e3779b97f4a7c15);
+    return @as(usize, @intCast(mixed % inode_cache_sets)) * inode_cache_ways;
+}
 
 const PreparedName = struct {
     spelling: []const u8,
@@ -1793,6 +1871,50 @@ test "blob filesystem formats and reopens an empty root" {
     try std.testing.expectEqual(name_profile.Profile.portable_v1, filesystem.root.name_profile);
     try std.testing.expectEqualDeep(previous_authority, filesystem.authority_ref);
     try std.testing.expectEqual(@as(u64, 3), filesystem.blobs.header.sequence);
+}
+
+test "blob filesystem inode cache is scoped to the metadata root generation" {
+    const blob_device = @import("blob_device.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "inode-cache",
+        16 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        blobs,
+        .portable_v1,
+    );
+    defer filesystem.close(std.testing.io) catch {};
+
+    const inode = filesystem_format.root_inode;
+    const old_generation = filesystem.root.generation;
+    const old_record = try filesystem.stat(std.testing.io, inode);
+    try std.testing.expectEqualDeep(
+        old_record,
+        filesystem.readInodeCache(std.testing.io, old_generation, inode).?,
+    );
+
+    _ = try filesystem.patchMetadata(std.testing.io, inode, .{ .mode = 0o700 });
+    try std.testing.expect(filesystem.root.generation > old_generation);
+    try std.testing.expect(filesystem.readInodeCache(
+        std.testing.io,
+        filesystem.root.generation,
+        inode,
+    ) == null);
+
+    const new_record = try filesystem.stat(std.testing.io, inode);
+    try std.testing.expectEqual(@as(u32, 0o040700), new_record.metadata.mode);
+    try std.testing.expectEqualDeep(
+        new_record,
+        filesystem.readInodeCache(std.testing.io, filesystem.root.generation, inode).?,
+    );
 }
 
 test "blob filesystem namespace transactions preserve inode and directory semantics" {
