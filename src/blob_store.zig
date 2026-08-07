@@ -255,11 +255,21 @@ pub const Store = struct {
 
     /// Reads and verifies one complete slot. Returns the logical payload length.
     pub fn read(self: *Store, io: Io, reference: format.BlobRef, output: []u8) !usize {
-        const reads = [_]Read{.{ .reference = reference, .output = output }};
-        var results: [1]ReadResult = undefined;
-        try self.readMany(io, &reads, &results);
-        if (results[0].failure) |err| return err;
-        return results[0].amount;
+        try self.mutex.lockShared(io);
+        defer self.mutex.unlockShared(io);
+        if (self.frozen) return error.BlobStoreFrozen;
+        try reference.validate(self.header.unit_count);
+        if (reference.endUnit() > self.staged_units) return error.UnpublishedBlobReference;
+        const stored_bytes: usize = @intCast(format.storedBytes(reference.valid_bytes));
+        if (output.len < stored_bytes) return error.InvalidBlobBuffer;
+        try self.device.readAt(io, output[0..stored_bytes], try format.slotOffset(reference.slot));
+        if (!std.mem.eql(
+            u32,
+            &reference.checksums,
+            &format.payloadChecksums(output[0..reference.valid_bytes]),
+        )) return error.BlobChecksumMismatch;
+        @memset(output[reference.valid_bytes..], 0);
+        return reference.valid_bytes;
     }
 
     pub const Read = struct {

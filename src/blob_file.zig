@@ -63,6 +63,8 @@ pub fn readSnapshotAt(
     if (offset >= snapshot.logical_size or output.len == 0) return 0;
 
     const amount: usize = @intCast(@min(@as(u64, output.len), snapshot.logical_size - offset));
+    if (amount == block_size and offset % block_size == 0)
+        return readSnapshotBlock(allocator, io, blobs, readable_units, snapshot, output[0..amount], offset / block_size);
     const map_scratch = try allocAlignedForOverwrite(
         allocator,
         .fromByteUnits(blob_format.allocation_unit),
@@ -157,6 +159,43 @@ pub fn readSnapshotAt(
         if (pending_error) |err| return err;
     }
     return amount;
+}
+
+fn readSnapshotBlock(
+    allocator: std.mem.Allocator,
+    io: Io,
+    blobs: *blob_store.Store,
+    readable_units: u64,
+    snapshot: Snapshot,
+    output: []u8,
+    block: u64,
+) !usize {
+    const root = snapshot.root orelse {
+        @memset(output, 0);
+        return output.len;
+    };
+    var map_scratch: [blob_map.page_size]u8 align(blob_format.allocation_unit) =
+        uninitialized([blob_map.page_size]u8);
+    var maps = blob_map_store.MapStore.init(allocator, blobs);
+    const reference = try maps.lookupAt(
+        io,
+        root,
+        snapshot.generation,
+        readable_units,
+        block,
+        &map_scratch,
+    ) orelse {
+        @memset(output, 0);
+        return output.len;
+    };
+    reference.validate(blobs.header.unit_count) catch return error.InvalidBlobFileSnapshot;
+    if (reference.valid_bytes != block_size or reference.endUnit() > readable_units)
+        return error.InvalidBlobFileSnapshot;
+    var block_scratch: [block_size]u8 align(block_size) = uninitialized([block_size]u8);
+    if (try blobs.read(io, reference, &block_scratch) != block_size)
+        return error.InvalidBlobFileBlock;
+    @memcpy(output, &block_scratch);
+    return output.len;
 }
 
 pub const State = struct {
@@ -1452,6 +1491,17 @@ test "blob file snapshot reads empty sparse partial multi-block and EOF ranges" 
     try std.testing.expect(std.mem.allEqual(u8, across[4 .. 2 * block_size + 3], 0));
     try std.testing.expectEqualStrings("tail", across[2 * block_size + 3 ..]);
 
+    var sparse_block: [block_size]u8 = @splat(0xff);
+    try std.testing.expectEqual(sparse_block.len, try readSnapshot(
+        std.testing.failing_allocator,
+        std.testing.io,
+        &blobs,
+        snapshot,
+        &sparse_block,
+        2 * block_size,
+    ));
+    try std.testing.expect(std.mem.allEqual(u8, &sparse_block, 0));
+
     @memset(&output, 0xff);
     try std.testing.expectEqual(@as(usize, 2), try readSnapshot(
         std.testing.allocator,
@@ -1516,12 +1566,22 @@ test "blob file snapshot point reads preserve corruption validation" {
         0,
     ));
     try std.testing.expectEqual(@as(u8, 'x'), byte[0]);
-    try std.testing.expectError(error.InvalidBlobFileSnapshot, readSnapshot(
-        std.testing.allocator,
+    var block_output: [block_size]u8 = undefined;
+    try std.testing.expectEqual(block_output.len, try readSnapshot(
+        std.testing.failing_allocator,
         std.testing.io,
         &blobs,
         snapshot,
-        &byte,
+        &block_output,
+        0,
+    ));
+    try std.testing.expectEqualSlices(u8, &data, &block_output);
+    try std.testing.expectError(error.InvalidBlobFileSnapshot, readSnapshot(
+        std.testing.failing_allocator,
+        std.testing.io,
+        &blobs,
+        snapshot,
+        &block_output,
         (entries.len - 1) * block_size,
     ));
 
@@ -1538,21 +1598,21 @@ test "blob file snapshot point reads preserve corruption validation" {
     var wrong_generation = snapshot;
     wrong_generation.generation += 1;
     try std.testing.expectError(error.BlobMapReferenceMismatch, readSnapshot(
-        std.testing.allocator,
+        std.testing.failing_allocator,
         std.testing.io,
         &blobs,
         wrong_generation,
-        &byte,
+        &block_output,
         0,
     ));
     var wrong_digest = snapshot;
     wrong_digest.root.?.digest[0] ^= 1;
     try std.testing.expectError(error.BlobDigestMismatch, readSnapshot(
-        std.testing.allocator,
+        std.testing.failing_allocator,
         std.testing.io,
         &blobs,
         wrong_digest,
-        &byte,
+        &block_output,
         0,
     ));
 
@@ -1564,11 +1624,11 @@ test "blob file snapshot point reads preserve corruption validation" {
     }});
     try blobs.commit(std.testing.io);
     try std.testing.expectError(error.BlobChecksumMismatch, readSnapshot(
-        std.testing.allocator,
+        std.testing.failing_allocator,
         std.testing.io,
         &blobs,
         .{ .generation = 10, .logical_size = block_size, .root = checksum_root },
-        &byte,
+        &block_output,
         0,
     ));
 
@@ -1580,7 +1640,7 @@ test "blob file snapshot point reads preserve corruption validation" {
     const bad_page_slot = try blobs.putDigestOnly(std.testing.io, &bad_page);
     try blobs.commit(std.testing.io);
     try std.testing.expectError(error.InvalidBlobMapPage, readSnapshot(
-        std.testing.allocator,
+        std.testing.failing_allocator,
         std.testing.io,
         &blobs,
         .{ .generation = 11, .logical_size = block_size, .root = .{
@@ -1590,7 +1650,7 @@ test "blob file snapshot point reads preserve corruption validation" {
             .last_key = 0,
             .digest = blob_map.pageDigest(&bad_page),
         } },
-        &byte,
+        &block_output,
         0,
     ));
 }
