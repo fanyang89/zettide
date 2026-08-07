@@ -699,7 +699,14 @@ pub const MapStore = struct {
         const units = blob_format.allocationUnits(metadata_map.page_size);
         if (reference.page > readable_units or units > readable_units - reference.page)
             return error.UnpublishedBlobReference;
-        try self.blobs.readDigestVerified(io, reference.page, metadata_map.page_size, &reference.digest, scratch);
+        try self.blobs.readDigestVerified(
+            io,
+            reference.page,
+            metadata_map.page_size,
+            &reference.digest,
+            scratch,
+            true,
+        );
     }
 
     fn writePage(

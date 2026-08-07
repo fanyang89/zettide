@@ -6,6 +6,17 @@ const storage_api = @import("v3/storage.zig");
 
 const Io = std.Io;
 
+const digest_cache_ways = 4;
+const digest_cache_sets = 256;
+const digest_cache_entries = digest_cache_ways * digest_cache_sets;
+
+const DigestCacheEntry = struct {
+    slot: u64 = 0,
+    digest: [32]u8 = @splat(0),
+    valid: bool = false,
+    bytes: [format.allocation_unit]u8 = undefined,
+};
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     device: blob_device.Device,
@@ -15,6 +26,9 @@ pub const Store = struct {
     sequence_floor: u64,
     staged_units: u64,
     mutex: Io.RwLock = .init,
+    digest_cache_mutex: Io.RwLock = .init,
+    digest_cache: ?[]DigestCacheEntry = null,
+    digest_cache_next: usize = 0,
     frozen: bool = false,
 
     /// Takes ownership of device, including on failure.
@@ -66,8 +80,11 @@ pub const Store = struct {
     }
 
     pub fn close(self: *Store, io: Io) !void {
+        const allocator = self.allocator;
+        const digest_cache = self.digest_cache;
         var device = self.device;
         self.* = undefined;
+        if (digest_cache) |entries| allocator.free(entries);
         try device.close(io);
     }
 
@@ -97,6 +114,7 @@ pub const Store = struct {
             if (physical != null and std.meta.eql(physical.?, candidate)) {
                 self.header = candidate;
                 self.selected_header = @intCast(index);
+                if (candidate.committed_units < self.staged_units) self.clearDigestCache(io);
                 self.staged_units = candidate.committed_units;
                 return;
             }
@@ -110,6 +128,7 @@ pub const Store = struct {
         try self.requireWritable();
         if (checkpoint < self.header.committed_units or checkpoint > self.staged_units)
             return error.InvalidBlobStoreCheckpoint;
+        if (checkpoint < self.staged_units) self.clearDigestCache(io);
         self.staged_units = checkpoint;
     }
 
@@ -295,6 +314,7 @@ pub const Store = struct {
         valid_bytes: usize,
         expected_digest: *const [32]u8,
         output: []u8,
+        cache: bool,
     ) !void {
         if (output.len != valid_bytes or valid_bytes == 0)
             return error.InvalidBlobBuffer;
@@ -304,10 +324,83 @@ pub const Store = struct {
         const units = format.allocationUnits(valid_bytes);
         if (slot > self.staged_units or units > self.staged_units - slot)
             return error.UnpublishedBlobReference;
+        if (cache and valid_bytes == format.allocation_unit and
+            self.readDigestCache(io, slot, expected_digest, output)) return;
         try self.device.readAt(io, output, try format.slotOffset(slot));
         var digest: [32]u8 = undefined;
         std.crypto.hash.Blake3.hash(output, &digest, .{});
         if (!std.mem.eql(u8, &digest, expected_digest)) return error.BlobDigestMismatch;
+        if (cache and valid_bytes == format.allocation_unit)
+            self.writeDigestCache(io, slot, expected_digest, output);
+    }
+
+    fn readDigestCache(
+        self: *Store,
+        io: Io,
+        slot: u64,
+        digest: *const [32]u8,
+        output: []u8,
+    ) bool {
+        self.digest_cache_mutex.lockSharedUncancelable(io);
+        defer self.digest_cache_mutex.unlockShared(io);
+        const entries = self.digest_cache orelse return false;
+        const set = digestCacheSet(slot, digest);
+        for (entries[set..][0..digest_cache_ways]) |*entry| {
+            if (entry.valid and entry.slot == slot and std.mem.eql(u8, &entry.digest, digest)) {
+                @memcpy(output, &entry.bytes);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn writeDigestCache(
+        self: *Store,
+        io: Io,
+        slot: u64,
+        digest: *const [32]u8,
+        bytes: []const u8,
+    ) void {
+        self.digest_cache_mutex.lockUncancelable(io);
+        defer self.digest_cache_mutex.unlock(io);
+        const entries = self.digest_cache orelse created: {
+            const allocated = self.allocator.alloc(DigestCacheEntry, digest_cache_entries) catch return;
+            for (allocated) |*entry| entry.* = .{};
+            self.digest_cache = allocated;
+            break :created allocated;
+        };
+        const set = digestCacheSet(slot, digest);
+        var target: ?*DigestCacheEntry = null;
+        for (entries[set..][0..digest_cache_ways]) |*entry| {
+            if (entry.valid and entry.slot == slot and std.mem.eql(u8, &entry.digest, digest)) {
+                target = entry;
+                break;
+            }
+            if (!entry.valid) {
+                target = entry;
+                break;
+            }
+        }
+        const selected = target orelse selected: {
+            const entry = &entries[set + self.digest_cache_next % digest_cache_ways];
+            self.digest_cache_next +%= 1;
+            break :selected entry;
+        };
+        selected.* = .{
+            .slot = slot,
+            .digest = digest.*,
+            .valid = true,
+            .bytes = bytes[0..format.allocation_unit].*,
+        };
+    }
+
+    fn clearDigestCache(self: *Store, io: Io) void {
+        self.digest_cache_mutex.lockUncancelable(io);
+        defer self.digest_cache_mutex.unlock(io);
+        if (self.digest_cache) |entries| {
+            for (entries) |*entry| entry.valid = false;
+        }
+        self.digest_cache_next = 0;
     }
 
     pub fn commit(self: *Store, io: Io) !void {
@@ -361,6 +454,11 @@ pub const Store = struct {
         if (self.frozen) return error.BlobStoreFrozen;
     }
 };
+
+fn digestCacheSet(slot: u64, digest: *const [32]u8) usize {
+    const hash = std.mem.readInt(u64, digest[0..8], .little) ^ slot;
+    return @as(usize, @intCast(hash % digest_cache_sets)) * digest_cache_ways;
+}
 
 fn validateAlignment(alignment: u32) !void {
     if (alignment > format.allocation_unit or format.allocation_unit % alignment != 0)
@@ -624,6 +722,22 @@ test "blob store discards an unpublished tail" {
     try std.testing.expectError(
         error.InvalidBlobStoreCheckpoint,
         store.discardStaged(std.testing.io, checkpoint),
+    );
+
+    const first_page: [format.allocation_unit]u8 = @splat(0x11);
+    const second_page: [format.allocation_unit]u8 = @splat(0x22);
+    var first_digest: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(&first_page, &first_digest, .{});
+    const page_checkpoint = store.stagedUnits();
+    const first_slot = try store.putDigestOnly(std.testing.io, &first_page);
+    var output: [format.allocation_unit]u8 align(format.allocation_unit) = undefined;
+    try store.readDigestVerified(std.testing.io, first_slot, output.len, &first_digest, &output, true);
+    try store.discardStaged(std.testing.io, page_checkpoint);
+    const second_slot = try store.putDigestOnly(std.testing.io, &second_page);
+    try std.testing.expectEqual(first_slot, second_slot);
+    try std.testing.expectError(
+        error.BlobDigestMismatch,
+        store.readDigestVerified(std.testing.io, first_slot, output.len, &first_digest, &output, true),
     );
 }
 

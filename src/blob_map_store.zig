@@ -443,7 +443,14 @@ pub const MapStore = struct {
     ) !blob_map.Header {
         if (scratch.len != blob_map.page_size) return error.InvalidBlobBuffer;
         _ = try pageReference(reference, boundary);
-        try self.blobs.readDigestVerified(io, reference.page, blob_map.page_size, &reference.digest, scratch);
+        try self.blobs.readDigestVerified(
+            io,
+            reference.page,
+            blob_map.page_size,
+            &reference.digest,
+            scratch,
+            reference.level != 0,
+        );
         const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
         const header = try blob_map.decodeHeader(page);
         if (header.level != reference.level or
