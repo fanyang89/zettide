@@ -7,7 +7,7 @@ const storage_api = @import("v3/storage.zig");
 const Io = std.Io;
 
 const digest_cache_ways = 4;
-const digest_cache_sets = 256;
+const digest_cache_sets = 4096;
 const digest_cache_entries = digest_cache_ways * digest_cache_sets;
 
 const DigestCacheEntry = struct {

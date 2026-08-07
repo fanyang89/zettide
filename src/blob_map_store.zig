@@ -449,7 +449,7 @@ pub const MapStore = struct {
             blob_map.page_size,
             &reference.digest,
             scratch,
-            reference.level != 0,
+            true,
         );
         const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
         const header = try blob_map.decodeHeader(page);
