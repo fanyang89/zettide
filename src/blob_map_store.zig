@@ -116,40 +116,49 @@ pub const MapStore = struct {
         var maximum_generation = root_generation;
         var is_root = true;
         while (true) {
-            const header = try self.readPage(io, current, readable_units, maximum_generation, is_root, scratch);
-            const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
-            is_root = false;
-            maximum_generation = header.generation;
-            if (logical_blob < current.first_key or logical_blob > current.last_key) return null;
-            if (header.kind == .leaf) {
-                var entries = uninitialized([blob_map.max_leaf_entries]blob_map.LeafEntry);
-                _ = try blob_map.decodeLeafVerified(page, &entries);
-                var low: usize = 0;
-                var high: usize = header.count;
-                while (low < high) {
-                    const middle = low + (high - low) / 2;
-                    if (entries[middle].logical_blob < logical_blob)
-                        low = middle + 1
-                    else
-                        high = middle;
+            const child = next: {
+                var loaded = try self.readPageBorrowed(
+                    io,
+                    current,
+                    readable_units,
+                    maximum_generation,
+                    is_root,
+                    scratch,
+                );
+                defer loaded.release();
+                is_root = false;
+                maximum_generation = loaded.header.generation;
+                if (logical_blob < current.first_key or logical_blob > current.last_key) return null;
+                if (loaded.header.kind == .leaf) {
+                    var entries = uninitialized([blob_map.max_leaf_entries]blob_map.LeafEntry);
+                    _ = try blob_map.decodeLeafVerified(loaded.page, &entries);
+                    var low: usize = 0;
+                    var high: usize = loaded.header.count;
+                    while (low < high) {
+                        const middle = low + (high - low) / 2;
+                        if (entries[middle].logical_blob < logical_blob)
+                            low = middle + 1
+                        else
+                            high = middle;
+                    }
+                    if (low == loaded.header.count or entries[low].logical_blob != logical_blob) return null;
+                    return entries[low].reference;
                 }
-                if (low == header.count or entries[low].logical_blob != logical_blob) return null;
-                return entries[low].reference;
-            }
 
-            var entries = uninitialized([blob_map.max_internal_entries]blob_map.InternalEntry);
-            _ = try blob_map.decodeInternalVerified(page, &entries);
-            var selected: ?blob_map.InternalEntry = null;
-            for (entries[0..header.count]) |entry| {
-                if (logical_blob >= entry.first_key and logical_blob <= entry.last_key) {
-                    selected = entry;
-                    break;
+                var entries = uninitialized([blob_map.max_internal_entries]blob_map.InternalEntry);
+                _ = try blob_map.decodeInternalVerified(loaded.page, &entries);
+                var selected: ?blob_map.InternalEntry = null;
+                for (entries[0..loaded.header.count]) |entry| {
+                    if (logical_blob >= entry.first_key and logical_blob <= entry.last_key) {
+                        selected = entry;
+                        break;
+                    }
                 }
-            }
-            const child = selected orelse return null;
+                break :next selected orelse return null;
+            };
             current = try pageReference(.{
                 .page = child.child_page,
-                .level = header.level - 1,
+                .level = current.level - 1,
                 .first_key = child.first_key,
                 .last_key = child.last_key,
                 .digest = child.child_digest,
@@ -458,15 +467,38 @@ pub const MapStore = struct {
             true,
         );
         const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
-        const header = try blob_map.decodeHeaderVerified(page);
-        if (header.level != reference.level or
-            header.first_key != reference.first_key or
-            header.last_key != reference.last_key or
-            (header.level == 0) != (header.kind == .leaf) or
-            header.generation > maximum_generation or
-            (is_root and header.generation != maximum_generation))
-            return error.BlobMapReferenceMismatch;
-        return header;
+        return validatePageHeader(page, reference, maximum_generation, is_root);
+    }
+
+    const BorrowedPage = struct {
+        header: blob_map.Header,
+        page: *const [blob_map.page_size]u8,
+        lease: ?blob_store.Store.DigestPageLease = null,
+
+        fn release(self: *BorrowedPage) void {
+            if (self.lease) |*lease| lease.release();
+        }
+    };
+
+    fn readPageBorrowed(
+        self: *MapStore,
+        io: Io,
+        reference: blob_map.PageRef,
+        boundary: u64,
+        maximum_generation: u64,
+        is_root: bool,
+        scratch: []u8,
+    ) !BorrowedPage {
+        if (scratch.len != blob_map.page_size) return error.InvalidBlobBuffer;
+        _ = try pageReference(reference, boundary);
+        if (try self.blobs.borrowDigestVerifiedPage(io, reference.page, &reference.digest)) |value| {
+            var lease = value;
+            errdefer lease.release();
+            const header = try validatePageHeader(lease.bytes, reference, maximum_generation, is_root);
+            return .{ .header = header, .page = lease.bytes, .lease = lease };
+        }
+        const header = try self.readPage(io, reference, boundary, maximum_generation, is_root, scratch);
+        return .{ .header = header, .page = @ptrCast(scratch.ptr) };
     }
 
     fn writePage(
@@ -972,6 +1004,23 @@ fn pageReference(reference: blob_map.PageRef, boundary: u64) !blob_map.PageRef {
     if (reference.page > boundary or units > boundary - reference.page)
         return error.UnpublishedBlobReference;
     return reference;
+}
+
+fn validatePageHeader(
+    page: *const [blob_map.page_size]u8,
+    reference: blob_map.PageRef,
+    maximum_generation: u64,
+    is_root: bool,
+) !blob_map.Header {
+    const header = try blob_map.decodeHeaderVerified(page);
+    if (header.level != reference.level or
+        header.first_key != reference.first_key or
+        header.last_key != reference.last_key or
+        (header.level == 0) != (header.kind == .leaf) or
+        header.generation > maximum_generation or
+        (is_root and header.generation != maximum_generation))
+        return error.BlobMapReferenceMismatch;
+    return header;
 }
 
 fn pageBoundary(

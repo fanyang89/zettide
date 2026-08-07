@@ -344,6 +344,49 @@ pub const Store = struct {
             self.writeDigestCache(io, slot, expected_digest, output);
     }
 
+    pub const DigestPageLease = struct {
+        store: ?*Store,
+        io: Io,
+        bytes: *const [format.allocation_unit]u8,
+
+        pub fn release(self: *DigestPageLease) void {
+            const store = self.store orelse return;
+            store.digest_cache_mutex.unlockShared(self.io);
+            self.store = null;
+        }
+    };
+
+    /// Borrows an immutable page while holding the cache shared lock.
+    pub fn borrowDigestVerifiedPage(
+        self: *Store,
+        io: Io,
+        slot: u64,
+        expected_digest: *const [32]u8,
+    ) !?DigestPageLease {
+        try self.mutex.lockShared(io);
+        defer self.mutex.unlockShared(io);
+        if (self.frozen) return error.BlobStoreFrozen;
+        if (slot >= self.staged_units) return error.UnpublishedBlobReference;
+
+        self.digest_cache_mutex.lockSharedUncancelable(io);
+        const entries = self.digest_cache orelse {
+            self.digest_cache_mutex.unlockShared(io);
+            return null;
+        };
+        const set = digestCacheSet(slot, expected_digest);
+        for (entries[set..][0..digest_cache_ways]) |*entry| {
+            if (entry.valid and entry.slot == slot and std.mem.eql(u8, &entry.digest, expected_digest)) {
+                return .{
+                    .store = self,
+                    .io = io,
+                    .bytes = &entry.bytes,
+                };
+            }
+        }
+        self.digest_cache_mutex.unlockShared(io);
+        return null;
+    }
+
     fn readDigestCache(
         self: *Store,
         io: Io,
@@ -742,9 +785,18 @@ test "blob store discards an unpublished tail" {
     const first_slot = try store.putDigestOnly(std.testing.io, &first_page);
     var output: [format.allocation_unit]u8 align(format.allocation_unit) = undefined;
     try store.readDigestVerified(std.testing.io, first_slot, output.len, &first_digest, &output, true);
+    var lease = (try store.borrowDigestVerifiedPage(std.testing.io, first_slot, &first_digest)).?;
+    try std.testing.expectEqualSlices(u8, &first_page, lease.bytes);
+    lease.release();
+    lease.release();
     try store.discardStaged(std.testing.io, page_checkpoint);
     const second_slot = try store.putDigestOnly(std.testing.io, &second_page);
     try std.testing.expectEqual(first_slot, second_slot);
+    try std.testing.expect((try store.borrowDigestVerifiedPage(
+        std.testing.io,
+        second_slot,
+        &first_digest,
+    )) == null);
     try std.testing.expectError(
         error.BlobDigestMismatch,
         store.readDigestVerified(std.testing.io, first_slot, output.len, &first_digest, &output, true),
