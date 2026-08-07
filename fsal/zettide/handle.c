@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -727,6 +728,11 @@ done:
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
+static void zettide_release_read_buffer(void *buffer)
+{
+	free(buffer);
+}
+
 static void zettide_read2(struct fsal_obj_handle *obj_hdl, bool bypass,
 			  fsal_async_cb done_cb, struct fsal_io_arg *read_arg,
 			  void *caller_arg)
@@ -742,6 +748,25 @@ static void zettide_read2(struct fsal_obj_handle *obj_hdl, bool bypass,
 	if (read_arg->info != NULL) {
 		result = fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
 		goto done;
+	}
+	if (read_arg->iov[0].iov_base == NULL) {
+		void *buffer = NULL;
+		int status;
+
+		if (read_arg->iov_count != 1) {
+			result = fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
+			goto done;
+		}
+		status = posix_memalign(&buffer, 4096,
+					read_arg->iov[0].iov_len);
+
+		if (status != 0) {
+			result = posix2fsal_status(status);
+			goto done;
+		}
+		read_arg->iov[0].iov_base = buffer;
+		read_arg->iov_release = zettide_release_read_buffer;
+		read_arg->release_data = buffer;
 	}
 	for (index = 0; index < read_arg->iov_count; index++) {
 		size_t amount = 0;
