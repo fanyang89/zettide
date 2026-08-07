@@ -302,8 +302,7 @@ pub const Store = struct {
                 result.failure = error.BlobChecksumMismatch;
                 continue;
             }
-            if (request.reference.valid_bytes < request.output.len)
-                @memset(request.output[request.reference.valid_bytes..], 0);
+            @memset(request.output[request.reference.valid_bytes..], 0);
             result.amount = request.reference.valid_bytes;
         }
     }
