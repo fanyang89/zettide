@@ -351,7 +351,7 @@ pub export fn zettide_nfs_getattr(
     const output = out_attributes orelse return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
     const info = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
     output.* = attributes(info);
     return status(.ok);
@@ -370,7 +370,7 @@ pub export fn zettide_nfs_setattr(
     if (changes.mask & ~set_mask != 0) return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
 
     if (changes.mask & set_size != 0) {
         if (decoded.kind != .file) return status(.invalid_argument);
@@ -412,10 +412,11 @@ pub export fn zettide_nfs_read(
     if (buffer_length != 0 and buffer == null) return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
     if (decoded.kind == .directory) return status(.is_directory);
     if (decoded.kind != .file) return status(.invalid_argument);
     if (buffer_length == 0) {
+        _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
         output.* = 0;
         return status(.ok);
     }
@@ -468,10 +469,11 @@ pub export fn zettide_nfs_write(
     if (data_length != 0 and data == null) return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const decoded = decodeExisting(self, handle_value) catch |err| return statusFor(err, true);
+    const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
     if (decoded.kind == .directory) return status(.is_directory);
     if (decoded.kind != .file) return status(.invalid_argument);
     if (data_length == 0) {
+        _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
         output.* = 0;
         return status(.ok);
     }
@@ -723,13 +725,17 @@ pub export fn zettide_nfs_directory_close(directory: ?*Directory) callconv(.c) c
 }
 
 fn decodeExisting(self: *Export, handle: *const Handle) !nfs_handle.Handle {
-    const decoded = nfs_handle.decode(self.filesystem.filesystem_id, &handle.bytes) catch
-        return error.StaleFileHandle;
+    const decoded = try decodeHandle(self, handle);
     _ = self.filesystem.stat(node(decoded)) catch |err| switch (err) {
         error.FileNotFound => return error.StaleFileHandle,
         else => return err,
     };
     return decoded;
+}
+
+fn decodeHandle(self: *Export, handle: *const Handle) !nfs_handle.Handle {
+    return nfs_handle.decode(self.filesystem.filesystem_id, &handle.bytes) catch
+        return error.StaleFileHandle;
 }
 
 fn fillResult(self: *Export, info: filesystem_api.NodeInfo, handle: *Handle, attrs: *Attributes) void {
@@ -1094,6 +1100,23 @@ test "direct NFS backend exports standalone BlobFilesystem" {
     ));
     try std.testing.expectEqual(@as(usize, "blob through NFS".len), written);
     try std.testing.expect(export_handle.owner.blob.native.dirty);
+
+    var decoded_stale = try nfs_handle.decode(export_handle.filesystem.filesystem_id, &file_handle.bytes);
+    const stale_generation = std.mem.readInt(u64, decoded_stale.identity[8..16], .little) + 1;
+    std.mem.writeInt(u64, decoded_stale.identity[8..16], stale_generation, .little);
+    const stale_handle: Handle = .{
+        .bytes = nfs_handle.encode(export_handle.filesystem.filesystem_id, decoded_stale),
+    };
+    var stale_buffer: [16]u8 = undefined;
+    var stale_amount: usize = 0;
+    try std.testing.expectEqual(
+        status(.stale),
+        zettide_nfs_read(export_handle, &stale_handle, 0, &stale_buffer, stale_buffer.len, &stale_amount),
+    );
+    try std.testing.expectEqual(
+        status(.stale),
+        zettide_nfs_write(export_handle, &stale_handle, 0, "stale", "stale".len, &stale_amount),
+    );
     try std.testing.expectEqual(status(.ok), zettide_nfs_sync(export_handle));
     try std.testing.expect(!export_handle.owner.blob.native.dirty);
 

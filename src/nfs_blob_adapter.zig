@@ -204,16 +204,28 @@ fn read(raw: *anyopaque, node: nfs_filesystem.Node, output: []u8, offset: u64) !
     if (node.kind == .directory) return error.IsDirectory;
     if (node.kind != .file) return error.InvalidArgument;
     const value = adapter(raw);
-    const identity = (try validate(value, node)).identity;
-    return value.native.read(value.io, identity.inode, output, offset) catch |err| return normalizeError(err);
+    const identity = try decodeIdentity(node.identity);
+    return value.native.readAtGeneration(
+        value.io,
+        identity.inode,
+        identity.generation,
+        output,
+        offset,
+    ) catch |err| return normalizeError(err);
 }
 
 fn write(raw: *anyopaque, node: nfs_filesystem.Node, data: []const u8, offset: u64) !usize {
     if (node.kind == .directory) return error.IsDirectory;
     if (node.kind != .file) return error.InvalidArgument;
     const value = adapter(raw);
-    const identity = (try validate(value, node)).identity;
-    return value.native.write(value.io, identity.inode, data, offset) catch |err| return normalizeError(err);
+    const identity = try decodeIdentity(node.identity);
+    return value.native.writeAtGeneration(
+        value.io,
+        identity.inode,
+        identity.generation,
+        data,
+        offset,
+    ) catch |err| return normalizeError(err);
 }
 
 fn createFile(

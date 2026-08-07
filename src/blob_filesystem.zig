@@ -479,11 +479,36 @@ pub const Filesystem = struct {
     pub fn read(self: *Filesystem, io: Io, inode: u64, output: []u8, offset: u64) !usize {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
+        return self.readUnlocked(io, inode, null, output, offset);
+    }
+
+    pub fn readAtGeneration(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        generation: u64,
+        output: []u8,
+        offset: u64,
+    ) !usize {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        return self.readUnlocked(io, inode, generation, output, offset);
+    }
+
+    fn readUnlocked(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        generation: ?u64,
+        output: []u8,
+        offset: u64,
+    ) !usize {
         if (self.dirty_files.getPtr(inode)) |dirty_file| {
             try self.authorizeDirectInode(io, inode, dirty_file.record);
+            try validateRegularFile(dirty_file.record, generation);
             return dirty_file.state.read(io, output, offset);
         }
-        const record = try self.requireRegularFile(io, inode);
+        const record = try self.requireRegularFileAtGeneration(io, inode, generation);
         return blob_file.readSnapshotAt(
             self.allocator,
             io,
@@ -498,7 +523,20 @@ pub const Filesystem = struct {
     pub fn write(self: *Filesystem, io: Io, inode: u64, data: []const u8, offset: u64) !usize {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
-        return self.writeUnlocked(io, inode, data, offset);
+        return self.writeUnlocked(io, inode, null, data, offset);
+    }
+
+    pub fn writeAtGeneration(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        generation: u64,
+        data: []const u8,
+        offset: u64,
+    ) !usize {
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        return self.writeUnlocked(io, inode, generation, data, offset);
     }
 
     /// Appends at the visible logical end while holding the filesystem transaction lock.
@@ -511,18 +549,25 @@ pub const Filesystem = struct {
             return 0;
         }
         const was_cached = self.dirty_files.contains(inode);
-        const dirty_file = try self.dirtyFile(io, inode);
+        const dirty_file = try self.dirtyFile(io, inode, null);
         return self.writeDirtyFile(io, inode, dirty_file, data, dirty_file.state.size(), was_cached);
     }
 
-    fn writeUnlocked(self: *Filesystem, io: Io, inode: u64, data: []const u8, offset: u64) !usize {
+    fn writeUnlocked(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        generation: ?u64,
+        data: []const u8,
+        offset: u64,
+    ) !usize {
         try self.requireMutable();
         if (data.len == 0) {
-            _ = try self.requireRegularFile(io, inode);
+            _ = try self.requireRegularFileAtGeneration(io, inode, generation);
             return 0;
         }
         const was_cached = self.dirty_files.contains(inode);
-        const dirty_file = try self.dirtyFile(io, inode);
+        const dirty_file = try self.dirtyFile(io, inode, generation);
         return self.writeDirtyFile(io, inode, dirty_file, data, offset, was_cached);
     }
 
@@ -562,7 +607,7 @@ pub const Filesystem = struct {
         defer self.transaction_mutex.unlock(io);
         try self.requireMutable();
         const was_cached = self.dirty_files.contains(inode);
-        const dirty_file = try self.dirtyFile(io, inode);
+        const dirty_file = try self.dirtyFile(io, inode, null);
         const checkpoint = self.blobs.stagedUnits();
         dirty_file.state.truncate(io, size) catch |err| {
             if (dirty_file.state.frozen or self.blobs.frozen) {
@@ -1037,12 +1082,13 @@ pub const Filesystem = struct {
             return error.InvalidBlobFilesystemGraph;
     }
 
-    fn dirtyFile(self: *Filesystem, io: Io, inode: u64) !*DirtyFile {
+    fn dirtyFile(self: *Filesystem, io: Io, inode: u64, generation: ?u64) !*DirtyFile {
         if (self.dirty_files.getPtr(inode)) |dirty_file| {
             try self.authorizeDirectInode(io, inode, dirty_file.record);
+            try validateRegularFile(dirty_file.record, generation);
             return dirty_file;
         }
-        const record = try self.requireRegularFile(io, inode);
+        const record = try self.requireRegularFileAtGeneration(io, inode, generation);
         var state = try blob_file.State.openKnownAllocatedAt(
             self.allocator,
             &self.blobs,
@@ -1152,10 +1198,29 @@ pub const Filesystem = struct {
     }
 
     fn requireRegularFile(self: *Filesystem, io: Io, inode: u64) !filesystem_format.InodeRecord {
+        return self.requireRegularFileAtGeneration(io, inode, null);
+    }
+
+    fn requireRegularFileAtGeneration(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        generation: ?u64,
+    ) !filesystem_format.InodeRecord {
         const record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
         try self.authorizeDirectInode(io, inode, record);
+        try validateRegularFile(record, generation);
+        return record;
+    }
+
+    fn validateRegularFile(record: filesystem_format.InodeRecord, generation: ?u64) !void {
+        if (generation) |expected| {
+            if (record.generation != expected or record.metadata.kind != .file)
+                return error.FileNotFound;
+            return;
+        }
         return switch (record.metadata.kind) {
-            .file => record,
+            .file => {},
             .directory => error.IsDirectory,
             .fifo, .symlink => error.InvalidArgument,
         };
