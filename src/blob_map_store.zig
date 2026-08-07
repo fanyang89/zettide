@@ -123,7 +123,7 @@ pub const MapStore = struct {
             if (logical_blob < current.first_key or logical_blob > current.last_key) return null;
             if (header.kind == .leaf) {
                 var entries = uninitialized([blob_map.max_leaf_entries]blob_map.LeafEntry);
-                _ = try blob_map.decodeLeaf(page, &entries);
+                _ = try blob_map.decodeLeafVerified(page, &entries);
                 var low: usize = 0;
                 var high: usize = header.count;
                 while (low < high) {
@@ -138,7 +138,7 @@ pub const MapStore = struct {
             }
 
             var entries = uninitialized([blob_map.max_internal_entries]blob_map.InternalEntry);
-            _ = try blob_map.decodeInternal(page, &entries);
+            _ = try blob_map.decodeInternalVerified(page, &entries);
             var selected: ?blob_map.InternalEntry = null;
             for (entries[0..header.count]) |entry| {
                 if (logical_blob >= entry.first_key and logical_blob <= entry.last_key) {
@@ -211,7 +211,7 @@ pub const MapStore = struct {
                 return .{ .end_key = end_key, .count = 0 };
             if (header.kind == .leaf) {
                 var entries = uninitialized([blob_map.max_leaf_entries]blob_map.LeafEntry);
-                _ = try blob_map.decodeLeaf(page, &entries);
+                _ = try blob_map.decodeLeafVerified(page, &entries);
                 const leaf_end = std.math.add(u64, current.last_key, 1) catch end_key;
                 const range_end = @min(end_key, leaf_end);
                 var count: usize = 0;
@@ -224,7 +224,7 @@ pub const MapStore = struct {
             }
 
             var entries = uninitialized([blob_map.max_internal_entries]blob_map.InternalEntry);
-            _ = try blob_map.decodeInternal(page, &entries);
+            _ = try blob_map.decodeInternalVerified(page, &entries);
             var next_key = end_key;
             var selected: ?blob_map.InternalEntry = null;
             for (entries[0..header.count]) |entry| {
@@ -458,7 +458,7 @@ pub const MapStore = struct {
             true,
         );
         const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
-        const header = try blob_map.decodeHeader(page);
+        const header = try blob_map.decodeHeaderVerified(page);
         if (header.level != reference.level or
             header.first_key != reference.first_key or
             header.last_key != reference.last_key or

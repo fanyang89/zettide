@@ -79,7 +79,16 @@ pub fn encodeLeaf(generation: u64, entries: []const LeafEntry) ![page_size]u8 {
 }
 
 pub fn decodeLeaf(bytes: *const [page_size]u8, entries: []LeafEntry) !Header {
-    const header = try decodeHeader(bytes);
+    return decodeLeafImpl(bytes, entries, true);
+}
+
+/// The caller has already verified the complete page against its BLAKE3 digest.
+pub fn decodeLeafVerified(bytes: *const [page_size]u8, entries: []LeafEntry) !Header {
+    return decodeLeafImpl(bytes, entries, false);
+}
+
+fn decodeLeafImpl(bytes: *const [page_size]u8, entries: []LeafEntry, verify_checksum: bool) !Header {
+    const header = try decodeHeaderImpl(bytes, verify_checksum);
     if (header.kind != .leaf or header.level != 0 or entries.len < header.count)
         return error.InvalidBlobMapPage;
     for (entries[0..header.count], 0..) |*entry, index| {
@@ -135,7 +144,16 @@ pub fn encodeInternal(level: u8, generation: u64, entries: []const InternalEntry
 }
 
 pub fn decodeInternal(bytes: *const [page_size]u8, entries: []InternalEntry) !Header {
-    const header = try decodeHeader(bytes);
+    return decodeInternalImpl(bytes, entries, true);
+}
+
+/// The caller has already verified the complete page against its BLAKE3 digest.
+pub fn decodeInternalVerified(bytes: *const [page_size]u8, entries: []InternalEntry) !Header {
+    return decodeInternalImpl(bytes, entries, false);
+}
+
+fn decodeInternalImpl(bytes: *const [page_size]u8, entries: []InternalEntry, verify_checksum: bool) !Header {
+    const header = try decodeHeaderImpl(bytes, verify_checksum);
     if (header.kind != .internal or header.level == 0 or entries.len < header.count)
         return error.InvalidBlobMapPage;
     for (entries[0..header.count], 0..) |*entry, index| {
@@ -157,12 +175,21 @@ pub fn decodeInternal(bytes: *const [page_size]u8, entries: []InternalEntry) !He
 }
 
 pub fn decodeHeader(bytes: *const [page_size]u8) !Header {
+    return decodeHeaderImpl(bytes, true);
+}
+
+/// The caller has already verified the complete page against its BLAKE3 digest.
+pub fn decodeHeaderVerified(bytes: *const [page_size]u8) !Header {
+    return decodeHeaderImpl(bytes, false);
+}
+
+fn decodeHeaderImpl(bytes: *const [page_size]u8, verify_checksum: bool) !Header {
     if (!std.mem.eql(u8, bytes[0..8], &magic) or
         std.mem.readInt(u16, bytes[8..10], .little) != version or
         !std.mem.allEqual(u8, bytes[14..16], 0) or
         !std.mem.allEqual(u8, bytes[40..header_size], 0) or
-        std.mem.readInt(u32, bytes[checksum_offset..page_size], .little) !=
-            google_crc32c.value(bytes[0..checksum_offset]))
+        (verify_checksum and std.mem.readInt(u32, bytes[checksum_offset..page_size], .little) !=
+            google_crc32c.value(bytes[0..checksum_offset])))
         return error.InvalidBlobMapPage;
     const kind = std.enums.fromInt(Kind, bytes[10]) orelse return error.InvalidBlobMapPage;
     const header: Header = .{
@@ -212,6 +239,11 @@ test "blob map leaf page round trips" {
     try std.testing.expectEqual(@as(u64, 9), header.generation);
     try std.testing.expectEqualDeep(references, decoded[0..references.len].*);
     _ = pageDigest(&encoded);
+
+    var stale_checksum = encoded;
+    stale_checksum[checksum_offset] ^= 1;
+    try std.testing.expectError(error.InvalidBlobMapPage, decodeLeaf(&stale_checksum, &decoded));
+    _ = try decodeLeafVerified(&stale_checksum, &decoded);
 }
 
 test "blob map internal page round trips and rejects corruption" {
