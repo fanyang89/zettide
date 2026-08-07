@@ -9,6 +9,23 @@ const Io = std.Io;
 
 pub const block_size: u32 = blob_format.allocation_unit;
 
+fn uninitialized(comptime T: type) T {
+    // Skip ReleaseSafe poisoning when callers initialize every consumed element.
+    @setRuntimeSafety(false);
+    return undefined;
+}
+
+fn allocAlignedForOverwrite(
+    allocator: std.mem.Allocator,
+    comptime alignment: std.mem.Alignment,
+    len: usize,
+) ![]align(alignment.toByteUnits()) u8 {
+    // Device reads overwrite the entire consumed region before it is inspected.
+    const pointer = allocator.rawAlloc(len, alignment, @returnAddress()) orelse
+        return error.OutOfMemory;
+    return @alignCast(pointer[0..len]);
+}
+
 pub const Snapshot = struct {
     generation: u64,
     logical_size: u64,
@@ -46,15 +63,19 @@ pub fn readSnapshotAt(
     if (offset >= snapshot.logical_size or output.len == 0) return 0;
 
     const amount: usize = @intCast(@min(@as(u64, output.len), snapshot.logical_size - offset));
-    const map_scratch = try allocator.alignedAlloc(u8, .fromByteUnits(blob_format.allocation_unit), blob_map.page_size);
+    const map_scratch = try allocAlignedForOverwrite(
+        allocator,
+        .fromByteUnits(blob_format.allocation_unit),
+        blob_map.page_size,
+    );
     defer allocator.free(map_scratch);
     const touched_blocks = try std.math.divCeil(
         usize,
         @as(usize, @intCast(offset % block_size)) + amount,
         block_size,
     );
-    const block_scratch = try allocator.alignedAlloc(
-        u8,
+    const block_scratch = try allocAlignedForOverwrite(
+        allocator,
         .fromByteUnits(block_size),
         @min(touched_blocks, blob_device.max_batch) * block_size,
     );
@@ -66,7 +87,7 @@ pub fn readSnapshotAt(
         const first_block = (offset + consumed) / block_size;
         const requested_end_block = try std.math.divCeil(u64, offset + amount, block_size);
         const end_block = @min(requested_end_block, first_block + blob_device.max_batch);
-        var entries: [blob_device.max_batch]blob_map.LeafEntry = undefined;
+        var entries = uninitialized([blob_device.max_batch]blob_map.LeafEntry);
         const loaded = if (snapshot.root) |root|
             try maps.loadRangeAt(
                 io,
@@ -81,12 +102,12 @@ pub fn readSnapshotAt(
         else
             blob_map_store.MapStore.LoadedRange{ .end_key = end_block, .count = 0 };
         const loaded_end_block = loaded.end_key;
-        var reads: [blob_device.max_batch]blob_store.Store.Read = undefined;
-        var copies: [blob_device.max_batch]struct {
+        var reads = uninitialized([blob_device.max_batch]blob_store.Store.Read);
+        var copies = uninitialized([blob_device.max_batch]struct {
             output_offset: usize,
             block_offset: usize,
             len: usize,
-        } = undefined;
+        });
         var read_count: usize = 0;
         var entry_index: usize = 0;
         var pending_error: ?anyerror = null;
@@ -122,7 +143,7 @@ pub fn readSnapshotAt(
         if (pending_error == null and entry_index != loaded.count)
             return error.InvalidBlobFileSnapshot;
         if (read_count != 0) {
-            var results: [blob_device.max_batch]blob_store.Store.ReadResult = undefined;
+            var results = uninitialized([blob_device.max_batch]blob_store.Store.ReadResult);
             try blobs.readMany(io, reads[0..read_count], results[0..read_count]);
             for (results[0..read_count], copies[0..read_count], 0..) |result, copy, index| {
                 if (result.failure) |err| return err;

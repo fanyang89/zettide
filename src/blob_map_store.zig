@@ -5,6 +5,12 @@ const blob_store = @import("blob_store.zig");
 
 const Io = std.Io;
 
+fn uninitialized(comptime T: type) T {
+    // Decoders initialize every element in the count they return.
+    @setRuntimeSafety(false);
+    return undefined;
+}
+
 pub const Mutation = union(enum) {
     upsert: blob_map.LeafEntry,
     remove: u64,
@@ -116,7 +122,7 @@ pub const MapStore = struct {
             maximum_generation = header.generation;
             if (logical_blob < current.first_key or logical_blob > current.last_key) return null;
             if (header.kind == .leaf) {
-                var entries: [blob_map.max_leaf_entries]blob_map.LeafEntry = undefined;
+                var entries = uninitialized([blob_map.max_leaf_entries]blob_map.LeafEntry);
                 _ = try blob_map.decodeLeaf(page, &entries);
                 var low: usize = 0;
                 var high: usize = header.count;
@@ -131,7 +137,7 @@ pub const MapStore = struct {
                 return entries[low].reference;
             }
 
-            var entries: [blob_map.max_internal_entries]blob_map.InternalEntry = undefined;
+            var entries = uninitialized([blob_map.max_internal_entries]blob_map.InternalEntry);
             _ = try blob_map.decodeInternal(page, &entries);
             var selected: ?blob_map.InternalEntry = null;
             for (entries[0..header.count]) |entry| {
@@ -204,7 +210,7 @@ pub const MapStore = struct {
             if (first_key > current.last_key)
                 return .{ .end_key = end_key, .count = 0 };
             if (header.kind == .leaf) {
-                var entries: [blob_map.max_leaf_entries]blob_map.LeafEntry = undefined;
+                var entries = uninitialized([blob_map.max_leaf_entries]blob_map.LeafEntry);
                 _ = try blob_map.decodeLeaf(page, &entries);
                 const leaf_end = std.math.add(u64, current.last_key, 1) catch end_key;
                 const range_end = @min(end_key, leaf_end);
@@ -217,7 +223,7 @@ pub const MapStore = struct {
                 return .{ .end_key = range_end, .count = count };
             }
 
-            var entries: [blob_map.max_internal_entries]blob_map.InternalEntry = undefined;
+            var entries = uninitialized([blob_map.max_internal_entries]blob_map.InternalEntry);
             _ = try blob_map.decodeInternal(page, &entries);
             var next_key = end_key;
             var selected: ?blob_map.InternalEntry = null;

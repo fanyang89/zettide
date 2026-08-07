@@ -6,6 +6,20 @@ const blob_store = @import("blob_store.zig");
 
 const Io = std.Io;
 
+fn uninitialized(comptime T: type) T {
+    // Decoders initialize every element in the count they return.
+    @setRuntimeSafety(false);
+    return undefined;
+}
+
+fn allocPageForOverwrite(allocator: std.mem.Allocator) ![]align(blob_format.allocation_unit) u8 {
+    // readPage overwrites the complete page before decoding it.
+    const alignment: std.mem.Alignment = .fromByteUnits(blob_format.allocation_unit);
+    const pointer = allocator.rawAlloc(metadata_map.page_size, alignment, @returnAddress()) orelse
+        return error.OutOfMemory;
+    return @alignCast(pointer[0..metadata_map.page_size]);
+}
+
 pub const OwnedEntry = struct {
     key: []u8,
     value: []u8,
@@ -137,15 +151,11 @@ pub const MapStore = struct {
         key: []const u8,
     ) !?[]u8 {
         _ = filesystem_format.decodeKey(key) catch return error.InvalidBlobFilesystemKey;
-        const scratch = try self.allocator.alignedAlloc(
-            u8,
-            .fromByteUnits(blob_format.allocation_unit),
-            metadata_map.page_size,
-        );
+        const scratch = try allocPageForOverwrite(self.allocator);
         defer self.allocator.free(scratch);
         var current = root;
         var expected_upper: ?[]const u8 = null;
-        var upper_buffer: [filesystem_format.max_key_size]u8 = undefined;
+        var upper_buffer = uninitialized([filesystem_format.max_key_size]u8);
         var is_root = true;
         var maximum_generation = root_generation;
         while (true) {
@@ -155,7 +165,7 @@ pub const MapStore = struct {
             is_root = false;
             maximum_generation = header.generation;
             if (header.kind == .leaf) {
-                var entries: [metadata_map.max_entries]metadata_map.LeafEntry = undefined;
+                var entries = uninitialized([metadata_map.max_entries]metadata_map.LeafEntry);
                 _ = try metadata_map.decodeLeaf(page, &entries);
                 if (expected_upper) |upper| if (!std.mem.eql(u8, entries[header.count - 1].key, upper))
                     return error.BlobMetadataReferenceMismatch;
@@ -164,7 +174,7 @@ pub const MapStore = struct {
                 return try self.allocator.dupe(u8, entries[index].value);
             }
 
-            var entries: [metadata_map.max_entries]metadata_map.InternalEntry = undefined;
+            var entries = uninitialized([metadata_map.max_entries]metadata_map.InternalEntry);
             _ = try metadata_map.decodeInternal(page, &entries);
             if (expected_upper) |upper| if (!std.mem.eql(u8, entries[header.count - 1].upper_key, upper))
                 return error.BlobMetadataReferenceMismatch;
