@@ -23,7 +23,7 @@ const Context = struct {
     identity: Identity,
     writable: bool,
     engine: ?linux_io_uring.Engine,
-    mutex: std.Io.Mutex = .init,
+    mutex: std.Io.RwLock = .init,
 };
 
 pub fn initOwned(
@@ -84,14 +84,10 @@ fn sameIdentity(context_ptr: *anyopaque, other_context_ptr: *anyopaque) bool {
 
 fn readAt(context_ptr: *anyopaque, io: std.Io, buffer: []u8, offset: u64) !usize {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    context.mutex.lock(io) catch |err| return mapOperationError(err);
-    defer context.mutex.unlock(io);
+    context.mutex.lockShared(io) catch |err| return mapOperationError(err);
+    defer context.mutex.unlockShared(io);
     try validateRange(context, offset, buffer.len);
-
-    return if (context.engine) |*engine|
-        engine.readAt(io, buffer, offset) catch |err| return mapOperationError(err)
-    else
-        context.file.readPositionalAll(io, buffer, offset) catch |err| return mapOperationError(err);
+    return context.file.readPositionalAll(io, buffer, offset) catch |err| return mapOperationError(err);
 }
 
 fn readManyAt(
@@ -101,18 +97,21 @@ fn readManyAt(
     results: []storage_api.ReadResult,
 ) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
-    context.mutex.lock(io) catch |err| return mapOperationError(err);
-    defer context.mutex.unlock(io);
     if (reads.len != results.len) return error.InvalidReadBatch;
     for (reads) |read| try validateRange(context, read.offset, read.buffer.len);
 
-    if (context.engine) |*engine| {
+    if (context.engine != null and reads.len > 1) {
+        context.mutex.lockShared(io) catch |err| return mapOperationError(err);
+        defer context.mutex.unlockShared(io);
+        const engine = &context.engine.?;
         engine.readManyAt(io, reads, results) catch |err| return mapOperationError(err);
         for (results) |*result| {
             if (result.failure) |err| result.failure = mapOperationError(err);
         }
         return;
     }
+    context.mutex.lockShared(io) catch |err| return mapOperationError(err);
+    defer context.mutex.unlockShared(io);
     for (results) |*result| result.* = .{};
     for (reads, results) |read, *result| {
         result.amount = context.file.readPositionalAll(io, read.buffer, read.offset) catch |err| {
@@ -305,7 +304,7 @@ test "forced POSIX raw storage preserves identity and bounds" {
     storage_open = false;
 }
 
-test "forced io_uring raw storage uses shared engine when available" {
+test "forced io_uring raw storage uses positional singleton reads and engine batches" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(std.testing.io, "uring-raw-storage", .{ .read = true });
@@ -352,7 +351,7 @@ test "forced io_uring raw storage uses shared engine when available" {
     for (results) |result| try std.testing.expectEqual(@as(usize, 4), result.amount);
     try std.testing.expectEqual(storage_api.TransportKind.io_uring, storage.transportKind());
     const stats = storage.transportStats(std.testing.io);
-    try std.testing.expectEqual(@as(u64, 5), stats.submitted_sqes);
+    try std.testing.expectEqual(@as(u64, 4), stats.submitted_sqes);
     try std.testing.expectEqual(stats.submitted_sqes, stats.completions);
     try std.testing.expect(stats.max_inflight >= 1);
     storage.resetTransportStats(std.testing.io);

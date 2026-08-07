@@ -24,7 +24,7 @@ const Context = struct {
     identity: [16]u8,
     writable: bool,
     coordinator_claimed: bool,
-    mutex: Io.Mutex = .init,
+    mutex: Io.RwLock = .init,
 };
 
 const ClaimedReplicaContext = struct {
@@ -204,8 +204,8 @@ fn sameIdentity(context_ptr: *anyopaque, other_context_ptr: *anyopaque) bool {
 
 fn readAt(context_ptr: *anyopaque, io: Io, buffer: []u8, offset: u64) !usize {
     const context = contextFromOpaque(context_ptr);
-    try context.mutex.lock(io);
-    defer context.mutex.unlock(io);
+    try context.mutex.lockShared(io);
+    defer context.mutex.unlockShared(io);
     return context.device.readAt(buffer, offset);
 }
 
@@ -216,8 +216,8 @@ fn readManyAt(
     results: []storage_api.ReadResult,
 ) !void {
     const context = contextFromOpaque(context_ptr);
-    try context.mutex.lock(io);
-    defer context.mutex.unlock(io);
+    try context.mutex.lockShared(io);
+    defer context.mutex.unlockShared(io);
     try context.device.readManyAt(reads, results);
 }
 
@@ -755,8 +755,8 @@ fn testSyncWorker(context: *Context, started: *std.atomic.Value(bool)) !void {
     try sync(context, std.testing.io);
 }
 
-fn waitForContended(mutex: *Io.Mutex, started: *std.atomic.Value(bool)) !void {
-    while (!started.load(.acquire) or mutex.state.load(.acquire) != .contended)
+fn waitForContended(mutex: *Io.RwLock, started: *std.atomic.Value(bool)) !void {
+    while (!started.load(.acquire) or mutex.mutex.state.load(.acquire) != .contended)
         try std.Thread.yield();
 }
 

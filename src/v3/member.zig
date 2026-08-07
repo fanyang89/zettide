@@ -193,7 +193,7 @@ pub const Member = struct {
     degraded: bool,
     checkpoint_reclaim_ready: bool,
     open_mode: OpenMode,
-    mutex: Io.Mutex = .init,
+    mutex: Io.RwLock = .init,
     fault: ?*FaultController = null,
     dirty: bool = false,
     frozen: std.atomic.Value(bool) = .init(false),
@@ -461,8 +461,8 @@ pub const Member = struct {
     }
 
     pub fn read(self: *Member, kind: RegionKind, offset: u64, buffer: []u8) !void {
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
+        try self.mutex.lockShared(self.io);
+        defer self.mutex.unlockShared(self.io);
 
         if (self.isClosed()) return error.MemberClosed;
         const file_offset = try self.position(kind, offset, buffer.len);
@@ -489,8 +489,8 @@ pub const Member = struct {
         results: []storage_api.ReadResult,
     ) !void {
         if (reads.len != results.len) return error.InvalidReadBatch;
-        try self.mutex.lock(self.io);
-        defer self.mutex.unlock(self.io);
+        try self.mutex.lockShared(self.io);
+        defer self.mutex.unlockShared(self.io);
         if (self.isClosed()) return error.MemberClosed;
         for (results) |*result| result.* = .{};
 
@@ -2019,7 +2019,7 @@ test "durable write excludes close through write and sync" {
     defer if (close_pending) {
         _ = close_future.cancel(std.testing.io) catch {};
     };
-    while (!close_started.load(.acquire) or member.mutex.state.load(.acquire) != .contended)
+    while (!close_started.load(.acquire) or member.mutex.mutex.state.load(.acquire) != .contended)
         try std.Thread.yield();
     try std.testing.expect(!member.isClosed());
 
