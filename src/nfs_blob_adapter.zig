@@ -218,9 +218,9 @@ fn write(raw: *anyopaque, node: nfs_filesystem.Node, data: []const u8, offset: u
     if (node.kind == .directory) return error.IsDirectory;
     if (node.kind != .file) return error.InvalidArgument;
     const value = adapter(raw);
-    if (!value.native.writable) {
+    if (!value.native.writable or value.native.frozen) {
         _ = try validate(value, node);
-        return error.ReadOnlyVolume;
+        if (!value.native.writable) return error.ReadOnlyVolume;
     }
     const identity = try decodeIdentity(node.identity);
     return value.native.writeAtGeneration(

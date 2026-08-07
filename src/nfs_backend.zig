@@ -412,7 +412,7 @@ pub export fn zettide_nfs_read(
     if (buffer_length != 0 and buffer == null) return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
+    const decoded = decodeDataHandle(self, handle_value) catch |err| return statusFor(err, true);
     if (decoded.kind != .file) {
         _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
         return if (decoded.kind == .directory) status(.is_directory) else status(.invalid_argument);
@@ -471,7 +471,7 @@ pub export fn zettide_nfs_write(
     if (data_length != 0 and data == null) return status(.invalid_argument);
     self.lock() catch return status(.internal);
     defer self.unlock();
-    const decoded = decodeHandle(self, handle_value) catch |err| return statusFor(err, true);
+    const decoded = decodeDataHandle(self, handle_value) catch |err| return statusFor(err, true);
     if (decoded.kind != .file) {
         _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
         return if (decoded.kind == .directory) status(.is_directory) else status(.invalid_argument);
@@ -730,11 +730,24 @@ pub export fn zettide_nfs_directory_close(directory: ?*Directory) callconv(.c) c
 
 fn decodeExisting(self: *Export, handle: *const Handle) !nfs_handle.Handle {
     const decoded = try decodeHandle(self, handle);
+    try validateExisting(self, decoded);
+    return decoded;
+}
+
+fn decodeDataHandle(self: *Export, handle: *const Handle) !nfs_handle.Handle {
+    const decoded = try decodeHandle(self, handle);
+    switch (self.owner) {
+        .littlefs => try validateExisting(self, decoded),
+        .blob => {},
+    }
+    return decoded;
+}
+
+fn validateExisting(self: *Export, decoded: nfs_handle.Handle) !void {
     _ = self.filesystem.stat(node(decoded)) catch |err| switch (err) {
         error.FileNotFound => return error.StaleFileHandle,
         else => return err,
     };
-    return decoded;
 }
 
 fn decodeHandle(self: *Export, handle: *const Handle) !nfs_handle.Handle {
@@ -952,6 +965,20 @@ test "direct NFS backend resolves and reads stable handles" {
     );
     try std.testing.expectEqualStrings("created", target_buffer[0..target_length]);
 
+    var mismatched_symlink = try nfs_handle.decode(export_handle.filesystem.filesystem_id, &symlink_handle.bytes);
+    mismatched_symlink.kind = .file;
+    const mismatched_symlink_handle: Handle = .{
+        .bytes = nfs_handle.encode(export_handle.filesystem.filesystem_id, mismatched_symlink),
+    };
+    try std.testing.expectEqual(
+        status(.stale),
+        zettide_nfs_read(export_handle, &mismatched_symlink_handle, 0, &contents, contents.len, &bytes_read),
+    );
+    try std.testing.expectEqual(
+        status(.stale),
+        zettide_nfs_write(export_handle, &mismatched_symlink_handle, 0, "stale", "stale".len, &bytes_written),
+    );
+
     var new_directory_handle: Handle = undefined;
     var new_directory_attributes: Attributes = undefined;
     try std.testing.expectEqual(
@@ -1121,8 +1148,18 @@ test "direct NFS backend exports standalone BlobFilesystem" {
         status(.stale),
         zettide_nfs_write(export_handle, &stale_handle, 0, "stale", "stale".len, &stale_amount),
     );
+    export_handle.owner.blob.native.frozen = true;
+    try std.testing.expectEqual(
+        status(.stale),
+        zettide_nfs_write(export_handle, &stale_handle, 0, "stale", "stale".len, &stale_amount),
+    );
+    export_handle.owner.blob.native.frozen = false;
     try std.testing.expectEqual(status(.ok), zettide_nfs_sync(export_handle));
     try std.testing.expect(!export_handle.owner.blob.native.dirty);
+    try std.testing.expectEqual(
+        status(.stale),
+        zettide_nfs_read(export_handle, &stale_handle, 0, &stale_buffer, stale_buffer.len, &stale_amount),
+    );
 
     var directory_handle: Handle = undefined;
     var directory_attributes: Attributes = undefined;
