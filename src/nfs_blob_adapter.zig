@@ -1,7 +1,6 @@
 const std = @import("std");
 const blob_filesystem = @import("blob_filesystem.zig");
 const blob_format = @import("blob_format.zig");
-const blob_store = @import("blob_store.zig");
 const filesystem_format = @import("blob_filesystem_format.zig");
 const metadata = @import("metadata.zig");
 const nfs_filesystem = @import("nfs_filesystem.zig");
@@ -22,24 +21,6 @@ pub const Adapter = struct {
             .filesystem_id = self.native.blobs.header.uuid,
             .vtable = &filesystem_vtable,
         };
-    }
-
-    pub fn directReadPlan(
-        self: *Adapter,
-        node: nfs_filesystem.Node,
-        offset: u64,
-        length: usize,
-    ) !?blob_store.DirectReadPlan {
-        if (node.kind == .directory) return error.IsDirectory;
-        if (node.kind != .file) return error.InvalidArgument;
-        const identity = try decodeIdentity(node.identity);
-        return self.native.directReadPlanAtGeneration(
-            self.io,
-            identity.inode,
-            identity.generation,
-            offset,
-            length,
-        ) catch |err| return normalizeError(err);
     }
 };
 
@@ -422,61 +403,4 @@ fn closeDirectory(raw: *anyopaque) !void {
 
 fn destroyDirectory(raw: *anyopaque, allocator: std.mem.Allocator) void {
     allocator.destroy(directory(raw));
-}
-
-test "NFS blob adapter direct read plans preserve fallback and stale handles" {
-    const blob_device = @import("blob_device.zig");
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const device = try blob_device.Device.createFile(
-        std.testing.io,
-        tmp.dir,
-        "nfs-direct-plan",
-        16 * 1024 * 1024,
-        blob_format.allocation_unit,
-    );
-    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
-    var native = try blob_filesystem.Filesystem.format(
-        std.testing.allocator,
-        std.testing.io,
-        blobs,
-        .legacy_raw,
-    );
-    defer native.close(std.testing.io) catch {};
-    const inode = try native.createFile(
-        std.testing.io,
-        filesystem_format.root_inode,
-        "file",
-        0o644,
-        0,
-        0,
-    );
-    const initial = try native.stat(std.testing.io, inode);
-    const node = nodeInfo(inode, initial).node();
-    var value = Adapter.init(&native, std.testing.io);
-    const data: [blob_format.allocation_unit]u8 = @splat('n');
-    _ = try native.writeAtGeneration(std.testing.io, inode, initial.generation, &data, 0);
-
-    try std.testing.expectEqual(
-        @as(?blob_store.DirectReadPlan, null),
-        try value.directReadPlan(node, 0, data.len),
-    );
-    var stale = node;
-    std.mem.writeInt(u64, stale.identity[8..16], initial.generation + 1, .little);
-    try std.testing.expectError(error.FileNotFound, value.directReadPlan(stale, 0, data.len));
-
-    try native.sync(std.testing.io);
-    try std.testing.expectEqual(
-        @as(?blob_store.DirectReadPlan, null),
-        try value.directReadPlan(node, 0, data.len),
-    );
-    try std.testing.expectEqual(
-        @as(?blob_store.DirectReadPlan, null),
-        try value.directReadPlan(node, 1, data.len),
-    );
-    const root_record = try native.stat(std.testing.io, filesystem_format.root_inode);
-    try std.testing.expectError(
-        error.IsDirectory,
-        value.directReadPlan(nodeInfo(filesystem_format.root_inode, root_record).node(), 0, data.len),
-    );
 }
