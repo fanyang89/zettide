@@ -15,6 +15,10 @@ nqn=nqn.2026-08.io.zettide:benchmark
 serial=ZETTIDEBENCH000001
 target_pid=""
 device=""
+target_arguments=()
+if [[ -n ${ZETTIDE_NVMF_TARGET_ARGUMENT:-} ]]; then
+    target_arguments+=("$ZETTIDE_NVMF_TARGET_ARGUMENT")
+fi
 
 [[ $EUID -eq 0 ]] || {
     echo "NVMe-oF fio requires root" >&2
@@ -45,7 +49,7 @@ mkdir -p "$log_dir"
 rm -f "$ready_file"
 modprobe nvme-tcp
 nvme disconnect -n "$nqn" >/dev/null 2>&1 || true
-"$target" "$ready_file" >"$log_dir/target.log" 2>&1 &
+"$target" "$ready_file" "${target_arguments[@]}" >"$log_dir/target.log" 2>&1 &
 target_pid=$!
 for ((attempt = 0; attempt < 1000; attempt++)); do
     [[ -f $ready_file ]] && break

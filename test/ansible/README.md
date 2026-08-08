@@ -229,7 +229,10 @@ Configure `zettide_throughput_targets` in the ignored inventory and run:
 uv run ansible-playbook test/ansible/throughput.yml --limit zettide-tier1
 ```
 
-## NVMe-oF/TCP fio ceiling
+The benchmark creates sparse 8 GiB temporary images inside the configured
+directories. It never writes raw block devices.
+
+## NVMe-oF/TCP fio
 
 The NVMe-oF profile builds the pinned `third_party/spdk` source on the remote
 host, exports a 64 GiB memory-backed provider bdev over loopback TCP, connects
@@ -245,8 +248,14 @@ Override the measured and ramp durations with `zettide_nvmf_fio_runtime` and
 `zettide_nvmf_fio_ramp_time`. JSON fio output, target logs, and NVMe topology
 are stored in the fetched result archive.
 
-The benchmark creates sparse 8 GiB temporary images inside the configured
-directories. It never writes raw block devices.
+The Catalog profile uses the same cases and export identity, but reads a real
+64 GiB thin Catalog Volume from an 8 MiB temporary file-backed Pool. Unmapped
+extents read as zero, so this isolates Catalog lookup, worker scheduling, and
+provider overhead without accessing a physical device:
+
+```sh
+uv run ansible-playbook test/ansible/nvmf-catalog-fio.yml --limit zettide-tier1
+```
 
 ## BlobDevice
 

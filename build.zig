@@ -28,6 +28,29 @@ pub fn build(b: *std.Build) void {
     const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
 
+    if (enable_spdk) {
+        const catalog_nvmf_benchmark_module = b.createModule(.{
+            .root_source_file = b.path("test/spdk_catalog_nvmf_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zettide", .module = portable_core }},
+        });
+        catalog_nvmf_benchmark_module.addIncludePath(b.path("test"));
+        const catalog_nvmf_benchmark = b.addLibrary(.{
+            .name = "zettide-spdk-catalog-nvmf-benchmark",
+            .linkage = .static,
+            .root_module = catalog_nvmf_benchmark_module,
+        });
+        catalog_nvmf_benchmark.bundle_compiler_rt = true;
+        const install_catalog_nvmf_benchmark = b.addInstallArtifact(catalog_nvmf_benchmark, .{});
+        const catalog_nvmf_benchmark_step = b.step(
+            "build-nvmf-catalog-benchmark",
+            "Build the Catalog NVMe-oF benchmark target",
+        );
+        catalog_nvmf_benchmark_step.dependOn(&install_catalog_nvmf_benchmark.step);
+    }
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
