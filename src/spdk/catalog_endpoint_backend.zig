@@ -1,4 +1,5 @@
 const std = @import("std");
+const catalog_nvmf_export = @import("catalog_nvmf_export.zig");
 const catalog_vhost_export = @import("catalog_vhost_export.zig");
 const endpoint_registry = @import("../endpoint_registry.zig");
 const pool_member_set = @import("../v3/pool_member_set.zig");
@@ -149,9 +150,18 @@ pub const Options = struct {
     block_size: u32 = 4096,
     write_unit_blocks: u32 = 1,
     max_io_blocks: u32 = 256,
+    nvme_of_tcp: NvmeOfTcpOptions = .{},
 };
 
-/// Adapts registry lifecycle operations to complete catalog vhost exports. The
+pub const NvmeOfTcpOptions = struct {
+    target_name: ?[]const u8 = null,
+    traddr: ?[]const u8 = null,
+    trsvcid: []const u8 = "4420",
+    host_nqn: ?[]const u8 = null,
+    allow_any_host: bool = false,
+};
+
+/// Adapts registry lifecycle operations to complete catalog exports. The
 /// allocator must be thread-safe. This object, allocator, io, runtime, source,
 /// and option strings must remain valid until every endpoint is stopped.
 pub const CatalogEndpointBackend = struct {
@@ -160,16 +170,23 @@ pub const CatalogEndpointBackend = struct {
     runtime: *runtime_api.Runtime,
     source: PoolSource,
     options: Options,
-    driver: ExportDriver,
+    vhost_driver: ExportDriver,
+    nvmf_driver: NvmfExportDriver,
 
     const Instance = struct {
         set: *pool_member_set.PoolMemberSet,
+        frontend: endpoint_registry.Frontend,
         export_handle: ?*anyopaque,
         socket_path: [socket_path_capacity]u8,
         socket_path_len: usize,
+        nqn: [nqn_length]u8,
     };
 
     const socket_path_capacity = 108;
+    const nqn_prefix = "nqn.2026-08.io.zettide:";
+    const nqn_length = nqn_prefix.len + 32;
+    const serial_number_length = 20;
+    const model_number = "Zettide Catalog Volume";
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -178,7 +195,15 @@ pub const CatalogEndpointBackend = struct {
         source: PoolSource,
         options: Options,
     ) CatalogEndpointBackend {
-        return initWithDriver(allocator, io, runtime, source, options, catalog_driver);
+        return initWithDrivers(
+            allocator,
+            io,
+            runtime,
+            source,
+            options,
+            catalog_driver,
+            catalog_nvmf_driver,
+        );
     }
 
     pub fn endpointBackend(self: *CatalogEndpointBackend) endpoint_registry.Backend {
@@ -193,13 +218,34 @@ pub const CatalogEndpointBackend = struct {
         options: Options,
         driver: ExportDriver,
     ) CatalogEndpointBackend {
+        return initWithDrivers(
+            allocator,
+            io,
+            runtime,
+            source,
+            options,
+            driver,
+            unsupported_nvmf_driver,
+        );
+    }
+
+    fn initWithDrivers(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        runtime: *runtime_api.Runtime,
+        source: PoolSource,
+        options: Options,
+        vhost_driver: ExportDriver,
+        nvmf_driver: NvmfExportDriver,
+    ) CatalogEndpointBackend {
         return .{
             .allocator = allocator,
             .io = io,
             .runtime = runtime,
             .source = source,
             .options = options,
-            .driver = driver,
+            .vhost_driver = vhost_driver,
+            .nvmf_driver = nvmf_driver,
         };
     }
 
@@ -208,7 +254,12 @@ pub const CatalogEndpointBackend = struct {
         spec: endpoint_registry.Spec,
     ) !endpoint_registry.Backend.Instance {
         const self: *CatalogEndpointBackend = @ptrCast(@alignCast(context));
-        if (spec.frontend != .vhost_user_blk) return error.UnsupportedFrontend;
+        const traddr = switch (spec.frontend) {
+            .vhost_user_blk => null,
+            .nvme_of_tcp => self.options.nvme_of_tcp.traddr orelse
+                return error.UnsupportedFrontend,
+            .iscsi => return error.UnsupportedFrontend,
+        };
         const names = namesFor(spec.endpoint_id);
         const instance = try self.allocator.create(Instance);
         errdefer self.allocator.destroy(instance);
@@ -217,42 +268,91 @@ pub const CatalogEndpointBackend = struct {
         errdefer self.source.abort(opened.set);
         if (!std.mem.eql(u8, &opened.pool_id, &spec.pool_id)) return error.PoolIdentityMismatch;
 
-        const export_instance = try self.driver.create(
-            self.allocator,
-            self.io,
-            self.runtime,
-            opened.set,
-            spec.volume_id,
-            .{
-                .bdev_name = names.bdevSlice(),
-                .controller_name = names.controllerSlice(),
-                .cpumask = self.options.cpumask,
-                .block_size = self.options.block_size,
-                .write_unit_blocks = self.options.write_unit_blocks,
-                .max_io_blocks = self.options.max_io_blocks,
-            },
-        );
-        std.debug.assert(export_instance.socket_path.len <= socket_path_capacity);
         instance.* = .{
             .set = opened.set,
-            .export_handle = export_instance.handle,
+            .frontend = spec.frontend,
+            .export_handle = null,
             .socket_path = undefined,
-            .socket_path_len = export_instance.socket_path.len,
+            .socket_path_len = 0,
+            .nqn = undefined,
         };
-        @memcpy(instance.socket_path[0..instance.socket_path_len], export_instance.socket_path);
-        return .{
-            .handle = instance,
-            .locator = .{ .vhost_user_blk = .{
-                .socket_path = instance.socket_path[0..instance.socket_path_len],
-            } },
-        };
+        switch (spec.frontend) {
+            .vhost_user_blk => {
+                const export_instance = try self.vhost_driver.create(
+                    self.allocator,
+                    self.io,
+                    self.runtime,
+                    opened.set,
+                    spec.volume_id,
+                    .{
+                        .bdev_name = names.bdevSlice(),
+                        .controller_name = names.controllerSlice(),
+                        .cpumask = self.options.cpumask,
+                        .block_size = self.options.block_size,
+                        .write_unit_blocks = self.options.write_unit_blocks,
+                        .max_io_blocks = self.options.max_io_blocks,
+                    },
+                );
+                std.debug.assert(export_instance.socket_path.len <= socket_path_capacity);
+                instance.export_handle = export_instance.handle;
+                instance.socket_path_len = export_instance.socket_path.len;
+                @memcpy(instance.socket_path[0..instance.socket_path_len], export_instance.socket_path);
+                return .{
+                    .handle = instance,
+                    .locator = .{ .vhost_user_blk = .{
+                        .socket_path = instance.socket_path[0..instance.socket_path_len],
+                    } },
+                };
+            },
+            .nvme_of_tcp => {
+                writeNqn(&instance.nqn, spec.endpoint_id);
+                var serial_number: [serial_number_length]u8 = undefined;
+                writeHex(&serial_number, spec.endpoint_id[0 .. serial_number_length / 2]);
+                instance.export_handle = try self.nvmf_driver.create(
+                    self.allocator,
+                    self.io,
+                    self.runtime,
+                    opened.set,
+                    spec.volume_id,
+                    .{
+                        .bdev_name = names.bdevSlice(),
+                        .nqn = &instance.nqn,
+                        .serial_number = &serial_number,
+                        .model_number = model_number,
+                        .host_nqn = self.options.nvme_of_tcp.host_nqn,
+                        .traddr = traddr.?,
+                        .trsvcid = self.options.nvme_of_tcp.trsvcid,
+                        .nsid = 1,
+                        .allow_any_host = self.options.nvme_of_tcp.allow_any_host,
+                        .target_name = self.options.nvme_of_tcp.target_name,
+                        .block_size = self.options.block_size,
+                        .write_unit_blocks = self.options.write_unit_blocks,
+                        .max_io_blocks = self.options.max_io_blocks,
+                    },
+                );
+                return .{
+                    .handle = instance,
+                    .locator = .{ .nvme_of_tcp = .{
+                        .traddr = traddr.?,
+                        .trsvcid = self.options.nvme_of_tcp.trsvcid,
+                        .nqn = &instance.nqn,
+                        .nsid = 1,
+                    } },
+                };
+            },
+            .iscsi => unreachable,
+        }
     }
 
     fn stopOpaque(context: *anyopaque, handle: *anyopaque) !void {
         const self: *CatalogEndpointBackend = @ptrCast(@alignCast(context));
         const instance: *Instance = @ptrCast(@alignCast(handle));
         if (instance.export_handle) |export_handle| {
-            try self.driver.close(self.allocator, export_handle);
+            switch (instance.frontend) {
+                .vhost_user_blk => try self.vhost_driver.close(self.allocator, export_handle),
+                .nvme_of_tcp => try self.nvmf_driver.close(self.allocator, export_handle),
+                .iscsi => unreachable,
+            }
             instance.export_handle = null;
         }
         try self.source.close(instance.set);
@@ -264,6 +364,20 @@ pub const CatalogEndpointBackend = struct {
         .stop = stopOpaque,
     };
 };
+
+fn writeNqn(destination: *[CatalogEndpointBackend.nqn_length]u8, endpoint_id: endpoint_registry.EndpointId) void {
+    @memcpy(destination[0..CatalogEndpointBackend.nqn_prefix.len], CatalogEndpointBackend.nqn_prefix);
+    writeHex(destination[CatalogEndpointBackend.nqn_prefix.len..], &endpoint_id);
+}
+
+fn writeHex(destination: []u8, bytes: []const u8) void {
+    const digits = "0123456789abcdef";
+    std.debug.assert(destination.len == bytes.len * 2);
+    for (bytes, 0..) |byte, index| {
+        destination[index * 2] = digits[byte >> 4];
+        destination[index * 2 + 1] = digits[byte & 0x0f];
+    }
+}
 
 const ExportDriver = struct {
     context: ?*anyopaque,
@@ -337,6 +451,100 @@ const catalog_driver: ExportDriver = .{
     .vtable = &.{
         .create = createCatalogExport,
         .close = closeCatalogExport,
+    },
+};
+
+const NvmfExportDriver = struct {
+    context: ?*anyopaque,
+    vtable: *const VTable,
+
+    const VTable = struct {
+        create: *const fn (
+            ?*anyopaque,
+            std.mem.Allocator,
+            std.Io,
+            *runtime_api.Runtime,
+            *pool_member_set.PoolMemberSet,
+            endpoint_registry.VolumeId,
+            catalog_nvmf_export.Options,
+        ) anyerror!*anyopaque,
+        close: *const fn (?*anyopaque, std.mem.Allocator, *anyopaque) anyerror!void,
+    };
+
+    fn create(
+        self: NvmfExportDriver,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        runtime: *runtime_api.Runtime,
+        set: *pool_member_set.PoolMemberSet,
+        volume_id: endpoint_registry.VolumeId,
+        options: catalog_nvmf_export.Options,
+    ) !*anyopaque {
+        return self.vtable.create(self.context, allocator, io, runtime, set, volume_id, options);
+    }
+
+    fn close(self: NvmfExportDriver, allocator: std.mem.Allocator, handle: *anyopaque) !void {
+        return self.vtable.close(self.context, allocator, handle);
+    }
+};
+
+fn createCatalogNvmfExport(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    runtime: *runtime_api.Runtime,
+    set: *pool_member_set.PoolMemberSet,
+    volume_id: endpoint_registry.VolumeId,
+    options: catalog_nvmf_export.Options,
+) !*anyopaque {
+    const export_handle = try allocator.create(catalog_nvmf_export.CatalogNvmfExport);
+    errdefer allocator.destroy(export_handle);
+    export_handle.* = try catalog_nvmf_export.CatalogNvmfExport.create(
+        allocator,
+        io,
+        runtime,
+        set,
+        volume_id,
+        options,
+    );
+    return export_handle;
+}
+
+fn closeCatalogNvmfExport(_: ?*anyopaque, allocator: std.mem.Allocator, handle: *anyopaque) !void {
+    const export_handle: *catalog_nvmf_export.CatalogNvmfExport = @ptrCast(@alignCast(handle));
+    try export_handle.close();
+    allocator.destroy(export_handle);
+}
+
+const catalog_nvmf_driver: NvmfExportDriver = .{
+    .context = null,
+    .vtable = &.{
+        .create = createCatalogNvmfExport,
+        .close = closeCatalogNvmfExport,
+    },
+};
+
+fn unsupportedNvmfCreate(
+    _: ?*anyopaque,
+    _: std.mem.Allocator,
+    _: std.Io,
+    _: *runtime_api.Runtime,
+    _: *pool_member_set.PoolMemberSet,
+    _: endpoint_registry.VolumeId,
+    _: catalog_nvmf_export.Options,
+) !*anyopaque {
+    return error.UnsupportedFrontend;
+}
+
+fn unsupportedNvmfClose(_: ?*anyopaque, _: std.mem.Allocator, _: *anyopaque) !void {
+    unreachable;
+}
+
+const unsupported_nvmf_driver: NvmfExportDriver = .{
+    .context = null,
+    .vtable = &.{
+        .create = unsupportedNvmfCreate,
+        .close = unsupportedNvmfClose,
     },
 };
 
@@ -433,6 +641,65 @@ const FakeExportDriver = struct {
     }
 
     const vtable: ExportDriver.VTable = .{ .create = create, .close = close };
+};
+
+const FakeNvmfExportDriver = struct {
+    events: *Events,
+    expected_set: *pool_member_set.PoolMemberSet,
+    fail_create: bool = false,
+    fail_close: bool = false,
+    creates: usize = 0,
+    closes: usize = 0,
+    volume_id: endpoint_registry.VolumeId = @splat(0),
+    bdev_name: [name_length]u8 = @splat(0),
+    nqn: [CatalogEndpointBackend.nqn_length]u8 = @splat(0),
+    serial_number: [CatalogEndpointBackend.serial_number_length]u8 = @splat(0),
+    expected_trsvcid: []const u8 = "4420",
+
+    fn exportDriver(self: *FakeNvmfExportDriver) NvmfExportDriver {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn create(
+        context: ?*anyopaque,
+        _: std.mem.Allocator,
+        _: std.Io,
+        _: *runtime_api.Runtime,
+        set: *pool_member_set.PoolMemberSet,
+        volume_id: endpoint_registry.VolumeId,
+        options: catalog_nvmf_export.Options,
+    ) !*anyopaque {
+        const self: *FakeNvmfExportDriver = @ptrCast(@alignCast(context.?));
+        std.debug.assert(set == self.expected_set);
+        self.creates += 1;
+        self.events.add(6);
+        if (self.fail_create) return error.ExportCreateFailed;
+        try std.testing.expectEqualStrings("nvmf0", options.target_name.?);
+        try std.testing.expectEqualStrings("192.0.2.1", options.traddr);
+        try std.testing.expectEqualStrings(self.expected_trsvcid, options.trsvcid);
+        try std.testing.expectEqualStrings("nqn.2014-08.org.nvmexpress:host", options.host_nqn.?);
+        try std.testing.expectEqualStrings(CatalogEndpointBackend.model_number, options.model_number.?);
+        try std.testing.expect(options.allow_any_host);
+        try std.testing.expectEqual(@as(u32, 1), options.nsid);
+        try std.testing.expectEqual(@as(u32, 8192), options.block_size);
+        try std.testing.expectEqual(@as(u32, 2), options.write_unit_blocks);
+        try std.testing.expectEqual(@as(u32, 128), options.max_io_blocks);
+        self.volume_id = volume_id;
+        @memcpy(&self.bdev_name, options.bdev_name);
+        @memcpy(&self.nqn, options.nqn);
+        @memcpy(&self.serial_number, options.serial_number.?);
+        return self;
+    }
+
+    fn close(context: ?*anyopaque, _: std.mem.Allocator, handle: *anyopaque) !void {
+        const self: *FakeNvmfExportDriver = @ptrCast(@alignCast(context.?));
+        std.debug.assert(handle == @as(*anyopaque, @ptrCast(self)));
+        self.closes += 1;
+        self.events.add(7);
+        if (self.fail_close) return error.ExportCloseFailed;
+    }
+
+    const vtable: NvmfExportDriver.VTable = .{ .create = create, .close = close };
 };
 
 fn testId(value: u8) [16]u8 {
@@ -532,6 +799,23 @@ test "stable vhost names use the endpoint id" {
     try std.testing.expectEqualStrings("zvh-000000000000000000000000000000ab", names.controllerSlice());
 }
 
+test "NVMe identities use deterministic lowercase endpoint hex" {
+    const endpoint_id: endpoint_registry.EndpointId = .{
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+    };
+    var nqn: [CatalogEndpointBackend.nqn_length]u8 = undefined;
+    var serial_number: [CatalogEndpointBackend.serial_number_length]u8 = undefined;
+    writeNqn(&nqn, endpoint_id);
+    writeHex(&serial_number, endpoint_id[0 .. serial_number.len / 2]);
+
+    try std.testing.expectEqualStrings(
+        "nqn.2026-08.io.zettide:0123456789abcdeffedcba9876543210",
+        &nqn,
+    );
+    try std.testing.expectEqualStrings("0123456789abcdeffedc", &serial_number);
+}
+
 test "catalog endpoint backend composes pool and export lifetimes" {
     var events: Events = .{};
     var source: FakePoolSource = .{ .events = &events, .actual_pool_id = testId(2) };
@@ -555,6 +839,9 @@ test "catalog endpoint backend composes pool and export lifetimes" {
     const names = namesFor(spec.endpoint_id);
 
     spec.frontend = .iscsi;
+    try std.testing.expectError(error.UnsupportedFrontend, backend.start(spec));
+    try std.testing.expectEqual(@as(usize, 0), source.opens);
+    spec.frontend = .nvme_of_tcp;
     try std.testing.expectError(error.UnsupportedFrontend, backend.start(spec));
     try std.testing.expectEqual(@as(usize, 0), source.opens);
     spec.frontend = .vhost_user_blk;
@@ -668,4 +955,104 @@ test "catalog endpoint backend does not reclose export when pool close retries" 
     try backend.stop(instance.handle);
     try std.testing.expectEqual(@as(usize, 1), driver.closes);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 4 }, events.values[0..events.len]);
+}
+
+test "catalog endpoint backend creates an NVMe-oF locator with global options" {
+    var events: Events = .{};
+    var source: FakePoolSource = .{ .events = &events, .actual_pool_id = testId(2) };
+    var vhost_driver: FakeExportDriver = .{ .events = &events, .expected_set = &source.set };
+    var nvmf_driver: FakeNvmfExportDriver = .{ .events = &events, .expected_set = &source.set };
+    var runtime: runtime_api.Runtime = .{ .handle = null };
+    var adapter = CatalogEndpointBackend.initWithDrivers(
+        std.testing.allocator,
+        std.testing.io,
+        &runtime,
+        source.poolSource(),
+        .{
+            .block_size = 8192,
+            .write_unit_blocks = 2,
+            .max_io_blocks = 128,
+            .nvme_of_tcp = .{
+                .target_name = "nvmf0",
+                .traddr = "192.0.2.1",
+                .host_nqn = "nqn.2014-08.org.nvmexpress:host",
+                .allow_any_host = true,
+            },
+        },
+        vhost_driver.exportDriver(),
+        nvmf_driver.exportDriver(),
+    );
+    const backend = adapter.endpointBackend();
+    const spec: endpoint_registry.Spec = .{
+        .endpoint_id = testId(0xab),
+        .pool_id = testId(2),
+        .volume_id = testId(3),
+        .frontend = .nvme_of_tcp,
+    };
+    const instance = try backend.start(spec);
+
+    try std.testing.expectEqual(@as(usize, 0), vhost_driver.creates);
+    try std.testing.expectEqualSlices(u8, &spec.volume_id, &nvmf_driver.volume_id);
+    try std.testing.expectEqualStrings(namesFor(spec.endpoint_id).bdevSlice(), &nvmf_driver.bdev_name);
+    try std.testing.expectEqualStrings(
+        "nqn.2026-08.io.zettide:000000000000000000000000000000ab",
+        &nvmf_driver.nqn,
+    );
+    try std.testing.expectEqualStrings("00000000000000000000", &nvmf_driver.serial_number);
+    try std.testing.expectEqualStrings("192.0.2.1", instance.locator.nvme_of_tcp.traddr);
+    try std.testing.expectEqualStrings("4420", instance.locator.nvme_of_tcp.trsvcid);
+    try std.testing.expectEqualStrings(&nvmf_driver.nqn, instance.locator.nvme_of_tcp.nqn);
+    try std.testing.expectEqual(@as(u32, 1), instance.locator.nvme_of_tcp.nsid);
+    try backend.stop(instance.handle);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 6, 7, 4 }, events.values[0..events.len]);
+}
+
+test "catalog endpoint backend retries NVMe export before pool teardown" {
+    var events: Events = .{};
+    var source: FakePoolSource = .{
+        .events = &events,
+        .actual_pool_id = testId(2),
+        .fail_close = true,
+    };
+    var vhost_driver: FakeExportDriver = .{ .events = &events, .expected_set = &source.set };
+    var nvmf_driver: FakeNvmfExportDriver = .{
+        .events = &events,
+        .expected_set = &source.set,
+        .expected_trsvcid = "4421",
+    };
+    var runtime: runtime_api.Runtime = .{ .handle = null };
+    var adapter = CatalogEndpointBackend.initWithDrivers(
+        std.testing.allocator,
+        std.testing.io,
+        &runtime,
+        source.poolSource(),
+        .{ .nvme_of_tcp = .{
+            .target_name = "nvmf0",
+            .traddr = "192.0.2.1",
+            .trsvcid = "4421",
+            .host_nqn = "nqn.2014-08.org.nvmexpress:host",
+            .allow_any_host = true,
+        }, .block_size = 8192, .write_unit_blocks = 2, .max_io_blocks = 128 },
+        vhost_driver.exportDriver(),
+        nvmf_driver.exportDriver(),
+    );
+    const backend = adapter.endpointBackend();
+    const spec: endpoint_registry.Spec = .{
+        .endpoint_id = testId(1),
+        .pool_id = testId(2),
+        .volume_id = testId(3),
+        .frontend = .nvme_of_tcp,
+    };
+    const instance = try backend.start(spec);
+
+    nvmf_driver.fail_close = true;
+    try std.testing.expectError(error.ExportCloseFailed, backend.stop(instance.handle));
+    try std.testing.expectEqual(@as(usize, 0), source.closes);
+    nvmf_driver.fail_close = false;
+    try std.testing.expectError(error.PoolCloseFailed, backend.stop(instance.handle));
+    try std.testing.expectEqual(@as(usize, 2), nvmf_driver.closes);
+    source.fail_close = false;
+    try backend.stop(instance.handle);
+    try std.testing.expectEqual(@as(usize, 2), nvmf_driver.closes);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 6, 7, 7, 4, 4 }, events.values[0..events.len]);
 }

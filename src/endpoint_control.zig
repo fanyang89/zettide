@@ -347,6 +347,18 @@ fn writeView(stringify: *std.json.Stringify, view: endpoint_registry.View) !void
                 try stringify.objectField("lun");
                 try stringify.write(iscsi.lun);
             },
+            .nvme_of_tcp => |nvme| {
+                try stringify.objectField("type");
+                try stringify.write("nvme_of_tcp");
+                try stringify.objectField("traddr");
+                try stringify.write(nvme.traddr);
+                try stringify.objectField("trsvcid");
+                try stringify.write(nvme.trsvcid);
+                try stringify.objectField("nqn");
+                try stringify.write(nvme.nqn);
+                try stringify.objectField("nsid");
+                try stringify.write(nvme.nsid);
+            },
         }
         try stringify.endObject();
     } else {
@@ -394,6 +406,7 @@ fn formatId(buffer: *[32]u8, id: [16]u8) []const u8 {
 fn parseFrontend(text: []const u8) !endpoint_registry.Frontend {
     if (std.mem.eql(u8, text, "vhost_user_blk")) return .vhost_user_blk;
     if (std.mem.eql(u8, text, "iscsi")) return .iscsi;
+    if (std.mem.eql(u8, text, "nvme_of_tcp")) return .nvme_of_tcp;
     return error.InvalidFrontend;
 }
 
@@ -575,6 +588,12 @@ const TestBackend = struct {
                 .target_name = "iqn.2026-08.io.zettide:test",
                 .lun = 7,
             } },
+            .nvme_of_tcp => .{ .nvme_of_tcp = .{
+                .traddr = "127.0.0.1",
+                .trsvcid = "4420",
+                .nqn = "nqn.2026-08.io.zettide:test",
+                .nsid = 1,
+            } },
         };
         return .{ .handle = self, .locator = locator };
     }
@@ -618,9 +637,9 @@ fn waitForActiveClient(server: *Server) !void {
 
 test "endpoint control parses strict versioned requests" {
     const request = try parseRequest(
-        "{\"v\":1,\"action\":\"ensure\",\"endpoint_id\":\"00000000000000000000000000000001\",\"pool_id\":\"00000000000000000000000000000002\",\"volume_id\":\"00000000000000000000000000000003\",\"frontend\":\"iscsi\"}\n",
+        "{\"v\":1,\"action\":\"ensure\",\"endpoint_id\":\"00000000000000000000000000000001\",\"pool_id\":\"00000000000000000000000000000002\",\"volume_id\":\"00000000000000000000000000000003\",\"frontend\":\"nvme_of_tcp\"}\n",
     );
-    try std.testing.expectEqual(endpoint_registry.Frontend.iscsi, request.ensure.frontend);
+    try std.testing.expectEqual(endpoint_registry.Frontend.nvme_of_tcp, request.ensure.frontend);
     try std.testing.expectEqualSlices(u8, &testId(3), &request.ensure.volume_id);
     try std.testing.expectError(error.InvalidRequestFields, parseRequest(
         "{\"v\":1,\"action\":\"list\",\"endpoint_id\":\"00000000000000000000000000000001\"}\n",
@@ -651,14 +670,14 @@ test "endpoint control dispatches typed locator responses and stable errors" {
         .endpoint_id = testId(1),
         .pool_id = testId(2),
         .volume_id = testId(3),
-        .frontend = .iscsi,
+        .frontend = .nvme_of_tcp,
     };
 
     var output: [4096]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try dispatch(&registry, std.testing.allocator, .{ .ensure = spec }, &writer);
     try std.testing.expectEqualStrings(
-        "{\"v\":1,\"ok\":true,\"endpoint\":{\"endpoint_id\":\"00000000000000000000000000000001\",\"pool_id\":\"00000000000000000000000000000002\",\"volume_id\":\"00000000000000000000000000000003\",\"frontend\":\"iscsi\",\"state\":\"active\",\"locator\":{\"type\":\"iscsi\",\"portal\":\"127.0.0.1:3260\",\"target_name\":\"iqn.2026-08.io.zettide:test\",\"lun\":7}}}\n",
+        "{\"v\":1,\"ok\":true,\"endpoint\":{\"endpoint_id\":\"00000000000000000000000000000001\",\"pool_id\":\"00000000000000000000000000000002\",\"volume_id\":\"00000000000000000000000000000003\",\"frontend\":\"nvme_of_tcp\",\"state\":\"active\",\"locator\":{\"type\":\"nvme_of_tcp\",\"traddr\":\"127.0.0.1\",\"trsvcid\":\"4420\",\"nqn\":\"nqn.2026-08.io.zettide:test\",\"nsid\":1}}}\n",
         writer.buffered(),
     );
 

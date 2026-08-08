@@ -4,10 +4,12 @@ const endpoint_registry = @import("endpoint_registry.zig");
 const catalog_endpoint_backend = @import("spdk/catalog_endpoint_backend.zig");
 const runtime_api = @import("spdk/runtime.zig");
 
-const bdev_config =
+const runtime_config =
     "{\"subsystems\":[{\"subsystem\":\"bdev\",\"config\":[" ++
     "{\"method\":\"bdev_set_options\",\"params\":{\"bdev_io_pool_size\":1024," ++
-    "\"bdev_io_cache_size\":32}}]}]}";
+    "\"bdev_io_cache_size\":32}}]}," ++
+    "{\"subsystem\":\"nvmf\",\"config\":[" ++
+    "{\"method\":\"nvmf_create_transport\",\"params\":{\"trtype\":\"TCP\"}}]}]}";
 
 const PoolMember = struct {
     pool_id: endpoint_registry.PoolId,
@@ -19,10 +21,18 @@ const Options = struct {
     runtime_dir: []const u8,
     reactor_mask: []const u8 = "0x1",
     pool_members: []PoolMember,
+    nvmf_traddr: ?[]const u8 = null,
+    nvmf_trsvcid: []const u8 = "4420",
+    nvmf_host_nqn: ?[]const u8 = null,
+    nvmf_allow_any_host: bool = false,
 
     fn parse(allocator: std.mem.Allocator, args: []const []const u8) !Options {
         var runtime_dir: ?[]const u8 = null;
         var reactor_mask: ?[]const u8 = null;
+        var nvmf_traddr: ?[]const u8 = null;
+        var nvmf_trsvcid: ?[]const u8 = null;
+        var nvmf_host_nqn: ?[]const u8 = null;
+        var nvmf_allow_any_host = false;
         var pool_members: std.ArrayList(PoolMember) = .empty;
         errdefer pool_members.deinit(allocator);
 
@@ -46,6 +56,24 @@ const Options = struct {
                     .path = args[index + 2],
                 });
                 index += 2;
+            } else if (std.mem.eql(u8, option, "--nvmf-traddr")) {
+                if (nvmf_traddr != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                nvmf_traddr = args[index];
+            } else if (std.mem.eql(u8, option, "--nvmf-trsvcid")) {
+                if (nvmf_trsvcid != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                nvmf_trsvcid = args[index];
+            } else if (std.mem.eql(u8, option, "--nvmf-host-nqn")) {
+                if (nvmf_host_nqn != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                nvmf_host_nqn = args[index];
+            } else if (std.mem.eql(u8, option, "--nvmf-allow-any-host")) {
+                if (nvmf_allow_any_host) return error.DuplicateOption;
+                nvmf_allow_any_host = true;
             } else {
                 return error.UnknownOption;
             }
@@ -56,11 +84,27 @@ const Options = struct {
         if (!std.fs.path.isAbsolute(directory)) return error.InvalidRuntimeDirectory;
         const mask = reactor_mask orelse "0x1";
         if (mask.len == 0) return error.InvalidReactorMask;
+        const nvmf_service_id: []const u8 = nvmf_trsvcid orelse "4420";
+        if (nvmf_traddr) |traddr| {
+            if (traddr.len == 0 or nvmf_service_id.len == 0)
+                return error.InvalidNvmfListenAddress;
+            if (nvmf_allow_any_host == (nvmf_host_nqn != null))
+                return error.InvalidNvmfAccessPolicy;
+            if (nvmf_host_nqn) |host_nqn| {
+                if (host_nqn.len == 0) return error.InvalidNvmfAccessPolicy;
+            }
+        } else if (nvmf_trsvcid != null or nvmf_host_nqn != null or nvmf_allow_any_host) {
+            return error.MissingNvmfTransportAddress;
+        }
         return .{
             .allocator = allocator,
             .runtime_dir = directory,
             .reactor_mask = mask,
             .pool_members = try pool_members.toOwnedSlice(allocator),
+            .nvmf_traddr = nvmf_traddr,
+            .nvmf_trsvcid = nvmf_service_id,
+            .nvmf_host_nqn = nvmf_host_nqn,
+            .nvmf_allow_any_host = nvmf_allow_any_host,
         };
     }
 
@@ -145,6 +189,7 @@ const DynamicModules = struct {
     const names = [_][:0]const u8{
         "librte_mempool_ring.so",
         "libspdk_event_bdev.so",
+        "libspdk_event_nvmf.so",
         "libspdk_event_vhost_blk.so",
     };
 
@@ -189,7 +234,7 @@ pub fn serve(
     var runtime = try runtime_api.Runtime.start(allocator, .{
         .name = "zettide-endpointd",
         .reactor_mask = options.reactor_mask,
-        .json_data = bdev_config,
+        .json_data = runtime_config,
         .mem_size_mb = 320,
         .no_pci = true,
         .no_huge = true,
@@ -210,7 +255,15 @@ pub fn serve(
         io,
         &runtime,
         source.poolSource(),
-        .{ .cpumask = options.reactor_mask },
+        .{
+            .cpumask = options.reactor_mask,
+            .nvme_of_tcp = .{
+                .traddr = options.nvmf_traddr,
+                .trsvcid = options.nvmf_trsvcid,
+                .host_nqn = options.nvmf_host_nqn,
+                .allow_any_host = options.nvmf_allow_any_host,
+            },
+        },
     );
     var store = endpoint_registry.FileStore.init(io, runtime_dir, "endpoints.state");
     var registry = try endpoint_registry.Registry.init(allocator, store.desiredStore(), backend.endpointBackend());
@@ -263,11 +316,23 @@ test "endpoint daemon parses runtime and grouped pool options" {
         "--pool-member",
         "00000000000000000000000000000001",
         "/dev/second",
+        "--nvmf-traddr",
+        "192.0.2.10",
+        "--nvmf-trsvcid",
+        "4421",
+        "--nvmf-host-nqn",
+        "nqn.2014-08.org.nvmexpress:uuid:test-host",
     });
     defer options.deinit();
     try std.testing.expectEqualStrings("/run/zettide", options.runtime_dir);
     try std.testing.expectEqualStrings("0x2", options.reactor_mask);
     try std.testing.expectEqual(@as(usize, 2), options.pool_members.len);
+    try std.testing.expectEqualStrings("192.0.2.10", options.nvmf_traddr.?);
+    try std.testing.expectEqualStrings("4421", options.nvmf_trsvcid);
+    try std.testing.expectEqualStrings(
+        "nqn.2014-08.org.nvmexpress:uuid:test-host",
+        options.nvmf_host_nqn.?,
+    );
 
     var pools = try PoolTable.init(std.testing.allocator, options.pool_members);
     defer pools.deinit();
@@ -288,6 +353,35 @@ test "endpoint daemon rejects incomplete options" {
             "--pool-member",
             "bad",
             "/dev/member",
+        }),
+    );
+    try std.testing.expectError(
+        error.MissingNvmfTransportAddress,
+        Options.parse(std.testing.allocator, &.{
+            "--runtime-dir",
+            "/run/zettide",
+            "--nvmf-allow-any-host",
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidNvmfAccessPolicy,
+        Options.parse(std.testing.allocator, &.{
+            "--runtime-dir",
+            "/run/zettide",
+            "--nvmf-traddr",
+            "192.0.2.10",
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidNvmfAccessPolicy,
+        Options.parse(std.testing.allocator, &.{
+            "--runtime-dir",
+            "/run/zettide",
+            "--nvmf-traddr",
+            "192.0.2.10",
+            "--nvmf-host-nqn",
+            "nqn.2014-08.org.nvmexpress:uuid:test-host",
+            "--nvmf-allow-any-host",
         }),
     );
 }

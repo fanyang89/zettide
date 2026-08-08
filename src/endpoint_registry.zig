@@ -10,6 +10,7 @@ pub const max_locator_component_len = 256;
 pub const Frontend = enum(u8) {
     vhost_user_blk = 1,
     iscsi = 2,
+    nvme_of_tcp = 3,
 };
 
 pub const Spec = struct {
@@ -27,6 +28,12 @@ pub const Locator = union(Frontend) {
         portal: []const u8,
         target_name: []const u8,
         lun: u64,
+    },
+    nvme_of_tcp: struct {
+        traddr: []const u8,
+        trsvcid: []const u8,
+        nqn: []const u8,
+        nsid: u32,
     },
 };
 
@@ -446,6 +453,12 @@ fn validateLocator(locator: Locator) !void {
             try validateLocatorString(iscsi.portal);
             try validateLocatorString(iscsi.target_name);
         },
+        .nvme_of_tcp => |nvme| {
+            try validateLocatorString(nvme.traddr);
+            try validateLocatorString(nvme.trsvcid);
+            try validateLocatorString(nvme.nqn);
+            if (nvme.nsid == 0) return error.InvalidLocator;
+        },
     }
 }
 
@@ -523,6 +536,7 @@ const FakeBackend = struct {
             const locator_frontend: Frontend = if (self.mismatch_frontend) switch (spec.frontend) {
                 .vhost_user_blk => .iscsi,
                 .iscsi => .vhost_user_blk,
+                .nvme_of_tcp => .vhost_user_blk,
             } else spec.frontend;
             const locator: Locator = switch (locator_frontend) {
                 .vhost_user_blk => .{ .vhost_user_blk = .{
@@ -532,6 +546,12 @@ const FakeBackend = struct {
                     .portal = "127.0.0.1:3260",
                     .target_name = "iqn.2026-08.io.zettide:test",
                     .lun = 0,
+                } },
+                .nvme_of_tcp => .{ .nvme_of_tcp = .{
+                    .traddr = "127.0.0.1",
+                    .trsvcid = "4420",
+                    .nqn = "nqn.2026-08.io.zettide:test",
+                    .nsid = 1,
                 } },
             };
             return .{ .handle = slot, .locator = locator };
@@ -633,6 +653,26 @@ test "registry returns a typed iSCSI locator" {
     try std.testing.expectEqual(@as(u64, 0), view.locator.?.iscsi.lun);
 }
 
+test "registry returns a typed NVMe over TCP locator" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var registry = try Registry.init(std.testing.allocator, store.desiredStore(), backend.backend());
+    defer {
+        registry.shutdown() catch unreachable;
+        registry.deinit();
+    }
+
+    var spec = testSpec(1, 2, 3);
+    spec.frontend = .nvme_of_tcp;
+    const view = try registry.ensure(spec);
+    try std.testing.expectEqual(Frontend.nvme_of_tcp, std.meta.activeTag(view.locator.?));
+    try std.testing.expectEqualStrings("127.0.0.1", view.locator.?.nvme_of_tcp.traddr);
+    try std.testing.expectEqualStrings("4420", view.locator.?.nvme_of_tcp.trsvcid);
+    try std.testing.expectEqualStrings("nqn.2026-08.io.zettide:test", view.locator.?.nvme_of_tcp.nqn);
+    try std.testing.expectEqual(@as(u32, 1), view.locator.?.nvme_of_tcp.nsid);
+}
+
 test "registry rolls back a mismatched backend locator" {
     var store = MemoryStore.init(std.testing.allocator);
     defer store.deinit();
@@ -670,6 +710,24 @@ test "registry rejects oversized and invalid UTF-8 locators" {
             .portal = &invalid_utf8,
             .target_name = "iqn.2026-08.io.zettide:test",
             .lun = 0,
+        } }),
+    );
+    try std.testing.expectError(
+        error.InvalidLocator,
+        validateLocator(.{ .nvme_of_tcp = .{
+            .traddr = "127.0.0.1",
+            .trsvcid = "4420",
+            .nqn = "nqn.2026-08.io.zettide:test",
+            .nsid = 0,
+        } }),
+    );
+    try std.testing.expectError(
+        error.InvalidLocator,
+        validateLocator(.{ .nvme_of_tcp = .{
+            .traddr = "",
+            .trsvcid = "4420",
+            .nqn = "nqn.2026-08.io.zettide:test",
+            .nsid = 1,
         } }),
     );
 }
@@ -779,7 +837,9 @@ test "file store atomically replaces and validates desired state" {
     const desired_store = file_store.desiredStore();
     var iscsi_spec = testSpec(4, 5, 6);
     iscsi_spec.frontend = .iscsi;
-    const specs = [_]Spec{ testSpec(1, 2, 3), iscsi_spec };
+    var nvme_spec = testSpec(7, 8, 9);
+    nvme_spec.frontend = .nvme_of_tcp;
+    const specs = [_]Spec{ testSpec(1, 2, 3), iscsi_spec, nvme_spec };
 
     try desired_store.replace(&specs);
     const loaded = try desired_store.load(std.testing.allocator);

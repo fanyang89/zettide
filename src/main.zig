@@ -1190,7 +1190,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide pool plan-create --device <device>... [--filesystem littlefs|blob] [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>]
         \\  zettide pool create --device <device>... [--filesystem littlefs|blob] [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>] --confirm <token>
         \\  zettide serve dufs <file|device> [--read-only] [--noatime] [--key-file <path>|--passphrase] [-- <dufs-options>...]
-        \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]...
+        \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]... [--nvmf-traddr <address> [--nvmf-trsvcid <port>] (--nvmf-host-nqn <nqn>|--nvmf-allow-any-host)]
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
         \\Blob file targets do not support labels, encryption, or transport metrics.
