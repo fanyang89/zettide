@@ -41,6 +41,17 @@ zig build test-nfs-ganesha -Dnfs-ganesha-tests=required \
   -Dganesha-build-dir=/path/to/ganesha-build
 ```
 
+For Linux NFS clients running concurrent I/O, mount with multiple TCP
+connections to avoid a single transport queue limiting throughput:
+
+```sh
+mount -t nfs -o vers=3,nolock,nconnect=8 server:/zettide /mnt/zettide
+```
+
+Eight connections provide a good throughput and tail-latency balance on the
+Optane test profile. Use `nconnect=16` only when peak throughput matters more
+than tail latency.
+
 Ganesha `V13.0` requires either D-Bus or gRPC for declarations used by its
 statistics source, so keep D-Bus enabled even when its administration API is
 not used.

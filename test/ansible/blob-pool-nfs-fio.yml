@@ -5,3 +5,4 @@
     zettide_test_profile_override: blob-pool-nfs-fio
     zettide_optimize_modes_override:
       - ReleaseSafe
+    zettide_nfs_nconnect: 8
