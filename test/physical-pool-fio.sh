@@ -20,6 +20,8 @@ frontend=${ZETTIDE_POOL_FIO_FRONTEND:-fuse}
 ganesha_build=${ZETTIDE_GANESHA_BUILD_DIR:-}
 nfs_stable_write_batch_us=${ZETTIDE_NFS_STABLE_WRITE_BATCH_US:-20000}
 nfs_nconnect=${ZETTIDE_NFS_NCONNECT:-1}
+nfs_perf_case=${ZETTIDE_NFS_PERF_CASE:-}
+nfs_perf_frequency=${ZETTIDE_NFS_PERF_FREQUENCY:-199}
 
 [[ $EUID -eq 0 ]] || {
     echo "physical Pool fio requires root" >&2
@@ -45,11 +47,20 @@ nfs_nconnect=${ZETTIDE_NFS_NCONNECT:-1}
     echo "ZETTIDE_NFS_NCONNECT must be between 1 and 16" >&2
     exit 2
 }
+[[ $nfs_perf_frequency =~ ^[1-9][0-9]*$ ]] || {
+    echo "ZETTIDE_NFS_PERF_FREQUENCY must be a positive integer" >&2
+    exit 2
+}
+[[ -z $nfs_perf_case || $frontend == nfs ]] || {
+    echo "ZETTIDE_NFS_PERF_CASE requires the NFS frontend" >&2
+    exit 2
+}
 commands=(fio lsblk mountpoint timeout)
 if [[ $frontend == fuse ]]; then
     commands+=(fusermount3 setsid)
 else
     commands+=(mount mount.nfs pgrep python3 rpcbind rpcinfo umount)
+    [[ -z $nfs_perf_case ]] || commands+=(perf)
     [[ -n $ganesha_build ]] || {
         echo "ZETTIDE_GANESHA_BUILD_DIR is required for the NFS frontend" >&2
         exit 2
@@ -73,6 +84,9 @@ ganesha_pid=""
 ganesha_launcher_pid=""
 ganesha_pid_file="$work/ganesha.pid"
 ganesha_config="$work/ganesha.conf"
+perf_pid=""
+perf_data=""
+perf_recorded=false
 rpcbind_started=false
 rpcbind_pid=""
 fio_command=(fio)
@@ -237,6 +251,11 @@ finish() {
     local result=$?
     trap - EXIT INT TERM
     set +e
+    if [[ -n $perf_pid ]]; then
+        kill -INT "$perf_pid" 2>/dev/null || true
+        wait "$perf_pid" 2>/dev/null || true
+        perf_pid=""
+    fi
     stop_pool_mount || result=1
     if [[ $rpcbind_started == true && -n $rpcbind_pid ]]; then
         kill -TERM "$rpcbind_pid" 2>/dev/null || result=1
@@ -349,7 +368,23 @@ run_fio_case() {
     else
         fio_args+=(--filename_format="$mountpoint_path/fio-performance/$file_pattern")
     fi
+    if [[ -n $nfs_perf_case && $name == "$nfs_perf_case" ]]; then
+        perf_data="$log_dir/perf-$name.data"
+        perf record --quiet --freq "$nfs_perf_frequency" --call-graph fp \
+            --pid "$ganesha_pid" --output "$perf_data" &
+        perf_pid=$!
+        perf_recorded=true
+    fi
     "${fio_args[@]}"
+    if [[ -n $perf_pid ]]; then
+        kill -INT "$perf_pid" 2>/dev/null || true
+        wait "$perf_pid" 2>/dev/null || true
+        perf_pid=""
+        perf report --stdio --no-children --percent-limit 0.1 \
+            --sort=dso,symbol --input "$perf_data" >"$log_dir/perf-$name-self.txt"
+        perf report --stdio --percent-limit 0.1 \
+            --sort=dso,symbol --input "$perf_data" >"$log_dir/perf-$name-inclusive.txt"
+    fi
     stop_pool_mount_clean
     if [[ $frontend == nfs ]]; then
         grep -q "Opened Zettide target $device (writable)" "$mount_log"
@@ -447,6 +482,10 @@ run_fio_case seq-read-1m-qd32-j1 read 1m 32 1 "$single_size" single.bin
 run_fio_case randread-4k-qd1-j1 randread 4k 1 1 "$single_size" single.bin
 run_fio_case randread-4k-qd32-j1 randread 4k 32 1 "$single_size" single.bin
 run_fio_case randread-4k-qd32-j4 randread 4k 32 4 "$multi_size" 'multi.$jobnum.bin'
+[[ -z $nfs_perf_case || $perf_recorded == true ]] || {
+    echo "NFS perf case was not run: $nfs_perf_case" >&2
+    exit 2
+}
 
 check_identity
 "$cli" pool inspect --device "$device" >"$log_dir/pool-inspect-after.log"

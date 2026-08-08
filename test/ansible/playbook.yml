@@ -38,6 +38,8 @@
     zettide_pool_fio_runtime: 20
     zettide_pool_fio_ramp_time: 5
     zettide_nfs_nconnect: 1
+    zettide_nfs_perf_case: ""
+    zettide_nfs_perf_frequency: 199
     zettide_blob_fuse_fio_backing_size_effective: "{{ zettide_blob_fuse_fio_backing_size | default(34359738368) }}"
     zettide_blob_fuse_fio_file_size_effective: "{{ zettide_blob_fuse_fio_file_size | default(268435456) }}"
     zettide_blob_fuse_fio_runtime_effective: "{{ zettide_blob_fuse_fio_runtime | default(8) }}"

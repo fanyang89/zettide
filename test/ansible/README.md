@@ -209,6 +209,10 @@ write request sizes. It does not run FUSE during the measured workload. Override
 `zettide_nfs_stable_write_batch_us` to test a different stable-write batching
 window; the default is 20000 microseconds and drained batches sync early.
 
+Set `zettide_nfs_perf_case` to one fio case name to attach `perf record` to
+NFS-Ganesha for that case. The archive includes `perf-<case>.data` plus self and
+inclusive text reports. `zettide_nfs_perf_frequency` defaults to 199 Hz.
+
 ## Throughput
 
 The throughput profile compares a direct-I/O host filesystem baseline with
