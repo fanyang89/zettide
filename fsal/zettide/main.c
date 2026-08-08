@@ -36,7 +36,6 @@ struct zettide_fsal_module ZETTIDE = {
 		.auth_exportpath_xdev = false,
 		.link_supports_permission_checks = false,
 		.readdir_plus = true,
-		.allocate_own_read_buffer = true,
 		.expire_time_parent = -1,
 	} },
 };

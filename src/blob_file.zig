@@ -191,11 +191,6 @@ fn readSnapshotBlock(
     reference.validate(blobs.header.unit_count) catch return error.InvalidBlobFileSnapshot;
     if (reference.valid_bytes != block_size or reference.endUnit() > readable_units)
         return error.InvalidBlobFileSnapshot;
-    if (@intFromPtr(output.ptr) % block_size == 0) {
-        if (try blobs.read(io, reference, output) != block_size)
-            return error.InvalidBlobFileBlock;
-        return output.len;
-    }
     var block_scratch: [block_size]u8 align(block_size) = uninitialized([block_size]u8);
     if (try blobs.read(io, reference, &block_scratch) != block_size)
         return error.InvalidBlobFileBlock;
@@ -1571,7 +1566,7 @@ test "blob file snapshot point reads preserve corruption validation" {
         0,
     ));
     try std.testing.expectEqual(@as(u8, 'x'), byte[0]);
-    var block_output: [block_size]u8 align(block_size) = undefined;
+    var block_output: [block_size]u8 = undefined;
     try std.testing.expectEqual(block_output.len, try readSnapshot(
         std.testing.failing_allocator,
         std.testing.io,
