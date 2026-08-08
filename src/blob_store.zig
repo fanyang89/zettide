@@ -8,27 +8,13 @@ const Io = std.Io;
 
 const digest_cache_ways = 4;
 const digest_cache_sets = 4096;
-const digest_cache_shard_count = 64;
-const digest_cache_sets_per_shard = digest_cache_sets / digest_cache_shard_count;
-const digest_cache_entries_per_shard = digest_cache_ways * digest_cache_sets_per_shard;
-
-comptime {
-    std.debug.assert(std.math.isPowerOfTwo(digest_cache_sets));
-    std.debug.assert(std.math.isPowerOfTwo(digest_cache_shard_count));
-    std.debug.assert(digest_cache_sets % digest_cache_shard_count == 0);
-}
+const digest_cache_entries = digest_cache_ways * digest_cache_sets;
 
 const DigestCacheEntry = struct {
     slot: u64 = 0,
     digest: [32]u8 = @splat(0),
     valid: bool = false,
     bytes: [format.allocation_unit]u8 = undefined,
-};
-
-const DigestCacheShard = struct {
-    mutex: Io.RwLock = .init,
-    entries: ?[]DigestCacheEntry = null,
-    next: usize = 0,
 };
 
 pub const Store = struct {
@@ -40,7 +26,9 @@ pub const Store = struct {
     sequence_floor: u64,
     staged_units: u64,
     mutex: Io.RwLock = .init,
-    digest_cache_shards: [digest_cache_shard_count]DigestCacheShard = @splat(.{}),
+    digest_cache_mutex: Io.RwLock = .init,
+    digest_cache: ?[]DigestCacheEntry = null,
+    digest_cache_next: usize = 0,
     frozen: bool = false,
 
     /// Takes ownership of device, including on failure.
@@ -93,11 +81,10 @@ pub const Store = struct {
 
     pub fn close(self: *Store, io: Io) !void {
         const allocator = self.allocator;
+        const digest_cache = self.digest_cache;
         var device = self.device;
-        for (&self.digest_cache_shards) |*shard| {
-            if (shard.entries) |entries| allocator.free(entries);
-        }
         self.* = undefined;
+        if (digest_cache) |entries| allocator.free(entries);
         try device.close(io);
     }
 
@@ -364,12 +351,11 @@ pub const Store = struct {
         digest: *const [32]u8,
         output: []u8,
     ) bool {
-        const location = digestCacheLocation(slot, digest);
-        const shard = &self.digest_cache_shards[location.shard];
-        shard.mutex.lockSharedUncancelable(io);
-        defer shard.mutex.unlockShared(io);
-        const entries = shard.entries orelse return false;
-        for (entries[location.entry_index..][0..digest_cache_ways]) |*entry| {
+        self.digest_cache_mutex.lockSharedUncancelable(io);
+        defer self.digest_cache_mutex.unlockShared(io);
+        const entries = self.digest_cache orelse return false;
+        const set = digestCacheSet(slot, digest);
+        for (entries[set..][0..digest_cache_ways]) |*entry| {
             if (entry.valid and entry.slot == slot and std.mem.eql(u8, &entry.digest, digest)) {
                 @memcpy(output, &entry.bytes);
                 return true;
@@ -385,18 +371,17 @@ pub const Store = struct {
         digest: *const [32]u8,
         bytes: []const u8,
     ) void {
-        const location = digestCacheLocation(slot, digest);
-        const shard = &self.digest_cache_shards[location.shard];
-        shard.mutex.lockUncancelable(io);
-        defer shard.mutex.unlock(io);
-        const entries = shard.entries orelse created: {
-            const allocated = self.allocator.alloc(DigestCacheEntry, digest_cache_entries_per_shard) catch return;
+        self.digest_cache_mutex.lockUncancelable(io);
+        defer self.digest_cache_mutex.unlock(io);
+        const entries = self.digest_cache orelse created: {
+            const allocated = self.allocator.alloc(DigestCacheEntry, digest_cache_entries) catch return;
             for (allocated) |*entry| entry.* = .{};
-            shard.entries = allocated;
+            self.digest_cache = allocated;
             break :created allocated;
         };
+        const set = digestCacheSet(slot, digest);
         var target: ?*DigestCacheEntry = null;
-        for (entries[location.entry_index..][0..digest_cache_ways]) |*entry| {
+        for (entries[set..][0..digest_cache_ways]) |*entry| {
             if (entry.valid and entry.slot == slot and std.mem.eql(u8, &entry.digest, digest)) {
                 target = entry;
                 break;
@@ -407,8 +392,8 @@ pub const Store = struct {
             }
         }
         const selected = target orelse selected: {
-            const entry = &entries[location.entry_index + shard.next % digest_cache_ways];
-            shard.next +%= 1;
+            const entry = &entries[set + self.digest_cache_next % digest_cache_ways];
+            self.digest_cache_next +%= 1;
             break :selected entry;
         };
         selected.* = .{
@@ -420,20 +405,12 @@ pub const Store = struct {
     }
 
     fn clearDigestCache(self: *Store, io: Io) void {
-        for (&self.digest_cache_shards) |*shard| shard.mutex.lockUncancelable(io);
-        defer {
-            var index = self.digest_cache_shards.len;
-            while (index > 0) {
-                index -= 1;
-                self.digest_cache_shards[index].mutex.unlock(io);
-            }
+        self.digest_cache_mutex.lockUncancelable(io);
+        defer self.digest_cache_mutex.unlock(io);
+        if (self.digest_cache) |entries| {
+            for (entries) |*entry| entry.valid = false;
         }
-        for (&self.digest_cache_shards) |*shard| {
-            if (shard.entries) |entries| {
-                for (entries) |*entry| entry.valid = false;
-            }
-            shard.next = 0;
-        }
+        self.digest_cache_next = 0;
     }
 
     pub fn commit(self: *Store, io: Io) !void {
@@ -488,18 +465,9 @@ pub const Store = struct {
     }
 };
 
-const DigestCacheLocation = struct {
-    shard: usize,
-    entry_index: usize,
-};
-
-fn digestCacheLocation(slot: u64, digest: *const [32]u8) DigestCacheLocation {
+fn digestCacheSet(slot: u64, digest: *const [32]u8) usize {
     const hash = std.mem.readInt(u64, digest[0..8], .little) ^ slot;
-    const set: usize = @intCast(hash & (digest_cache_sets - 1));
-    return .{
-        .shard = set & (digest_cache_shard_count - 1),
-        .entry_index = (set / digest_cache_shard_count) * digest_cache_ways,
-    };
+    return @as(usize, @intCast(hash % digest_cache_sets)) * digest_cache_ways;
 }
 
 fn validateAlignment(alignment: u32) !void {
@@ -571,94 +539,6 @@ fn selectHeader(first: ?format.Header, second: ?format.Header, device_size: u64)
             (valid_second orelse selected).sequence,
         ),
     };
-}
-
-fn writeDigestCacheWorker(
-    store: *Store,
-    slot: u64,
-    digest: *const [32]u8,
-    bytes: *const [format.allocation_unit]u8,
-) !void {
-    store.writeDigestCache(std.testing.io, slot, digest, bytes);
-}
-
-fn clearDigestCacheWorker(store: *Store) !void {
-    store.clearDigestCache(std.testing.io);
-}
-
-test "digest cache set sharding covers every set exactly once" {
-    var covered: [digest_cache_sets]bool = @splat(false);
-    var digest: [32]u8 = @splat(0);
-    for (0..digest_cache_sets) |set| {
-        std.mem.writeInt(u64, digest[0..8], set, .little);
-        const location = digestCacheLocation(0, &digest);
-        try std.testing.expectEqual(set % digest_cache_shard_count, location.shard);
-        try std.testing.expectEqual(
-            (set / digest_cache_shard_count) * digest_cache_ways,
-            location.entry_index,
-        );
-        const covered_index = location.shard * digest_cache_sets_per_shard +
-            location.entry_index / digest_cache_ways;
-        try std.testing.expect(!covered[covered_index]);
-        covered[covered_index] = true;
-    }
-    try std.testing.expect(std.mem.allEqual(bool, &covered, true));
-}
-
-test "digest cache initializes distinct shards concurrently and clears safely" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const device = try blob_device.Device.createFile(
-        std.testing.io,
-        tmp.dir,
-        "sharded-digest-cache",
-        4 * 1024 * 1024,
-        format.allocation_unit,
-    );
-    var store = try Store.create(std.testing.allocator, std.testing.io, device);
-    defer store.close(std.testing.io) catch {};
-
-    const first_bytes: [format.allocation_unit]u8 = @splat(0x11);
-    const second_bytes: [format.allocation_unit]u8 = @splat(0x22);
-    const first_digest: [32]u8 = @splat(0);
-    const second_digest: [32]u8 = .{1} ++ @as([31]u8, @splat(0));
-    const first_location = digestCacheLocation(0, &first_digest);
-    const second_location = digestCacheLocation(0, &second_digest);
-    try std.testing.expect(first_location.shard != second_location.shard);
-
-    var first_future = std.testing.io.async(
-        writeDigestCacheWorker,
-        .{ &store, 0, &first_digest, &first_bytes },
-    );
-    var second_future = std.testing.io.async(
-        writeDigestCacheWorker,
-        .{ &store, 0, &second_digest, &second_bytes },
-    );
-    try first_future.await(std.testing.io);
-    try second_future.await(std.testing.io);
-
-    try std.testing.expect(store.digest_cache_shards[first_location.shard].entries != null);
-    try std.testing.expect(store.digest_cache_shards[second_location.shard].entries != null);
-    for (&store.digest_cache_shards, 0..) |*shard, index| {
-        if (index != first_location.shard and index != second_location.shard)
-            try std.testing.expect(shard.entries == null);
-    }
-    var output: [format.allocation_unit]u8 = undefined;
-    try std.testing.expect(store.readDigestCache(std.testing.io, 0, &first_digest, &output));
-    try std.testing.expectEqualSlices(u8, &first_bytes, &output);
-    try std.testing.expect(store.readDigestCache(std.testing.io, 0, &second_digest, &output));
-    try std.testing.expectEqualSlices(u8, &second_bytes, &output);
-
-    var write_future = std.testing.io.async(
-        writeDigestCacheWorker,
-        .{ &store, 0, &first_digest, &first_bytes },
-    );
-    var clear_future = std.testing.io.async(clearDigestCacheWorker, .{&store});
-    try write_future.await(std.testing.io);
-    try clear_future.await(std.testing.io);
-    store.clearDigestCache(std.testing.io);
-    try std.testing.expect(!store.readDigestCache(std.testing.io, 0, &first_digest, &output));
-    try std.testing.expect(!store.readDigestCache(std.testing.io, 0, &second_digest, &output));
 }
 
 test "blob store commits and reopens immutable blobs" {
