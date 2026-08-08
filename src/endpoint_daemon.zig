@@ -321,7 +321,7 @@ test "endpoint daemon parses runtime and grouped pool options" {
         "--nvmf-trsvcid",
         "4421",
         "--nvmf-host-nqn",
-        "nqn.2014-08.org.nvmexpress:uuid:test-host",
+        "nqn.2026-08.io.zettide:test-host",
     });
     defer options.deinit();
     try std.testing.expectEqualStrings("/run/zettide", options.runtime_dir);
@@ -330,7 +330,7 @@ test "endpoint daemon parses runtime and grouped pool options" {
     try std.testing.expectEqualStrings("192.0.2.10", options.nvmf_traddr.?);
     try std.testing.expectEqualStrings("4421", options.nvmf_trsvcid);
     try std.testing.expectEqualStrings(
-        "nqn.2014-08.org.nvmexpress:uuid:test-host",
+        "nqn.2026-08.io.zettide:test-host",
         options.nvmf_host_nqn.?,
     );
 
@@ -380,7 +380,7 @@ test "endpoint daemon rejects incomplete options" {
             "--nvmf-traddr",
             "192.0.2.10",
             "--nvmf-host-nqn",
-            "nqn.2014-08.org.nvmexpress:uuid:test-host",
+            "nqn.2026-08.io.zettide:test-host",
             "--nvmf-allow-any-host",
         }),
     );

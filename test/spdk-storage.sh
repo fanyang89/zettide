@@ -59,8 +59,8 @@ fi
 
 # shellcheck disable=SC2046
 "${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Isrc -Itest \
-	src/spdk/runtime.c src/spdk/nvmf_tcp_export.c test/spdk_runtime.c \
-	test/spdk_nvmf_tcp_export.c "$2" -o "$build_dir/zettide-spdk-nvmf-export-test" -pthread -lubsan \
+	src/spdk/runtime.c src/spdk/bdev_provider.c src/spdk/nvmf_tcp_export.c test/spdk_runtime.c \
+	test/spdk_nvmf_tcp_export.c "$2" -o "$build_dir/zettide-spdk-nvmf-export-test" -pthread -lubsan -lstdc++ \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \
 	-Wl,--as-needed
@@ -81,7 +81,7 @@ LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 	-I"$spdk_source/module/bdev/nvme" \
 	src/spdk/runtime.c src/spdk/nvme_controller.c src/spdk/bdev_endpoint.c \
 	src/spdk/bdev_dispatcher.c test/spdk_runtime.c \
-	test/spdk_storage_main.c "$1" -o "$build_dir/zettide-spdk-storage-test" -pthread -lubsan \
+	test/spdk_storage_main.c "$1" -o "$build_dir/zettide-spdk-storage-test" -pthread -lubsan -lstdc++ \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \
 	-Wl,--as-needed

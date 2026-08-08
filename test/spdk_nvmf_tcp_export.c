@@ -9,6 +9,8 @@ static const char g_config[] =
 	"{\"subsystems\":["
 	"{\"subsystem\":\"bdev\",\"config\":["
 	"{\"method\":\"bdev_malloc_create\",\"params\":{\"name\":\"NvmfExportBdev\","
+	"\"num_blocks\":4096,\"block_size\":4096}},"
+	"{\"method\":\"bdev_malloc_create\",\"params\":{\"name\":\"NvmfSharedBdev\","
 	"\"num_blocks\":4096,\"block_size\":4096}}]},"
 	"{\"subsystem\":\"nvmf\",\"config\":["
 	"{\"method\":\"nvmf_create_transport\",\"params\":{\"trtype\":\"TCP\"}}]}]}";
@@ -42,6 +44,7 @@ run_export_lifecycle(struct zettide_spdk_runtime *runtime)
 		return 1;
 	}
 	options.nqn = "nqn.2026-08.io.zettide:shared-listener-test";
+	options.bdev_name = "NvmfSharedBdev";
 	status = zettide_spdk_nvmf_tcp_export_create(runtime, &options, &shared_listener);
 	if (status != 0 || shared_listener == NULL) {
 		(void)zettide_spdk_nvmf_tcp_export_close(export_handle);
@@ -59,6 +62,7 @@ run_export_lifecycle(struct zettide_spdk_runtime *runtime)
 		return 1;
 	}
 	options.nqn = "nqn.2026-08.io.zettide:managed-test";
+	options.bdev_name = "NvmfExportBdev";
 	status = zettide_spdk_nvmf_tcp_export_create(runtime, &options, &export_handle);
 	if (status != 0 || export_handle == NULL) {
 		return 1;

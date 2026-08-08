@@ -35,7 +35,7 @@ pub export fn zettide_spdk_nvmf_zig_export_test(runtime: *anyopaque) c_int {
             .bdev_name = "NvmfExportBdev",
             .serial_number = "ZETTIDEZIGTEST001",
             .model_number = "Zettide Zig Managed Test",
-            .host_nqn = "nqn.2014-08.org.nvmexpress:uuid:zettide-test-host",
+            .host_nqn = "nqn.2026-08.io.zettide:test-host",
             .traddr = "127.0.0.1",
             .trsvcid = "44230",
         },
