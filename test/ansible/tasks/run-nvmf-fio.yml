@@ -58,7 +58,7 @@
   environment:
     PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
   changed_when: true
-  when: zettide_test_profile == 'nvmf-catalog-fio'
+  when: zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
 
 - name: Link the Catalog NVMe-oF benchmark target | {{ zettide_optimize }}
   ansible.builtin.shell:
@@ -74,7 +74,7 @@
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
   changed_when: true
-  when: zettide_test_profile == 'nvmf-catalog-fio'
+  when: zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
 
 - name: Discover SPDK shared library paths | {{ zettide_optimize }}
   ansible.builtin.command:
@@ -105,7 +105,7 @@
       - >-
         {{ zettide_remote_workspace.path ~
            ('/test/spdk-catalog-nvmf-benchmark'
-            if zettide_test_profile == 'nvmf-catalog-fio'
+            if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
             else '/test/spdk-nvmf-benchmark') }}
       - "{{ zettide_remote_workspace.path }}/nvmf-ready"
       - "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_test_profile }}"
@@ -117,9 +117,13 @@
          | map('regex_replace', '^-L', '') | join(':') }}
     ZETTIDE_NVMF_FIO_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
     ZETTIDE_NVMF_FIO_RAMP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
+    ZETTIDE_NVMF_FIO_SIZE: >-
+      {{ '256M' if zettide_test_profile == 'nvmf-catalog-mapped-fio' else '8G' }}
     ZETTIDE_NVMF_TARGET_ARGUMENT: >-
       {{ zettide_remote_workspace.path ~ '/catalog-member'
-         if zettide_test_profile == 'nvmf-catalog-fio' else '' }}
+         if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio'] else '' }}
+    ZETTIDE_NVMF_TARGET_MODE: >-
+      {{ 'mapped' if zettide_test_profile == 'nvmf-catalog-mapped-fio' else '' }}
   changed_when: true
   failed_when: false
   register: zettide_nvmf_fio_result

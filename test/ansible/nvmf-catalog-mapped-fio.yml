@@ -1,0 +1,7 @@
+---
+- name: Benchmark a mapped Catalog Volume through NVMe-oF/TCP
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: nvmf-catalog-mapped-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe

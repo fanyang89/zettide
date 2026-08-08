@@ -11,6 +11,7 @@ ready_file=$2
 log_dir=$3
 runtime=${ZETTIDE_NVMF_FIO_RUNTIME:-20}
 ramp_time=${ZETTIDE_NVMF_FIO_RAMP_TIME:-5}
+fio_size=${ZETTIDE_NVMF_FIO_SIZE:-8G}
 nqn=nqn.2026-08.io.zettide:benchmark
 serial=ZETTIDEBENCH000001
 target_pid=""
@@ -18,6 +19,9 @@ device=""
 target_arguments=()
 if [[ -n ${ZETTIDE_NVMF_TARGET_ARGUMENT:-} ]]; then
     target_arguments+=("$ZETTIDE_NVMF_TARGET_ARGUMENT")
+fi
+if [[ -n ${ZETTIDE_NVMF_TARGET_MODE:-} ]]; then
+    target_arguments+=("$ZETTIDE_NVMF_TARGET_MODE")
 fi
 
 [[ $EUID -eq 0 ]] || {
@@ -103,10 +107,10 @@ run_case() {
         --output="$log_dir/fio-$name.json"
 }
 
-run_case seq-read-1m-qd32-j1 read 1m 32 1 8G
-run_case randread-4k-qd1-j1 randread 4k 1 1 8G
-run_case randread-4k-qd32-j1 randread 4k 32 1 8G
-run_case randread-4k-qd32-j4 randread 4k 32 4 8G
+run_case seq-read-1m-qd32-j1 read 1m 32 1 "$fio_size"
+run_case randread-4k-qd1-j1 randread 4k 1 1 "$fio_size"
+run_case randread-4k-qd32-j1 randread 4k 32 1 "$fio_size"
+run_case randread-4k-qd32-j4 randread 4k 32 4 "$fio_size"
 
 for result in "$log_dir"/fio-*.json; do
     jq -r '(.jobs[0].jobname) + " iops=" + (.jobs[0].read.iops|tostring) +

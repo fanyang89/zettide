@@ -257,6 +257,15 @@ provider overhead without accessing a physical device:
 uv run ansible-playbook test/ansible/nvmf-catalog-fio.yml --limit zettide-tier1
 ```
 
+The mapped profile initializes and maps a 1 GiB window from a temporary
+file-backed member, then confines each fio job to a disjoint 256 MiB range.
+Reads include extent translation and file-storage I/O without using a raw
+block device:
+
+```sh
+uv run ansible-playbook test/ansible/nvmf-catalog-mapped-fio.yml --limit zettide-tier1
+```
+
 ## BlobDevice
 
 The BlobDevice profile measures the file-backed data plane without LittleFS,

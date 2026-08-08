@@ -93,6 +93,7 @@
       blob-pool-nfs-fio: tasks/run-blob-pool-fio.yml
       nvmf-fio: tasks/run-nvmf-fio.yml
       nvmf-catalog-fio: tasks/run-nvmf-fio.yml
+      nvmf-catalog-mapped-fio: tasks/run-nvmf-fio.yml
     zettide_packages:
       RedHat:
         - acl
@@ -345,7 +346,7 @@
       become: false
       run_once: true
       changed_when: true
-      when: zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio']
+      when: zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
 
     - name: Require a supported target family
       ansible.builtin.assert:
@@ -380,7 +381,7 @@
               {{ zettide_packages[ansible_facts.os_family]
                  if zettide_test_profile == 'tier1'
                  else (zettide_nvmf_packages[ansible_facts.os_family]
-                       if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio']
+                       if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
                        else zettide_io_packages[ansible_facts.os_family])
                       + (zettide_nfs_ganesha_packages[ansible_facts.os_family]
                          if zettide_test_profile == 'blob-pool-nfs-fio' else []) }}
@@ -393,7 +394,7 @@
               - "{{ item }}"
           loop: >-
             {{ ['nvme', 'nvme-tcp']
-               if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio']
+               if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
                else (['fuse'] if zettide_test_profile in ['blob-fuse-fio', 'blob-pool-fio']
                else ['fuse', 'loop']) }}
           changed_when: false
@@ -403,7 +404,7 @@
           ansible.builtin.stat:
             path: /dev/fuse
           register: zettide_fuse_device
-          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio']
+          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
 
         - name: Require the FUSE device
           ansible.builtin.assert:
@@ -411,7 +412,7 @@
               - zettide_fuse_device.stat.exists
               - zettide_fuse_device.stat.ischr
             fail_msg: "/dev/fuse is unavailable on the remote test host."
-          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio']
+          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
 
         - name: Check the remote Zig version
           ansible.builtin.command:
@@ -467,7 +468,7 @@
               pool_fio_frontend: >-
                 {{ 'nfs' if zettide_test_profile == 'blob-pool-nfs-fio'
                    else ('nvmf'
-                         if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio']
+                         if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio']
                          else 'fuse') }}
               blob_fuse_fio:
                 backing_size: "{{ zettide_blob_fuse_fio_backing_size_effective }}"

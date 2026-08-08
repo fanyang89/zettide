@@ -8,7 +8,8 @@ const c = @cImport({
 });
 
 const catalog_size = 64 * 1024 * 1024 * 1024;
-const member_size = 8 * 1024 * 1024;
+const mapped_size = 1024 * 1024 * 1024;
+const metadata_slack = 8 * 1024 * 1024;
 const runtime_config =
     \\{"subsystems":[
     \\{"subsystem":"bdev","config":[
@@ -20,15 +21,16 @@ const runtime_config =
 pub export fn zettide_spdk_catalog_nvmf_benchmark(
     ready_path_z: [*:0]const u8,
     member_path_z: [*:0]const u8,
+    mapped: c_int,
 ) c_int {
-    run(ready_path_z, member_path_z) catch |err| {
+    run(ready_path_z, member_path_z, mapped != 0) catch |err| {
         std.debug.print("Catalog NVMe-oF benchmark failed: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8) !void {
+fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8, mapped: bool) !void {
     const allocator = std.heap.c_allocator;
     const ready_path = std.mem.span(ready_path_z);
     const member_path = std.mem.span(member_path_z);
@@ -52,7 +54,12 @@ fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8) !void {
     const parent = try std.Io.Dir.openDirAbsolute(io, parent_path, .{});
     defer parent.close(io);
     var storages = [_]zettide.v3.storage.Storage{
-        try zettide.v3.storage.Storage.createFile(io, parent, basename, member_size),
+        try zettide.v3.storage.Storage.createFile(
+            io,
+            parent,
+            basename,
+            if (mapped) mapped_size + metadata_slack else metadata_slack,
+        ),
     };
     const outcome = try zettide.v3.pool_provision.create(
         io,
@@ -67,7 +74,7 @@ fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8) !void {
     defer provisioned.deinit();
     var set = try provisioned.intoMemberSet();
     defer set.deinit();
-    const volume_id = try publishCatalog(io, &set);
+    const volume_id = try publishCatalog(io, &set, mapped);
 
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_catalog_nvmf_benchmark",
@@ -106,6 +113,7 @@ fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8) !void {
 fn publishCatalog(
     io: std.Io,
     set: *zettide.v3.pool_member_set.PoolMemberSet,
+    mapped: bool,
 ) ![16]u8 {
     const catalog = zettide.v3.pool_catalog;
     const graph = zettide.v3.pool_catalog_graph;
@@ -120,6 +128,16 @@ fn publishCatalog(
     header.state = .ready;
     const header_bytes = header.encode();
     const header_reference = try page.pageReference(6 * catalog.page_size, &header_bytes);
+    const mapped_extent_count = mapped_size / @as(u64, extent_size);
+    const extent_bytes = try page.encodeExtentMap(1, header.uuid, if (mapped) &.{.{
+        .logical_start = 0,
+        .physical_start = 0,
+        .extent_count = @intCast(mapped_extent_count),
+        .state = .mapped,
+        .member_count = 1,
+        .member_slots = .{ authority.topology.members[0].slot, 0, 0 },
+    }} else &.{});
+    const extent_reference = try page.pageReference(7 * catalog.page_size, &extent_bytes);
     const descriptor: catalog.VolumeDescriptor = .{
         .volume_id = header.uuid,
         .state = .ready,
@@ -127,6 +145,8 @@ fn publishCatalog(
         .created_ns = header.created_ns,
         .logical_size = header.logical_size,
         .header_page = header_reference,
+        .extent_map_root = if (mapped) extent_reference else .{},
+        .allocated_extent_count = if (mapped) mapped_extent_count else 0,
         .extent_size = extent_size,
         .name = try catalog.Name.init("benchmark"),
     };
@@ -135,15 +155,20 @@ fn publishCatalog(
         .volume_id = descriptor.volume_id,
         .name = descriptor.name,
     }});
-    const physical_bytes = try page.encodePhysicalIntervals(.physical_allocator, 1, &.{.{
-        .member_slot = authority.topology.members[0].slot,
-        .physical_start = 0,
-        .extent_count = extent_count,
-    }});
+    const physical_bytes = try page.encodePhysicalIntervals(
+        .physical_allocator,
+        1,
+        &.{.{
+            .member_slot = authority.topology.members[0].slot,
+            .physical_start = if (mapped) mapped_extent_count else 0,
+            .extent_count = extent_count - (if (mapped) mapped_extent_count else 0),
+        }},
+    );
     const metadata_page_count = member.header().metadata.length / catalog.page_size;
+    const metadata_start: u64 = if (mapped) 8 else 7;
     const metadata_bytes = try page.encodeMetadataAllocator(1, &.{.{
-        .page_start = 7,
-        .page_count = @intCast(metadata_page_count - 7),
+        .page_start = metadata_start,
+        .page_count = @intCast(metadata_page_count - metadata_start),
     }});
     const volume_reference = try page.pageReference(2 * catalog.page_size, &volume_bytes);
     const name_reference = try page.pageReference(3 * catalog.page_size, &name_bytes);
@@ -168,6 +193,7 @@ fn publishCatalog(
         .{ .offset = physical_reference.offset, .bytes = &physical_bytes },
         .{ .offset = metadata_reference.offset, .bytes = &metadata_bytes },
         .{ .offset = header_reference.offset, .bytes = &header_bytes },
+        .{ .offset = extent_reference.offset, .bytes = &extent_bytes },
     };
     var proposal: zettide.v3.control_record.Record = .{
         .kind = zettide.v3.control_record.generation_prepare_kind,
@@ -190,10 +216,20 @@ fn publishCatalog(
 
     var coordinator = try zettide.v3.pool_replicated_journal.open(io, set);
     defer coordinator.deinit();
+    const initialization: graph.DataInitialization = .{
+        .volume_id = descriptor.volume_id,
+        .logical_start = 0,
+        .extent_count = @intCast(mapped_extent_count),
+        .contents = .zero,
+    };
     _ = try coordinator.commitCatalogGeneration(.{
         .prepare_proposal = proposal,
         .previous_graph = null,
-        .current_graph = .{ .root_bytes = &root_bytes, .pages = &images },
+        .current_graph = .{
+            .root_bytes = &root_bytes,
+            .pages = images[0..if (mapped) images.len else images.len - 1],
+        },
+        .data_initializations = if (mapped) &.{initialization} else &.{},
     });
     coordinator.close();
     return descriptor.volume_id;
