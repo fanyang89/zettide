@@ -93,16 +93,6 @@ pub const Device = struct {
         self.storage.resetTransportStats(io);
     }
 
-    pub fn linuxReadExtent(
-        self: *Device,
-        io: Io,
-        offset: u64,
-        length: usize,
-    ) !?storage_api.LinuxReadExtent {
-        try self.validateGeometry(length, offset);
-        return self.storage.linuxReadExtent(io, self.region_offset + offset, length);
-    }
-
     pub fn readAt(self: *Device, io: Io, buffer: []u8, offset: u64) !void {
         try self.validateIo(buffer.ptr, buffer.len, offset);
         const amount = try self.storage.readAt(io, buffer, self.region_offset + offset);
@@ -165,12 +155,8 @@ pub const Device = struct {
     }
 
     fn validateIo(self: *const Device, pointer: [*]const u8, len: usize, offset: u64) !void {
-        if (@intFromPtr(pointer) % self.io_alignment != 0) return error.InvalidBlobDeviceIo;
-        try self.validateGeometry(len, offset);
-    }
-
-    fn validateGeometry(self: *const Device, len: usize, offset: u64) !void {
-        if (len == 0 or
+        if (@intFromPtr(pointer) % self.io_alignment != 0 or
+            len == 0 or
             len % self.io_alignment != 0 or
             offset % self.io_alignment != 0 or
             offset > self.capacity_bytes or
@@ -231,66 +217,4 @@ test "blob device rejects unaligned and out of range IO" {
     try std.testing.expectError(error.InvalidBlobDeviceIo, device.writeAllAt(std.testing.io, bytes[0..2048], 0));
     try std.testing.expectError(error.InvalidBlobDeviceIo, device.writeAllAt(std.testing.io, bytes, 4096 + 1));
     try std.testing.expectError(error.InvalidBlobDeviceIo, device.writeAllAt(std.testing.io, bytes, 8192));
-}
-
-test "blob device translates Linux read extents without a user buffer" {
-    const ExtentBackend = struct {
-        requested_offset: u64 = 0,
-        requested_length: usize = 0,
-
-        fn sameIdentity(context: *anyopaque, other: *anyopaque) bool {
-            return context == other;
-        }
-
-        fn readAt(_: *anyopaque, _: Io, _: []u8, _: u64) !usize {
-            return error.Unsupported;
-        }
-
-        fn writeAllAt(_: *anyopaque, _: Io, _: []const u8, _: u64) !void {
-            return error.Unsupported;
-        }
-
-        fn sync(_: *anyopaque, _: Io) !void {}
-        fn close(_: *anyopaque, _: Io) !void {}
-
-        fn linuxReadExtent(
-            context: *anyopaque,
-            _: Io,
-            offset: u64,
-            length: usize,
-        ) !?storage_api.LinuxReadExtent {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.requested_offset = offset;
-            self.requested_length = length;
-            return null;
-        }
-
-        const vtable: storage_api.Storage.VTable = .{
-            .same_identity = sameIdentity,
-            .read_at = readAt,
-            .write_all_at = writeAllAt,
-            .sync = sync,
-            .close = close,
-            .linux_read_extent = linuxReadExtent,
-        };
-    };
-
-    var backend: ExtentBackend = .{};
-    const storage = storage_api.Storage.initBackend(
-        &backend,
-        &ExtentBackend.vtable,
-        16 * 1024,
-        .linux_block_device,
-        4096,
-    );
-    var device = try Device.init(storage, 4096, 8192, 4096);
-    try std.testing.expectEqual(@as(?storage_api.LinuxReadExtent, null), try device.linuxReadExtent(
-        std.testing.io,
-        4096,
-        4096,
-    ));
-    try std.testing.expectEqual(@as(u64, 8192), backend.requested_offset);
-    try std.testing.expectEqual(@as(usize, 4096), backend.requested_length);
-    try std.testing.expectError(error.InvalidBlobDeviceIo, device.linuxReadExtent(std.testing.io, 1, 4096));
-    try std.testing.expectError(error.InvalidBlobDeviceIo, device.linuxReadExtent(std.testing.io, 0, 1));
 }

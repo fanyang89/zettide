@@ -235,16 +235,6 @@ pub const PoolBlockDevice = struct {
         return buffer.len;
     }
 
-    pub fn linuxReadExtent(
-        self: *PoolBlockDevice,
-        offset: u64,
-        length: usize,
-    ) !?storage_api.LinuxReadExtent {
-        try self.validateByteIo(offset, length);
-        if (self.kind != .unprotected or self.crypto != null) return null;
-        return self.replicas[0].linuxReadExtent(offset, length);
-    }
-
     pub fn readManyAt(
         self: *PoolBlockDevice,
         reads: []const storage_api.Read,
