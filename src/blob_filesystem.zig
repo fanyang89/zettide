@@ -22,28 +22,6 @@ const InodeCacheEntry = struct {
     valid: bool = false,
 };
 
-const InodeTlsKey = struct {
-    filesystem_identity: usize,
-    store_uuid: [16]u8,
-    root_generation: u64,
-    inode: u64,
-
-    fn eql(self: InodeTlsKey, other: InodeTlsKey) bool {
-        return self.filesystem_identity == other.filesystem_identity and
-            std.mem.eql(u8, &self.store_uuid, &other.store_uuid) and
-            self.root_generation == other.root_generation and
-            self.inode == other.inode;
-    }
-};
-
-const InodeTlsEntry = struct {
-    key: InodeTlsKey = undefined,
-    record: filesystem_format.InodeRecord = undefined,
-    valid: bool = false,
-};
-
-threadlocal var inode_tls_entry: InodeTlsEntry = .{};
-
 pub const Filesystem = struct {
     allocator: std.mem.Allocator,
     blobs: blob_store.Store,
@@ -1106,13 +1084,7 @@ pub const Filesystem = struct {
     fn loadInode(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.InodeRecord {
         if (self.dirty_files.getPtr(inode)) |dirty_file| return dirty_file.record;
         if (self.blobs.frozen) return error.BlobStoreFrozen;
-        const tls_key = self.inodeTlsKey(inode);
-        if (inode_tls_entry.valid and inode_tls_entry.key.eql(tls_key))
-            return inode_tls_entry.record;
-        if (self.readInodeCache(io, self.root.generation, inode)) |record| {
-            inode_tls_entry = .{ .key = tls_key, .record = record, .valid = true };
-            return record;
-        }
+        if (self.readInodeCache(io, self.root.generation, inode)) |record| return record;
         const key = filesystem_format.inodeKey(inode) catch return error.FileNotFound;
         var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
         const value = try maps.lookupAllocAt(
@@ -1129,17 +1101,7 @@ pub const Filesystem = struct {
         const record = filesystem_format.decodeInode(@ptrCast(value.ptr)) catch
             return error.InvalidBlobFilesystemGraph;
         self.writeInodeCache(io, self.root.generation, inode, record);
-        inode_tls_entry = .{ .key = tls_key, .record = record, .valid = true };
         return record;
-    }
-
-    fn inodeTlsKey(self: *const Filesystem, inode: u64) InodeTlsKey {
-        return .{
-            .filesystem_identity = @intFromPtr(self),
-            .store_uuid = self.blobs.header.uuid,
-            .root_generation = self.root.generation,
-            .inode = inode,
-        };
     }
 
     fn readInodeCache(
@@ -1512,29 +1474,6 @@ pub const Filesystem = struct {
 fn inodeCacheSet(root_generation: u64, inode: u64) usize {
     const mixed = inode ^ (root_generation *% 0x9e3779b97f4a7c15);
     return @as(usize, @intCast(mixed % inode_cache_sets)) * inode_cache_ways;
-}
-
-test "blob filesystem inode TLS key matches every identity field" {
-    const key: InodeTlsKey = .{
-        .filesystem_identity = 1,
-        .store_uuid = @splat(2),
-        .root_generation = 3,
-        .inode = 4,
-    };
-    try std.testing.expect(key.eql(key));
-
-    var different = key;
-    different.filesystem_identity += 1;
-    try std.testing.expect(!key.eql(different));
-    different = key;
-    different.store_uuid[0] += 1;
-    try std.testing.expect(!key.eql(different));
-    different = key;
-    different.root_generation += 1;
-    try std.testing.expect(!key.eql(different));
-    different = key;
-    different.inode += 1;
-    try std.testing.expect(!key.eql(different));
 }
 
 const PreparedName = struct {
