@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "FSAL/fsal_commonlib.h"
+#include "export_mgr.h"
 #include "fsal_convert.h"
 #include "zettide_fsal.h"
 
@@ -727,6 +728,31 @@ done:
 	return fsalstat(ERR_FSAL_NO_ERROR, 0);
 }
 
+struct zettide_read_cb_info {
+	struct fsal_obj_handle *obj_hdl;
+	struct fsal_io_arg *read_arg;
+	fsal_async_cb done_cb;
+	void *caller_arg;
+	struct gsh_export *ctx_export;
+	struct fsal_export *fsal_export;
+};
+
+static void zettide_read2_cb(int status, size_t bytes_read, void *context)
+{
+	struct zettide_read_cb_info *cbi = context;
+	struct req_op_context ctx;
+	fsal_status_t result = zettide_status(status);
+
+	/* The request cannot finish before done_cb, so its export ref is live. */
+	get_gsh_export_ref(cbi->ctx_export);
+	init_op_context_simple(&ctx, cbi->ctx_export, cbi->fsal_export);
+	cbi->read_arg->io_amount = status == ZETTIDE_NFS_OK ? bytes_read : 0;
+	cbi->read_arg->end_of_file = false;
+	cbi->done_cb(cbi->obj_hdl, result, cbi->read_arg, cbi->caller_arg);
+	release_op_context();
+	gsh_free(cbi);
+}
+
 static void zettide_read2(struct fsal_obj_handle *obj_hdl, bool bypass,
 			  fsal_async_cb done_cb, struct fsal_io_arg *read_arg,
 			  void *caller_arg)
@@ -742,6 +768,30 @@ static void zettide_read2(struct fsal_obj_handle *obj_hdl, bool bypass,
 	if (read_arg->info != NULL) {
 		result = fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
 		goto done;
+	}
+	if (read_arg->iov_count == 1 && read_arg->iov[0].iov_len == 4096 &&
+	    read_arg->offset % 4096 == 0) {
+		struct zettide_read_cb_info *cbi = gsh_calloc(1, sizeof(*cbi));
+		int status;
+
+		cbi->obj_hdl = obj_hdl;
+		cbi->read_arg = read_arg;
+		cbi->done_cb = done_cb;
+		cbi->caller_arg = caller_arg;
+		cbi->ctx_export = op_ctx->ctx_export;
+		cbi->fsal_export = op_ctx->fsal_export;
+		status = zettide_nfs_read_async(handle->export->backend,
+						&handle->wire, read_arg->offset,
+						read_arg->iov[0].iov_base,
+						read_arg->iov[0].iov_len,
+						zettide_read2_cb, cbi);
+		if (status == ZETTIDE_NFS_OK)
+			return;
+		gsh_free(cbi);
+		if (status != ZETTIDE_NFS_NOT_SUPPORTED) {
+			result = zettide_status(status);
+			goto done;
+		}
 	}
 	for (index = 0; index < read_arg->iov_count; index++) {
 		size_t amount = 0;

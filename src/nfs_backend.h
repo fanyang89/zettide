@@ -22,6 +22,11 @@ extern "C" {
 struct zettide_nfs_export;
 struct zettide_nfs_directory;
 
+typedef void (*zettide_nfs_read_callback)(
+    int status,
+    size_t bytes_read,
+    void *context);
+
 enum zettide_nfs_status {
     ZETTIDE_NFS_OK = 0,
     ZETTIDE_NFS_INVALID_ARGUMENT = 1,
@@ -92,6 +97,13 @@ struct zettide_nfs_filesystem_info {
     uint64_t available_bytes;
 };
 
+struct zettide_nfs_async_read_stats {
+    uint64_t submitted;
+    uint64_t completed;
+    uint64_t fallbacks;
+    uint64_t queue_peak;
+};
+
 int zettide_nfs_export_open(
     const char *target,
     bool writable,
@@ -132,6 +144,17 @@ int zettide_nfs_read(
     void *buffer,
     size_t buffer_length,
     size_t *out_read);
+int zettide_nfs_read_async(
+    struct zettide_nfs_export *export_handle,
+    const struct zettide_nfs_handle *handle,
+    uint64_t offset,
+    void *buffer,
+    size_t buffer_length,
+    zettide_nfs_read_callback callback,
+    void *context);
+int zettide_nfs_get_async_read_stats(
+    struct zettide_nfs_export *export_handle,
+    struct zettide_nfs_async_read_stats *out_stats);
 int zettide_nfs_create(
     struct zettide_nfs_export *export_handle,
     const struct zettide_nfs_handle *parent,
