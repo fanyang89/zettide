@@ -21,16 +21,22 @@ const runtime_config =
 pub export fn zettide_spdk_catalog_nvmf_benchmark(
     ready_path_z: [*:0]const u8,
     member_path_z: [*:0]const u8,
-    mapped: c_int,
+    mode: c_int,
+    expected_pool_id_z: ?[*:0]const u8,
 ) c_int {
-    run(ready_path_z, member_path_z, mapped != 0) catch |err| {
+    run(ready_path_z, member_path_z, mode, expected_pool_id_z) catch |err| {
         std.debug.print("Catalog NVMe-oF benchmark failed: {s}\n", .{@errorName(err)});
         return 1;
     };
     return 0;
 }
 
-fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8, mapped: bool) !void {
+fn run(
+    ready_path_z: [*:0]const u8,
+    member_path_z: [*:0]const u8,
+    mode: c_int,
+    expected_pool_id_z: ?[*:0]const u8,
+) !void {
     const allocator = std.heap.c_allocator;
     const ready_path = std.mem.span(ready_path_z);
     const member_path = std.mem.span(member_path_z);
@@ -48,6 +54,21 @@ fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8, mapped: bool) 
         c.sigaddset(&signals, c.SIGTERM) != 0 or
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
+
+    if (mode == 2) {
+        const expected_pool_id = expected_pool_id_z orelse return error.ExpectedPoolIdRequired;
+        return serveExisting(
+            io,
+            allocator,
+            ready_path,
+            member_path,
+            std.mem.span(expected_pool_id),
+            reactor_mask,
+            &signals,
+        );
+    }
+    if (mode != 0 and mode != 1) return error.InvalidMode;
+    const mapped = mode == 1;
 
     const parent_path = std.fs.path.dirname(member_path) orelse return error.MemberPathMustHaveParent;
     const basename = std.fs.path.basename(member_path);
@@ -76,6 +97,73 @@ fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8, mapped: bool) 
     defer set.deinit();
     const volume_id = try publishCatalog(io, &set, mapped);
 
+    try serve(io, allocator, ready_path, reactor_mask, &signals, &set, volume_id);
+}
+
+fn serveExisting(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    ready_path: []const u8,
+    member_path: []const u8,
+    expected_pool_id_text: []const u8,
+    reactor_mask: []const u8,
+    signals: *const c.sigset_t,
+) !void {
+    if (expected_pool_id_text.len != 32) return error.InvalidExpectedPoolId;
+    var expected_pool_id: [16]u8 = undefined;
+    _ = std.fmt.hexToBytes(&expected_pool_id, expected_pool_id_text) catch
+        return error.InvalidExpectedPoolId;
+    const opened = try zettide.v3.linux_block_device.openStorageOptions(
+        io,
+        allocator,
+        member_path,
+        false,
+        true,
+    );
+    var storages = [_]zettide.v3.storage.Storage{opened.storage};
+    var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
+        io,
+        allocator,
+        &storages,
+        .read_only,
+    );
+    defer set.deinit();
+    const authority = set.authority() orelse return error.MissingAuthority;
+    if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
+        return error.UnexpectedPoolId;
+    const catalog = try set.loadCatalog();
+    var selected_index: ?usize = null;
+    for (catalog.descriptorSlice(), 0..) |descriptor, index| {
+        std.debug.print("Catalog volume name={s} allocated_extents={d} logical_size={d}\n", .{
+            descriptor.name.slice(),
+            descriptor.allocated_extent_count,
+            descriptor.logical_size,
+        });
+        if (descriptor.allocated_extent_count == 0) continue;
+        if (selected_index == null or descriptor.allocated_extent_count >
+            catalog.descriptors[selected_index.?].allocated_extent_count) selected_index = index;
+    }
+    const selected = selected_index orelse return error.NoMappedCatalogVolume;
+    try serve(
+        io,
+        allocator,
+        ready_path,
+        reactor_mask,
+        signals,
+        &set,
+        catalog.descriptors[selected].volume_id,
+    );
+}
+
+fn serve(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    ready_path: []const u8,
+    reactor_mask: []const u8,
+    signals: *const c.sigset_t,
+    set: *zettide.v3.pool_member_set.PoolMemberSet,
+    volume_id: [16]u8,
+) !void {
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_catalog_nvmf_benchmark",
         .reactor_mask = reactor_mask,
@@ -90,7 +178,7 @@ fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8, mapped: bool) 
         allocator,
         io,
         &runtime,
-        &set,
+        set,
         volume_id,
         .{
             .bdev_name = "ZettideCatalogBenchmark0",
@@ -107,7 +195,7 @@ fn run(ready_path_z: [*:0]const u8, member_path_z: [*:0]const u8, mapped: bool) 
     const ready = try std.Io.Dir.createFileAbsolute(io, ready_path, .{ .exclusive = true });
     ready.close(io);
     var signal_number: c_int = undefined;
-    if (c.sigwait(&signals, &signal_number) != 0) return error.SignalWaitFailed;
+    if (c.sigwait(signals, &signal_number) != 0) return error.SignalWaitFailed;
 }
 
 fn publishCatalog(

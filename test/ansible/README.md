@@ -266,6 +266,14 @@ block device:
 uv run ansible-playbook test/ansible/nvmf-catalog-mapped-fio.yml --limit zettide-tier1
 ```
 
+The Optane profile opens the configured retained Pool read-only, verifies its
+Pool ID and device serial, and exports the Catalog Volume with the most mapped
+extents. It does not create a Volume or modify the Pool:
+
+```sh
+uv run ansible-playbook test/ansible/nvmf-catalog-optane-fio.yml --limit zettide-tier1
+```
+
 ## BlobDevice
 
 The BlobDevice profile measures the file-backed data plane without LittleFS,

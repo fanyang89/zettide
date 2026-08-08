@@ -23,6 +23,9 @@ fi
 if [[ -n ${ZETTIDE_NVMF_TARGET_MODE:-} ]]; then
     target_arguments+=("$ZETTIDE_NVMF_TARGET_MODE")
 fi
+if [[ -n ${ZETTIDE_NVMF_TARGET_EXPECTED_POOL_ID:-} ]]; then
+    target_arguments+=("$ZETTIDE_NVMF_TARGET_EXPECTED_POOL_ID")
+fi
 
 [[ $EUID -eq 0 ]] || {
     echo "NVMe-oF fio requires root" >&2
@@ -89,7 +92,9 @@ done
 nvme list -o json >"$log_dir/nvme-list.json"
 nvme list-subsys -o json >"$log_dir/nvme-list-subsys.json"
 lsblk --bytes --output NAME,KNAME,TYPE,SIZE,MODEL,SERIAL "$device" >"$log_dir/lsblk.txt"
-[[ $(blockdev --getsize64 "$device") -eq $((64 * 1024 * 1024 * 1024)) ]]
+if [[ -n ${ZETTIDE_NVMF_EXPECTED_SIZE:-68719476736} ]]; then
+    [[ $(blockdev --getsize64 "$device") -eq ${ZETTIDE_NVMF_EXPECTED_SIZE:-68719476736} ]]
+fi
 
 run_case() {
     local name=$1

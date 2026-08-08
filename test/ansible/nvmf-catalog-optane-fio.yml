@@ -1,0 +1,7 @@
+---
+- name: Benchmark an existing Optane Catalog Volume through NVMe-oF/TCP
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: nvmf-catalog-optane-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe
