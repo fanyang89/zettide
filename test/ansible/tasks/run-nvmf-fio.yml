@@ -67,7 +67,7 @@
       -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_provider.c
       src/spdk/nvmf_tcp_export.c test/spdk_runtime.c test/spdk_catalog_nvmf_benchmark_main.c
       zig-out/lib/libzettide-spdk-catalog-nvmf-benchmark.a
-      -o test/spdk-catalog-nvmf-benchmark -pthread -lubsan -lstdc++ -Wl,--no-as-needed
+      -o test/spdk-catalog-nvmf-benchmark -pthread -lstdc++ -Wl,--no-as-needed
       $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
       spdk_event spdk_event_bdev spdk_vhost spdk_event_nvmf spdk_bdev_modules spdk_env_dpdk
       spdk_nvmf spdk_sock_modules spdk_syslibs) -Wl,--as-needed
