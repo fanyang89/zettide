@@ -9,8 +9,8 @@ if [[ -z ${PKG_CONFIG_PATH:-} ]]; then
 	printf '%s\n' "PKG_CONFIG_PATH must reference an SPDK build" >&2
 	exit 1
 fi
-if [[ $# -ne 1 ]]; then
-	printf 'usage: %s TEST_LIBRARY\n' "$0" >&2
+if [[ $# -ne 2 ]]; then
+	printf 'usage: %s STORAGE_TEST_LIBRARY NVMF_EXPORT_TEST_LIBRARY\n' "$0" >&2
 	exit 1
 fi
 
@@ -56,6 +56,17 @@ if [[ -z $spdk_source ]]; then
 	printf '%s\n' "SPDK source directory was not found" >&2
 	exit 1
 fi
+
+# shellcheck disable=SC2046
+"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Isrc -Itest \
+	src/spdk/runtime.c src/spdk/nvmf_tcp_export.c test/spdk_runtime.c \
+	test/spdk_nvmf_tcp_export.c "$2" -o "$build_dir/zettide-spdk-nvmf-export-test" -pthread -lubsan \
+	-Wl,--no-as-needed \
+	$(pkg-config --cflags --libs "${packages[@]}") \
+	-Wl,--as-needed
+
+LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+	timeout 30 "$build_dir/zettide-spdk-nvmf-export-test"
 
 # shellcheck disable=SC2046
 "${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Isrc -Itest \

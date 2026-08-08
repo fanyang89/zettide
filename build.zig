@@ -305,8 +305,10 @@ pub fn build(b: *std.Build) void {
     spdk_daemon_step.dependOn(&spdk_daemon_cmd.step);
 
     const spdk_storage_test = createSpdkStorageTest(b, target, optimize, portable_core);
+    const spdk_nvmf_export_test = createSpdkNvmfExportTest(b, target, optimize, portable_core);
     const spdk_storage_cmd = b.addSystemCommand(&.{ "bash", "test/spdk-storage.sh" });
     spdk_storage_cmd.addArtifactArg(spdk_storage_test);
+    spdk_storage_cmd.addArtifactArg(spdk_nvmf_export_test);
     const spdk_storage_step = b.step("test-spdk-storage", "Run the Linux SPDK storage integration test");
     spdk_storage_step.dependOn(&spdk_storage_cmd.step);
 
@@ -657,6 +659,7 @@ fn configureSpdk(module: *std.Build.Module) void {
         .files = &.{
             "src/spdk/runtime.c",
             "src/spdk/bdev_provider.c",
+            "src/spdk/nvmf_tcp_export.c",
             "src/spdk/vhost_blk_controller.c",
         },
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
@@ -664,9 +667,11 @@ fn configureSpdk(module: *std.Build.Module) void {
     for ([_][]const u8{
         "spdk_event",
         "spdk_event_bdev",
+        "spdk_event_nvmf",
         "spdk_event_vhost_blk",
         "spdk_bdev_modules",
         "spdk_env_dpdk",
+        "spdk_nvmf",
         "spdk_sock_modules",
         "spdk_syslibs",
     }) |library| module.linkSystemLibrary(library, .{ .needed = true, .use_pkg_config = .force });
@@ -706,6 +711,26 @@ fn createSpdkStorageTest(
     module.addIncludePath(b.path("test"));
     return b.addLibrary(.{
         .name = "zettide-spdk-storage-test",
+        .root_module = module,
+    });
+}
+
+fn createSpdkNvmfExportTest(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    core: *std.Build.Module,
+) *std.Build.Step.Compile {
+    const module = b.createModule(.{
+        .root_source_file = b.path("test/spdk_nvmf_export.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = core }},
+    });
+    module.addIncludePath(b.path("src"));
+    return b.addLibrary(.{
+        .name = "zettide-spdk-nvmf-export-test",
         .root_module = module,
     });
 }
