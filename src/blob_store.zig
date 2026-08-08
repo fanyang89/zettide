@@ -10,6 +10,16 @@ const digest_cache_ways = 4;
 const digest_cache_sets = 4096;
 const digest_cache_entries = digest_cache_ways * digest_cache_sets;
 
+pub const DirectReadPlan = struct {
+    extent: storage_api.LinuxReadExtent,
+    expected_crc32c: u32,
+
+    pub fn deinit(self: *DirectReadPlan) void {
+        self.extent.deinit();
+        self.* = undefined;
+    }
+};
+
 const DigestCacheEntry = struct {
     slot: u64 = 0,
     digest: [32]u8 = @splat(0),
@@ -270,6 +280,27 @@ pub const Store = struct {
         )) return error.BlobChecksumMismatch;
         @memset(output[reference.valid_bytes..], 0);
         return reference.valid_bytes;
+    }
+
+    pub fn directReadPlan(
+        self: *Store,
+        io: Io,
+        reference: format.BlobRef,
+    ) !?DirectReadPlan {
+        try self.mutex.lockShared(io);
+        defer self.mutex.unlockShared(io);
+        if (self.frozen) return error.BlobStoreFrozen;
+        try reference.validate(self.header.unit_count);
+        if (reference.endUnit() > self.staged_units) return error.UnpublishedBlobReference;
+        if (reference.valid_bytes != format.allocation_unit) return null;
+        if (!std.mem.allEqual(u32, reference.checksums[1..], 0))
+            return error.BlobChecksumMismatch;
+        const extent = try self.device.linuxReadExtent(
+            io,
+            try format.slotOffset(reference.slot),
+            format.allocation_unit,
+        ) orelse return null;
+        return .{ .extent = extent, .expected_crc32c = reference.checksums[0] };
     }
 
     pub const Read = struct {
@@ -849,4 +880,119 @@ test "blob store detects payload corruption" {
     const output = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), format.blob_size);
     defer std.testing.allocator.free(output);
     try std.testing.expectError(error.BlobChecksumMismatch, store.read(std.testing.io, reference, output));
+}
+
+test "blob store direct read plans own extents and preserve reference integrity" {
+    const ExtentBackend = struct {
+        source_fd: std.posix.fd_t,
+        supported: bool = true,
+        requested_offset: u64 = 0,
+        requested_length: usize = 0,
+
+        fn sameIdentity(context: *anyopaque, other: *anyopaque) bool {
+            return context == other;
+        }
+
+        fn readAt(_: *anyopaque, _: Io, _: []u8, _: u64) !usize {
+            return error.Unsupported;
+        }
+
+        fn writeAllAt(_: *anyopaque, _: Io, _: []const u8, _: u64) !void {
+            return error.Unsupported;
+        }
+
+        fn sync(_: *anyopaque, _: Io) !void {}
+        fn close(_: *anyopaque, _: Io) !void {}
+
+        fn linuxReadExtent(
+            context: *anyopaque,
+            _: Io,
+            offset: u64,
+            length: usize,
+        ) !?storage_api.LinuxReadExtent {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.requested_offset = offset;
+            self.requested_length = length;
+            if (!self.supported) return null;
+            const extent_offset = std.math.cast(std.posix.off_t, offset) orelse return error.Overflow;
+            const duplicated = std.os.linux.dup(self.source_fd);
+            if (std.os.linux.errno(duplicated) != .SUCCESS) return error.Unexpected;
+            return .{
+                .fd = @intCast(duplicated),
+                .offset = extent_offset,
+                .length = length,
+            };
+        }
+
+        const vtable: storage_api.Storage.VTable = .{
+            .same_identity = sameIdentity,
+            .read_at = readAt,
+            .write_all_at = writeAllAt,
+            .sync = sync,
+            .close = close,
+            .linux_read_extent = linuxReadExtent,
+        };
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try tmp.dir.createFile(std.testing.io, "direct-plan-source", .{ .read = true });
+    defer source.close(std.testing.io);
+    const device_size = format.minimum_device_size;
+    var backend: ExtentBackend = .{ .source_fd = source.handle };
+    const storage = storage_api.Storage.initBackend(
+        &backend,
+        &ExtentBackend.vtable,
+        device_size,
+        .linux_block_device,
+        format.allocation_unit,
+    );
+    const device = try blob_device.Device.init(storage, 0, device_size, format.allocation_unit);
+    var header = try format.Header.init(std.testing.io, device_size);
+    header.committed_units = 1;
+    var store: Store = .{
+        .allocator = std.testing.allocator,
+        .device = device,
+        .header = header,
+        .headers = .{ header, null },
+        .selected_header = 0,
+        .sequence_floor = header.sequence,
+        .staged_units = 1,
+    };
+    const bytes: [format.allocation_unit]u8 = @splat(0x5a);
+    const reference: format.BlobRef = .{
+        .slot = 0,
+        .valid_bytes = bytes.len,
+        .checksums = format.payloadChecksums(&bytes),
+    };
+
+    var plan = (try store.directReadPlan(std.testing.io, reference)).?;
+    defer plan.deinit();
+    try std.testing.expectEqual(reference.checksums[0], plan.expected_crc32c);
+    try std.testing.expectEqual(try format.slotOffset(reference.slot), backend.requested_offset);
+    try std.testing.expectEqual(@as(usize, format.allocation_unit), backend.requested_length);
+
+    backend.supported = false;
+    try std.testing.expectEqual(
+        @as(?DirectReadPlan, null),
+        try store.directReadPlan(std.testing.io, reference),
+    );
+    var trailing_checksum = reference;
+    trailing_checksum.checksums[1] = 1;
+    try std.testing.expectError(
+        error.BlobChecksumMismatch,
+        store.directReadPlan(std.testing.io, trailing_checksum),
+    );
+    var unpublished = reference;
+    unpublished.slot = 1;
+    try std.testing.expectError(
+        error.UnpublishedBlobReference,
+        store.directReadPlan(std.testing.io, unpublished),
+    );
+    var malformed = reference;
+    malformed.valid_bytes = 0;
+    try std.testing.expectError(
+        error.InvalidBlobReference,
+        store.directReadPlan(std.testing.io, malformed),
+    );
 }

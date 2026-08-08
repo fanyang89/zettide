@@ -513,6 +513,34 @@ pub const Filesystem = struct {
         return self.readUnlocked(io, inode, generation, output, offset);
     }
 
+    /// Concurrent calls require the filesystem allocator to be thread-safe.
+    pub fn directReadPlanAtGeneration(
+        self: *Filesystem,
+        io: Io,
+        inode: u64,
+        generation: u64,
+        offset: u64,
+        length: usize,
+    ) !?blob_store.DirectReadPlan {
+        try self.transaction_mutex.lockShared(io);
+        defer self.transaction_mutex.unlockShared(io);
+        if (self.dirty_files.getPtr(inode)) |dirty_file| {
+            try self.authorizeDirectInode(io, inode, dirty_file.record);
+            try validateRegularFile(dirty_file.record, generation);
+            return null;
+        }
+        const record = try self.requireRegularFileAtGeneration(io, inode, generation);
+        return blob_file.directReadPlanAt(
+            self.allocator,
+            io,
+            &self.blobs,
+            self.visibleUnits(),
+            record.data.?,
+            offset,
+            length,
+        );
+    }
+
     fn readUnlocked(
         self: *Filesystem,
         io: Io,

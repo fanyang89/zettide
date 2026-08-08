@@ -161,6 +161,44 @@ pub fn readSnapshotAt(
     return amount;
 }
 
+pub fn directReadPlanAt(
+    allocator: std.mem.Allocator,
+    io: Io,
+    blobs: *blob_store.Store,
+    readable_units: u64,
+    snapshot: Snapshot,
+    offset: u64,
+    length: usize,
+) !?blob_store.DirectReadPlan {
+    if (snapshot.generation == 0 or snapshot.logical_size > std.math.maxInt(i64) or
+        (snapshot.root != null and snapshot.logical_size == 0))
+        return error.InvalidBlobFileSnapshot;
+    const block_count = try std.math.divCeil(u64, snapshot.logical_size, block_size);
+    if (snapshot.root) |root| {
+        if (root.first_key > root.last_key or root.last_key >= block_count)
+            return error.InvalidBlobFileSnapshot;
+    }
+    if (length != block_size or offset % block_size != 0 or
+        offset > snapshot.logical_size or length > snapshot.logical_size - offset)
+        return null;
+    const root = snapshot.root orelse return null;
+    var map_scratch: [blob_map.page_size]u8 align(blob_format.allocation_unit) =
+        uninitialized([blob_map.page_size]u8);
+    var maps = blob_map_store.MapStore.init(allocator, blobs);
+    const reference = try maps.lookupAt(
+        io,
+        root,
+        snapshot.generation,
+        readable_units,
+        offset / block_size,
+        &map_scratch,
+    ) orelse return null;
+    reference.validate(blobs.header.unit_count) catch return error.InvalidBlobFileSnapshot;
+    if (reference.valid_bytes != block_size or reference.endUnit() > readable_units)
+        return error.InvalidBlobFileSnapshot;
+    return blobs.directReadPlan(io, reference);
+}
+
 fn readSnapshotBlock(
     allocator: std.mem.Allocator,
     io: Io,
@@ -1652,5 +1690,86 @@ test "blob file snapshot point reads preserve corruption validation" {
         } },
         &block_output,
         0,
+    ));
+}
+
+test "blob file direct read plans restrict shape holes and snapshot integrity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "blob-file-direct-plan",
+        8 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    var file = State.init(std.testing.allocator, &blobs);
+    defer file.deinit();
+    const data: [block_size]u8 = @splat('d');
+    _ = try file.write(std.testing.io, &data, 0);
+    try file.truncate(std.testing.io, 2 * block_size);
+    const snapshot = try file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try file.acceptSnapshot(snapshot);
+
+    try std.testing.expectEqual(
+        @as(?blob_store.DirectReadPlan, null),
+        try directReadPlanAt(
+            std.testing.failing_allocator,
+            std.testing.io,
+            &blobs,
+            blobs.committedUnits(),
+            snapshot,
+            0,
+            block_size,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?blob_store.DirectReadPlan, null),
+        try directReadPlanAt(
+            std.testing.failing_allocator,
+            std.testing.io,
+            &blobs,
+            blobs.committedUnits(),
+            snapshot,
+            block_size,
+            block_size,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(?blob_store.DirectReadPlan, null),
+        try directReadPlanAt(
+            std.testing.failing_allocator,
+            std.testing.io,
+            &blobs,
+            blobs.committedUnits(),
+            snapshot,
+            0,
+            block_size - 1,
+        ),
+    );
+    var malformed = snapshot;
+    malformed.generation = 0;
+    try std.testing.expectError(error.InvalidBlobFileSnapshot, directReadPlanAt(
+        std.testing.failing_allocator,
+        std.testing.io,
+        &blobs,
+        blobs.committedUnits(),
+        malformed,
+        0,
+        block_size,
+    ));
+    var stale_map = snapshot;
+    stale_map.generation += 1;
+    try std.testing.expectError(error.BlobMapReferenceMismatch, directReadPlanAt(
+        std.testing.failing_allocator,
+        std.testing.io,
+        &blobs,
+        blobs.committedUnits(),
+        stale_map,
+        0,
+        block_size,
     ));
 }
