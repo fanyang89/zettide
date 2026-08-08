@@ -19,6 +19,7 @@ ramp_time=${ZETTIDE_POOL_FIO_RAMP_TIME:-5}
 frontend=${ZETTIDE_POOL_FIO_FRONTEND:-fuse}
 ganesha_build=${ZETTIDE_GANESHA_BUILD_DIR:-}
 nfs_stable_write_batch_us=${ZETTIDE_NFS_STABLE_WRITE_BATCH_US:-20000}
+nfs_nconnect=${ZETTIDE_NFS_NCONNECT:-1}
 
 [[ $EUID -eq 0 ]] || {
     echo "physical Pool fio requires root" >&2
@@ -38,6 +39,10 @@ nfs_stable_write_batch_us=${ZETTIDE_NFS_STABLE_WRITE_BATCH_US:-20000}
 }
 [[ $nfs_stable_write_batch_us =~ ^[0-9]+$ ]] && ((nfs_stable_write_batch_us <= 999999)) || {
     echo "ZETTIDE_NFS_STABLE_WRITE_BATCH_US must be between 0 and 999999" >&2
+    exit 2
+}
+[[ $nfs_nconnect =~ ^[1-9][0-9]*$ ]] && ((nfs_nconnect <= 16)) || {
+    echo "ZETTIDE_NFS_NCONNECT must be between 1 and 16" >&2
     exit 2
 }
 commands=(fio lsblk mountpoint timeout)
@@ -193,7 +198,7 @@ start_pool_mount() {
                     rpcinfo -p 127.0.0.1 2>/dev/null |
                         grep -Eq "^[[:space:]]*100003[[:space:]]+3[[:space:]]+tcp[[:space:]]+$nfs_port([[:space:]]|$)"; then
                     timeout --kill-after=2s 30s mount -t nfs \
-                        -o "vers=3,nolock,proto=tcp,port=$nfs_port,mountport=$mnt_port,rsize=1048576,wsize=1048576,noatime" \
+                        -o "vers=3,nolock,proto=tcp,port=$nfs_port,mountport=$mnt_port,rsize=1048576,wsize=1048576,noatime,nconnect=$nfs_nconnect" \
                         127.0.0.1:/zettide "$mountpoint_path"
                     return
                 fi
