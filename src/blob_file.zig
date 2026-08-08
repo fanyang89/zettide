@@ -191,10 +191,15 @@ fn readSnapshotBlock(
     reference.validate(blobs.header.unit_count) catch return error.InvalidBlobFileSnapshot;
     if (reference.valid_bytes != block_size or reference.endUnit() > readable_units)
         return error.InvalidBlobFileSnapshot;
-    var block_scratch: [block_size]u8 align(block_size) = uninitialized([block_size]u8);
-    if (try blobs.read(io, reference, &block_scratch) != block_size)
-        return error.InvalidBlobFileBlock;
-    @memcpy(output, &block_scratch);
+    if (@intFromPtr(output.ptr) % blobs.readBufferAlignment() == 0) {
+        if (try blobs.read(io, reference, output) != block_size)
+            return error.InvalidBlobFileBlock;
+    } else {
+        var block_scratch: [block_size]u8 align(block_size) = uninitialized([block_size]u8);
+        if (try blobs.read(io, reference, &block_scratch) != block_size)
+            return error.InvalidBlobFileBlock;
+        @memcpy(output, &block_scratch);
+    }
     return output.len;
 }
 
@@ -1653,4 +1658,75 @@ test "blob file snapshot point reads preserve corruption validation" {
         &block_output,
         0,
     ));
+}
+
+fn testExactSnapshotReadAlignment(read_buffer_alignment: u32) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file_handle = try tmp.dir.createFile(std.testing.io, "blob-file-alignment", .{ .read = true });
+    var file_owned = true;
+    defer if (file_owned) file_handle.close(std.testing.io);
+    try file_handle.setLength(std.testing.io, 32 * 1024 * 1024);
+    const storage = @import("v3/storage.zig").Storage.initOwned(
+        file_handle,
+        32 * 1024 * 1024,
+        .regular_file,
+        read_buffer_alignment,
+        false,
+    );
+    const device = try blob_device.Device.init(
+        storage,
+        0,
+        32 * 1024 * 1024,
+        blob_format.allocation_unit,
+    );
+    file_owned = false;
+    var blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    defer blobs.close(std.testing.io) catch {};
+    try std.testing.expectEqual(read_buffer_alignment, blobs.readBufferAlignment());
+
+    var blob_file = State.init(std.testing.allocator, &blobs);
+    defer blob_file.deinit();
+    const data: [block_size]u8 = @splat(0x6b);
+    try std.testing.expectEqual(data.len, try blob_file.write(std.testing.io, &data, 0));
+    const reference = blob_file.blocks.get(0).?;
+    const snapshot = try blob_file.prepareSnapshot(std.testing.io);
+    try blobs.commit(std.testing.io);
+    try blob_file.acceptSnapshot(snapshot);
+
+    const allocation = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(block_size), block_size + 1);
+    defer std.testing.allocator.free(allocation);
+    const output = allocation[1..][0..block_size];
+    try std.testing.expect(@intFromPtr(output.ptr) % block_size != 0);
+    try std.testing.expectEqual(output.len, try readSnapshot(
+        std.testing.failing_allocator,
+        std.testing.io,
+        &blobs,
+        snapshot,
+        output,
+        0,
+    ));
+    try std.testing.expectEqualSlices(u8, &data, output);
+
+    var bad_checksum = reference;
+    bad_checksum.checksums[0] ^= 1;
+    var maps = blob_map_store.MapStore.init(std.testing.allocator, &blobs);
+    const checksum_root = try maps.build(std.testing.io, snapshot.generation + 1, &.{.{
+        .logical_blob = 0,
+        .reference = bad_checksum,
+    }});
+    try blobs.commit(std.testing.io);
+    try std.testing.expectError(error.BlobChecksumMismatch, readSnapshot(
+        std.testing.failing_allocator,
+        std.testing.io,
+        &blobs,
+        .{ .generation = snapshot.generation + 1, .logical_size = block_size, .root = checksum_root },
+        output,
+        0,
+    ));
+}
+
+test "exact snapshot reads support direct and aligned scratch buffers" {
+    try testExactSnapshotReadAlignment(1);
+    try testExactSnapshotReadAlignment(block_size);
 }

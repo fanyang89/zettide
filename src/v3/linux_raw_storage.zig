@@ -175,6 +175,10 @@ fn transportKind(context_ptr: *anyopaque) storage_api.TransportKind {
     return if (context.engine != null) .io_uring else .posix;
 }
 
+fn readBufferAlignment(_: *anyopaque) u32 {
+    return 1;
+}
+
 fn transportStats(context_ptr: *anyopaque, io: std.Io) storage_api.TransportStats {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.mutex.lockUncancelable(io);
@@ -248,6 +252,7 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .sync_data = syncData,
     .sync = sync,
     .close = close,
+    .read_buffer_alignment = readBufferAlignment,
     .transport_kind = transportKind,
     .transport_stats = transportStats,
     .reset_transport_stats = resetTransportStats,
@@ -288,6 +293,7 @@ test "forced POSIX raw storage preserves identity and bounds" {
     defer alias.close(std.testing.io) catch {};
     try std.testing.expect(storage.sameIdentity(&alias));
     try std.testing.expectEqual(storage_api.Kind.linux_block_device, storage.kind);
+    try std.testing.expectEqual(@as(u32, 1), storage.readBufferAlignment());
     try std.testing.expectError(error.ReadOnlyStorage, alias.writeAllAt(std.testing.io, "denied", 0));
 
     const expected = "POSIX raw storage";
@@ -302,6 +308,43 @@ test "forced POSIX raw storage preserves identity and bounds" {
 
     try storage.close(std.testing.io);
     storage_open = false;
+}
+
+test "buffered raw storage accepts unaligned read buffers without relaxing IO geometry" {
+    const blob_device = @import("../blob_device.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "unaligned-raw-read", .{ .read = true });
+    var file_owned = true;
+    defer if (file_owned) file.close(std.testing.io);
+    try file.setLength(std.testing.io, 8192);
+
+    var storage = try initOwned(
+        std.testing.allocator,
+        file,
+        8192,
+        4096,
+        .{ .major = 1, .minor = 2, .disk_sequence = 3 },
+        true,
+        .posix,
+    );
+    file_owned = false;
+    var storage_owned = true;
+    defer if (storage_owned) storage.close(std.testing.io) catch {};
+    var device = try blob_device.Device.init(storage, 0, 8192, 4096);
+    storage_owned = false;
+    defer device.close(std.testing.io) catch {};
+
+    const expected: [4096]u8 = @splat(0x5a);
+    try storage.writeAllAt(std.testing.io, &expected, 0);
+    const allocation = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(4096), 4097);
+    defer std.testing.allocator.free(allocation);
+    const output = allocation[1..][0..4096];
+    try std.testing.expect(@intFromPtr(output.ptr) % 4096 != 0);
+    try device.readAt(std.testing.io, output, 0);
+    try std.testing.expectEqualSlices(u8, &expected, output);
+    try std.testing.expectError(error.InvalidBlobDeviceIo, device.readAt(std.testing.io, output[0..4095], 0));
+    try std.testing.expectError(error.InvalidBlobDeviceIo, device.readAt(std.testing.io, output, 1));
 }
 
 test "forced io_uring raw storage uses positional singleton reads and engine batches" {

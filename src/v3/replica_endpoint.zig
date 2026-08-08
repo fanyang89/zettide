@@ -18,6 +18,7 @@ pub const ReplicaEndpoint = struct {
         write_data_many: ?*const fn (*anyopaque, []const storage_api.Write) anyerror!void = null,
         write_metadata_durable: *const fn (*anyopaque, u64, []const u8) anyerror!void,
         sync: *const fn (*anyopaque) anyerror!void,
+        read_buffer_alignment: ?*const fn (*anyopaque) u32 = null,
     };
 
     pub fn init(context: *anyopaque, geometry: Geometry, vtable: *const VTable) ReplicaEndpoint {
@@ -34,6 +35,11 @@ pub const ReplicaEndpoint = struct {
 
     pub fn readData(self: ReplicaEndpoint, offset: u64, buffer: []u8) anyerror!void {
         return self.vtable.read_data(self.context, offset, buffer);
+    }
+
+    pub fn readBufferAlignment(self: ReplicaEndpoint) ?u32 {
+        const alignment = self.vtable.read_buffer_alignment orelse return null;
+        return alignment(self.context);
     }
 
     pub fn readDataMany(

@@ -474,6 +474,10 @@ pub const Member = struct {
         return self.storage.transportKind();
     }
 
+    pub fn readBufferAlignment(self: *const Member) u32 {
+        return self.storage.readBufferAlignment();
+    }
+
     pub fn transportStats(self: *Member) storage_api.TransportStats {
         return self.storage.transportStats(self.io);
     }
@@ -906,6 +910,7 @@ const member_replica_vtable: ReplicaEndpoint.VTable = .{
     .write_data = replicaWriteData,
     .write_metadata_durable = replicaWriteMetadataDurable,
     .sync = replicaSync,
+    .read_buffer_alignment = replicaReadBufferAlignment,
 };
 
 fn replicaMember(context: *anyopaque) *Member {
@@ -918,6 +923,10 @@ fn replicaReadMetadata(context: *anyopaque, offset: u64, buffer: []u8) anyerror!
 
 fn replicaReadData(context: *anyopaque, offset: u64, buffer: []u8) anyerror!void {
     return replicaMember(context).read(.data, offset, buffer);
+}
+
+fn replicaReadBufferAlignment(context: *anyopaque) u32 {
+    return replicaMember(context).readBufferAlignment();
 }
 
 fn replicaReadDataMany(
