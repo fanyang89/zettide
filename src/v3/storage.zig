@@ -57,7 +57,6 @@ pub const Storage = struct {
         sync: *const fn (context: *anyopaque, io: Io) anyerror!void,
         /// Consumes context even when cleanup reports an error. It must not be retried.
         close: *const fn (context: *anyopaque, io: Io) anyerror!void,
-        read_buffer_alignment: ?*const fn (context: *anyopaque) u32 = null,
         transport_kind: ?*const fn (context: *anyopaque) TransportKind = null,
         transport_stats: ?*const fn (context: *anyopaque, io: Io) TransportStats = null,
         reset_transport_stats: ?*const fn (context: *anyopaque, io: Io) void = null,
@@ -158,16 +157,6 @@ pub const Storage = struct {
 
     pub fn capacity(self: *const Storage) u64 {
         return self.capacity_bytes;
-    }
-
-    pub fn readBufferAlignment(self: *const Storage) u32 {
-        return switch (self.backend) {
-            .file => self.minimum_io_size,
-            .custom => |backend| if (backend.vtable.read_buffer_alignment) |alignment|
-                alignment(backend.context)
-            else
-                self.minimum_io_size,
-        };
     }
 
     pub fn transportKind(self: *const Storage) TransportKind {
@@ -482,7 +471,6 @@ test "custom storage delegates operations and preserves identity" {
 
     try std.testing.expect(storage.sameIdentity(&alias));
     try std.testing.expect(!storage.sameIdentity(&other));
-    try std.testing.expectEqual(@as(u32, 4096), storage.readBufferAlignment());
     try storage.writeAllAt(std.testing.io, "data", 2048);
     var actual: [4]u8 = undefined;
     try std.testing.expectEqual(actual.len, try storage.readAt(std.testing.io, &actual, 2048));

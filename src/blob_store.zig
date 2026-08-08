@@ -96,10 +96,6 @@ pub const Store = struct {
         return self.staged_units;
     }
 
-    pub fn readBufferAlignment(self: *const Store) u32 {
-        return self.device.readBufferAlignment();
-    }
-
     pub fn authorityRoot(self: *const Store) ?format.BlobRef {
         return self.header.authority_root;
     }

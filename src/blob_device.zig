@@ -81,10 +81,6 @@ pub const Device = struct {
         return self.io_alignment;
     }
 
-    pub fn readBufferAlignment(self: *const Device) u32 {
-        return self.storage.readBufferAlignment();
-    }
-
     pub fn transportKind(self: *const Device) storage_api.TransportKind {
         return self.storage.transportKind();
     }
@@ -98,7 +94,7 @@ pub const Device = struct {
     }
 
     pub fn readAt(self: *Device, io: Io, buffer: []u8, offset: u64) !void {
-        try self.validateIo(buffer.ptr, buffer.len, offset, self.readBufferAlignment());
+        try self.validateIo(buffer.ptr, buffer.len, offset);
         const amount = try self.storage.readAt(io, buffer, self.region_offset + offset);
         if (amount != buffer.len) return error.UnexpectedEndOfBlobDevice;
     }
@@ -110,7 +106,7 @@ pub const Device = struct {
             const count = @min(reads.len - index, max_batch);
             var translated: [max_batch]storage_api.Read = undefined;
             for (reads[index..][0..count], 0..) |read, batch_index| {
-                try self.validateIo(read.buffer.ptr, read.buffer.len, read.offset, self.readBufferAlignment());
+                try self.validateIo(read.buffer.ptr, read.buffer.len, read.offset);
                 translated[batch_index] = .{
                     .buffer = read.buffer,
                     .offset = self.region_offset + read.offset,
@@ -122,7 +118,7 @@ pub const Device = struct {
     }
 
     pub fn writeAllAt(self: *Device, io: Io, bytes: []const u8, offset: u64) !void {
-        try self.validateIo(bytes.ptr, bytes.len, offset, self.io_alignment);
+        try self.validateIo(bytes.ptr, bytes.len, offset);
         try self.storage.writeAllAt(io, bytes, self.region_offset + offset);
     }
 
@@ -133,7 +129,7 @@ pub const Device = struct {
             const count = @min(writes.len - index, max_batch);
             var translated: [max_batch]storage_api.Write = undefined;
             for (writes[index..][0..count], 0..) |write, batch_index| {
-                try self.validateIo(write.bytes.ptr, write.bytes.len, write.offset, self.io_alignment);
+                try self.validateIo(write.bytes.ptr, write.bytes.len, write.offset);
                 translated[batch_index] = .{
                     .bytes = write.bytes,
                     .offset = self.region_offset + write.offset,
@@ -158,8 +154,8 @@ pub const Device = struct {
         try storage.close(io);
     }
 
-    fn validateIo(self: *const Device, pointer: [*]const u8, len: usize, offset: u64, pointer_alignment: u32) !void {
-        if (@intFromPtr(pointer) % pointer_alignment != 0 or
+    fn validateIo(self: *const Device, pointer: [*]const u8, len: usize, offset: u64) !void {
+        if (@intFromPtr(pointer) % self.io_alignment != 0 or
             len == 0 or
             len % self.io_alignment != 0 or
             offset % self.io_alignment != 0 or

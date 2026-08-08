@@ -294,10 +294,6 @@ fn claimedReadData(context_ptr: *anyopaque, offset: u64, buffer: []u8) !void {
     try claimedReplicaContext(context_ptr).member.read(.data, offset, buffer);
 }
 
-fn claimedReadBufferAlignment(context_ptr: *anyopaque) u32 {
-    return claimedReplicaContext(context_ptr).member.readBufferAlignment();
-}
-
 fn claimedReadDataMany(
     context_ptr: *anyopaque,
     reads: []const storage_api.Read,
@@ -333,12 +329,7 @@ const claimed_replica_vtable: ReplicaEndpoint.VTable = .{
     .write_data_many = claimedWriteDataMany,
     .write_metadata_durable = claimedWriteMetadataDurable,
     .sync = claimedSync,
-    .read_buffer_alignment = claimedReadBufferAlignment,
 };
-
-fn readBufferAlignment(context_ptr: *anyopaque) u32 {
-    return contextFromOpaque(context_ptr).device.readBufferAlignment();
-}
 
 fn transportKind(_: *anyopaque) storage_api.TransportKind {
     return .custom;
@@ -382,7 +373,6 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .sync_data = syncData,
     .sync = sync,
     .close = close,
-    .read_buffer_alignment = readBufferAlignment,
     .transport_kind = transportKind,
     .transport_stats = transportStats,
     .reset_transport_stats = resetTransportStats,
@@ -432,10 +422,6 @@ test "Pool data storage supports aligned byte IO across protection modes" {
 
         try std.testing.expectEqual(storage_api.Kind.pool_data, storage.kind);
         try std.testing.expectEqual(@as(u32, io_alignment), storage.minimum_io_size);
-        try std.testing.expectEqual(
-            @as(u32, if (protection == .unprotected) 1 else io_alignment),
-            storage.readBufferAlignment(),
-        );
         try std.testing.expectEqual(storage_api.TransportKind.custom, storage.transportKind());
         try std.testing.expect(storage.sameIdentity(&storage));
 

@@ -235,12 +235,6 @@ pub const PoolBlockDevice = struct {
         return buffer.len;
     }
 
-    pub fn readBufferAlignment(self: *const PoolBlockDevice) u32 {
-        const conservative = if (self.block_size == 0) byte_io_alignment else self.block_size;
-        if (self.kind != .unprotected or self.crypto != null) return conservative;
-        return self.replicas[0].readBufferAlignment() orelse conservative;
-    }
-
     pub fn readManyAt(
         self: *PoolBlockDevice,
         reads: []const storage_api.Read,
@@ -806,7 +800,6 @@ const BatchReplicaProbe = struct {
         .write_data_many = writeMany,
         .write_metadata_durable = write,
         .sync = sync,
-        .read_buffer_alignment = readBufferAlignment,
     };
 
     fn fromContext(context: *anyopaque) *@This() {
@@ -829,28 +822,7 @@ const BatchReplicaProbe = struct {
     }
 
     fn sync(_: *anyopaque) anyerror!void {}
-
-    fn readBufferAlignment(_: *anyopaque) u32 {
-        return 1;
-    }
 };
-
-test "Pool byte reads only propagate relaxed alignment when unprotected" {
-    var probes: [max_replica_count]BatchReplicaProbe = @splat(.{});
-    var replicas: [max_replica_count]ReplicaEndpoint = undefined;
-    for (&probes, &replicas) |*probe, *replica| replica.* = .init(probe, .{
-        .logical_capacity = 1024 * 1024,
-        .data_length = 1024 * 1024,
-    }, &BatchReplicaProbe.vtable);
-
-    const unprotected_layout = try pool_layout.Layout.init(.unprotected, 1, 1, container.default_block_size);
-    const unprotected = try PoolBlockDevice.initBytes(std.testing.io, replicas[0..1], unprotected_layout, 1024 * 1024);
-    try std.testing.expectEqual(@as(u32, 1), unprotected.readBufferAlignment());
-
-    const replicated_layout = try pool_layout.Layout.init(.replicated, 1, 1, container.default_block_size);
-    const replicated = try PoolBlockDevice.initBytes(std.testing.io, &replicas, replicated_layout, 1024 * 1024);
-    try std.testing.expectEqual(@as(u32, byte_io_alignment), replicated.readBufferAlignment());
-}
 
 test "replicated byte writes preserve batches for every member" {
     var probes: [max_replica_count]BatchReplicaProbe = @splat(.{});
