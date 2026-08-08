@@ -2,7 +2,6 @@
 #include "config.h"
 
 #include <errno.h>
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -731,7 +730,7 @@ done:
 
 static void zettide_release_read_buffer(void *buffer)
 {
-	free(((void **)buffer)[-1]);
+	free(buffer);
 }
 
 static void zettide_read2(struct fsal_obj_handle *obj_hdl, bool bypass,
@@ -751,27 +750,20 @@ static void zettide_read2(struct fsal_obj_handle *obj_hdl, bool bypass,
 		goto done;
 	}
 	if (read_arg->iov[0].iov_base == NULL) {
-		size_t length = read_arg->iov[0].iov_len;
-		void *allocation;
 		void *buffer = NULL;
-		uintptr_t address;
+		int status;
 
 		if (read_arg->iov_count != 1) {
 			result = fsalstat(ERR_FSAL_NOTSUPP, ENOTSUP);
 			goto done;
 		}
-		if (length > SIZE_MAX - 4095 - sizeof(void *)) {
-			result = fsalstat(ERR_FSAL_NOMEM, ENOMEM);
+		status = posix_memalign(&buffer, 4096,
+					read_arg->iov[0].iov_len);
+
+		if (status != 0) {
+			result = posix2fsal_status(status);
 			goto done;
 		}
-		allocation = malloc(length + 4095 + sizeof(void *));
-		if (allocation == NULL) {
-			result = fsalstat(ERR_FSAL_NOMEM, ENOMEM);
-			goto done;
-		}
-		address = (uintptr_t)allocation + sizeof(void *) + 4095;
-		buffer = (void *)(address & ~(uintptr_t)4095);
-		((void **)buffer)[-1] = allocation;
 		read_arg->iov[0].iov_base = buffer;
 		read_arg->iov_release = zettide_release_read_buffer;
 		read_arg->release_data = buffer;
