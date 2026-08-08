@@ -92,7 +92,7 @@ run_case() {
     local size=$6
     fio --name="$name" --filename="$device" --rw="$rw" --bs="$block_size" \
         --size="$size" --offset_increment="$size" --ioengine=io_uring \
-        --iodepth="$depth" --numjobs="$jobs" --direct=1 --readonly=1 \
+        --iodepth="$depth" --numjobs="$jobs" --direct=1 --readonly \
         --invalidate=1 --group_reporting=1 --time_based=1 --runtime="$runtime" \
         --ramp_time="$ramp_time" --randrepeat=0 --norandommap=1 \
         --percentile_list=50:95:99:99.9 --eta=never --output-format=json \
