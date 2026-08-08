@@ -90,6 +90,32 @@ fn readAt(context_ptr: *anyopaque, io: std.Io, buffer: []u8, offset: u64) !usize
     return context.file.readPositionalAll(io, buffer, offset) catch |err| return mapOperationError(err);
 }
 
+fn linuxReadExtent(
+    context_ptr: *anyopaque,
+    io: std.Io,
+    offset: u64,
+    length: usize,
+) !?storage_api.LinuxReadExtent {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    context.mutex.lockShared(io) catch |err| return mapOperationError(err);
+    defer context.mutex.unlockShared(io);
+    try validateRange(context, offset, length);
+    const end = std.math.add(u64, offset, length) catch return error.StorageOutOfBounds;
+    if (end > std.math.maxInt(std.posix.off_t)) return error.StorageOutOfBounds;
+
+    const linux = std.os.linux;
+    const result = linux.fcntl(context.file.handle, linux.F.DUPFD_CLOEXEC, 0);
+    const fd: std.posix.fd_t = switch (linux.errno(result)) {
+        .SUCCESS => @intCast(result),
+        .BADF => return error.StorageClosed,
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        .NOMEM => return error.SystemResources,
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+    return .{ .fd = fd, .offset = @intCast(offset), .length = length };
+}
+
 fn readManyAt(
     context_ptr: *anyopaque,
     io: std.Io,
@@ -251,6 +277,7 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .transport_kind = transportKind,
     .transport_stats = transportStats,
     .reset_transport_stats = resetTransportStats,
+    .linux_read_extent = linuxReadExtent,
 };
 
 test "automatic raw transport only falls back when io_uring is unavailable" {
@@ -302,6 +329,48 @@ test "forced POSIX raw storage preserves identity and bounds" {
 
     try storage.close(std.testing.io);
     storage_open = false;
+}
+
+test "raw storage returns an owned CLOEXEC read extent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "raw-read-extent", .{ .read = true });
+    var storage_owns_file = false;
+    defer if (!storage_owns_file) file.close(std.testing.io);
+    try file.setLength(std.testing.io, 4096);
+    try file.writePositionalAll(std.testing.io, "extent data", 1024);
+
+    var storage = try initOwned(
+        std.testing.allocator,
+        file,
+        4096,
+        512,
+        .{ .major = 1, .minor = 2, .disk_sequence = 3 },
+        false,
+        .posix,
+    );
+    storage_owns_file = true;
+    var storage_open = true;
+    defer if (storage_open) storage.close(std.testing.io) catch {};
+
+    var extent = (try storage.linuxReadExtent(std.testing.io, 1024, "extent data".len)).?;
+    defer extent.deinit();
+    try std.testing.expectEqual(@as(std.posix.off_t, 1024), extent.offset);
+    try std.testing.expectEqual(@as(usize, "extent data".len), extent.length);
+    const descriptor_flags = std.os.linux.fcntl(extent.fd, std.os.linux.F.GETFD, 0);
+    try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(descriptor_flags));
+    try std.testing.expect(descriptor_flags & std.os.linux.FD_CLOEXEC != 0);
+
+    try storage.close(std.testing.io);
+    storage_open = false;
+    const extent_file: File = .{ .handle = extent.fd, .flags = .{ .nonblocking = false } };
+    var actual: ["extent data".len]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try extent_file.readPositionalAll(
+        std.testing.io,
+        &actual,
+        @intCast(extent.offset),
+    ));
+    try std.testing.expectEqualStrings("extent data", &actual);
 }
 
 test "forced io_uring raw storage uses positional singleton reads and engine batches" {

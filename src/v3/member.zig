@@ -470,6 +470,20 @@ pub const Member = struct {
         if (amount != buffer.len) return error.TruncatedMember;
     }
 
+    pub fn linuxReadExtent(
+        self: *Member,
+        kind: RegionKind,
+        offset: u64,
+        length: usize,
+    ) !?storage_api.LinuxReadExtent {
+        try self.mutex.lockShared(self.io);
+        defer self.mutex.unlockShared(self.io);
+
+        if (self.isClosed()) return error.MemberClosed;
+        const file_offset = try self.position(kind, offset, length);
+        return self.storage.linuxReadExtent(self.io, file_offset, length);
+    }
+
     pub fn transportKind(self: *const Member) storage_api.TransportKind {
         return self.storage.transportKind();
     }
@@ -906,6 +920,7 @@ const member_replica_vtable: ReplicaEndpoint.VTable = .{
     .write_data = replicaWriteData,
     .write_metadata_durable = replicaWriteMetadataDurable,
     .sync = replicaSync,
+    .linux_read_extent = replicaLinuxReadExtent,
 };
 
 fn replicaMember(context: *anyopaque) *Member {
@@ -926,6 +941,10 @@ fn replicaReadDataMany(
     results: []storage_api.ReadResult,
 ) anyerror!void {
     return replicaMember(context).readMany(.data, reads, results);
+}
+
+fn replicaLinuxReadExtent(context: *anyopaque, offset: u64, length: usize) anyerror!?storage_api.LinuxReadExtent {
+    return replicaMember(context).linuxReadExtent(.data, offset, length);
 }
 
 fn replicaWriteData(context: *anyopaque, offset: u64, data: []const u8) anyerror!void {

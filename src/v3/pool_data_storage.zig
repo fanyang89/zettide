@@ -221,6 +221,18 @@ fn readManyAt(
     try context.device.readManyAt(reads, results);
 }
 
+fn linuxReadExtent(
+    context_ptr: *anyopaque,
+    io: Io,
+    offset: u64,
+    length: usize,
+) !?storage_api.LinuxReadExtent {
+    const context = contextFromOpaque(context_ptr);
+    try context.mutex.lockShared(io);
+    defer context.mutex.unlockShared(io);
+    return context.device.linuxReadExtent(offset, length);
+}
+
 fn writeAllAt(context_ptr: *anyopaque, io: Io, bytes: []const u8, offset: u64) !void {
     const context = contextFromOpaque(context_ptr);
     try context.mutex.lock(io);
@@ -302,6 +314,14 @@ fn claimedReadDataMany(
     try claimedReplicaContext(context_ptr).member.readMany(.data, reads, results);
 }
 
+fn claimedLinuxReadExtent(
+    context_ptr: *anyopaque,
+    offset: u64,
+    length: usize,
+) !?storage_api.LinuxReadExtent {
+    return claimedReplicaContext(context_ptr).member.linuxReadExtent(.data, offset, length);
+}
+
 fn claimedWriteData(context_ptr: *anyopaque, offset: u64, bytes: []const u8) !void {
     const claim = claimedReplicaContext(context_ptr).data_claim orelse return error.ReadOnlyPoolData;
     try claim.write(offset, bytes);
@@ -329,6 +349,7 @@ const claimed_replica_vtable: ReplicaEndpoint.VTable = .{
     .write_data_many = claimedWriteDataMany,
     .write_metadata_durable = claimedWriteMetadataDurable,
     .sync = claimedSync,
+    .linux_read_extent = claimedLinuxReadExtent,
 };
 
 fn transportKind(_: *anyopaque) storage_api.TransportKind {
@@ -376,6 +397,7 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .transport_kind = transportKind,
     .transport_stats = transportStats,
     .reset_transport_stats = resetTransportStats,
+    .linux_read_extent = linuxReadExtent,
 };
 
 const test_member_names = [_][]const u8{ "member-a", "member-b", "member-c" };

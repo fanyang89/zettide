@@ -40,6 +40,17 @@ pub const TransportStats = struct {
     max_inflight: u64 = 0,
 };
 
+pub const LinuxReadExtent = struct {
+    fd: std.posix.fd_t,
+    offset: std.posix.off_t,
+    length: usize,
+
+    pub fn deinit(self: *LinuxReadExtent) void {
+        _ = std.os.linux.close(self.fd);
+        self.* = undefined;
+    }
+};
+
 /// Owned durable random-access storage used by a v3 member.
 pub const Storage = struct {
     backend: Backend,
@@ -60,6 +71,7 @@ pub const Storage = struct {
         transport_kind: ?*const fn (context: *anyopaque) TransportKind = null,
         transport_stats: ?*const fn (context: *anyopaque, io: Io) TransportStats = null,
         reset_transport_stats: ?*const fn (context: *anyopaque, io: Io) void = null,
+        linux_read_extent: ?*const fn (context: *anyopaque, io: Io, offset: u64, length: usize) anyerror!?LinuxReadExtent = null,
     };
 
     const FileBackend = struct {
@@ -185,6 +197,16 @@ pub const Storage = struct {
             .custom => |backend| if (backend.vtable.reset_transport_stats) |reset|
                 reset(backend.context, io),
         }
+    }
+
+    pub fn linuxReadExtent(self: *Storage, io: Io, offset: u64, length: usize) !?LinuxReadExtent {
+        return switch (self.backend) {
+            .file => null,
+            .custom => |backend| if (backend.vtable.linux_read_extent) |read_extent|
+                read_extent(backend.context, io, offset, length)
+            else
+                null,
+        };
     }
 
     pub fn sameIdentity(self: *const Storage, other: *const Storage) bool {

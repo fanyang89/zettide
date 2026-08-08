@@ -18,6 +18,7 @@ pub const ReplicaEndpoint = struct {
         write_data_many: ?*const fn (*anyopaque, []const storage_api.Write) anyerror!void = null,
         write_metadata_durable: *const fn (*anyopaque, u64, []const u8) anyerror!void,
         sync: *const fn (*anyopaque) anyerror!void,
+        linux_read_extent: ?*const fn (*anyopaque, u64, usize) anyerror!?storage_api.LinuxReadExtent = null,
     };
 
     pub fn init(context: *anyopaque, geometry: Geometry, vtable: *const VTable) ReplicaEndpoint {
@@ -70,5 +71,10 @@ pub const ReplicaEndpoint = struct {
 
     pub fn sync(self: ReplicaEndpoint) anyerror!void {
         return self.vtable.sync(self.context);
+    }
+
+    pub fn linuxReadExtent(self: ReplicaEndpoint, offset: u64, length: usize) anyerror!?storage_api.LinuxReadExtent {
+        const read_extent = self.vtable.linux_read_extent orelse return null;
+        return read_extent(self.context, offset, length);
     }
 };
