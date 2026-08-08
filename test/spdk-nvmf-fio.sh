@@ -63,8 +63,13 @@ done
 
 nvme connect -t tcp -a 127.0.0.1 -s 44220 -n "$nqn"
 for ((attempt = 0; attempt < 1000; attempt++)); do
-    device=$(lsblk --nodeps --noheadings --paths --output NAME,SERIAL | \
-        while read -r name candidate; do [[ $candidate == "$serial" ]] && echo "$name"; done)
+    device=""
+    while read -r name candidate; do
+        if [[ $candidate == "$serial" ]]; then
+            device=$name
+            break
+        fi
+    done < <(lsblk --nodeps --noheadings --paths --output NAME,SERIAL)
     [[ -n $device ]] && break
     sleep 0.01
 done
