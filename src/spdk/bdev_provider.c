@@ -116,7 +116,7 @@ provider_module_fini(void)
 static int
 provider_get_ctx_size(void)
 {
-	return 0;
+	return sizeof(struct provider_io);
 }
 
 static bool
@@ -172,7 +172,6 @@ complete_provider_io(void *context)
 	spdk_bdev_io_complete(io->bdev_io,
 			io->status == 0 && copied ? SPDK_BDEV_IO_STATUS_SUCCESS :
 			SPDK_BDEV_IO_STATUS_FAILED);
-	free(io);
 }
 
 static void
@@ -213,20 +212,17 @@ submit_provider_io(struct spdk_bdev_io *bdev_io,
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 		return;
 	}
-	io = calloc(1, sizeof(*io));
-	if (io == NULL) {
-		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_NOMEM);
-		return;
-	}
+	io = (struct provider_io *)bdev_io->driver_ctx;
 	io->bdev_io = bdev_io;
 	io->submit_thread = spdk_bdev_io_get_thread(bdev_io);
+	io->buffer = NULL;
 	io->length = length;
+	io->status = 0;
 	io->operation = operation;
 	if (operation == ZETTIDE_SPDK_BDEV_PROVIDER_READ ||
 		operation == ZETTIDE_SPDK_BDEV_PROVIDER_WRITE) {
 		io->buffer = malloc((size_t)length);
 		if (io->buffer == NULL) {
-			free(io);
 			spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_NOMEM);
 			return;
 		}
@@ -235,7 +231,6 @@ submit_provider_io(struct spdk_bdev_io *bdev_io,
 		!copy_from_iovs(io->buffer, length, bdev_io->u.bdev.iovs,
 			bdev_io->u.bdev.iovcnt)) {
 		free(io->buffer);
-		free(io);
 		spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_FAILED);
 		return;
 	}
