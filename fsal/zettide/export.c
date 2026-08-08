@@ -27,17 +27,6 @@ static void zettide_release_export(struct fsal_export *exp_hdl)
 		 export->stable_syncs, export->commit_calls);
 
 	if (export->backend != NULL) {
-		struct zettide_nfs_async_read_stats async_stats;
-
-		if (zettide_nfs_get_async_read_stats(export->backend,
-						     &async_stats) == ZETTIDE_NFS_OK) {
-			LogEvent(COMPONENT_FSAL,
-				 "zettide_async_read_metrics submitted=%" PRIu64
-				 " completed=%" PRIu64 " fallbacks=%" PRIu64
-				 " queue_peak=%" PRIu64,
-				 async_stats.submitted, async_stats.completed,
-				 async_stats.fallbacks, async_stats.queue_peak);
-		}
 		int status = zettide_nfs_export_close(export->backend);
 		if (status != ZETTIDE_NFS_OK) {
 			LogMajor(COMPONENT_FSAL,

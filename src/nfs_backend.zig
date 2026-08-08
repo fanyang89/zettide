@@ -1,6 +1,5 @@
 const std = @import("std");
 const zettide = @import("zettide");
-const async_read = @import("nfs_async_read.zig");
 
 const allocator = std.heap.c_allocator;
 const filesystem_api = zettide.nfs_filesystem;
@@ -161,7 +160,6 @@ const Export = struct {
     owner: FilesystemOwner,
     filesystem: filesystem_api.Filesystem,
     mutex: std.Io.RwLock = .init,
-    async_read_engine: ?*async_read.Engine = null,
 
     fn io(self: *Export) std.Io {
         return self.threaded.io();
@@ -238,29 +236,6 @@ const FilesystemInfo = extern struct {
     available_bytes: u64,
 };
 
-const AsyncReadStats = extern struct {
-    submitted: u64,
-    completed: u64,
-    fallbacks: u64,
-    queue_peak: u64,
-};
-
-const AsyncTestContext = struct {
-    io: std.Io,
-    event: std.Io.Event = .unset,
-    calls: usize = 0,
-    completion_status: c_int = status(.internal),
-    amount: usize = 0,
-};
-
-fn asyncTestCallback(completion_status: c_int, amount: usize, context_ptr: ?*anyopaque) callconv(.c) void {
-    const context: *AsyncTestContext = @ptrCast(@alignCast(context_ptr.?));
-    context.calls += 1;
-    context.completion_status = completion_status;
-    context.amount = amount;
-    context.event.set(context.io);
-}
-
 const set_mode: u64 = 1 << 0;
 const set_uid: u64 = 1 << 1;
 const set_gid: u64 = 1 << 2;
@@ -290,114 +265,18 @@ pub export fn zettide_nfs_export_open(
     };
     self.filesystem = self.owner.filesystem();
     self.mutex = .init;
-    self.async_read_engine = switch (self.owner) {
-        .blob => async_read.Engine.create(allocator, self.io()) catch |err| if (asyncEngineUnavailable(err))
-            null
-        else {
-            _ = self.owner.close(self.io()) catch {};
-            self.threaded.deinit();
-            allocator.destroy(self);
-            return statusFor(err, false);
-        },
-        .littlefs => null,
-    };
     output.* = self;
     return status(.ok);
 }
 
-fn asyncEngineUnavailable(err: anyerror) bool {
-    return switch (err) {
-        error.ArgumentsInvalid,
-        error.PermissionDenied,
-        error.SystemOutdated,
-        error.UnsupportedIoUringOperations,
-        => true,
-        else => false,
-    };
-}
-
 pub export fn zettide_nfs_export_close(export_handle: ?*Export) callconv(.c) c_int {
     const self = export_handle orelse return status(.invalid_argument);
-    self.lock() catch return status(.internal);
-    const engine = self.async_read_engine;
-    self.async_read_engine = null;
-    if (engine) |value| value.stopAccepting();
-    self.unlock();
-    if (engine) |value| value.destroy();
-
     self.lock() catch return status(.internal);
     const result = self.owner.close(self.io());
     self.unlock();
     self.threaded.deinit();
     allocator.destroy(self);
     result catch |err| return statusFor(err, false);
-    return status(.ok);
-}
-
-pub export fn zettide_nfs_read_async(
-    export_handle: ?*Export,
-    handle: ?*const Handle,
-    offset: u64,
-    buffer: ?*anyopaque,
-    buffer_length: usize,
-    callback: ?async_read.Callback,
-    context: ?*anyopaque,
-) callconv(.c) c_int {
-    const self = export_handle orelse return status(.invalid_argument);
-    const handle_value = handle orelse return status(.invalid_argument);
-    const buffer_value = buffer orelse return status(.invalid_argument);
-    const callback_value = callback orelse return status(.invalid_argument);
-    if (buffer_length != async_read.block_size or offset % async_read.block_size != 0)
-        return status(.not_supported);
-    self.lockDataRead() catch return status(.internal);
-    defer self.unlockDataRead();
-    const engine = self.async_read_engine orelse return status(.not_supported);
-    const decoded = decodeDataHandle(self, handle_value) catch |err| return statusFor(err, true);
-    if (decoded.kind != .file) {
-        _ = self.filesystem.stat(node(decoded)) catch |err| return statusFor(err, true);
-        return if (decoded.kind == .directory) status(.is_directory) else status(.invalid_argument);
-    }
-    var plan = switch (self.owner) {
-        .blob => |*blob| (blob.adapter.directReadPlan(node(decoded), offset, buffer_length) catch |err|
-            return statusFor(err, true)) orelse {
-            engine.noteFallback();
-            return status(.not_supported);
-        },
-        .littlefs => unreachable,
-    };
-    if (plan.extent.length != buffer_length or plan.extent.offset < 0 or
-        @as(u64, @intCast(plan.extent.offset)) % async_read.block_size != 0)
-    {
-        plan.deinit();
-        engine.noteFallback();
-        return status(.not_supported);
-    }
-    const bytes = @as([*]u8, @ptrCast(buffer_value))[0..buffer_length];
-    if (!(engine.enqueue(plan, bytes, callback_value, context) catch |err| {
-        plan.deinit();
-        return statusFor(err, false);
-    })) {
-        plan.deinit();
-        return status(.not_supported);
-    }
-    return status(.ok);
-}
-
-pub export fn zettide_nfs_get_async_read_stats(
-    export_handle: ?*Export,
-    out_stats: ?*AsyncReadStats,
-) callconv(.c) c_int {
-    const self = export_handle orelse return status(.invalid_argument);
-    const output = out_stats orelse return status(.invalid_argument);
-    self.lockDataRead() catch return status(.internal);
-    defer self.unlockDataRead();
-    const engine_stats: async_read.Stats = if (self.async_read_engine) |engine| engine.getStats() else .{};
-    output.* = .{
-        .submitted = engine_stats.submitted,
-        .completed = engine_stats.completed,
-        .fallbacks = engine_stats.fallbacks,
-        .queue_peak = engine_stats.queue_peak,
-    };
     return status(.ok);
 }
 
@@ -998,21 +877,6 @@ test "direct NFS backend resolves and reads stable handles" {
         zettide_nfs_read(export_handle, &file_handle, 0, &contents, contents.len, &bytes_read),
     );
     try std.testing.expectEqualStrings("direct backend", contents[0..bytes_read]);
-    var async_contents: [async_read.block_size]u8 align(async_read.block_size) = undefined;
-    var async_context: AsyncTestContext = .{ .io = std.testing.io };
-    try std.testing.expectEqual(
-        status(.not_supported),
-        zettide_nfs_read_async(
-            export_handle,
-            &file_handle,
-            0,
-            &async_contents,
-            async_contents.len,
-            asyncTestCallback,
-            &async_context,
-        ),
-    );
-    try std.testing.expectEqual(@as(usize, 0), async_context.calls);
 
     var created_handle: Handle = undefined;
     var created_attributes: Attributes = undefined;
@@ -1424,39 +1288,24 @@ test "direct NFS backend exports a single-member Blob Pool" {
         &file_handle,
         &file_attributes,
     ));
-    const persistent: [async_read.block_size]u8 = @splat(0x6d);
     var amount: usize = 0;
     try std.testing.expectEqual(status(.ok), zettide_nfs_write(
         export_handle,
         &file_handle,
         0,
-        &persistent,
-        persistent.len,
+        "persistent",
+        "persistent".len,
         &amount,
     ));
-    try std.testing.expectEqual(status(.ok), zettide_nfs_sync(export_handle));
-    var async_contents: [async_read.block_size]u8 align(async_read.block_size) = undefined;
-    var async_context: AsyncTestContext = .{ .io = std.testing.io };
-    const async_status = zettide_nfs_read_async(
-        export_handle,
-        &file_handle,
-        0,
-        &async_contents,
-        async_contents.len,
-        asyncTestCallback,
-        &async_context,
-    );
-    try std.testing.expectEqual(status(.not_supported), async_status);
-    try std.testing.expectEqual(@as(usize, 0), async_context.calls);
     try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
 
     try std.testing.expectEqual(status(.ok), zettide_nfs_export_open(path_z, false, &export_handle));
-    var contents: [async_read.block_size]u8 = undefined;
+    var contents: [16]u8 = undefined;
     amount = 0;
     try std.testing.expectEqual(
         status(.ok),
         zettide_nfs_read(export_handle, &file_handle, 0, &contents, contents.len, &amount),
     );
-    try std.testing.expectEqualSlices(u8, &persistent, contents[0..amount]);
+    try std.testing.expectEqualStrings("persistent", contents[0..amount]);
     try std.testing.expectEqual(status(.ok), zettide_nfs_export_close(export_handle));
 }
