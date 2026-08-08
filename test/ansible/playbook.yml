@@ -42,6 +42,8 @@
     zettide_nfs_rpc_ioq_thrd_max: 16
     zettide_nfs_perf_case: ""
     zettide_nfs_perf_frequency: 199
+    zettide_nvmf_fio_runtime: 20
+    zettide_nvmf_fio_ramp_time: 5
     zettide_blob_fuse_fio_backing_size_effective: "{{ zettide_blob_fuse_fio_backing_size | default(34359738368) }}"
     zettide_blob_fuse_fio_file_size_effective: "{{ zettide_blob_fuse_fio_file_size | default(268435456) }}"
     zettide_blob_fuse_fio_runtime_effective: "{{ zettide_blob_fuse_fio_runtime | default(8) }}"
@@ -89,6 +91,7 @@
       blob-fuse-fio: tasks/run-blob-fuse-fio.yml
       blob-pool-fio: tasks/run-blob-pool-fio.yml
       blob-pool-nfs-fio: tasks/run-blob-pool-fio.yml
+      nvmf-fio: tasks/run-nvmf-fio.yml
     zettide_packages:
       RedHat:
         - acl
@@ -217,6 +220,45 @@
         - nfs-common
         - libssl-dev
         - uuid-dev
+    zettide_nvmf_packages:
+      RedHat:
+        - autoconf
+        - automake
+        - elfutils-libelf-devel
+        - fio
+        - gcc
+        - gcc-c++
+        - jq
+        - kmod
+        - libtool
+        - libuuid-devel
+        - make
+        - meson
+        - nasm
+        - ninja-build
+        - numactl-devel
+        - nvme-cli
+        - openssl-devel
+        - pkgconf-pkg-config
+        - python3-pyelftools
+      Debian:
+        - autoconf
+        - automake
+        - build-essential
+        - fio
+        - jq
+        - kmod
+        - libelf-dev
+        - libtool
+        - libnuma-dev
+        - libssl-dev
+        - meson
+        - nasm
+        - ninja-build
+        - nvme-cli
+        - pkg-config
+        - python3-pyelftools
+        - uuid-dev
 
   pre_tasks:
     - name: Read the source revision
@@ -286,6 +328,24 @@
       run_once: true
       register: zettide_source_archive
 
+    - name: Archive the pinned SPDK source
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --exclude=.git
+          - --exclude=build
+          - --exclude=build-tmp
+          - -C
+          - "{{ zettide_controller_root }}/../third_party"
+          - -czf
+          - "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
+          - spdk
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: true
+      when: zettide_test_profile == 'nvmf-fio'
+
     - name: Require a supported target family
       ansible.builtin.assert:
         that:
@@ -318,7 +378,9 @@
             name: >-
               {{ zettide_packages[ansible_facts.os_family]
                  if zettide_test_profile == 'tier1'
-                 else zettide_io_packages[ansible_facts.os_family]
+                 else (zettide_nvmf_packages[ansible_facts.os_family]
+                       if zettide_test_profile == 'nvmf-fio'
+                       else zettide_io_packages[ansible_facts.os_family])
                       + (zettide_nfs_ganesha_packages[ansible_facts.os_family]
                          if zettide_test_profile == 'blob-pool-nfs-fio' else []) }}
             state: present
@@ -328,7 +390,10 @@
             argv:
               - modprobe
               - "{{ item }}"
-          loop: "{{ ['fuse'] if zettide_test_profile in ['blob-fuse-fio', 'blob-pool-fio'] else ['fuse', 'loop'] }}"
+          loop: >-
+            {{ ['nvme', 'nvme-tcp'] if zettide_test_profile == 'nvmf-fio'
+               else (['fuse'] if zettide_test_profile in ['blob-fuse-fio', 'blob-pool-fio']
+               else ['fuse', 'loop']) }}
           changed_when: false
           when: zettide_test_profile != 'blob-pool-nfs-fio'
 
@@ -336,7 +401,7 @@
           ansible.builtin.stat:
             path: /dev/fuse
           register: zettide_fuse_device
-          when: zettide_test_profile != 'blob-pool-nfs-fio'
+          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio']
 
         - name: Require the FUSE device
           ansible.builtin.assert:
@@ -344,7 +409,7 @@
               - zettide_fuse_device.stat.exists
               - zettide_fuse_device.stat.ischr
             fail_msg: "/dev/fuse is unavailable on the remote test host."
-          when: zettide_test_profile != 'blob-pool-nfs-fio'
+          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio']
 
         - name: Check the remote Zig version
           ansible.builtin.command:
@@ -397,7 +462,9 @@
               throughput_targets: "{{ zettide_throughput_targets | default([]) }}"
               blob_device_targets: "{{ zettide_blob_device_targets | default([]) }}"
               blob_fuse_targets: "{{ zettide_blob_fuse_targets | default([]) }}"
-              pool_fio_frontend: "{{ 'nfs' if zettide_test_profile == 'blob-pool-nfs-fio' else 'fuse' }}"
+              pool_fio_frontend: >-
+                {{ 'nfs' if zettide_test_profile == 'blob-pool-nfs-fio'
+                   else ('nvmf' if zettide_test_profile == 'nvmf-fio' else 'fuse') }}
               blob_fuse_fio:
                 backing_size: "{{ zettide_blob_fuse_fio_backing_size_effective }}"
                 file_size: "{{ zettide_blob_fuse_fio_file_size_effective }}"

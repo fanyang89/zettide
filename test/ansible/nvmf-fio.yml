@@ -1,0 +1,7 @@
+---
+- name: Benchmark the SPDK provider through NVMe-oF/TCP and the Linux kernel initiator
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: nvmf-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe

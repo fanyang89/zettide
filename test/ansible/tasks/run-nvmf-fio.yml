@@ -1,0 +1,82 @@
+---
+- name: Extract SPDK source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
+    dest: "{{ zettide_remote_workspace.path }}"
+
+- name: Configure SPDK for NVMe-oF/TCP | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - ./configure
+      - --with-shared
+      - --without-rdma
+      - --without-uring
+      - --disable-tests
+      - --disable-unit-tests
+      - --disable-examples
+      - --disable-apps
+      - --without-nvme-cuse
+      - --without-fsdev
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}/spdk"
+  changed_when: true
+
+- name: Build SPDK for NVMe-oF/TCP | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - make
+      - "-j{{ ansible_facts.processor_vcpus | default(2) }}"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}/spdk"
+  changed_when: true
+
+- name: Build the NVMe-oF benchmark target | {{ zettide_optimize }}
+  ansible.builtin.shell:
+    cmd: >-
+      cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
+      -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_provider.c
+      src/spdk/nvmf_tcp_export.c test/spdk_runtime.c test/spdk_nvmf_benchmark.c
+      -o test/spdk-nvmf-benchmark -pthread -Wl,--no-as-needed
+      $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
+      spdk_event spdk_event_bdev spdk_vhost spdk_event_nvmf spdk_bdev_modules spdk_env_dpdk
+      spdk_nvmf spdk_sock_modules spdk_syslibs) -Wl,--as-needed
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: true
+
+- name: Run NVMe-oF/TCP fio | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - bash
+      - test/spdk-nvmf-fio.sh
+      - "{{ zettide_remote_workspace.path }}/test/spdk-nvmf-benchmark"
+      - "{{ zettide_remote_workspace.path }}/nvmf-ready"
+      - "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/nvmf-fio"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    LD_LIBRARY_PATH: >-
+      {{ zettide_remote_workspace.path }}/spdk/build/lib:
+      {{ zettide_remote_workspace.path }}/spdk/dpdk/build/lib:
+      {{ zettide_remote_workspace.path }}/spdk/isa-l/.libs:
+      {{ zettide_remote_workspace.path }}/spdk/isa-l-crypto/.libs
+    ZETTIDE_NVMF_FIO_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
+    ZETTIDE_NVMF_FIO_RAMP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
+  changed_when: true
+  failed_when: false
+  register: zettide_nvmf_fio_result
+
+- name: Record NVMe-oF/TCP fio lifecycle | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_nvmf_fio_result.rc | default(1) }}
+      {{ zettide_nvmf_fio_result.stdout | default('') }}
+      {{ zettide_nvmf_fio_result.stderr | default(zettide_nvmf_fio_result.msg | default('')) }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/nvmf-fio/ansible.log"
+    mode: "0644"
+
+- name: Require NVMe-oF/TCP fio lifecycle | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_nvmf_fio_result.rc | default(1) == 0
+    fail_msg: "NVMe-oF/TCP fio failed; inspect the fetched nvmf-fio logs."

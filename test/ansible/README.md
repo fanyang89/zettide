@@ -229,6 +229,22 @@ Configure `zettide_throughput_targets` in the ignored inventory and run:
 uv run ansible-playbook test/ansible/throughput.yml --limit zettide-tier1
 ```
 
+## NVMe-oF/TCP fio ceiling
+
+The NVMe-oF profile builds the pinned `third_party/spdk` source on the remote
+host, exports a 64 GiB memory-backed provider bdev over loopback TCP, connects
+it through the Linux kernel NVMe/TCP initiator, and runs read-only fio cases.
+It measures the provider, SPDK NVMe-oF, and kernel initiator ceiling rather
+than Catalog volume or physical media performance.
+
+```sh
+uv run ansible-playbook test/ansible/nvmf-fio.yml --limit zettide-tier1
+```
+
+Override the measured and ramp durations with `zettide_nvmf_fio_runtime` and
+`zettide_nvmf_fio_ramp_time`. JSON fio output, target logs, and NVMe topology
+are stored in the fetched result archive.
+
 The benchmark creates sparse 8 GiB temporary images inside the configured
 directories. It never writes raw block devices.
 
