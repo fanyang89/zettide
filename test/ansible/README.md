@@ -212,6 +212,8 @@ window; the default is 20000 microseconds and drained batches sync early.
 Set `zettide_nfs_perf_case` to one fio case name to attach `perf record` to
 NFS-Ganesha for that case. The archive includes `perf-<case>.data` plus self and
 inclusive text reports. `zettide_nfs_perf_frequency` defaults to 199 Hz.
+Use `zettide_nfs_rpc_ioq_thrd_min` and `zettide_nfs_rpc_ioq_thrd_max` to tune
+the NTIRPC work pool; their defaults preserve Ganesha's values of 2 and 200.
 
 ## Throughput
 

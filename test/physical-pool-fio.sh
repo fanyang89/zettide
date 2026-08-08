@@ -20,6 +20,8 @@ frontend=${ZETTIDE_POOL_FIO_FRONTEND:-fuse}
 ganesha_build=${ZETTIDE_GANESHA_BUILD_DIR:-}
 nfs_stable_write_batch_us=${ZETTIDE_NFS_STABLE_WRITE_BATCH_US:-20000}
 nfs_nconnect=${ZETTIDE_NFS_NCONNECT:-1}
+nfs_rpc_ioq_thrd_min=${ZETTIDE_NFS_RPC_IOQ_THRD_MIN:-2}
+nfs_rpc_ioq_thrd_max=${ZETTIDE_NFS_RPC_IOQ_THRD_MAX:-200}
 nfs_perf_case=${ZETTIDE_NFS_PERF_CASE:-}
 nfs_perf_frequency=${ZETTIDE_NFS_PERF_FREQUENCY:-199}
 
@@ -45,6 +47,11 @@ nfs_perf_frequency=${ZETTIDE_NFS_PERF_FREQUENCY:-199}
 }
 [[ $nfs_nconnect =~ ^[1-9][0-9]*$ ]] && ((nfs_nconnect <= 16)) || {
     echo "ZETTIDE_NFS_NCONNECT must be between 1 and 16" >&2
+    exit 2
+}
+[[ $nfs_rpc_ioq_thrd_min =~ ^[1-9][0-9]*$ && $nfs_rpc_ioq_thrd_max =~ ^[1-9][0-9]*$ ]] &&
+    ((nfs_rpc_ioq_thrd_min >= 2 && nfs_rpc_ioq_thrd_min <= nfs_rpc_ioq_thrd_max)) || {
+    echo "NFS RPC IOQ thread limits must satisfy 2 <= min <= max" >&2
     exit 2
 }
 [[ $nfs_perf_frequency =~ ^[1-9][0-9]*$ ]] || {
@@ -288,6 +295,8 @@ NFS_Core_Param {
     Enable_UDP = false;
     Plugins_Dir = "$ganesha_build/FSAL/FSAL_ZETTIDE";
     Allow_Set_Io_Flusher_Fail = true;
+    rpc_ioq_thrdmin = $nfs_rpc_ioq_thrd_min;
+    RPC_Ioq_ThrdMax = $nfs_rpc_ioq_thrd_max;
 }
 
 NFSv4 {
@@ -380,7 +389,7 @@ run_fio_case() {
         kill -INT "$perf_pid" 2>/dev/null || true
         wait "$perf_pid" 2>/dev/null || true
         perf_pid=""
-        perf report --stdio --no-children --percent-limit 0.1 \
+        perf report --stdio --no-children --call-graph none --percent-limit 0.1 \
             --sort=dso,symbol --input "$perf_data" >"$log_dir/perf-$name-self.txt"
         perf report --stdio --percent-limit 0.1 \
             --sort=dso,symbol --input "$perf_data" >"$log_dir/perf-$name-inclusive.txt"
