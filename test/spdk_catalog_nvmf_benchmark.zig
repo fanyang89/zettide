@@ -55,7 +55,7 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    if (mode == 2) {
+    if (mode == 2 or mode == 3) {
         const expected_pool_id = expected_pool_id_z orelse return error.ExpectedPoolIdRequired;
         return serveExisting(
             io,
@@ -65,6 +65,7 @@ fn run(
             std.mem.span(expected_pool_id),
             reactor_mask,
             &signals,
+            mode == 3,
         );
     }
     if (mode != 0 and mode != 1) return error.InvalidMode;
@@ -108,6 +109,7 @@ fn serveExisting(
     expected_pool_id_text: []const u8,
     reactor_mask: []const u8,
     signals: *const c.sigset_t,
+    provision: bool,
 ) !void {
     if (expected_pool_id_text.len != 32) return error.InvalidExpectedPoolId;
     var expected_pool_id: [16]u8 = undefined;
@@ -117,7 +119,7 @@ fn serveExisting(
         io,
         allocator,
         member_path,
-        false,
+        provision,
         true,
     );
     var storages = [_]zettide.v3.storage.Storage{opened.storage};
@@ -125,25 +127,38 @@ fn serveExisting(
         io,
         allocator,
         &storages,
-        .read_only,
+        if (provision) .writable else .read_only,
     );
     defer set.deinit();
     const authority = set.authority() orelse return error.MissingAuthority;
     if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
         return error.UnexpectedPoolId;
-    const catalog = try set.loadCatalog();
-    var selected_index: ?usize = null;
-    for (catalog.descriptorSlice(), 0..) |descriptor, index| {
-        std.debug.print("Catalog volume name={s} allocated_extents={d} logical_size={d}\n", .{
-            descriptor.name.slice(),
-            descriptor.allocated_extent_count,
-            descriptor.logical_size,
-        });
-        if (descriptor.allocated_extent_count == 0) continue;
-        if (selected_index == null or descriptor.allocated_extent_count >
-            catalog.descriptors[selected_index.?].allocated_extent_count) selected_index = index;
-    }
-    const selected = selected_index orelse return error.NoMappedCatalogVolume;
+    const volume_id = if (provision) provisioned: {
+        const catalog = set.loadCatalog() catch |err| switch (err) {
+            error.GenesisHasNoCatalogRoot => break :provisioned try publishCatalog(io, &set, true),
+            else => return err,
+        };
+        for (catalog.descriptorSlice()) |descriptor| {
+            if (std.mem.eql(u8, descriptor.name.slice(), "benchmark"))
+                break :provisioned descriptor.volume_id;
+        }
+        return error.BenchmarkVolumeMissing;
+    } else existing: {
+        const catalog = try set.loadCatalog();
+        var selected_index: ?usize = null;
+        for (catalog.descriptorSlice(), 0..) |descriptor, index| {
+            std.debug.print("Catalog volume name={s} allocated_extents={d} logical_size={d}\n", .{
+                descriptor.name.slice(),
+                descriptor.allocated_extent_count,
+                descriptor.logical_size,
+            });
+            if (descriptor.allocated_extent_count == 0) continue;
+            if (selected_index == null or descriptor.allocated_extent_count >
+                catalog.descriptors[selected_index.?].allocated_extent_count) selected_index = index;
+        }
+        const selected = selected_index orelse return error.NoMappedCatalogVolume;
+        break :existing catalog.descriptors[selected].volume_id;
+    };
     try serve(
         io,
         allocator,
@@ -151,7 +166,7 @@ fn serveExisting(
         reactor_mask,
         signals,
         &set,
-        catalog.descriptors[selected].volume_id,
+        volume_id,
     );
 }
 
