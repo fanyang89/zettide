@@ -39,7 +39,7 @@
     zettide_pool_fio_ramp_time: 5
     zettide_nfs_nconnect: 1
     zettide_nfs_rpc_ioq_thrd_min: 2
-    zettide_nfs_rpc_ioq_thrd_max: 200
+    zettide_nfs_rpc_ioq_thrd_max: 16
     zettide_nfs_perf_case: ""
     zettide_nfs_perf_frequency: 199
     zettide_blob_fuse_fio_backing_size_effective: "{{ zettide_blob_fuse_fio_backing_size | default(34359738368) }}"

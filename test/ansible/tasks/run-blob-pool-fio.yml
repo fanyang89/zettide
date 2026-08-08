@@ -213,7 +213,7 @@
     ZETTIDE_NFS_STABLE_WRITE_BATCH_US: "{{ zettide_nfs_stable_write_batch_us | default(20000) }}"
     ZETTIDE_NFS_NCONNECT: "{{ zettide_nfs_nconnect | default(1) }}"
     ZETTIDE_NFS_RPC_IOQ_THRD_MIN: "{{ zettide_nfs_rpc_ioq_thrd_min | default(2) }}"
-    ZETTIDE_NFS_RPC_IOQ_THRD_MAX: "{{ zettide_nfs_rpc_ioq_thrd_max | default(200) }}"
+    ZETTIDE_NFS_RPC_IOQ_THRD_MAX: "{{ zettide_nfs_rpc_ioq_thrd_max | default(16) }}"
     ZETTIDE_NFS_PERF_CASE: "{{ zettide_nfs_perf_case | default('') }}"
     ZETTIDE_NFS_PERF_FREQUENCY: "{{ zettide_nfs_perf_frequency | default(199) }}"
     ZETTIDE_GANESHA_BUILD_DIR: "{{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build"

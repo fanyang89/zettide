@@ -21,7 +21,7 @@ ganesha_build=${ZETTIDE_GANESHA_BUILD_DIR:-}
 nfs_stable_write_batch_us=${ZETTIDE_NFS_STABLE_WRITE_BATCH_US:-20000}
 nfs_nconnect=${ZETTIDE_NFS_NCONNECT:-1}
 nfs_rpc_ioq_thrd_min=${ZETTIDE_NFS_RPC_IOQ_THRD_MIN:-2}
-nfs_rpc_ioq_thrd_max=${ZETTIDE_NFS_RPC_IOQ_THRD_MAX:-200}
+nfs_rpc_ioq_thrd_max=${ZETTIDE_NFS_RPC_IOQ_THRD_MAX:-16}
 nfs_perf_case=${ZETTIDE_NFS_PERF_CASE:-}
 nfs_perf_frequency=${ZETTIDE_NFS_PERF_FREQUENCY:-199}
 
