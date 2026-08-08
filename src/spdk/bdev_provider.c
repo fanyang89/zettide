@@ -28,6 +28,7 @@ struct provider_io {
 	void *buffer;
 	uint64_t length;
 	int status;
+	bool owns_buffer;
 	enum zettide_spdk_bdev_provider_operation operation;
 };
 
@@ -157,6 +158,16 @@ copy_to_iovs(struct iovec *iovs, int iov_count, const void *source, uint64_t len
 	return copied == length;
 }
 
+static void *
+single_iov_buffer(struct spdk_bdev_io *bdev_io, uint64_t length)
+{
+	if (bdev_io->u.bdev.iovcnt != 1 ||
+		bdev_io->u.bdev.iovs[0].iov_len < length) {
+		return NULL;
+	}
+	return bdev_io->u.bdev.iovs[0].iov_base;
+}
+
 static void
 complete_provider_io(void *context)
 {
@@ -164,11 +175,14 @@ complete_provider_io(void *context)
 	bool copied = true;
 
 	assert(spdk_get_thread() == io->submit_thread);
-	if (io->status == 0 && io->operation == ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
+	if (io->status == 0 && io->owns_buffer &&
+		io->operation == ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
 		copied = copy_to_iovs(io->bdev_io->u.bdev.iovs,
 				io->bdev_io->u.bdev.iovcnt, io->buffer, io->length);
 	}
-	free(io->buffer);
+	if (io->owns_buffer) {
+		free(io->buffer);
+	}
 	spdk_bdev_io_complete(io->bdev_io,
 			io->status == 0 && copied ? SPDK_BDEV_IO_STATUS_SUCCESS :
 			SPDK_BDEV_IO_STATUS_FAILED);
@@ -218,16 +232,21 @@ submit_provider_io(struct spdk_bdev_io *bdev_io,
 	io->buffer = NULL;
 	io->length = length;
 	io->status = 0;
+	io->owns_buffer = false;
 	io->operation = operation;
 	if (operation == ZETTIDE_SPDK_BDEV_PROVIDER_READ ||
 		operation == ZETTIDE_SPDK_BDEV_PROVIDER_WRITE) {
-		io->buffer = malloc((size_t)length);
+		io->buffer = single_iov_buffer(bdev_io, length);
 		if (io->buffer == NULL) {
-			spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_NOMEM);
-			return;
+			io->buffer = malloc((size_t)length);
+			if (io->buffer == NULL) {
+				spdk_bdev_io_complete(bdev_io, SPDK_BDEV_IO_STATUS_NOMEM);
+				return;
+			}
+			io->owns_buffer = true;
 		}
 	}
-	if (operation == ZETTIDE_SPDK_BDEV_PROVIDER_WRITE &&
+	if (operation == ZETTIDE_SPDK_BDEV_PROVIDER_WRITE && io->owns_buffer &&
 		!copy_from_iovs(io->buffer, length, bdev_io->u.bdev.iovs,
 			bdev_io->u.bdev.iovcnt)) {
 		free(io->buffer);

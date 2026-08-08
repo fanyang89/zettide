@@ -39,6 +39,8 @@ struct test_backend {
 	uint8_t *data;
 	uint64_t capacity;
 	uint64_t flush_count;
+	void *last_read_buffer;
+	void *last_write_buffer;
 	bool stopping;
 	bool fail_next;
 	bool complete_inline;
@@ -63,9 +65,11 @@ execute_request(struct test_backend *backend,
 	}
 	switch (operation) {
 	case ZETTIDE_SPDK_BDEV_PROVIDER_READ:
+		backend->last_read_buffer = buffer;
 		memcpy(buffer, backend->data + offset, (size_t)length);
 		break;
 	case ZETTIDE_SPDK_BDEV_PROVIDER_WRITE:
+		backend->last_write_buffer = buffer;
 		memcpy(backend->data + offset, buffer, (size_t)length);
 		break;
 	case ZETTIDE_SPDK_BDEV_PROVIDER_FLUSH:
@@ -421,6 +425,8 @@ main(void)
 				3 * block_size, 2 * block_size);
 	}
 	if (status != 0 || memcmp(write_buffer, read_buffer, 2 * block_size) != 0 ||
+		backend.last_write_buffer != write_buffer ||
+		backend.last_read_buffer != read_buffer ||
 		backend.flush_count != 1) {
 		status = status != 0 ? status : -EIO;
 		goto done;
