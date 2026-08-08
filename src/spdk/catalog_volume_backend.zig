@@ -7,8 +7,42 @@ pub const c = @cImport({
     @cInclude("spdk/bdev_provider.h");
 });
 
-/// Serializes a writable catalog volume backend behind the asynchronous SPDK
-/// provider contract. The allocator must be thread-safe, and the caller must
+const ReadBatch = struct {
+    const max_concurrent = 16;
+
+    io: std.Io,
+    group: std.Io.Group = .init,
+    permits: std.Io.Semaphore = .{ .permits = max_concurrent },
+
+    fn concurrent(
+        self: *ReadBatch,
+        function: anytype,
+        args: std.meta.ArgsTuple(@TypeOf(function)),
+    ) void {
+        const Args = @TypeOf(args);
+        const Bounded = struct {
+            fn run(batch: *ReadBatch, function_args: Args) std.Io.Cancelable!void {
+                defer batch.permits.post(batch.io);
+                return @call(.auto, function, function_args);
+            }
+        };
+        self.permits.waitUncancelable(self.io);
+        self.group.concurrent(self.io, Bounded.run, .{ self, args }) catch {
+            _ = Bounded.run(self, args) catch {};
+        };
+    }
+
+    fn await(self: *ReadBatch) void {
+        self.group.await(self.io) catch unreachable;
+    }
+
+    fn cancel(self: *ReadBatch) void {
+        self.group.cancel(self.io);
+    }
+};
+
+/// Runs reads concurrently while preserving request order across writes,
+/// flushes, and resets. The allocator must be thread-safe, and the caller must
 /// not use `set` until `close` returns.
 pub const Worker = struct {
     allocator: std.mem.Allocator,
@@ -119,11 +153,17 @@ pub const Worker = struct {
     }
 
     fn run(self: *Worker) void {
+        var reads: ReadBatch = .{ .io = self.io };
+        defer reads.cancel();
         while (self.nextRequest()) |request| {
-            const status = self.execute(request) catch |err| errorStatus(err);
-            request.complete.?(request.complete_context, status);
-            self.allocator.destroy(request);
+            if (request.operation == c.ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
+                reads.concurrent(completeRequest, .{ self, request });
+                continue;
+            }
+            reads.await();
+            self.completeRequest(request) catch unreachable;
         }
+        reads.await();
     }
 
     fn nextRequest(self: *Worker) ?*Request {
@@ -159,6 +199,12 @@ pub const Worker = struct {
         }
         return 0;
     }
+
+    fn completeRequest(self: *Worker, request: *Request) std.Io.Cancelable!void {
+        const status = self.execute(request) catch |err| errorStatus(err);
+        request.complete.?(request.complete_context, status);
+        self.allocator.destroy(request);
+    }
 };
 
 pub const submit_callback: c.zettide_spdk_bdev_provider_submit = Worker.submit;
@@ -180,4 +226,38 @@ fn errorStatus(err: anyerror) c_int {
         => -c.EBADF,
         else => -c.EIO,
     };
+}
+
+test "read batch starts independent requests concurrently" {
+    const Context = struct {
+        io: std.Io,
+        started: std.atomic.Value(u32) = .init(0),
+        overlapped: std.atomic.Value(bool) = .init(false),
+        release: std.Io.Semaphore = .{},
+
+        fn run(context: *@This()) std.Io.Cancelable!void {
+            _ = context.started.fetchAdd(1, .release);
+            context.release.waitUncancelable(context.io);
+        }
+
+        fn watch(context: *@This()) void {
+            for (0..5000) |_| {
+                if (context.started.load(.acquire) == 2) break;
+                context.io.sleep(.fromMilliseconds(1), .awake) catch break;
+            }
+            context.overlapped.store(context.started.load(.acquire) == 2, .release);
+            context.release.post(context.io);
+            context.release.post(context.io);
+        }
+    };
+
+    var context: Context = .{ .io = std.testing.io };
+    const watcher = try std.Thread.spawn(.{}, Context.watch, .{&context});
+    defer watcher.join();
+    var batch: ReadBatch = .{ .io = std.testing.io };
+    defer batch.cancel();
+    batch.concurrent(Context.run, .{&context});
+    batch.concurrent(Context.run, .{&context});
+    batch.await();
+    try std.testing.expect(context.overlapped.load(.acquire));
 }
