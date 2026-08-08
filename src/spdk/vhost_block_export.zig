@@ -1,4 +1,5 @@
 const std = @import("std");
+const provider_bdev = @import("provider_bdev.zig");
 
 pub const c = @cImport({
     @cInclude("errno.h");
@@ -6,14 +7,7 @@ pub const c = @cImport({
     @cInclude("spdk/vhost_blk_controller.h");
 });
 
-pub const Backend = struct {
-    context: *anyopaque,
-    submit: c.zettide_spdk_bdev_provider_submit,
-    block_size: u32 = 4096,
-    block_count: u64,
-    write_unit_blocks: u32 = 1,
-    max_io_blocks: u32 = 256,
-};
+pub const Backend = provider_bdev.Backend;
 
 pub const Options = struct {
     bdev_name: []const u8,
@@ -21,11 +15,11 @@ pub const Options = struct {
     cpumask: ?[]const u8 = null,
 };
 
-/// Owns an SPDK provider and the vhost-blk controller consuming it. Backend
+/// Owns an SPDK provider bdev and the vhost-blk controller consuming it. Backend
 /// context and submit callback state must remain valid until close succeeds.
 pub const VhostBlockExport = struct {
     allocator: std.mem.Allocator,
-    provider: ?*c.struct_zettide_spdk_bdev_provider,
+    bdev: provider_bdev.ProviderBdev,
     controller: ?*c.struct_zettide_spdk_vhost_blk_controller,
     socket_path: []u8,
 
@@ -35,7 +29,6 @@ pub const VhostBlockExport = struct {
         backend: Backend,
         options: Options,
     ) !VhostBlockExport {
-        if (backend.submit == null or backend.block_count == 0) return error.InvalidBackend;
         const bdev_name = try allocator.dupeZ(u8, options.bdev_name);
         defer allocator.free(bdev_name);
         const controller_name = try allocator.dupeZ(u8, options.controller_name);
@@ -52,18 +45,7 @@ pub const VhostBlockExport = struct {
         );
         errdefer allocator.free(socket_path);
 
-        var provider_options: c.struct_zettide_spdk_bdev_provider_opts = undefined;
-        c.zettide_spdk_bdev_provider_opts_init(&provider_options, @sizeOf(@TypeOf(provider_options)));
-        provider_options.name = bdev_name.ptr;
-        provider_options.block_size = backend.block_size;
-        provider_options.block_count = backend.block_count;
-        provider_options.write_unit_blocks = backend.write_unit_blocks;
-        provider_options.max_io_blocks = backend.max_io_blocks;
-        provider_options.backend_context = backend.context;
-        provider_options.submit = backend.submit;
-        var provider: ?*c.struct_zettide_spdk_bdev_provider = null;
-        try statusError(c.zettide_spdk_bdev_provider_create(@ptrCast(runtime), &provider_options, &provider));
-        const provider_handle = provider orelse return error.UnexpectedProviderStatus;
+        var bdev = try provider_bdev.ProviderBdev.create(allocator, runtime, backend, options.bdev_name);
 
         var controller_options: c.struct_zettide_spdk_vhost_blk_controller_opts = undefined;
         c.zettide_spdk_vhost_blk_controller_opts_init(
@@ -80,17 +62,17 @@ pub const VhostBlockExport = struct {
             &controller,
         );
         if (create_status != 0) {
-            rollbackProvider(provider_handle);
+            rollbackBdev(&bdev);
             statusError(create_status) catch |err| return err;
             unreachable;
         }
         const controller_handle = controller orelse {
-            rollbackProvider(provider_handle);
+            rollbackBdev(&bdev);
             return error.UnexpectedControllerStatus;
         };
         return .{
             .allocator = allocator,
-            .provider = provider_handle,
+            .bdev = bdev,
             .controller = controller_handle,
             .socket_path = socket_path,
         };
@@ -106,18 +88,14 @@ pub const VhostBlockExport = struct {
             try statusError(c.zettide_spdk_vhost_blk_controller_remove(controller));
             self.controller = null;
         }
-        if (self.provider) |provider| {
-            try statusError(c.zettide_spdk_bdev_provider_delete_wait(provider));
-            self.provider = null;
-        }
+        try self.bdev.close();
         self.allocator.free(self.socket_path);
         self.socket_path = &.{};
     }
 };
 
-fn rollbackProvider(provider: *c.struct_zettide_spdk_bdev_provider) void {
-    if (c.zettide_spdk_bdev_provider_delete_wait(provider) != 0)
-        @panic("failed to roll back SPDK bdev provider");
+fn rollbackBdev(bdev: *provider_bdev.ProviderBdev) void {
+    bdev.close() catch @panic("failed to roll back SPDK bdev provider");
 }
 
 fn statusError(status: c_int) !void {

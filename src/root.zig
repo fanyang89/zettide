@@ -37,6 +37,7 @@ pub const spdk_catalog_endpoint_backend = if (@import("builtin").os.tag == .linu
 pub const spdk_catalog_volume_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_volume_backend.zig") else struct {};
 pub const spdk_catalog_vhost_export = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_vhost_export.zig") else struct {};
 pub const spdk_nvme_controller = if (@import("builtin").os.tag == .linux) @import("spdk/nvme_controller.zig") else struct {};
+pub const spdk_provider_bdev = if (@import("builtin").os.tag == .linux) @import("spdk/provider_bdev.zig") else struct {};
 pub const spdk_runtime = if (@import("builtin").os.tag == .linux) @import("spdk/runtime.zig") else struct {};
 pub const spdk_storage = if (@import("builtin").os.tag == .linux) @import("spdk/storage.zig") else struct {};
 pub const spdk_vhost_block_export = if (@import("builtin").os.tag == .linux) @import("spdk/vhost_block_export.zig") else struct {};
@@ -89,6 +90,7 @@ test {
     _ = spdk_catalog_volume_backend;
     _ = spdk_catalog_vhost_export;
     _ = spdk_nvme_controller;
+    _ = spdk_provider_bdev;
     _ = spdk_runtime;
     _ = spdk_storage;
     _ = spdk_vhost_block_export;
