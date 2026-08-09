@@ -182,7 +182,8 @@ test "single-node WAL restores Pool and Volume snapshot before replaying its suf
         var deleted = try state_machine.decodeDeleteVolumeApplyResponse(allocator, original_delete_response.?);
         defer deleted.deinit(allocator);
         try std.testing.expectEqual(pb.DeleteVolumeApplyCode.DELETE_VOLUME_APPLY_CODE_DELETED, deleted.code);
-        try std.testing.expect(deleted.deleted_revision > volume_revision);
+        try std.testing.expect(deleted.accepted_revision > volume_revision);
+        try std.testing.expect(!deleted.deletion_pending);
         try std.testing.expectEqual(@as(usize, 0), machine.volumeCount());
         try std.testing.expectEqual(@as(usize, 1), machine.volumeTombstoneCount());
 

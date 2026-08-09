@@ -4,6 +4,8 @@ const pb = @import("control_proto");
 const grpc = @import("grpc_lite");
 const raft = @import("raftz");
 const config_mod = @import("config.zig");
+const data_service = @import("data_service.zig");
+const reconciler = @import("reconciler.zig");
 const runtime_mod = @import("runtime.zig");
 
 const config_allocator = std.testing.allocator;
@@ -23,6 +25,108 @@ const member_metadata_capacity_bytes: u64 = 1024;
 const member_data_capacity_bytes: u64 = 8192;
 const member_extent_size_bytes: u32 = 4096;
 const volume_size_bytes: u64 = 256 * 1024;
+
+const ReconcileBackend = struct {
+    ensures: usize = 0,
+    deletes: usize = 0,
+
+    fn interface(self: *ReconcileBackend) data_service.Backend {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn ensure(context: *anyopaque, binding: data_service.Binding) !data_service.Digest {
+        const self: *ReconcileBackend = @ptrCast(@alignCast(context));
+        self.ensures += 1;
+        var digest: data_service.Digest = @splat(0);
+        digest[0..16].* = binding.allocation_id;
+        return digest;
+    }
+
+    fn delete(context: *anyopaque, _: data_service.Binding) !void {
+        const self: *ReconcileBackend = @ptrCast(@alignCast(context));
+        self.deletes += 1;
+    }
+
+    const vtable: data_service.Backend.VTable = .{ .ensure = ensure, .delete = delete };
+};
+
+const ReconcileDataClient = struct {
+    service: *data_service.Service,
+    lose_first_ensure: bool = true,
+
+    fn interface(self: *ReconcileDataClient) reconciler.DataServiceClient {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn ensure(context: *anyopaque, _: []const u8, request: data_service.Request) !data_service.Response {
+        const self: *ReconcileDataClient = @ptrCast(@alignCast(context));
+        const response = try self.service.ensureReplica(request);
+        if (self.lose_first_ensure) {
+            self.lose_first_ensure = false;
+            return error.TransportUnknown;
+        }
+        return response;
+    }
+
+    fn delete(context: *anyopaque, _: []const u8, request: data_service.Request) !data_service.Response {
+        const self: *ReconcileDataClient = @ptrCast(@alignCast(context));
+        return self.service.deleteReplica(request);
+    }
+
+    fn cancel(_: *anyopaque) void {}
+
+    const vtable: reconciler.DataServiceClient.VTable = .{
+        .ensure = ensure,
+        .delete = delete,
+        .cancel = cancel,
+    };
+};
+
+const BlockingDataClient = struct {
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+    entered: std.Io.Event = .unset,
+    completed: std.Io.Event = .unset,
+    canceled: bool = false,
+    active: bool = false,
+    cancel_count: usize = 0,
+
+    fn interface(self: *BlockingDataClient) reconciler.DataServiceClient {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn ensure(context: *anyopaque, _: []const u8, _: data_service.Request) !data_service.Response {
+        const self: *BlockingDataClient = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        if (self.canceled) return error.Canceled;
+        self.active = true;
+        self.entered.set(std.testing.io);
+        while (!self.canceled) self.condition.waitUncancelable(std.testing.io, &self.mutex);
+        self.active = false;
+        self.completed.set(std.testing.io);
+        return error.Canceled;
+    }
+
+    fn delete(context: *anyopaque, endpoint: []const u8, request: data_service.Request) !data_service.Response {
+        return ensure(context, endpoint, request);
+    }
+
+    fn cancel(context: *anyopaque) void {
+        const self: *BlockingDataClient = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(std.testing.io);
+        defer self.mutex.unlock(std.testing.io);
+        self.cancel_count += 1;
+        self.canceled = true;
+        self.condition.broadcast(std.testing.io);
+    }
+
+    const vtable: reconciler.DataServiceClient.VTable = .{
+        .ensure = ensure,
+        .delete = delete,
+        .cancel = cancel,
+    };
+};
 
 const test_options: runtime_mod.Options = .{
     .tick_interval_ms = 5,
@@ -260,7 +364,8 @@ test "runtime restores Pool, Volume, Node, and Member snapshot and WAL suffix th
             snapshot_volume.value.resource_version,
         );
         errdefer deleted_volume.deinit();
-        try std.testing.expect(deleted_volume.value.deleted_revision > snapshot_volume.value.resource_version);
+        try std.testing.expect(deleted_volume.value.accepted_revision > snapshot_volume.value.resource_version);
+        try std.testing.expect(!deleted_volume.value.deletion_pending);
         try runtime.shutdown();
     }
     defer deleted_volume.deinit();
@@ -432,7 +537,8 @@ test "three-voter runtime survives leader failover and restart" {
         created_volume.value.resource_version,
     );
     defer deleted_volume.deinit();
-    try std.testing.expect(deleted_volume.value.deleted_revision > created_volume.value.resource_version);
+    try std.testing.expect(deleted_volume.value.accepted_revision > created_volume.value.resource_version);
+    try std.testing.expect(!deleted_volume.value.deletion_pending);
     var replayed_delete = try deleteVolume(
         runtimes[replacement_leader].?,
         "request-delete-volume-failover",
@@ -457,6 +563,144 @@ test "three-voter runtime survives leader failover and restart" {
         try std.testing.expectEqual(@as(usize, 0), runtime.?.machine.volumeCount());
         try std.testing.expectEqual(@as(usize, 1), runtime.?.machine.volumeTombstoneCount());
     }
+}
+
+test "runtime reconciler recovers unknown ensure and completes create and delete" {
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+    const root_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
+    defer config_allocator.free(root_path);
+    const data_dir = try std.fmt.allocPrintSentinel(config_allocator, "{s}/node-1", .{root_path}, 0);
+    defer config_allocator.free(data_dir);
+    const ports = try reserveUniquePorts(1);
+    const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
+    defer config_allocator.free(address);
+    const addresses = [_][]const u8{address};
+    var config = try makeConfig(1, .{3} ++ .{0} ** 15, &addresses, data_dir);
+    defer config.deinit();
+
+    var store = data_service.MemoryStore.init(runtime_allocator);
+    defer store.deinit();
+    var backend: ReconcileBackend = .{};
+    var data_server = data_service.Service.init(store.store(), backend.interface());
+    var data_client = ReconcileDataClient{ .service = &data_server };
+    var options = test_options;
+    options.data_service_client = data_client.interface();
+    options.reconcile_interval_ms = 1;
+
+    const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, options);
+    defer destroyRuntime(runtime);
+    _ = try waitForStableLeader(&.{runtime});
+    var pool = try createPool(runtime, "reconcile-pool", "reconcile");
+    defer pool.deinit();
+
+    const node_ids = [_][]const u8{
+        "0198f54d-5c2a-7000-8000-000000000301",
+        "0198f54d-5c2a-7000-8000-000000000302",
+        "0198f54d-5c2a-7000-8000-000000000303",
+    };
+    const domains = [_][]const u8{ "rack-a", "rack-b", "rack-c" };
+    const member_ids = [3][16]u8{
+        .{ 0x41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        .{ 0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 },
+        .{ 0x43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 },
+    };
+    var nodes: [3]RegisteredNode = undefined;
+    var node_count: usize = 0;
+    defer for (nodes[0..node_count]) |*node| node.deinit();
+    var members: [3]RegisteredMember = undefined;
+    var member_count: usize = 0;
+    defer for (members[0..member_count]) |*member| member.deinit();
+    for (node_ids, domains, 0..) |node_id, domain, index| {
+        nodes[index] = try registerReconcileNode(runtime, &config, index, node_id, domain);
+        node_count += 1;
+        members[index] = try registerReconcileMember(runtime, &config, index, &member_ids[index], pool.id, nodes[index].id);
+        member_count += 1;
+    }
+
+    var created = try createVolume(runtime, "reconcile-volume", pool.id, "database");
+    defer created.deinit();
+    var active = try waitForVolumeState(runtime, created.value.id, .VOLUME_LIFECYCLE_STATE_ACTIVE);
+    defer active.deinit();
+    try std.testing.expectEqual(@as(usize, 3), backend.ensures);
+
+    var deleted = try deleteVolume(runtime, "reconcile-delete", active.value.id, active.value.resource_version);
+    defer deleted.deinit();
+    try waitForVolumeDeletion(runtime, active.value.id);
+    try std.testing.expectEqual(@as(usize, 3), backend.deletes);
+
+    try runtime.shutdown();
+    try std.testing.expectEqual(@as(usize, 1), runtime.machine.volumeTombstoneCount());
+    try std.testing.expect(runtime.reconcile_thread == null);
+    try std.testing.expect(runtime.planned_action == null);
+    try std.testing.expect(runtime.proposal_response == null);
+    try std.testing.expect(runtime.proposal_allocator == null);
+}
+
+test "runtime shutdown cancels a blocking reconciler data call" {
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+    const root_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
+    defer config_allocator.free(root_path);
+    const data_dir = try std.fmt.allocPrintSentinel(config_allocator, "{s}/node-1", .{root_path}, 0);
+    defer config_allocator.free(data_dir);
+    const ports = try reserveUniquePorts(1);
+    const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
+    defer config_allocator.free(address);
+    const addresses = [_][]const u8{address};
+    var config = try makeConfig(1, .{4} ++ .{0} ** 15, &addresses, data_dir);
+    defer config.deinit();
+
+    var data_client: BlockingDataClient = .{};
+    var options = test_options;
+    options.data_service_client = data_client.interface();
+    options.reconcile_interval_ms = 1;
+
+    const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, options);
+    defer destroyRuntime(runtime);
+    _ = try waitForStableLeader(&.{runtime});
+    var pool = try createPool(runtime, "blocking-pool", "blocking");
+    defer pool.deinit();
+
+    const node_ids = [_][]const u8{
+        "0198f54d-5c2a-7000-8000-000000000401",
+        "0198f54d-5c2a-7000-8000-000000000402",
+        "0198f54d-5c2a-7000-8000-000000000403",
+    };
+    const domains = [_][]const u8{ "rack-a", "rack-b", "rack-c" };
+    const member_ids = [3][16]u8{
+        .{ 0x51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        .{ 0x52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 },
+        .{ 0x53, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 },
+    };
+    var nodes: [3]RegisteredNode = undefined;
+    var node_count: usize = 0;
+    defer for (nodes[0..node_count]) |*node| node.deinit();
+    var members: [3]RegisteredMember = undefined;
+    var member_count: usize = 0;
+    defer for (members[0..member_count]) |*member| member.deinit();
+    for (node_ids, domains, 0..) |node_id, domain, index| {
+        nodes[index] = try registerReconcileNode(runtime, &config, index, node_id, domain);
+        node_count += 1;
+        members[index] = try registerReconcileMember(runtime, &config, index, &member_ids[index], pool.id, nodes[index].id);
+        member_count += 1;
+    }
+
+    var created = try createVolume(runtime, "blocking-volume", pool.id, "blocking");
+    defer created.deinit();
+    data_client.entered.waitUncancelable(std.testing.io);
+
+    try runtime.shutdown();
+    data_client.completed.waitUncancelable(std.testing.io);
+    data_client.mutex.lockUncancelable(std.testing.io);
+    defer data_client.mutex.unlock(std.testing.io);
+    try std.testing.expect(!data_client.active);
+    try std.testing.expect(data_client.canceled);
+    try std.testing.expectEqual(@as(usize, 1), data_client.cancel_count);
+    try std.testing.expect(runtime.reconcile_thread == null);
+    try std.testing.expect(runtime.planned_action == null);
+    try std.testing.expect(runtime.proposal_response == null);
+    try std.testing.expect(runtime.proposal_allocator == null);
 }
 
 fn makeConfig(
@@ -720,6 +964,101 @@ fn registerMember(
         .id = try config_allocator.dupe(u8, member.id),
         .revision = member.registered_revision,
     };
+}
+
+fn registerReconcileNode(
+    runtime: *runtime_mod.Runtime,
+    config: *const config_mod.Config,
+    index: usize,
+    node_id: []const u8,
+    failure_domain: []const u8,
+) !RegisteredNode {
+    const request_id = try std.fmt.allocPrint(runtime_allocator, "reconcile-node-{}", .{index});
+    defer runtime_allocator.free(request_id);
+    const request = try encodeMessage(pb.RegisterNodeRequest{
+        .request_id = request_id,
+        .node_id = node_id,
+        .cluster_id = &config.cluster_id,
+        .control_endpoint = node_control_endpoint,
+        .nvmf_endpoint = node_nvmf_endpoint,
+        .failure_domain = failure_domain,
+        .capability_bits = node_capability_bits,
+        .protocol_version = node_protocol_version,
+    });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.NodeService/RegisterNode", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.RegisterNodeResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    const node = response.node orelse return error.MissingNode;
+    return .{
+        .id = try config_allocator.dupe(u8, node.id),
+        .revision = node.registered_revision,
+    };
+}
+
+fn registerReconcileMember(
+    runtime: *runtime_mod.Runtime,
+    config: *const config_mod.Config,
+    index: usize,
+    member_id: []const u8,
+    pool_id: []const u8,
+    node_id: []const u8,
+) !RegisteredMember {
+    const request_id = try std.fmt.allocPrint(runtime_allocator, "reconcile-member-{}", .{index});
+    defer runtime_allocator.free(request_id);
+    const request = try encodeMessage(pb.RegisterMemberRequest{
+        .request_id = request_id,
+        .cluster_id = &config.cluster_id,
+        .member_id = member_id,
+        .pool_id = pool_id,
+        .node_id = node_id,
+        .local_set_id = &member_local_set_id,
+        .member_slot = @intCast(index),
+        .birth_topology_digest = &member_birth_topology_digest,
+        .metadata_capacity_bytes = 4096,
+        .data_capacity_bytes = 1024 * 1024,
+        .extent_size_bytes = member_extent_size_bytes,
+    });
+    defer runtime_allocator.free(request);
+    var result = try call(runtime, "/zettide.control.v1.MemberService/RegisterMember", request);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    var response = try pb.RegisterMemberResponse.decode(&reader, runtime_allocator);
+    defer response.deinit(runtime_allocator);
+    const member = response.member orelse return error.MissingMember;
+    return .{
+        .id = try config_allocator.dupe(u8, member.id),
+        .revision = member.registered_revision,
+    };
+}
+
+fn waitForVolumeState(
+    runtime: *runtime_mod.Runtime,
+    volume_id: []const u8,
+    expected: pb.VolumeLifecycleState,
+) !OwnedVolume {
+    for (0..500) |_| {
+        if (try getVolume(runtime, volume_id)) |value| {
+            if (value.value.lifecycle_state == expected) return value;
+            var pending = value;
+            pending.deinit();
+        }
+    }
+    return error.TestTimeout;
+}
+
+fn waitForVolumeDeletion(runtime: *runtime_mod.Runtime, volume_id: []const u8) !void {
+    for (0..500) |_| {
+        if (try getVolume(runtime, volume_id)) |value| {
+            var pending = value;
+            pending.deinit();
+        } else return;
+    }
+    return error.TestTimeout;
 }
 
 fn reportHeartbeat(

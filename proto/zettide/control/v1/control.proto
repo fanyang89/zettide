@@ -28,6 +28,8 @@ service HeartbeatService {
 service VolumeService {
   rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
   rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
+  rpc UpdateVolume(UpdateVolumeRequest) returns (UpdateVolumeResponse);
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
   rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
 }
 
@@ -304,6 +306,28 @@ message GetVolumeResponse {
   Volume volume = 1;
 }
 
+message UpdateVolumeRequest {
+  string request_id = 1;
+  string volume_id = 2;
+  string description = 3;
+  uint64 expected_resource_version = 4;
+}
+
+message UpdateVolumeResponse {
+  Volume volume = 1;
+}
+
+message ListVolumesRequest {
+  string pool_id = 1;
+  uint32 page_size = 2;
+  bytes page_token = 3;
+}
+
+message ListVolumesResponse {
+  repeated Volume volumes = 1;
+  bytes next_page_token = 2;
+}
+
 message DeleteVolumeRequest {
   string request_id = 1;
   string volume_id = 2;
@@ -312,8 +336,10 @@ message DeleteVolumeRequest {
 
 message DeleteVolumeResponse {
   string volume_id = 1;
-  int64 deleted_at_unix_ms = 2;
-  uint64 deleted_revision = 3;
+  int64 accepted_at_unix_ms = 2;
+  uint64 accepted_revision = 3;
+  bool deletion_pending = 4;
+  Volume volume = 5;
 }
 
 enum DataReplicaState {
@@ -463,6 +489,10 @@ message CommandEnvelope {
     RegisterMemberCommand register_member = 4;
     CreateVolumeCommand create_volume = 5;
     DeleteVolumeCommand delete_volume = 6;
+    UpdateVolumeCommand update_volume = 7;
+    ReserveVolumeResourcesCommand reserve_volume_resources = 8;
+    ActivateReplicaCommand activate_replica = 9;
+    FinalizeVolumeDeletionCommand finalize_volume_deletion = 10;
   }
 }
 
@@ -516,6 +546,41 @@ message DeleteVolumeCommand {
   string volume_id = 2;
   uint64 expected_resource_version = 3;
   int64 proposed_deleted_at_unix_ms = 4;
+}
+
+message UpdateVolumeCommand {
+  string request_id = 1;
+  string volume_id = 2;
+  string description = 3;
+  uint64 expected_resource_version = 4;
+}
+
+message ReplicaReservation {
+  ReplicaPlacement placement = 1;
+  ReplicaAllocation allocation = 2;
+}
+
+message ReserveVolumeResourcesCommand {
+  string volume_id = 1;
+  uint64 expected_resource_version = 2;
+  repeated ReplicaReservation reservations = 3;
+}
+
+message ActivateReplicaCommand {
+  string volume_id = 1;
+  string placement_id = 2;
+  string allocation_id = 3;
+  uint64 expected_volume_resource_version = 4;
+  uint64 expected_placement_resource_version = 5;
+  uint64 expected_allocation_resource_version = 6;
+}
+
+message FinalizeVolumeDeletionCommand {
+  string volume_id = 1;
+  uint64 expected_resource_version = 2;
+  repeated string placement_ids = 3;
+  repeated string allocation_ids = 4;
+  int64 proposed_deleted_at_unix_ms = 5;
 }
 
 enum ApplyCode {
@@ -592,13 +657,79 @@ enum DeleteVolumeApplyCode {
   DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES = 5;
   DELETE_VOLUME_APPLY_CODE_REQUEST_LIMIT = 6;
   DELETE_VOLUME_APPLY_CODE_TOMBSTONE_LIMIT = 7;
+  DELETE_VOLUME_APPLY_CODE_DELETION_ACCEPTED = 8;
 }
 
 message DeleteVolumeApplyResponse {
   DeleteVolumeApplyCode code = 1;
   string volume_id = 2;
-  int64 deleted_at_unix_ms = 3;
-  uint64 deleted_revision = 4;
+  int64 accepted_at_unix_ms = 3;
+  uint64 accepted_revision = 4;
+  bool deletion_pending = 5;
+  Volume volume = 6;
+}
+
+enum UpdateVolumeApplyCode {
+  UPDATE_VOLUME_APPLY_CODE_UNSPECIFIED = 0;
+  UPDATE_VOLUME_APPLY_CODE_UPDATED = 1;
+  UPDATE_VOLUME_APPLY_CODE_REQUEST_CONFLICT = 2;
+  UPDATE_VOLUME_APPLY_CODE_NOT_FOUND = 3;
+  UPDATE_VOLUME_APPLY_CODE_VERSION_CONFLICT = 4;
+  UPDATE_VOLUME_APPLY_CODE_INVALID_STATE = 5;
+  UPDATE_VOLUME_APPLY_CODE_REQUEST_LIMIT = 6;
+}
+
+message UpdateVolumeApplyResponse {
+  UpdateVolumeApplyCode code = 1;
+  Volume volume = 2;
+}
+
+enum ReserveVolumeResourcesApplyCode {
+  RESERVE_VOLUME_RESOURCES_APPLY_CODE_UNSPECIFIED = 0;
+  RESERVE_VOLUME_RESOURCES_APPLY_CODE_RESERVED = 1;
+  RESERVE_VOLUME_RESOURCES_APPLY_CODE_NOT_FOUND = 2;
+  RESERVE_VOLUME_RESOURCES_APPLY_CODE_VERSION_CONFLICT = 3;
+  RESERVE_VOLUME_RESOURCES_APPLY_CODE_INVALID_STATE = 4;
+  RESERVE_VOLUME_RESOURCES_APPLY_CODE_INVALID_RESERVATION = 5;
+  RESERVE_VOLUME_RESOURCES_APPLY_CODE_RESOURCE_LIMIT = 6;
+}
+
+message ReserveVolumeResourcesApplyResponse {
+  ReserveVolumeResourcesApplyCode code = 1;
+  Volume volume = 2;
+}
+
+enum ActivateReplicaApplyCode {
+  ACTIVATE_REPLICA_APPLY_CODE_UNSPECIFIED = 0;
+  ACTIVATE_REPLICA_APPLY_CODE_ACTIVATED = 1;
+  ACTIVATE_REPLICA_APPLY_CODE_NOT_FOUND = 2;
+  ACTIVATE_REPLICA_APPLY_CODE_VERSION_CONFLICT = 3;
+  ACTIVATE_REPLICA_APPLY_CODE_INVALID_STATE = 4;
+  ACTIVATE_REPLICA_APPLY_CODE_BINDING_MISMATCH = 5;
+}
+
+message ActivateReplicaApplyResponse {
+  ActivateReplicaApplyCode code = 1;
+  Volume volume = 2;
+  ReplicaPlacement placement = 3;
+  ReplicaAllocation allocation = 4;
+}
+
+enum FinalizeVolumeDeletionApplyCode {
+  FINALIZE_VOLUME_DELETION_APPLY_CODE_UNSPECIFIED = 0;
+  FINALIZE_VOLUME_DELETION_APPLY_CODE_FINALIZED = 1;
+  FINALIZE_VOLUME_DELETION_APPLY_CODE_NOT_FOUND = 2;
+  FINALIZE_VOLUME_DELETION_APPLY_CODE_VERSION_CONFLICT = 3;
+  FINALIZE_VOLUME_DELETION_APPLY_CODE_INVALID_STATE = 4;
+  FINALIZE_VOLUME_DELETION_APPLY_CODE_PROOF_MISMATCH = 5;
+  FINALIZE_VOLUME_DELETION_APPLY_CODE_HAS_ATTACHMENTS = 6;
+  FINALIZE_VOLUME_DELETION_APPLY_CODE_TOMBSTONE_LIMIT = 7;
+}
+
+message FinalizeVolumeDeletionApplyResponse {
+  FinalizeVolumeDeletionApplyCode code = 1;
+  string volume_id = 2;
+  uint64 deleted_revision = 3;
 }
 
 message RequestRecord {

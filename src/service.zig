@@ -1145,11 +1145,13 @@ const DeleteVolumePending = struct {
         };
         defer response.deinit(arena.allocator());
         switch (response.code) {
-            .DELETE_VOLUME_APPLY_CODE_DELETED => {
+            .DELETE_VOLUME_APPLY_CODE_DELETED, .DELETE_VOLUME_APPLY_CODE_DELETION_ACCEPTED => {
                 const encoded = encodeMessage(self.owner.allocator, pb.DeleteVolumeResponse{
                     .volume_id = response.volume_id,
-                    .deleted_at_unix_ms = response.deleted_at_unix_ms,
-                    .deleted_revision = response.deleted_revision,
+                    .accepted_at_unix_ms = response.accepted_at_unix_ms,
+                    .accepted_revision = response.accepted_revision,
+                    .deletion_pending = response.deletion_pending,
+                    .volume = response.volume,
                 }) catch {
                     self.completion.invoke(internalError());
                     return;
@@ -3134,7 +3136,9 @@ test "Volume service completes asynchronous create get delete replay and status 
     var delete_response = try pb.DeleteVolumeResponse.decode(&delete_reader, allocator);
     defer delete_response.deinit(allocator);
     try std.testing.expectEqualStrings(volume.id, delete_response.volume_id);
-    try std.testing.expect(delete_response.deleted_revision > volume.resource_version);
+    try std.testing.expect(delete_response.accepted_revision > volume.resource_version);
+    try std.testing.expect(!delete_response.deletion_pending);
+    try std.testing.expect(delete_response.volume == null);
 
     var delete_replay_probe = CompletionProbe{ .allocator = allocator };
     defer delete_replay_probe.deinit();
@@ -3143,8 +3147,9 @@ test "Volume service completes asynchronous create get delete replay and status 
     var delete_replay_reader: std.Io.Reader = .fixed(delete_replay_probe.payload);
     var delete_replay_response = try pb.DeleteVolumeResponse.decode(&delete_replay_reader, allocator);
     defer delete_replay_response.deinit(allocator);
-    try std.testing.expectEqual(delete_response.deleted_revision, delete_replay_response.deleted_revision);
-    try std.testing.expectEqual(delete_response.deleted_at_unix_ms, delete_replay_response.deleted_at_unix_ms);
+    try std.testing.expectEqual(delete_response.accepted_revision, delete_replay_response.accepted_revision);
+    try std.testing.expectEqual(delete_response.accepted_at_unix_ms, delete_replay_response.accepted_at_unix_ms);
+    try std.testing.expectEqual(delete_response.deletion_pending, delete_replay_response.deletion_pending);
 
     try expectDeleteVolumeStatus(allocator, &service, raftor, .{
         .request_id = "volume-delete-missing",
@@ -3231,6 +3236,30 @@ test "Volume service completes asynchronous create get delete replay and status 
         pending.completeApplied(encoded);
         try std.testing.expectEqual(mapping.expected, probe.code);
     }
+
+    var deleting_volume = volume;
+    deleting_volume.lifecycle_state = .VOLUME_LIFECYCLE_STATE_DELETING;
+    deleting_volume.availability_state = .VOLUME_AVAILABILITY_STATE_UNAVAILABLE;
+    deleting_volume.resource_version += 1;
+    const accepted_encoded = try encodeMessage(allocator, pb.DeleteVolumeApplyResponse{
+        .code = .DELETE_VOLUME_APPLY_CODE_DELETION_ACCEPTED,
+        .volume_id = deleting_volume.id,
+        .accepted_at_unix_ms = 1_753_744_000_100,
+        .accepted_revision = deleting_volume.resource_version,
+        .deletion_pending = true,
+        .volume = deleting_volume,
+    });
+    defer allocator.free(accepted_encoded);
+    var accepted_probe = CompletionProbe{ .allocator = allocator };
+    defer accepted_probe.deinit();
+    var accepted_pending = DeleteVolumePending{ .owner = &service, .completion = accepted_probe.completion() };
+    accepted_pending.completeApplied(accepted_encoded);
+    try std.testing.expectEqual(grpc.StatusCode.ok, accepted_probe.code);
+    var accepted_reader: std.Io.Reader = .fixed(accepted_probe.payload);
+    var accepted_response = try pb.DeleteVolumeResponse.decode(&accepted_reader, allocator);
+    defer accepted_response.deinit(allocator);
+    try std.testing.expect(accepted_response.deletion_pending);
+    try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_DELETING, accepted_response.volume.?.lifecycle_state);
 }
 
 test "Volume service lists filtered and unfiltered pages after ReadIndex" {

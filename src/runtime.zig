@@ -4,6 +4,7 @@ const grpc = @import("grpc_lite");
 const raft = @import("raftz");
 const config_mod = @import("config.zig");
 const heartbeat = @import("heartbeat.zig");
+const reconciler_mod = @import("reconciler.zig");
 const service_mod = @import("service.zig");
 const state_machine = @import("state_machine.zig");
 
@@ -20,6 +21,8 @@ pub const Options = struct {
     transport_reconnect_initial_delay_ns: u64 = 20 * std.time.ns_per_ms,
     transport_reconnect_max_delay_ns: u64 = 2 * std.time.ns_per_s,
     transport_graceful_timeout_ns: u64 = 5 * std.time.ns_per_s,
+    data_service_client: ?reconciler_mod.DataServiceClient = null,
+    reconcile_interval_ms: i64 = 1_000,
 };
 
 pub const Runtime = struct {
@@ -35,6 +38,15 @@ pub const Runtime = struct {
     driver_thread: std.Thread,
     driver_exited: std.atomic.Value(bool) = .init(false),
     driver_failed: std.atomic.Value(bool) = .init(false),
+    io: std.Io,
+    reconciler: ?reconciler_mod.Reconciler = null,
+    reconcile_thread: ?std.Thread = null,
+    reconcile_stopping: std.atomic.Value(bool) = .init(false),
+    reconcile_event: std.Io.Event = .unset,
+    planned_action: ?*reconciler_mod.Action = null,
+    reconcile_error: ?anyerror = null,
+    proposal_response: ?[]u8 = null,
+    proposal_allocator: ?std.mem.Allocator = null,
     running: bool = true,
 
     pub fn create(
@@ -43,14 +55,24 @@ pub const Runtime = struct {
         config: *const config_mod.Config,
         options: Options,
     ) !*Runtime {
-        if (options.management_graceful_timeout_ns == 0) return error.InvalidConfig;
+        if (options.management_graceful_timeout_ns == 0 or
+            (options.data_service_client != null and options.reconcile_interval_ms <= 0)) return error.InvalidConfig;
 
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
         self.allocator = allocator;
         self.options = options;
+        self.io = io;
         self.driver_exited = .init(false);
         self.driver_failed = .init(false);
+        self.reconciler = null;
+        self.reconcile_thread = null;
+        self.reconcile_stopping = .init(false);
+        self.reconcile_event = .unset;
+        self.planned_action = null;
+        self.reconcile_error = null;
+        self.proposal_response = null;
+        self.proposal_allocator = null;
         self.running = false;
 
         self.machine = state_machine.PoolStateMachine.init(allocator);
@@ -126,6 +148,16 @@ pub const Runtime = struct {
             self.driver_thread.join();
         }
         try self.management_server.start();
+        if (options.data_service_client) |data_client| {
+            self.reconciler = reconciler_mod.Reconciler.init(
+                allocator,
+                io,
+                &self.machine,
+                data_client,
+                self.commandSubmitter(),
+            );
+            self.reconcile_thread = try std.Thread.spawn(.{}, runReconciler, .{self});
+        }
         self.running = true;
         log.info(@src(), "control plane listening on {s}:{}", .{ config.management_host, config.management_port });
         return self;
@@ -133,11 +165,21 @@ pub const Runtime = struct {
 
     pub fn shutdown(self: *Runtime) !void {
         if (!self.running) return;
+        self.stopReconciler();
         self.pool_rpc.stopAccepting();
         self.management_server.shutdownGracefully(self.options.management_graceful_timeout_ns);
         self.management_server.wait();
         self.raftor.stop();
         self.driver_thread.join();
+        if (self.planned_action) |action| {
+            action.deinit();
+            self.planned_action = null;
+        }
+        if (self.proposal_response) |response| {
+            self.allocator.free(response);
+            self.proposal_response = null;
+        }
+        self.proposal_allocator = null;
         self.running = false;
         try self.pool_rpc.shutdown();
         if (self.driver_failed.load(.acquire)) return error.RaftDriverFailed;
@@ -175,4 +217,102 @@ pub const Runtime = struct {
         };
         self.driver_exited.store(true, .release);
     }
+
+    fn stopReconciler(self: *Runtime) void {
+        if (self.options.data_service_client) |data_client| data_client.cancel();
+        self.reconcile_stopping.store(true, .release);
+        self.reconcile_event.set(self.io);
+        if (self.reconcile_thread) |thread| {
+            thread.join();
+            self.reconcile_thread = null;
+        }
+    }
+
+    fn runReconciler(self: *Runtime) void {
+        while (!self.reconcile_stopping.load(.acquire)) {
+            if (self.status().role == .leader) self.reconcileOnce() catch |err| {
+                if (!self.reconcile_stopping.load(.acquire))
+                    log.warn(@src(), "reconciliation round failed: {s}", .{@errorName(err)});
+            };
+            if (self.reconcile_stopping.load(.acquire)) break;
+            self.reconcile_event.reset();
+            if (self.reconcile_stopping.load(.acquire)) break;
+            self.reconcile_event.waitTimeout(
+                self.io,
+                .{ .duration = .{
+                    .raw = .fromMilliseconds(self.options.reconcile_interval_ms),
+                    .clock = .awake,
+                } },
+            ) catch |err| switch (err) {
+                error.Timeout => {},
+                error.Canceled => return,
+            };
+        }
+    }
+
+    fn reconcileOnce(self: *Runtime) !void {
+        self.planned_action = null;
+        self.reconcile_error = null;
+        self.reconcile_event.reset();
+        if (self.reconcile_stopping.load(.acquire)) return error.ShuttingDown;
+        self.raftor.readIndex("reconcile", .{ .ctx = self, .function = planCallback }) catch |err| return err;
+        self.reconcile_event.waitUncancelable(self.io);
+        if (self.reconcile_stopping.load(.acquire)) return error.ShuttingDown;
+        if (self.reconcile_error) |err| return err;
+        const action = self.planned_action orelse return;
+        self.planned_action = null;
+        defer action.deinit();
+        try action.execute(self.options.data_service_client.?, self.commandSubmitter());
+    }
+
+    fn planCallback(context: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.reconcile_stopping.load(.acquire)) {
+            self.reconcile_error = error.ShuttingDown;
+        } else switch (result) {
+            .ok => self.planned_action = self.reconciler.?.planOnce() catch |err| {
+                self.reconcile_error = err;
+                return self.reconcile_event.set(self.io);
+            },
+            .err => |err| self.reconcile_error = err,
+        }
+        self.reconcile_event.set(self.io);
+    }
+
+    fn commandSubmitter(self: *Runtime) reconciler_mod.CommandSubmitter {
+        return .{ .context = self, .vtable = &command_submitter_vtable };
+    }
+
+    fn submitCommand(context: *anyopaque, allocator: std.mem.Allocator, command: []const u8) ![]u8 {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        self.proposal_response = null;
+        self.proposal_allocator = allocator;
+        self.reconcile_error = null;
+        self.reconcile_event.reset();
+        if (self.reconcile_stopping.load(.acquire)) return error.ShuttingDown;
+        self.raftor.propose(command, .{ .ctx = self, .function = proposalCallback }) catch |err| return err;
+        self.reconcile_event.waitUncancelable(self.io);
+        if (self.reconcile_stopping.load(.acquire)) return error.ShuttingDown;
+        if (self.reconcile_error) |err| return err;
+        const response = self.proposal_response orelse return error.MissingApplyResponse;
+        self.proposal_response = null;
+        self.proposal_allocator = null;
+        return response;
+    }
+
+    fn proposalCallback(context: *anyopaque, result: raft.ProposalResult) void {
+        const self: *Runtime = @ptrCast(@alignCast(context));
+        if (self.reconcile_stopping.load(.acquire)) {
+            self.reconcile_error = error.ShuttingDown;
+        } else switch (result) {
+            .ok => |response| self.proposal_response = self.proposal_allocator.?.dupe(u8, response) catch |err| {
+                self.reconcile_error = err;
+                return self.reconcile_event.set(self.io);
+            },
+            .err => |err| self.reconcile_error = err,
+        }
+        self.reconcile_event.set(self.io);
+    }
+
+    const command_submitter_vtable: reconciler_mod.CommandSubmitter.VTable = .{ .submit = submitCommand };
 };

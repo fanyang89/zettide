@@ -17,6 +17,8 @@ pub const PoolService = service.PoolService;
 pub const PoolRpc = service.PoolRpc;
 pub const data_service = @import("data_service.zig");
 pub const DataService = data_service.Service;
+pub const reconciler = @import("reconciler.zig");
+pub const Reconciler = reconciler.Reconciler;
 
 test "protobuf model round trips" {
     var pool: pb.Pool = .{
@@ -89,6 +91,7 @@ test {
     _ = state_machine;
     _ = service;
     _ = data_service;
+    _ = reconciler;
     _ = @import("integration_test.zig");
     _ = @import("runtime_integration_test.zig");
 }
