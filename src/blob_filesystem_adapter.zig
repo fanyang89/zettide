@@ -477,12 +477,11 @@ fn spaceInfo(raw: *anyopaque) !backend.SpaceInfo {
     defer value.native.transaction_mutex.unlock(value.io);
     const total = value.native.blobs.header.unit_count;
     const committed = value.native.blobs.committedUnits();
-    const staged = value.native.blobs.stagedUnits();
     return .{
         .block_size = blob_format.allocation_unit,
         .total_blocks = total,
         .free_blocks = total - committed,
-        .available_blocks = total - staged,
+        .available_blocks = value.native.availableUnits(),
         .name_max = filesystem_format.max_name_bytes,
     };
 }
@@ -530,9 +529,8 @@ fn fallocateFile(raw: *anyopaque, offset: u64, length: u64) !void {
     const context = fileContext(raw);
     if (context.access != .read_write) return error.AccessDenied;
     _ = try validateFileIdentity(context);
-    if (length == 0 or offset > std.math.maxInt(u64) - length) return error.InvalidArgument;
-    if (!context.native.writable) return error.ReadOnlyVolume;
-    return error.OperationNotSupported;
+    context.native.fallocate(context.io, context.identity.inode, offset, length) catch |err|
+        return frontendError(err);
 }
 
 fn syncFile(raw: *anyopaque) !void {
@@ -683,7 +681,10 @@ test "blob filesystem adapter file identity and namespace round trip" {
     try std.testing.expectEqualStrings("hello!-t", output[0..8]);
     _ = try append_handle.patchMetadata(.{ .uid = 77, .update_ctime = false });
     try std.testing.expectEqual(@as(u32, 77), (try append_handle.stat()).metadata.uid);
-    try std.testing.expectError(error.OperationNotSupported, append_handle.fallocate(0, 4096));
+    try append_handle.fallocate(0, 4096);
+    try std.testing.expectEqual(@as(u64, 4096), (try append_handle.stat()).size);
+    try std.testing.expectError(error.InvalidArgument, append_handle.fallocate(0, 0));
+    try std.testing.expectError(error.FileTooLarge, append_handle.fallocate(std.math.maxInt(u64), 1));
     try append_handle.close();
     append_open = false;
     try std.testing.expectEqual(@as(u64, 0), (try fs.statFileId(id)).nlink);

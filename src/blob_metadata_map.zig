@@ -212,6 +212,13 @@ fn validateLeafEntry(entry: LeafEntry) !void {
             _ = filesystem_format.decodeOrphan(@ptrCast(entry.value.ptr)) catch
                 return error.InvalidBlobMetadataEntry;
         },
+        .reservation => |reservation| {
+            if (entry.value.len != filesystem_format.reservation_encoded_size)
+                return error.InvalidBlobMetadataEntry;
+            const end_block = filesystem_format.decodeReservation(@ptrCast(entry.value.ptr)) catch
+                return error.InvalidBlobMetadataEntry;
+            if (reservation.start_block >= end_block) return error.InvalidBlobMetadataEntry;
+        },
     }
 }
 

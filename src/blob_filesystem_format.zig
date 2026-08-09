@@ -9,6 +9,7 @@ const name_profile = @import("name_profile.zig");
 pub const root_encoded_size: usize = 256;
 pub const inode_encoded_size: usize = 192;
 pub const orphan_encoded_size: usize = 16;
+pub const reservation_encoded_size: usize = 8;
 pub const max_name_bytes: usize = name_profile.max_utf8_bytes;
 pub const max_lookup_name_bytes: usize = 4 * max_name_bytes;
 pub const max_symlink_target_bytes: usize = 4095;
@@ -26,6 +27,7 @@ pub const KeyKind = enum(u8) {
     inode = 1,
     dentry = 2,
     orphan = 3,
+    reservation = 4,
 };
 
 pub const TreeRef = struct {
@@ -41,10 +43,12 @@ pub const Root = struct {
     orphan_count: u64,
     name_profile: name_profile.Profile,
     metadata_root: TreeRef,
+    reserved_bytes: u64 = 0,
 
     pub fn validate(self: Root) !void {
         if (self.generation == 0 or self.next_inode <= root_inode or
-            self.record_count == 0 or self.orphan_count > self.record_count)
+            self.record_count == 0 or self.orphan_count > self.record_count or
+            self.reserved_bytes % blob_file.block_size != 0)
             return error.InvalidBlobFilesystemRoot;
     }
 };
@@ -56,9 +60,11 @@ pub const InodeRecord = struct {
     allocated_bytes: u64,
     parent_inode: u64,
     data: ?blob_file.Snapshot,
+    reserved_bytes: u64 = 0,
 
     pub fn validate(self: InodeRecord) !void {
-        if (self.generation == 0 or self.allocated_bytes % blob_file.block_size != 0)
+        if (self.generation == 0 or self.allocated_bytes % blob_file.block_size != 0 or
+            self.reserved_bytes % blob_file.block_size != 0)
             return error.InvalidBlobFilesystemInode;
         const expected_type: u32 = switch (self.metadata.kind) {
             .file => 0o100000,
@@ -71,13 +77,17 @@ pub const InodeRecord = struct {
         switch (self.metadata.kind) {
             .directory => {
                 if (self.parent_inode == 0 or self.data != null or self.allocated_bytes != 0 or
+                    self.reserved_bytes != 0 or
                     (self.nlink != 0 and self.nlink < 2))
                     return error.InvalidBlobFilesystemInode;
             },
-            .fifo => if (self.parent_inode != 0 or self.data != null or self.allocated_bytes != 0)
+            .fifo => if (self.parent_inode != 0 or self.data != null or self.allocated_bytes != 0 or
+                self.reserved_bytes != 0)
                 return error.InvalidBlobFilesystemInode,
             .file, .symlink => {
                 if (self.parent_inode != 0 or self.data == null)
+                    return error.InvalidBlobFilesystemInode;
+                if (self.metadata.kind == .symlink and self.reserved_bytes != 0)
                     return error.InvalidBlobFilesystemInode;
                 const snapshot = self.data.?;
                 if (snapshot.generation == 0 or snapshot.logical_size > std.math.maxInt(i64))
@@ -122,6 +132,10 @@ pub const DecodedKey = union(KeyKind) {
         lookup_name: []const u8,
     },
     orphan: u64,
+    reservation: struct {
+        inode: u64,
+        start_block: u64,
+    },
 };
 
 pub const OrphanRecord = struct {
@@ -145,6 +159,7 @@ pub fn encodeRoot(root: Root) ![root_encoded_size]u8 {
     putInt(u64, &bytes, 64, root.metadata_root.page, .little);
     bytes[72] = root.metadata_root.level;
     @memcpy(bytes[80..112], &root.metadata_root.digest);
+    putInt(u64, &bytes, 112, root.reserved_bytes, .little);
     putInt(u32, &bytes, root_checksum_offset, google_crc32c.value(bytes[0..root_checksum_offset]), .little);
     return bytes;
 }
@@ -160,7 +175,7 @@ pub fn decodeRoot(bytes: *const [root_encoded_size]u8) !Root {
         !std.mem.allEqual(u8, bytes[12..16], 0) or
         !std.mem.allEqual(u8, bytes[60..64], 0) or
         !std.mem.allEqual(u8, bytes[73..80], 0) or
-        !std.mem.allEqual(u8, bytes[112..root_checksum_offset], 0))
+        !std.mem.allEqual(u8, bytes[120..root_checksum_offset], 0))
         return error.InvalidBlobFilesystemRoot;
     const root: Root = .{
         .generation = getInt(u64, bytes, 16, .little),
@@ -176,6 +191,7 @@ pub fn decodeRoot(bytes: *const [root_encoded_size]u8) !Root {
             .level = bytes[72],
             .digest = bytes[80..112].*,
         },
+        .reserved_bytes = getInt(u64, bytes, 112, .little),
     };
     try root.validate();
     return root;
@@ -201,13 +217,15 @@ pub fn encodeInode(record: InodeRecord) ![inode_encoded_size]u8 {
             bytes[168] = root.level;
         }
     }
+    putInt(u64, &bytes, 176, record.reserved_bytes, .little);
     putInt(u32, &bytes, 188, google_crc32c.value(bytes[0..188]), .little);
     return bytes;
 }
 
 pub fn decodeInode(bytes: *const [inode_encoded_size]u8) !InodeRecord {
     if (bytes[169] & ~inode_supported_flags != 0 or
-        !std.mem.allEqual(u8, bytes[170..188], 0) or
+        !std.mem.allEqual(u8, bytes[170..176], 0) or
+        !std.mem.allEqual(u8, bytes[184..188], 0) or
         getInt(u32, bytes, 188, .little) != google_crc32c.value(bytes[0..188]))
         return error.InvalidBlobFilesystemInode;
     const value_metadata = metadata.Metadata.decode(bytes[0..metadata.encoded_size]) catch
@@ -232,6 +250,7 @@ pub fn decodeInode(bytes: *const [inode_encoded_size]u8) !InodeRecord {
                 .digest = bytes[136..168].*,
             } else null,
         } else null,
+        .reserved_bytes = getInt(u64, bytes, 176, .little),
     };
     if (!has_data and !std.mem.allEqual(u8, bytes[96..170], 0))
         return error.InvalidBlobFilesystemInode;
@@ -248,6 +267,19 @@ pub fn inodeKey(inode: u64) ![9]u8 {
 
 pub fn orphanKey(inode: u64) ![9]u8 {
     return fixedKey(.orphan, inode);
+}
+
+pub fn reservationKey(inode: u64, start_block: u64) ![17]u8 {
+    if (inode == 0) return error.InvalidBlobFilesystemKey;
+    var key: [17]u8 = undefined;
+    key[0] = @intFromEnum(KeyKind.reservation);
+    std.mem.writeInt(u64, key[1..9], inode, .big);
+    std.mem.writeInt(u64, key[9..17], start_block, .big);
+    return key;
+}
+
+pub fn reservationPrefix(inode: u64) ![9]u8 {
+    return fixedKey(.reservation, inode);
 }
 
 pub fn dentryKey(output: *[max_key_size]u8, parent_inode: u64, lookup_name: []const u8) ![]const u8 {
@@ -271,11 +303,28 @@ pub fn decodeKey(key: []const u8) !DecodedKey {
     return switch (kind) {
         .inode => if (key.len == 9) .{ .inode = inode } else error.InvalidBlobFilesystemKey,
         .orphan => if (key.len == 9) .{ .orphan = inode } else error.InvalidBlobFilesystemKey,
+        .reservation => if (key.len == 17) .{ .reservation = .{
+            .inode = inode,
+            .start_block = std.mem.readInt(u64, key[9..17], .big),
+        } } else error.InvalidBlobFilesystemKey,
         .dentry => dentry: {
             validateLookupName(key[9..]) catch return error.InvalidBlobFilesystemKey;
             break :dentry .{ .dentry = .{ .parent_inode = inode, .lookup_name = key[9..] } };
         },
     };
+}
+
+pub fn encodeReservation(end_block: u64) ![reservation_encoded_size]u8 {
+    if (end_block == 0) return error.InvalidBlobFilesystemReservation;
+    var bytes: [reservation_encoded_size]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, end_block, .little);
+    return bytes;
+}
+
+pub fn decodeReservation(bytes: *const [reservation_encoded_size]u8) !u64 {
+    const end_block = std.mem.readInt(u64, bytes, .little);
+    if (end_block == 0) return error.InvalidBlobFilesystemReservation;
+    return end_block;
 }
 
 pub fn encodeDentry(output: *[max_dentry_size]u8, record: DentryRecord) ![]const u8 {
@@ -453,6 +502,40 @@ test "blob filesystem inode records preserve sparse snapshots" {
     var invalid = file;
     invalid.data.?.root.?.last_key = 3;
     try std.testing.expectError(error.InvalidBlobFilesystemInode, encodeInode(invalid));
+}
+
+test "blob filesystem reservation fields and sidecar keys round trip" {
+    var root: Root = .{
+        .generation = 1,
+        .next_inode = 2,
+        .record_count = 1,
+        .orphan_count = 0,
+        .name_profile = .portable_v1,
+        .metadata_root = .{ .page = 1, .level = 0, .digest = @splat(1) },
+        .reserved_bytes = 3 * blob_file.block_size,
+    };
+    try std.testing.expectEqualDeep(root, try decodeRoot(&try encodeRoot(root)));
+    root.reserved_bytes = 1;
+    try std.testing.expectError(error.InvalidBlobFilesystemRoot, encodeRoot(root));
+
+    const key = try reservationKey(9, std.math.maxInt(u64) - 1);
+    const decoded = (try decodeKey(&key)).reservation;
+    try std.testing.expectEqual(@as(u64, 9), decoded.inode);
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, decoded.start_block);
+    const value = try encodeReservation(std.math.maxInt(u64));
+    try std.testing.expectEqual(std.math.maxInt(u64), try decodeReservation(&value));
+
+    var legacy_root = try encodeRoot(.{
+        .generation = 1,
+        .next_inode = 2,
+        .record_count = 1,
+        .orphan_count = 0,
+        .name_profile = .legacy_raw,
+        .metadata_root = .{ .page = 1, .level = 0, .digest = @splat(0) },
+    });
+    @memset(legacy_root[112..120], 0);
+    putInt(u32, &legacy_root, root_checksum_offset, google_crc32c.value(legacy_root[0..root_checksum_offset]), .little);
+    try std.testing.expectEqual(@as(u64, 0), (try decodeRoot(&legacy_root)).reserved_bytes);
 }
 
 test "blob filesystem keys sort and dentry records preserve spelling" {

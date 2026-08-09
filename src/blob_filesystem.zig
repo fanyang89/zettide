@@ -31,6 +31,7 @@ pub const Filesystem = struct {
     open_references: std.AutoHashMap(u64, u64),
     inode_pins: std.AutoHashMap(u64, u64),
     dirty_files: std.AutoHashMap(u64, DirtyFile),
+    reserved_bytes: u64,
     transaction_mutex: Io.RwLock = .init,
     inode_cache_mutex: Io.RwLock = .init,
     inode_cache: ?[]InodeCacheEntry = null,
@@ -76,6 +77,12 @@ pub const Filesystem = struct {
     const DirtyFile = struct {
         state: blob_file.State,
         record: InodeRecord,
+        reservations: []Reservation,
+    };
+
+    pub const Reservation = struct {
+        start: u64,
+        end: u64,
     };
 
     pub const FormatOptions = struct {
@@ -99,6 +106,7 @@ pub const Filesystem = struct {
             .open_references = std.AutoHashMap(u64, u64).init(allocator),
             .inode_pins = std.AutoHashMap(u64, u64).init(allocator),
             .dirty_files = std.AutoHashMap(u64, DirtyFile).init(allocator),
+            .reserved_bytes = root.reserved_bytes,
         };
     }
 
@@ -221,6 +229,12 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         return self.syncUnlocked(io);
+    }
+
+    pub fn availableUnits(self: *const Filesystem) u64 {
+        const free = self.blobs.header.unit_count - self.blobs.stagedUnits();
+        const protected = reservationCapacityUnits(self.reserved_bytes) catch return 0;
+        return free -| protected;
     }
 
     fn syncUnlocked(self: *Filesystem, io: Io) !void {
@@ -437,12 +451,18 @@ pub const Filesystem = struct {
         defer mutations.deinit();
         try mutations.removeOrphan(inode);
         try mutations.removeInode(inode);
+        const reservations = try self.loadReservations(io, inode);
+        defer self.allocator.free(reservations);
+        try mutations.replaceReservations(inode, reservations, &.{});
         var next_root = self.root;
         next_root.generation = try nextGeneration(self.root.generation);
-        next_root.record_count = std.math.sub(u64, next_root.record_count, 2) catch
+        next_root.record_count = std.math.sub(u64, next_root.record_count, 2 + reservations.len) catch
             return error.InvalidBlobFilesystemGraph;
         next_root.orphan_count = std.math.sub(u64, next_root.orphan_count, 1) catch
             return error.InvalidBlobFilesystemGraph;
+        next_root.reserved_bytes = std.math.sub(u64, next_root.reserved_bytes, record.reserved_bytes) catch
+            return error.InvalidBlobFilesystemGraph;
+        self.reserved_bytes = next_root.reserved_bytes;
         try self.publish(io, next_root, &mutations, null);
     }
 
@@ -599,6 +619,27 @@ pub const Filesystem = struct {
         was_cached: bool,
     ) !usize {
         try self.requireMutable();
+        var keep_dirty_file = was_cached;
+        errdefer if (!keep_dirty_file) {
+            dirty_file.state.deinit();
+            self.allocator.free(dirty_file.reservations);
+            std.debug.assert(self.dirty_files.remove(inode));
+        };
+        const end = std.math.add(u64, offset, data.len) catch return error.FileTooLarge;
+        if (end > std.math.maxInt(i64)) return error.FileTooLarge;
+        const first_block = offset / blob_file.block_size;
+        const end_block = try std.math.divCeil(u64, end, blob_file.block_size);
+        const touched_blocks = end_block - first_block;
+        var newly_reserved: u64 = 0;
+        var block = first_block;
+        while (block < end_block) : (block += 1) {
+            if (!reservationContains(dirty_file.reservations, block)) continue;
+            if (!try dirty_file.state.blockAllocated(io, block)) newly_reserved += 1;
+        }
+        const released_bytes = try std.math.mul(u64, newly_reserved, blob_file.block_size);
+        const remaining_reserved = std.math.sub(u64, self.reserved_bytes, released_bytes) catch
+            return error.InvalidBlobFilesystemGraph;
+        try self.ensureCapacity(touched_blocks, remaining_reserved);
         const checkpoint = self.blobs.stagedUnits();
         const amount = dirty_file.state.write(io, data, offset) catch |err| {
             if (dirty_file.state.frozen or self.blobs.frozen) {
@@ -606,16 +647,20 @@ pub const Filesystem = struct {
             } else {
                 self.rollback(io, checkpoint);
             }
-            if (!was_cached) {
-                dirty_file.state.deinit();
-                std.debug.assert(self.dirty_files.remove(inode));
-            }
             return err;
         };
+        keep_dirty_file = true;
         std.debug.assert(amount != 0);
         const now = timestamp(io);
         dirty_file.record.metadata.mtime_ns = now;
         dirty_file.record.metadata.ctime_ns = now;
+        dirty_file.record.reserved_bytes = std.math.sub(
+            u64,
+            dirty_file.record.reserved_bytes,
+            released_bytes,
+        ) catch return error.InvalidBlobFilesystemGraph;
+        self.reserved_bytes = remaining_reserved;
+        self.root.reserved_bytes = remaining_reserved;
         self.dirty = true;
         return amount;
     }
@@ -635,6 +680,7 @@ pub const Filesystem = struct {
             }
             if (!was_cached) {
                 dirty_file.state.deinit();
+                self.allocator.free(dirty_file.reservations);
                 std.debug.assert(self.dirty_files.remove(inode));
             }
             return err;
@@ -642,7 +688,85 @@ pub const Filesystem = struct {
         const now = timestamp(io);
         dirty_file.record.metadata.mtime_ns = now;
         dirty_file.record.metadata.ctime_ns = now;
+        if (size < dirty_file.record.data.?.logical_size and dirty_file.reservations.len != 0) {
+            const old_reservations = dirty_file.reservations;
+            const clipped = try clipReservations(self.allocator, old_reservations, size);
+            var clipped_owned = true;
+            errdefer if (clipped_owned) self.allocator.free(clipped);
+            const outstanding = try reservationOutstandingBytes(&dirty_file.state, io, clipped);
+            const other_reserved = std.math.sub(u64, self.reserved_bytes, dirty_file.record.reserved_bytes) catch
+                return error.InvalidBlobFilesystemGraph;
+            const total_reserved = try std.math.add(u64, other_reserved, outstanding);
+            var mutations: MutationAccumulator = .init(self.allocator);
+            defer mutations.deinit();
+            try mutations.replaceReservations(inode, old_reservations, clipped);
+            var next_root = self.root;
+            next_root.generation = try nextGeneration(self.root.generation);
+            next_root.record_count = try adjustedRecordCount(next_root.record_count, old_reservations.len, clipped.len);
+            next_root.reserved_bytes = total_reserved;
+            dirty_file.reservations = clipped;
+            clipped_owned = false;
+            dirty_file.record.reserved_bytes = outstanding;
+            self.reserved_bytes = total_reserved;
+            self.root.reserved_bytes = total_reserved;
+            self.allocator.free(old_reservations);
+            try self.publish(io, next_root, &mutations, checkpoint);
+            return;
+        }
         self.dirty = true;
+    }
+
+    pub fn fallocate(self: *Filesystem, io: Io, inode: u64, offset: u64, length: u64) !void {
+        if (length == 0) return error.InvalidArgument;
+        const end = std.math.add(u64, offset, length) catch return error.FileTooLarge;
+        if (end > std.math.maxInt(i64)) return error.FileTooLarge;
+        try self.transaction_mutex.lock(io);
+        defer self.transaction_mutex.unlock(io);
+        try self.requireMutable();
+
+        const was_cached = self.dirty_files.contains(inode);
+        const dirty_file = try self.dirtyFile(io, inode, null);
+        const old_reservations = dirty_file.reservations;
+        const start_block = offset / blob_file.block_size;
+        const end_block = try std.math.divCeil(u64, end, blob_file.block_size);
+        const merged = try mergeReservation(self.allocator, old_reservations, .{ .start = start_block, .end = end_block });
+        var merged_owned = true;
+        errdefer if (merged_owned) self.allocator.free(merged);
+        const outstanding = try reservationOutstandingBytes(&dirty_file.state, io, merged);
+        const next_reserved = std.math.sub(u64, self.reserved_bytes, dirty_file.record.reserved_bytes) catch
+            return error.InvalidBlobFilesystemGraph;
+        const total_reserved = try std.math.add(u64, next_reserved, outstanding);
+        const changed_intervals = try std.math.add(u64, old_reservations.len, merged.len);
+        const metadata_depth = @as(u64, self.root.metadata_root.level) + 1;
+        const metadata_units = std.math.mul(u64, changed_intervals + 2, metadata_depth) catch
+            return error.BlobStoreFull;
+        try self.ensureCapacity(metadata_units + 1, total_reserved);
+        var mutations: MutationAccumulator = .init(self.allocator);
+        defer mutations.deinit();
+        try mutations.replaceReservations(inode, old_reservations, merged);
+        var next_root = self.root;
+        next_root.generation = try nextGeneration(self.root.generation);
+        next_root.record_count = try adjustedRecordCount(next_root.record_count, old_reservations.len, merged.len);
+        next_root.reserved_bytes = total_reserved;
+        const checkpoint = self.blobs.stagedUnits();
+        dirty_file.state.truncate(io, @max(dirty_file.state.size(), end)) catch |err| {
+            if (!was_cached) {
+                dirty_file.state.deinit();
+                self.allocator.free(dirty_file.reservations);
+                std.debug.assert(self.dirty_files.remove(inode));
+            }
+            return err;
+        };
+        dirty_file.reservations = merged;
+        merged_owned = false;
+        dirty_file.record.reserved_bytes = outstanding;
+        const now = timestamp(io);
+        dirty_file.record.metadata.mtime_ns = now;
+        dirty_file.record.metadata.ctime_ns = now;
+        self.reserved_bytes = total_reserved;
+        self.root.reserved_bytes = total_reserved;
+        self.allocator.free(old_reservations);
+        try self.publish(io, next_root, &mutations, checkpoint);
     }
 
     pub fn readSpecial(self: *Filesystem, io: Io, inode: u64, output: []u8, offset: u64) !usize {
@@ -919,13 +1043,19 @@ pub const Filesystem = struct {
 
         var removed_records: u64 = 0;
         var added_orphans: u64 = 0;
+        var released_reserved_bytes: u64 = 0;
         if (victim_dentry) |entry| {
             removed_records = 1;
             var record = victim.?;
             record.metadata.ctime_ns = now;
-            const retired = try self.retireUnlinkedInode(entry.inode, record, &mutations);
+            const retired = try self.retireUnlinkedInode(io, entry.inode, record, &mutations);
             removed_records += retired.removed_records;
             added_orphans += retired.added_orphans;
+            released_reserved_bytes = try std.math.add(
+                u64,
+                released_reserved_bytes,
+                retired.released_reserved_bytes,
+            );
         }
         var next_root = self.root;
         next_root.generation = try nextGeneration(self.root.generation);
@@ -935,6 +1065,9 @@ pub const Filesystem = struct {
             return error.FilesystemRecordCountOverflow;
         next_root.orphan_count = std.math.add(u64, next_root.orphan_count, added_orphans) catch
             return error.FilesystemRecordCountOverflow;
+        next_root.reserved_bytes = std.math.sub(u64, next_root.reserved_bytes, released_reserved_bytes) catch
+            return error.InvalidBlobFilesystemGraph;
+        self.reserved_bytes = next_root.reserved_bytes;
         try self.publish(io, next_root, &mutations, null);
         return .renamed;
     }
@@ -1033,7 +1166,7 @@ pub const Filesystem = struct {
         try mutations.removeDentry(parent_inode, prepared.key);
         try mutations.putInode(parent_inode, parent);
         record.metadata.ctime_ns = now;
-        const retired = try self.retireUnlinkedInode(dentry.inode, record, &mutations);
+        const retired = try self.retireUnlinkedInode(io, dentry.inode, record, &mutations);
         const removed_records = 1 + retired.removed_records;
         var next_root = self.root;
         next_root.generation = try nextGeneration(self.root.generation);
@@ -1043,16 +1176,21 @@ pub const Filesystem = struct {
             return error.FilesystemRecordCountOverflow;
         next_root.orphan_count = std.math.add(u64, next_root.orphan_count, retired.added_orphans) catch
             return error.FilesystemRecordCountOverflow;
+        next_root.reserved_bytes = std.math.sub(u64, next_root.reserved_bytes, retired.released_reserved_bytes) catch
+            return error.InvalidBlobFilesystemGraph;
+        self.reserved_bytes = next_root.reserved_bytes;
         try self.publish(io, next_root, &mutations, null);
     }
 
     const RetireResult = struct {
         removed_records: u64,
         added_orphans: u64,
+        released_reserved_bytes: u64,
     };
 
     fn retireUnlinkedInode(
         self: *Filesystem,
+        io: Io,
         inode: u64,
         record_value: filesystem_format.InodeRecord,
         mutations: *MutationAccumulator,
@@ -1067,7 +1205,7 @@ pub const Filesystem = struct {
         }
         if (record.nlink != 0) {
             try mutations.putInode(inode, record);
-            return .{ .removed_records = 0, .added_orphans = 0 };
+            return .{ .removed_records = 0, .added_orphans = 0, .released_reserved_bytes = 0 };
         }
         if (self.inodeIsRetained(inode)) {
             try mutations.putInode(inode, record);
@@ -1075,10 +1213,17 @@ pub const Filesystem = struct {
                 .generation = record.generation,
                 .kind = record.metadata.kind,
             });
-            return .{ .removed_records = 0, .added_orphans = 1 };
+            return .{ .removed_records = 0, .added_orphans = 1, .released_reserved_bytes = 0 };
         }
         try mutations.removeInode(inode);
-        return .{ .removed_records = 1, .added_orphans = 0 };
+        const reservations = try self.loadReservations(io, inode);
+        defer self.allocator.free(reservations);
+        try mutations.replaceReservations(inode, reservations, &.{});
+        return .{
+            .removed_records = 1 + reservations.len,
+            .added_orphans = 0,
+            .released_reserved_bytes = record.reserved_bytes,
+        };
     }
 
     fn loadInode(self: *Filesystem, io: Io, inode: u64) !?filesystem_format.InodeRecord {
@@ -1163,6 +1308,8 @@ pub const Filesystem = struct {
             return dirty_file;
         }
         const record = try self.requireRegularFileAtGeneration(io, inode, generation);
+        const reservations = try self.loadReservations(io, inode);
+        errdefer self.allocator.free(reservations);
         var state = try blob_file.State.openKnownAllocatedAt(
             self.allocator,
             &self.blobs,
@@ -1173,7 +1320,7 @@ pub const Filesystem = struct {
         errdefer state.deinit();
         const result = try self.dirty_files.getOrPut(inode);
         std.debug.assert(!result.found_existing);
-        result.value_ptr.* = .{ .state = state, .record = record };
+        result.value_ptr.* = .{ .state = state, .record = record, .reservations = reservations };
         return result.value_ptr;
     }
 
@@ -1186,7 +1333,10 @@ pub const Filesystem = struct {
 
     fn clearDirtyFiles(self: *Filesystem) void {
         var iterator = self.dirty_files.valueIterator();
-        while (iterator.next()) |dirty_file| dirty_file.state.deinit();
+        while (iterator.next()) |dirty_file| {
+            dirty_file.state.deinit();
+            self.allocator.free(dirty_file.reservations);
+        }
         self.dirty_files.clearRetainingCapacity();
     }
 
@@ -1211,6 +1361,36 @@ pub const Filesystem = struct {
             return error.InvalidBlobFilesystemGraph;
         return filesystem_format.decodeOrphan(@ptrCast(value.ptr)) catch
             return error.InvalidBlobFilesystemGraph;
+    }
+
+    fn loadReservations(self: *Filesystem, io: Io, inode: u64) ![]Reservation {
+        const prefix = try filesystem_format.reservationPrefix(inode);
+        var maps = metadata_map_store.MapStore.init(self.allocator, &self.blobs);
+        const entries = try maps.loadPrefixAllocAt(
+            io,
+            self.root.metadata_root,
+            self.root.generation,
+            self.visibleUnits(),
+            &prefix,
+        );
+        defer metadata_map_store.deinitEntries(self.allocator, entries);
+        const reservations = try self.allocator.alloc(Reservation, entries.len);
+        errdefer self.allocator.free(reservations);
+        for (entries, reservations, 0..) |entry, *reservation, index| {
+            const key = switch (try filesystem_format.decodeKey(entry.key)) {
+                .reservation => |value| value,
+                else => return error.InvalidBlobFilesystemGraph,
+            };
+            if (key.inode != inode or entry.value.len != filesystem_format.reservation_encoded_size)
+                return error.InvalidBlobFilesystemGraph;
+            const end_block = filesystem_format.decodeReservation(@ptrCast(entry.value.ptr)) catch
+                return error.InvalidBlobFilesystemGraph;
+            if (key.start_block >= end_block or
+                (index != 0 and reservations[index - 1].end >= key.start_block))
+                return error.InvalidBlobFilesystemGraph;
+            reservation.* = .{ .start = key.start_block, .end = end_block };
+        }
+        return reservations;
     }
 
     fn resolvePathUnlocked(self: *Filesystem, io: Io, path: []const u8) !u64 {
@@ -1411,6 +1591,9 @@ pub const Filesystem = struct {
         );
         const root_bytes = try filesystem_format.encodeRoot(next_root);
         const authority_ref = try self.blobs.put(io, &root_bytes);
+        const protected_units = try reservationCapacityUnits(next_root.reserved_bytes);
+        if (protected_units > self.blobs.header.unit_count - self.blobs.stagedUnits())
+            return error.BlobStoreFull;
         prepublication = false;
         self.blobs.commitAuthority(io, authority_ref) catch |err| {
             self.frozen = true;
@@ -1441,23 +1624,39 @@ pub const Filesystem = struct {
         var mutations: MutationAccumulator = .init(self.allocator);
         defer mutations.deinit();
         var orphan_count: u64 = 0;
+        var reservation_count: u64 = 0;
+        var released_reserved_bytes: u64 = 0;
         for (entries) |entry| switch (try filesystem_format.decodeKey(entry.key)) {
             .orphan => |inode| {
+                const record = (try self.loadInode(io, inode)) orelse
+                    return error.InvalidBlobFilesystemGraph;
+                const reservations = try self.loadReservations(io, inode);
+                defer self.allocator.free(reservations);
                 try mutations.removeOrphan(inode);
                 try mutations.removeInode(inode);
+                try mutations.replaceReservations(inode, reservations, &.{});
                 orphan_count = std.math.add(u64, orphan_count, 1) catch
+                    return error.InvalidBlobFilesystemGraph;
+                reservation_count = std.math.add(u64, reservation_count, reservations.len) catch
+                    return error.InvalidBlobFilesystemGraph;
+                released_reserved_bytes = std.math.add(u64, released_reserved_bytes, record.reserved_bytes) catch
                     return error.InvalidBlobFilesystemGraph;
             },
             else => {},
         };
         if (orphan_count != self.root.orphan_count) return error.InvalidBlobFilesystemGraph;
-        const removed_records = std.math.mul(u64, orphan_count, 2) catch
+        const orphan_records = std.math.mul(u64, orphan_count, 2) catch
+            return error.InvalidBlobFilesystemGraph;
+        const removed_records = std.math.add(u64, orphan_records, reservation_count) catch
             return error.InvalidBlobFilesystemGraph;
         var next_root = self.root;
         next_root.generation = try nextGeneration(self.root.generation);
         next_root.record_count = std.math.sub(u64, next_root.record_count, removed_records) catch
             return error.InvalidBlobFilesystemGraph;
         next_root.orphan_count = 0;
+        next_root.reserved_bytes = std.math.sub(u64, next_root.reserved_bytes, released_reserved_bytes) catch
+            return error.InvalidBlobFilesystemGraph;
+        self.reserved_bytes = next_root.reserved_bytes;
         try self.publish(io, next_root, &mutations, null);
     }
 
@@ -1468,6 +1667,13 @@ pub const Filesystem = struct {
 
     fn visibleUnits(self: *const Filesystem) u64 {
         return self.authority_ref.slot;
+    }
+
+    fn ensureCapacity(self: *const Filesystem, operation_units: u64, reserved_bytes: u64) !void {
+        const protected = try reservationCapacityUnits(reserved_bytes);
+        const required = std.math.add(u64, operation_units, protected) catch return error.BlobStoreFull;
+        if (required > self.blobs.header.unit_count - self.blobs.stagedUnits())
+            return error.BlobStoreFull;
     }
 };
 
@@ -1578,6 +1784,23 @@ const MutationAccumulator = struct {
         try self.set(&key, null);
     }
 
+    fn replaceReservations(
+        self: *MutationAccumulator,
+        inode: u64,
+        old: []const Filesystem.Reservation,
+        new: []const Filesystem.Reservation,
+    ) !void {
+        for (old) |reservation| {
+            const key = try filesystem_format.reservationKey(inode, reservation.start);
+            try self.set(&key, null);
+        }
+        for (new) |reservation| {
+            const key = try filesystem_format.reservationKey(inode, reservation.start);
+            const value = try filesystem_format.encodeReservation(reservation.end);
+            try self.set(&key, &value);
+        }
+    }
+
     fn putDentry(
         self: *MutationAccumulator,
         parent_inode: u64,
@@ -1631,6 +1854,87 @@ fn timestamp(io: Io) i64 {
     return @intCast(Io.Clock.real.now(io).nanoseconds);
 }
 
+fn reservationContains(reservations: []const Filesystem.Reservation, block: u64) bool {
+    for (reservations) |reservation| {
+        if (block < reservation.start) return false;
+        if (block < reservation.end) return true;
+    }
+    return false;
+}
+
+fn mergeReservation(
+    allocator: std.mem.Allocator,
+    current: []const Filesystem.Reservation,
+    added: Filesystem.Reservation,
+) ![]Filesystem.Reservation {
+    std.debug.assert(added.start < added.end);
+    var result: std.ArrayList(Filesystem.Reservation) = .empty;
+    defer result.deinit(allocator);
+    var merged = added;
+    var inserted = false;
+    for (current) |reservation| {
+        if (reservation.end < merged.start) {
+            try result.append(allocator, reservation);
+        } else if (merged.end < reservation.start) {
+            if (!inserted) {
+                try result.append(allocator, merged);
+                inserted = true;
+            }
+            try result.append(allocator, reservation);
+        } else {
+            merged.start = @min(merged.start, reservation.start);
+            merged.end = @max(merged.end, reservation.end);
+        }
+    }
+    if (!inserted) try result.append(allocator, merged);
+    return result.toOwnedSlice(allocator);
+}
+
+fn clipReservations(
+    allocator: std.mem.Allocator,
+    current: []const Filesystem.Reservation,
+    size: u64,
+) ![]Filesystem.Reservation {
+    const end_block = try std.math.divCeil(u64, size, blob_file.block_size);
+    var result: std.ArrayList(Filesystem.Reservation) = .empty;
+    defer result.deinit(allocator);
+    for (current) |reservation| {
+        if (reservation.start >= end_block) break;
+        try result.append(allocator, .{
+            .start = reservation.start,
+            .end = @min(reservation.end, end_block),
+        });
+    }
+    return result.toOwnedSlice(allocator);
+}
+
+fn reservationOutstandingBytes(
+    state: *blob_file.State,
+    io: Io,
+    reservations: []const Filesystem.Reservation,
+) !u64 {
+    var blocks: u64 = 0;
+    for (reservations) |reservation| {
+        const interval_blocks = reservation.end - reservation.start;
+        const allocated = try state.allocatedBlockCount(io, reservation.start, reservation.end);
+        blocks = try std.math.add(u64, blocks, interval_blocks - allocated);
+    }
+    return std.math.mul(u64, blocks, blob_file.block_size) catch return error.FileTooLarge;
+}
+
+fn reservationCapacityUnits(reserved_bytes: u64) !u64 {
+    if (reserved_bytes % blob_file.block_size != 0) return error.InvalidBlobFilesystemGraph;
+    // Each promised data unit retains COW headroom for its data and three tree/authority units.
+    return std.math.mul(u64, reserved_bytes / blob_file.block_size, 4) catch
+        return error.BlobStoreFull;
+}
+
+fn adjustedRecordCount(current: u64, old_count: usize, new_count: usize) !u64 {
+    var result = std.math.sub(u64, current, old_count) catch return error.InvalidBlobFilesystemGraph;
+    result = std.math.add(u64, result, new_count) catch return error.FilesystemRecordCountOverflow;
+    return result;
+}
+
 fn touchParent(record: *filesystem_format.InodeRecord, now: i64) void {
     record.metadata.mtime_ns = now;
     record.metadata.ctime_ns = now;
@@ -1665,6 +1969,8 @@ fn loadCandidate(
     const entries = try maps.loadAllAllocAt(io, root.metadata_root, root.generation, readable_units);
     defer metadata_map_store.deinitEntries(allocator, entries);
     try validateGraph(allocator, io, blobs, root, readable_units, entries);
+    if (try reservationCapacityUnits(root.reserved_bytes) > candidate.unit_count - candidate.committed_units)
+        return error.InvalidBlobFilesystemGraph;
     return root;
 }
 
@@ -1685,6 +1991,10 @@ fn validateGraph(
     defer child_directories.deinit();
     var orphans = std.AutoHashMap(u64, filesystem_format.OrphanRecord).init(allocator);
     defer orphans.deinit();
+    var reservation_ends = std.AutoHashMap(u64, u64).init(allocator);
+    defer reservation_ends.deinit();
+    var reserved_by_inode = std.AutoHashMap(u64, u64).init(allocator);
+    defer reserved_by_inode.deinit();
 
     for (entries) |entry| switch (try filesystem_format.decodeKey(entry.key)) {
         .inode => |inode| {
@@ -1710,6 +2020,28 @@ fn validateGraph(
             const result = try orphans.getOrPut(inode);
             if (result.found_existing) return error.InvalidBlobFilesystemGraph;
             result.value_ptr.* = record;
+        },
+        .reservation => |key| {
+            const record = inodes.get(key.inode) orelse return error.InvalidBlobFilesystemGraph;
+            if (record.metadata.kind != .file or entry.value.len != filesystem_format.reservation_encoded_size)
+                return error.InvalidBlobFilesystemGraph;
+            const end_block = try filesystem_format.decodeReservation(@ptrCast(entry.value.ptr));
+            if (key.start_block >= end_block) return error.InvalidBlobFilesystemGraph;
+            if (reservation_ends.get(key.inode)) |previous_end| {
+                if (previous_end >= key.start_block) return error.InvalidBlobFilesystemGraph;
+            }
+            try reservation_ends.put(key.inode, end_block);
+            var file = try blob_file.State.openAt(allocator, io, blobs, readable_units, record.data.?);
+            defer file.deinit();
+            const allocated = try file.allocatedBlockCount(io, key.start_block, end_block);
+            const outstanding = try std.math.mul(
+                u64,
+                end_block - key.start_block - allocated,
+                blob_file.block_size,
+            );
+            const result = try reserved_by_inode.getOrPut(key.inode);
+            if (!result.found_existing) result.value_ptr.* = 0;
+            result.value_ptr.* = try std.math.add(u64, result.value_ptr.*, outstanding);
         },
         .dentry => {},
     };
@@ -1745,11 +2077,15 @@ fn validateGraph(
         root_record.parent_inode != filesystem_format.root_inode or root_record.nlink == 0)
         return error.InvalidBlobFilesystemGraph;
     var iterator = inodes.iterator();
+    var reserved_total: u64 = 0;
     while (iterator.next()) |entry| {
         const inode = entry.key_ptr.*;
         const record = entry.value_ptr.*;
         const namespace_links = links.get(inode) orelse 0;
         const orphan = orphans.get(inode);
+        const inode_reserved = reserved_by_inode.get(inode) orelse 0;
+        if (record.reserved_bytes != inode_reserved) return error.InvalidBlobFilesystemGraph;
+        reserved_total = try std.math.add(u64, reserved_total, inode_reserved);
         if (orphan) |value| {
             if (inode == filesystem_format.root_inode or record.nlink != 0 or namespace_links != 0 or
                 value.generation != record.generation or value.kind != record.metadata.kind)
@@ -1770,6 +2106,7 @@ fn validateGraph(
             return error.InvalidBlobFilesystemGraph;
         }
     }
+    if (reserved_total != root.reserved_bytes) return error.InvalidBlobFilesystemGraph;
     var orphan_iterator = orphans.iterator();
     while (orphan_iterator.next()) |entry| if (!inodes.contains(entry.key_ptr.*))
         return error.InvalidBlobFilesystemGraph;
@@ -3198,6 +3535,115 @@ test "blob close chain consumes ownership when backend close fails" {
 
     var reopened = try storage_api.Storage.openFile(std.testing.io, tmp.dir, "close-error", false);
     try reopened.close(std.testing.io);
+}
+
+test "blob filesystem reservations merge persist share and release capacity" {
+    const blob_device = @import("blob_device.zig");
+    const storage_api = @import("v3/storage.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const device_size = 32 * 1024 * 1024;
+    const device = try blob_device.Device.createFile(
+        std.testing.io,
+        tmp.dir,
+        "reservations",
+        device_size,
+        blob_format.allocation_unit,
+    );
+    const blobs = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try Filesystem.format(std.testing.allocator, std.testing.io, blobs, .legacy_raw);
+    var open = true;
+    defer if (open) filesystem.close(std.testing.io) catch {};
+    const inode = try filesystem.createFile(std.testing.io, filesystem_format.root_inode, "file", 0o600, 0, 0);
+    try filesystem.fallocate(std.testing.io, inode, blob_file.block_size + 1, blob_file.block_size);
+    try filesystem.fallocate(std.testing.io, inode, 3 * blob_file.block_size, blob_file.block_size);
+    try filesystem.fallocate(std.testing.io, inode, 2 * blob_file.block_size, blob_file.block_size);
+    var reservations = try filesystem.loadReservations(std.testing.io, inode);
+    try std.testing.expectEqualSlices(Filesystem.Reservation, &.{.{ .start = 1, .end = 4 }}, reservations);
+    std.testing.allocator.free(reservations);
+    try std.testing.expectEqual(@as(u64, 3 * blob_file.block_size), filesystem.root.reserved_bytes);
+    try std.testing.expectEqual(@as(u64, 4 * blob_file.block_size), (try filesystem.stat(std.testing.io, inode)).data.?.logical_size);
+    try filesystem.link(std.testing.io, inode, filesystem_format.root_inode, "alias");
+    try std.testing.expectEqual(@as(u64, 2), (try filesystem.stat(std.testing.io, inode)).nlink);
+
+    try filesystem.close(std.testing.io);
+    open = false;
+    const backing = try tmp.dir.openFile(std.testing.io, "reservations", .{ .mode = .read_write });
+    var backing_open = true;
+    defer if (backing_open) backing.close(std.testing.io);
+    const storage = storage_api.Storage.initOwned(backing, device_size, .regular_file, 1, false);
+    const reopened_device = try blob_device.Device.init(storage, 0, device_size, blob_format.allocation_unit);
+    backing_open = false;
+    const reopened_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, reopened_device);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, reopened_blobs, true);
+    open = true;
+    try std.testing.expectEqual(@as(u64, 3 * blob_file.block_size), filesystem.root.reserved_bytes);
+    try expectValidGraph(&filesystem, std.testing.io);
+
+    const ordinary = try filesystem.createFile(std.testing.io, filesystem_format.root_inode, "ordinary", 0o600, 0, 0);
+    const unit_count = filesystem.blobs.header.unit_count;
+    filesystem.blobs.header.unit_count = filesystem.blobs.stagedUnits() + 12;
+    try std.testing.expectError(
+        error.BlobStoreFull,
+        filesystem.write(std.testing.io, ordinary, "x", 0),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try filesystem.write(std.testing.io, inode, "x", blob_file.block_size),
+    );
+    filesystem.blobs.header.unit_count = unit_count;
+    try filesystem.sync(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 2 * blob_file.block_size), filesystem.root.reserved_bytes);
+
+    const high = try filesystem.createFile(std.testing.io, filesystem_format.root_inode, "high", 0o600, 0, 0);
+    try filesystem.fallocate(std.testing.io, high, std.math.maxInt(i64) - 1, 1);
+    try std.testing.expectEqual(std.math.maxInt(i64), (try filesystem.stat(std.testing.io, high)).data.?.logical_size);
+    try std.testing.expectError(error.InvalidArgument, filesystem.fallocate(std.testing.io, high, 0, 0));
+    try std.testing.expectError(error.FileTooLarge, filesystem.fallocate(std.testing.io, high, std.math.maxInt(i64), 1));
+    try filesystem.unlink(std.testing.io, filesystem_format.root_inode, "high");
+    try std.testing.expectEqual(@as(u64, 2 * blob_file.block_size), filesystem.root.reserved_bytes);
+
+    try filesystem.truncate(std.testing.io, inode, 2 * blob_file.block_size);
+    reservations = try filesystem.loadReservations(std.testing.io, inode);
+    try std.testing.expectEqualSlices(Filesystem.Reservation, &.{.{ .start = 1, .end = 2 }}, reservations);
+    std.testing.allocator.free(reservations);
+    try std.testing.expectEqual(@as(u64, 0), filesystem.root.reserved_bytes);
+    try filesystem.unlink(std.testing.io, filesystem_format.root_inode, "file");
+    try std.testing.expectEqual(@as(u64, 1), (try filesystem.stat(std.testing.io, inode)).nlink);
+    try filesystem.unlink(std.testing.io, filesystem_format.root_inode, "alias");
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, inode));
+    try expectValidGraph(&filesystem, std.testing.io);
+
+    const orphan = try filesystem.createFile(std.testing.io, filesystem_format.root_inode, "orphan", 0o600, 0, 0);
+    try filesystem.retainInode(std.testing.io, orphan);
+    try filesystem.fallocate(std.testing.io, orphan, 0, blob_file.block_size);
+    try filesystem.unlink(std.testing.io, filesystem_format.root_inode, "orphan");
+    try std.testing.expectEqual(@as(u64, blob_file.block_size), filesystem.root.reserved_bytes);
+    try filesystem.close(std.testing.io);
+    open = false;
+
+    const orphan_backing = try tmp.dir.openFile(std.testing.io, "reservations", .{ .mode = .read_write });
+    var orphan_backing_open = true;
+    defer if (orphan_backing_open) orphan_backing.close(std.testing.io);
+    const orphan_storage = storage_api.Storage.initOwned(orphan_backing, device_size, .regular_file, 1, false);
+    const orphan_device = try blob_device.Device.init(orphan_storage, 0, device_size, blob_format.allocation_unit);
+    orphan_backing_open = false;
+    const orphan_blobs = try blob_store.Store.open(std.testing.allocator, std.testing.io, orphan_device);
+    filesystem = try Filesystem.open(std.testing.allocator, std.testing.io, orphan_blobs, true);
+    open = true;
+    try std.testing.expectEqual(@as(u64, 0), filesystem.root.reserved_bytes);
+    try std.testing.expectError(error.FileNotFound, filesystem.stat(std.testing.io, orphan));
+    try expectValidGraph(&filesystem, std.testing.io);
+}
+
+test "blob filesystem reservation interval helpers merge adjacent ranges" {
+    const current = [_]Filesystem.Reservation{
+        .{ .start = 1, .end = 3 },
+        .{ .start = 8, .end = 10 },
+    };
+    const merged = try mergeReservation(std.testing.allocator, &current, .{ .start = 3, .end = 8 });
+    defer std.testing.allocator.free(merged);
+    try std.testing.expectEqualSlices(Filesystem.Reservation, &.{.{ .start = 1, .end = 10 }}, merged);
 }
 
 fn expectValidGraph(filesystem: *Filesystem, io: Io) !void {

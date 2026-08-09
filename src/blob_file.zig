@@ -341,6 +341,23 @@ pub const State = struct {
         return std.math.mul(u64, self.allocated_blocks, block_size) catch unreachable;
     }
 
+    pub fn allocatedBlockCount(self: *State, io: Io, start: u64, end: u64) !u64 {
+        try self.requireUsable();
+        if (start >= end) return 0;
+        try self.materializeCurrent(io);
+        var count: u64 = 0;
+        var iterator = self.blocks.keyIterator();
+        while (iterator.next()) |block| {
+            if (block.* >= start and block.* < end) count += 1;
+        }
+        return count;
+    }
+
+    pub fn blockAllocated(self: *State, io: Io, block: u64) !bool {
+        try self.requireUsable();
+        return (try self.lookupCurrent(io, block)) != null;
+    }
+
     pub fn read(self: *State, io: Io, output: []u8, offset: u64) !usize {
         try self.requireUsable();
         if (offset >= self.logical_size or output.len == 0) return 0;
