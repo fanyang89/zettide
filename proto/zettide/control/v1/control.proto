@@ -31,6 +31,13 @@ service VolumeService {
   rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
 }
 
+// Node-local service used by the control plane to manage data replicas.
+service DataService {
+  rpc EnsureReplica(EnsureReplicaRequest) returns (EnsureReplicaResponse);
+  rpc InspectReplica(InspectReplicaRequest) returns (InspectReplicaResponse);
+  rpc DeleteReplica(DeleteReplicaRequest) returns (DeleteReplicaResponse);
+}
+
 message Pool {
   string id = 1;
   string name = 2;
@@ -307,6 +314,76 @@ message DeleteVolumeResponse {
   string volume_id = 1;
   int64 deleted_at_unix_ms = 2;
   uint64 deleted_revision = 3;
+}
+
+enum DataReplicaState {
+  DATA_REPLICA_STATE_UNSPECIFIED = 0;
+  DATA_REPLICA_STATE_ACTIVE = 1;
+  DATA_REPLICA_STATE_TOMBSTONED = 2;
+}
+
+message ReplicaAttestation {
+  string volume_id = 1;
+  string placement_id = 2;
+  string allocation_id = 3;
+  uint64 generation = 4;
+  bytes member_id = 5;
+  uint64 offset_bytes = 6;
+  uint64 length_bytes = 7;
+  bytes backend_digest = 8;
+}
+
+message DataReplica {
+  DataReplicaState state = 1;
+  ReplicaAttestation attestation = 2;
+}
+
+message EnsureReplicaRequest {
+  string operation_id = 1;
+  string volume_id = 2;
+  string placement_id = 3;
+  string allocation_id = 4;
+  uint64 generation = 5;
+  bytes member_id = 6;
+  uint64 offset_bytes = 7;
+  uint64 length_bytes = 8;
+}
+
+message EnsureReplicaResponse {
+  string operation_id = 1;
+  DataReplica replica = 2;
+}
+
+message InspectReplicaRequest {
+  string operation_id = 1;
+  string volume_id = 2;
+  string placement_id = 3;
+  string allocation_id = 4;
+  uint64 generation = 5;
+  bytes member_id = 6;
+  uint64 offset_bytes = 7;
+  uint64 length_bytes = 8;
+}
+
+message InspectReplicaResponse {
+  string operation_id = 1;
+  DataReplica replica = 2;
+}
+
+message DeleteReplicaRequest {
+  string operation_id = 1;
+  string volume_id = 2;
+  string placement_id = 3;
+  string allocation_id = 4;
+  uint64 generation = 5;
+  bytes member_id = 6;
+  uint64 offset_bytes = 7;
+  uint64 length_bytes = 8;
+}
+
+message DeleteReplicaResponse {
+  string operation_id = 1;
+  DataReplica replica = 2;
 }
 
 enum ReplicaPlacementState {
