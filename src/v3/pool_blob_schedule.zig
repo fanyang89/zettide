@@ -4,6 +4,8 @@ const codec = @import("codec.zig");
 pub const max_member_count: usize = 12;
 pub const replica_count: usize = 3;
 pub const encoded_size: usize = 256;
+pub const placement_page_size: usize = 4096;
+pub const PlacementPage = [placement_page_size]u8;
 pub const checksum_offset: usize = encoded_size - @sizeOf(u32);
 
 const magic = [8]u8{ 'D', 'D', 'B', 'S', 'C', 'H', '1', 0 };
@@ -162,6 +164,17 @@ pub fn decode(bytes: *const [encoded_size]u8) !PlacementPlan {
     return plan;
 }
 
+pub fn encodePage(plan: PlacementPlan) !PlacementPage {
+    var page: PlacementPage = @splat(0);
+    page[0..encoded_size].* = try encode(plan);
+    return page;
+}
+
+pub fn decodePage(page: *const PlacementPage) !PlacementPlan {
+    if (!codec.isZero(page[encoded_size..])) return error.NonZeroPageTail;
+    return decode(page[0..encoded_size]);
+}
+
 pub fn digest(plan: PlacementPlan) !codec.Digest {
     const bytes = try encode(plan);
     return codec.blake3(bytes[0..checksum_offset]);
@@ -307,6 +320,18 @@ test "placement plan codec is canonical and rejects envelope corruption" {
     try std.testing.expectError(error.NonZeroReserved, decode(&bytes));
 }
 
+test "placement page is canonical and rejects a non-zero tail" {
+    const plan = try build(1024 * 1024, uniformGeometries(6, 17)[0..6], 41);
+    const page = try encodePage(plan);
+    try std.testing.expectEqualSlices(u8, &(try encode(plan)), page[0..encoded_size]);
+    try std.testing.expect(codec.isZero(page[encoded_size..]));
+    try std.testing.expectEqualSlices(u8, &page, &(try encodePage(try decodePage(&page))));
+
+    var corrupted = page;
+    corrupted[placement_page_size - 1] = 1;
+    try std.testing.expectError(error.NonZeroPageTail, decodePage(&corrupted));
+}
+
 test "capacity assignment handles equal and heterogeneous members" {
     var geometries = uniformGeometries(12, 100);
     var plan = try build(4096, &geometries, 0);
@@ -416,6 +441,17 @@ test "large logical counts round trip and map with u128 arithmetic" {
     const locations = try map(plan, n - 1);
     for (locations) |location| try std.testing.expect(location.physical_stripe < n);
     try std.testing.expectError(error.LogicalStripeOutOfRange, map(plan, n));
+}
+
+test "maximum input capacities do not overflow placement arithmetic" {
+    const geometries = uniformGeometries(replica_count, std.math.maxInt(u64));
+    const plan = try build(4096, geometries[0..replica_count], std.math.maxInt(u64));
+    try std.testing.expectEqual(std.math.maxInt(u64), plan.logical_stripe_count);
+    for (plan.memberSlice()) |entry|
+        try std.testing.expectEqual(std.math.maxInt(u64), entry.assigned_stripes);
+    const locations = try map(plan, std.math.maxInt(u64) - 1);
+    for (locations) |location|
+        try std.testing.expect(location.physical_stripe < std.math.maxInt(u64));
 }
 
 test "invalid geometry and persisted plans are rejected" {
