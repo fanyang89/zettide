@@ -48,6 +48,51 @@ pub fn build(b: *std.Build) void {
             "Build the Catalog NVMe-oF benchmark target",
         );
         catalog_nvmf_benchmark_step.dependOn(&install_catalog_nvmf_benchmark.step);
+
+        const pool_data_benchmark_core = createCoreModule(
+            b,
+            target,
+            .ReleaseSafe,
+            false,
+            crc32c_dependency,
+        );
+        const pool_data_nvmf_benchmark_module = b.createModule(.{
+            .root_source_file = b.path("test/spdk_pool_data_nvmf_benchmark.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zettide", .module = pool_data_benchmark_core }},
+        });
+        pool_data_nvmf_benchmark_module.addIncludePath(b.path("src"));
+        pool_data_nvmf_benchmark_module.addIncludePath(b.path("test"));
+        const pool_data_nvmf_benchmark = b.addLibrary(.{
+            .name = "zettide-spdk-pool-data-nvmf-benchmark",
+            .linkage = .static,
+            .root_module = pool_data_nvmf_benchmark_module,
+        });
+        pool_data_nvmf_benchmark.bundle_compiler_rt = true;
+        const install_pool_data_nvmf_benchmark = b.addInstallArtifact(pool_data_nvmf_benchmark, .{});
+        const pool_data_nvmf_benchmark_step = b.step(
+            "build-nvmf-pool-data-benchmark",
+            "Build the ReleaseSafe scheduled Pool data NVMe-oF benchmark target",
+        );
+        pool_data_nvmf_benchmark_step.dependOn(&install_pool_data_nvmf_benchmark.step);
+
+        const pool_data_nvmf_args_test_module = b.createModule(.{
+            .root_source_file = b.path("test/spdk_pool_data_nvmf_args.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        });
+        const pool_data_nvmf_args_tests = b.addTest(.{
+            .root_module = pool_data_nvmf_args_test_module,
+        });
+        const run_pool_data_nvmf_args_tests = b.addRunArtifact(pool_data_nvmf_args_tests);
+        const pool_data_nvmf_benchmark_test_step = b.step(
+            "test-nvmf-pool-data-benchmark",
+            "Test scheduled Pool data NVMe-oF benchmark arguments and worker compilation",
+        );
+        pool_data_nvmf_benchmark_test_step.dependOn(&install_pool_data_nvmf_benchmark.step);
+        pool_data_nvmf_benchmark_test_step.dependOn(&run_pool_data_nvmf_args_tests.step);
     }
 
     const run_cmd = b.addRunArtifact(exe);

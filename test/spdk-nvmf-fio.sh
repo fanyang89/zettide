@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -eq 3 ]] || {
-    echo "usage: spdk-nvmf-fio.sh TARGET READY_FILE LOG_DIR" >&2
+[[ $# -ge 3 ]] || {
+    echo "usage: spdk-nvmf-fio.sh TARGET READY_FILE LOG_DIR [TARGET_ARG...]" >&2
     exit 2
 }
 
 target=$1
 ready_file=$2
 log_dir=$3
+shift 3
 runtime=${ZETTIDE_NVMF_FIO_RUNTIME:-20}
 ramp_time=${ZETTIDE_NVMF_FIO_RAMP_TIME:-5}
 fio_size=${ZETTIDE_NVMF_FIO_SIZE:-8G}
+expected_size=${ZETTIDE_NVMF_EXPECTED_SIZE-68719476736}
 nqn=nqn.2026-08.io.zettide:benchmark
 serial=ZETTIDEBENCH000001
 transport=${ZETTIDE_NVMF_TRANSPORT:-tcp}
@@ -23,7 +25,7 @@ rxe_target_if=ztnvmft0
 rxe_target_device=ztnvmf_t
 rxe_target_link_created=false
 rxe_target_device_created=false
-target_arguments=()
+target_arguments=("$@")
 if [[ -n ${ZETTIDE_NVMF_TARGET_ARGUMENT:-} ]]; then
     target_arguments+=("$ZETTIDE_NVMF_TARGET_ARGUMENT")
 fi
@@ -58,12 +60,39 @@ fi
 
 cleanup() {
     local result=$?
+    local deadline state=""
     trap - EXIT INT TERM
     set +e
     nvme disconnect -n "$nqn" >/dev/null 2>&1 || true
     if [[ -n $target_pid ]] && kill -0 "$target_pid" 2>/dev/null; then
-        kill -TERM "$target_pid"
-        wait "$target_pid" || result=1
+        kill -TERM "$target_pid" 2>/dev/null || true
+        deadline=$((SECONDS + 5))
+        while kill -0 "$target_pid" 2>/dev/null && ((SECONDS < deadline)); do
+            if [[ -r /proc/$target_pid/stat ]]; then
+                read -r _ _ state _ <"/proc/$target_pid/stat" || true
+                [[ $state != Z ]] || break
+            fi
+            sleep 0.1
+        done
+        if kill -0 "$target_pid" 2>/dev/null && [[ $state != Z ]]; then
+            echo "NVMe-oF benchmark target did not stop after 5 seconds; sending KILL" >&2
+            kill -KILL "$target_pid" 2>/dev/null || true
+            result=1
+            deadline=$((SECONDS + 2))
+            while kill -0 "$target_pid" 2>/dev/null && ((SECONDS < deadline)); do
+                if [[ -r /proc/$target_pid/stat ]]; then
+                    read -r _ _ state _ <"/proc/$target_pid/stat" || true
+                    [[ $state != Z ]] || break
+                fi
+                sleep 0.1
+            done
+        fi
+        if ! kill -0 "$target_pid" 2>/dev/null || [[ $state == Z ]]; then
+            wait "$target_pid" 2>/dev/null || true
+        else
+            echo "NVMe-oF benchmark target remains uninterruptible after KILL" >&2
+            result=1
+        fi
     fi
     if [[ $rxe_target_device_created == true ]]; then
         if ! rdma link delete "$rxe_target_device"; then
@@ -126,7 +155,8 @@ for ((attempt = 0; attempt < 1000; attempt++)); do
     sleep 0.01
 done
 [[ -f $ready_file ]] || {
-    echo "NVMe-oF benchmark target did not become ready" >&2
+    echo "NVMe-oF benchmark target did not become ready after 10 seconds" >&2
+    command cat "$log_dir/target.log" >&2
     exit 1
 }
 
@@ -150,8 +180,8 @@ done
 nvme list -o json >"$log_dir/nvme-list.json"
 nvme list-subsys -o json >"$log_dir/nvme-list-subsys.json"
 lsblk --bytes --output NAME,KNAME,TYPE,SIZE,MODEL,SERIAL "$device" >"$log_dir/lsblk.txt"
-if [[ -n ${ZETTIDE_NVMF_EXPECTED_SIZE:-68719476736} ]]; then
-    [[ $(blockdev --getsize64 "$device") -eq ${ZETTIDE_NVMF_EXPECTED_SIZE:-68719476736} ]]
+if [[ -n $expected_size ]]; then
+    [[ $(blockdev --getsize64 "$device") -eq $expected_size ]]
 fi
 
 run_case() {
@@ -171,6 +201,7 @@ run_case() {
 }
 
 run_case seq-read-1m-qd32-j1 read 1m 32 1 "$fio_size"
+run_case seq-read-128k-qd1-j1 read 128k 1 1 "$fio_size"
 run_case randread-4k-qd1-j1 randread 4k 1 1 "$fio_size"
 run_case randread-4k-qd32-j1 randread 4k 32 1 "$fio_size"
 run_case randread-4k-qd32-j4 randread 4k 32 4 "$fio_size"

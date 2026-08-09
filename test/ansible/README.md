@@ -259,6 +259,24 @@ uv run ansible-playbook test/ansible/nvmf-catalog-rxe-fio.yml --limit zettide-ti
 The remote kernel must provide `rdma_rxe` and `nvme-rdma`. This profile checks
 functionality only; RXE results do not represent hardware RDMA performance.
 
+The dedicated-disk scheduled Pool profile exposes three equal 1 MiB-aligned
+synthetic members through NVMe-oF/RDMA. Configure only `path` and `serial` in
+`zettide_raw_device`, then pass the exact destructive token:
+
+```sh
+uv run ansible-playbook test/ansible/nvmf-scheduled-pool-rxe-fio.yml --limit zettide-tier1 \
+  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:/dev/nvme1n1:PHYSICAL-DISK-SERIAL'
+```
+
+The profile reuses an existing three-member `scheduled-replicated` Blob Pool
+only after validating its complete layout and writable policy. Otherwise it
+wipes the disposable disk and creates one. It leaves test data on disk, never
+backs up or restores prior contents, and always detaches loops. The export is
+read-only and defaults to `first_available`; set
+`zettide_nvmf_scheduled_pool_read_policy=quorum` to compare quorum reads.
+Results include fio JSON, NVMe/RDMA topology, target stage logs, and lifecycle
+cleanup state. Synthetic members do not measure physical fault isolation.
+
 The Catalog profile uses the same cases and export identity, but reads a real
 64 GiB thin Catalog Volume from an 8 MiB temporary file-backed Pool. Unmapped
 extents read as zero, so this isolates Catalog lookup, worker scheduling, and

@@ -1,0 +1,154 @@
+---
+- name: Initialize scheduled Pool NVMe-oF configuration | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_scheduled_pool_nvmf_config: "{{ zettide_raw_device | default({}) }}"
+
+- name: Require dedicated scheduled Pool disk configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_scheduled_pool_nvmf_config.path is defined
+      - zettide_scheduled_pool_nvmf_config.serial is defined
+      - zettide_scheduled_pool_nvmf_config.path | length > 0
+      - zettide_scheduled_pool_nvmf_config.serial | length > 0
+      - ansible_play_hosts_all | length == 1
+      - >-
+        zettide_scheduled_pool_nvmf_fio_confirm | default('') ==
+        'DESTROY:' ~ zettide_scheduled_pool_nvmf_config.path ~ ':' ~
+        zettide_scheduled_pool_nvmf_config.serial
+      - zettide_nvmf_scheduled_pool_read_policy in ['first_available', 'quorum']
+    fail_msg: >-
+      Configure raw device path and serial, then pass
+      -e zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:<path>:<serial>.
+
+- name: Create scheduled Pool NVMe-oF result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/nvmf-scheduled-pool-rxe-fio"
+    state: directory
+    mode: "0755"
+
+- name: Extract SPDK source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
+    dest: "{{ zettide_remote_workspace.path }}"
+
+- name: Configure SPDK with RDMA | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - ./configure
+      - --with-shared
+      - --with-rdma
+      - --without-uring
+      - --disable-tests
+      - --disable-unit-tests
+      - --disable-examples
+      - --disable-apps
+      - --without-nvme-cuse
+      - --without-fsdev
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}/spdk"
+  changed_when: true
+
+- name: Build SPDK | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv: [make, "-j{{ ansible_facts.processor_vcpus | default(2) }}"]
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}/spdk"
+  changed_when: true
+
+- name: Build scheduled Pool target library | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Dspdk=true
+      - -Doptimize=ReleaseSafe
+      - build-nvmf-pool-data-benchmark
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
+  changed_when: true
+
+- name: Build Zettide CLI | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize=ReleaseSafe
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: true
+
+- name: Link scheduled Pool NVMe-oF target | {{ zettide_optimize }}
+  ansible.builtin.shell:
+    cmd: >-
+      cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
+      -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_provider.c
+      src/spdk/nvmf_tcp_export.c test/spdk_runtime.c test/spdk_pool_data_nvmf_benchmark_main.c
+      zig-out/lib/libzettide-spdk-pool-data-nvmf-benchmark.a
+      -o test/spdk-pool-data-nvmf-benchmark -pthread -lstdc++ -Wl,--no-as-needed
+      $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
+      spdk_event spdk_event_bdev spdk_vhost spdk_event_nvmf spdk_bdev_modules spdk_env_dpdk
+      spdk_nvmf spdk_sock_modules spdk_syslibs) -Wl,--as-needed
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: true
+
+- name: Discover SPDK shared library paths | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv: [pkg-config, --libs-only-L, spdk_event, spdk_event_bdev, spdk_vhost, spdk_event_nvmf, spdk_bdev_modules, spdk_env_dpdk, spdk_nvmf, spdk_sock_modules, spdk_syslibs]
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
+  changed_when: false
+  register: zettide_scheduled_pool_spdk_library_flags
+
+- name: Run destructive scheduled Pool NVMe-oF lifecycle | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-raw-device.lock
+      - bash
+      - test/scheduled-pool-nvmf-fio.sh
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
+      - "{{ zettide_scheduled_pool_nvmf_config.path }}"
+      - "{{ zettide_scheduled_pool_nvmf_config.serial }}"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    LD_LIBRARY_PATH: >-
+      {{ zettide_scheduled_pool_spdk_library_flags.stdout.split()
+         | map('regex_replace', '^-L', '') | join(':') }}
+    ZETTIDE_SCHEDULED_POOL_NVMF_FIO_CONFIRM: "{{ zettide_scheduled_pool_nvmf_fio_confirm }}"
+    ZETTIDE_SCHEDULED_POOL_NVMF_TARGET: "{{ zettide_remote_workspace.path }}/test/spdk-pool-data-nvmf-benchmark"
+    ZETTIDE_SCHEDULED_POOL_NVMF_READ_POLICY: "{{ zettide_nvmf_scheduled_pool_read_policy }}"
+    ZETTIDE_NVMF_TRANSPORT: rdma
+    ZETTIDE_NVMF_TARGET_ADDR: 192.0.2.2
+    ZETTIDE_NVMF_TARGET_PORT: "44220"
+    ZETTIDE_NVMF_EXPECTED_SIZE: ""
+    ZETTIDE_NVMF_FIO_SIZE: "{{ zettide_nvmf_scheduled_pool_fio_size }}"
+    ZETTIDE_NVMF_FIO_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
+    ZETTIDE_NVMF_FIO_RAMP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
+    ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/nvmf-scheduled-pool-rxe-fio"
+  async: "{{ zettide_raw_timeout }}"
+  poll: 15
+  changed_when: true
+  failed_when: false
+  register: zettide_scheduled_pool_nvmf_result
+
+- name: Record scheduled Pool NVMe-oF lifecycle | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_scheduled_pool_nvmf_result.rc | default(1) }}
+      {{ zettide_scheduled_pool_nvmf_result.stdout | default('') }}
+      {{ zettide_scheduled_pool_nvmf_result.stderr | default(zettide_scheduled_pool_nvmf_result.msg | default('')) }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/nvmf-scheduled-pool-rxe-fio/ansible.log"
+    mode: "0644"
+
+- name: Require scheduled Pool NVMe-oF lifecycle | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_scheduled_pool_nvmf_result.rc | default(1) == 0
+    fail_msg: "Scheduled Pool NVMe-oF fio failed; inspect the fetched logs."

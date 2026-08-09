@@ -1,0 +1,7 @@
+---
+- name: Benchmark scheduled Pool data through NVMe-oF/RDMA and Soft-RoCE
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: nvmf-scheduled-pool-rxe-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe
