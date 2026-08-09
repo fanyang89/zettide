@@ -13,6 +13,11 @@
 
 #define ZETTIDE_SPDK_NVMF_BDEV_NAME_MAX 255
 #define ZETTIDE_SPDK_NVMF_NSID_MAX 65535
+#define ZETTIDE_SPDK_NVMF_BASE_OPTS_SIZE \
+	offsetof(struct zettide_spdk_nvmf_tcp_export_opts, transport)
+#define ZETTIDE_SPDK_NVMF_TRANSPORT_OPTS_SIZE \
+	(ZETTIDE_SPDK_NVMF_BASE_OPTS_SIZE + \
+	 sizeof(((struct zettide_spdk_nvmf_tcp_export_opts *)0)->transport))
 
 struct zettide_spdk_nvmf_tcp_export {
 	struct zettide_spdk_runtime *runtime;
@@ -388,10 +393,19 @@ zettide_spdk_nvmf_tcp_export_opts_init(
 		return;
 	}
 	memset(opts, 0, opts_size);
-	if (opts_size >= sizeof(*opts)) {
+	if (opts_size >= ZETTIDE_SPDK_NVMF_BASE_OPTS_SIZE) {
 		opts->opts_size = opts_size;
 		opts->nsid = 1;
 	}
+}
+
+static enum zettide_spdk_nvmf_transport
+get_transport(const struct zettide_spdk_nvmf_tcp_export_opts *opts)
+{
+	if (opts->opts_size < ZETTIDE_SPDK_NVMF_TRANSPORT_OPTS_SIZE) {
+		return ZETTIDE_SPDK_NVMF_TRANSPORT_TCP;
+	}
+	return opts->transport;
 }
 
 static int
@@ -399,8 +413,15 @@ validate_opts(struct zettide_spdk_runtime *runtime,
 		const struct zettide_spdk_nvmf_tcp_export_opts *opts,
 		struct zettide_spdk_nvmf_tcp_export **export_out)
 {
+	enum zettide_spdk_nvmf_transport transport;
+
+	if (opts == NULL || opts->opts_size < ZETTIDE_SPDK_NVMF_BASE_OPTS_SIZE ||
+		(opts->opts_size > ZETTIDE_SPDK_NVMF_BASE_OPTS_SIZE &&
+		 opts->opts_size < ZETTIDE_SPDK_NVMF_TRANSPORT_OPTS_SIZE)) {
+		return -EINVAL;
+	}
+	transport = get_transport(opts);
 	if (runtime == NULL || opts == NULL || export_out == NULL ||
-		opts->opts_size != sizeof(*opts) ||
 		!valid_string(opts->target_name, NVMF_TGT_NAME_MAX_LENGTH - 1, true) ||
 		!valid_string(opts->nqn, SPDK_NVMF_NQN_MAX_LEN, false) ||
 		!valid_string(opts->bdev_name, ZETTIDE_SPDK_NVMF_BDEV_NAME_MAX, false) ||
@@ -410,8 +431,8 @@ validate_opts(struct zettide_spdk_runtime *runtime,
 		!valid_string(opts->traddr, SPDK_NVMF_TRADDR_MAX_LEN, false) ||
 		!valid_string(opts->trsvcid, SPDK_NVMF_TRSVCID_MAX_LEN, false) ||
 		opts->nsid == 0 || opts->nsid > ZETTIDE_SPDK_NVMF_NSID_MAX ||
-		(opts->transport != ZETTIDE_SPDK_NVMF_TRANSPORT_TCP &&
-		 opts->transport != ZETTIDE_SPDK_NVMF_TRANSPORT_RDMA) ||
+		(transport != ZETTIDE_SPDK_NVMF_TRANSPORT_TCP &&
+		 transport != ZETTIDE_SPDK_NVMF_TRANSPORT_RDMA) ||
 		(opts->allow_any_host && opts->host_nqn != NULL)) {
 		return -EINVAL;
 	}
@@ -465,7 +486,7 @@ create_export(struct zettide_spdk_runtime *runtime,
 	export_handle->nsid = opts->nsid;
 	export_handle->allow_any_host = opts->allow_any_host;
 	spdk_nvme_trid_populate_transport(&export_handle->trid,
-			opts->transport == ZETTIDE_SPDK_NVMF_TRANSPORT_RDMA ?
+			get_transport(opts) == ZETTIDE_SPDK_NVMF_TRANSPORT_RDMA ?
 			SPDK_NVME_TRANSPORT_RDMA : SPDK_NVME_TRANSPORT_TCP);
 	export_handle->trid.adrfam = SPDK_NVMF_ADRFAM_IPV4;
 	memcpy(export_handle->trid.traddr, opts->traddr, strlen(opts->traddr) + 1);

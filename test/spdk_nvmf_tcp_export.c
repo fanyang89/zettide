@@ -64,6 +64,16 @@ run_export_lifecycle(struct zettide_spdk_runtime *runtime)
 	if (zettide_spdk_nvmf_tcp_export_close(shared_listener) != 0) {
 		return 1;
 	}
+	options.opts_size = offsetof(struct zettide_spdk_nvmf_tcp_export_opts, transport);
+	options.nqn = "nqn.2026-08.io.zettide:legacy-options-test";
+	options.transport = (enum zettide_spdk_nvmf_transport)99;
+	status = zettide_spdk_nvmf_tcp_export_create(runtime, &options, &export_handle);
+	if (status != 0 || export_handle == NULL ||
+		zettide_spdk_nvmf_tcp_export_close(export_handle) != 0) {
+		return 1;
+	}
+	options.opts_size = sizeof(options);
+	options.transport = ZETTIDE_SPDK_NVMF_TRANSPORT_TCP;
 	if (zettide_spdk_nvmf_zig_export_test(runtime) != 0) {
 		return 1;
 	}
