@@ -49,10 +49,19 @@ pub const Backend = struct {
     context: *anyopaque,
     vtable: *const VTable,
 
+    /// Mutations receive the complete Binding and must be idempotent for it.
+    /// The journal provides durable at-least-once invocation, not exactly-once.
     pub const VTable = struct {
+        /// Implement this when backend state can be verified before replaying a mutation.
+        inspect: ?*const fn (*anyopaque, Binding) anyerror!BackendState = null,
         ensure: *const fn (*anyopaque, Binding) anyerror!Digest,
         delete: *const fn (*anyopaque, Binding) anyerror!void,
     };
+
+    fn inspect(self: Backend, binding: Binding) !?BackendState {
+        const inspectFn = self.vtable.inspect orelse return null;
+        return try inspectFn(self.context, binding);
+    }
 
     fn ensure(self: Backend, binding: Binding) !Digest {
         return self.vtable.ensure(self.context, binding);
@@ -63,14 +72,26 @@ pub const Backend = struct {
     }
 };
 
+pub const BackendState = union(enum) {
+    absent,
+    active: Digest,
+    deleted,
+};
+
 pub const OperationKind = enum(u8) {
     ensure = 1,
     delete = 2,
 };
 
+pub const OperationStatus = enum(u8) {
+    prepared = 1,
+    completed = 2,
+};
+
 pub const OperationRecord = struct {
     operation_id: Id,
     kind: OperationKind,
+    status: OperationStatus,
     result: Replica,
 };
 
@@ -107,7 +128,7 @@ pub const Service = struct {
 
     pub fn ensureReplica(self: *Service, request: Request) !Response {
         const parsed = try parseRequest(request);
-        if (try self.replay(parsed, .ensure)) |response| return response;
+        if (try self.recoverOperation(parsed, .ensure)) |response| return response;
 
         if (self.store.findReplica(parsed.binding.placement_id)) |current| {
             try validateGeneration(parsed.binding, current.attestation.binding);
@@ -117,6 +138,7 @@ pub const Service = struct {
                 const record: OperationRecord = .{
                     .operation_id = parsed.operation_id,
                     .kind = .ensure,
+                    .status = .completed,
                     .result = current,
                 };
                 try self.store.append(record);
@@ -124,17 +146,17 @@ pub const Service = struct {
             }
         }
 
-        const digest = try self.backend.ensure(parsed.binding);
-        const record: OperationRecord = .{
+        const prepared: OperationRecord = .{
             .operation_id = parsed.operation_id,
             .kind = .ensure,
+            .status = .prepared,
             .result = .{ .state = .active, .attestation = .{
                 .binding = parsed.binding,
-                .backend_digest = digest,
+                .backend_digest = @splat(0),
             } },
         };
-        try self.store.append(record);
-        return responseOf(record);
+        try self.store.append(prepared);
+        return self.completeEnsure(prepared);
     }
 
     pub fn inspectReplica(self: *Service, request: Request) !Response {
@@ -147,27 +169,53 @@ pub const Service = struct {
 
     pub fn deleteReplica(self: *Service, request: Request) !Response {
         const parsed = try parseRequest(request);
-        if (try self.replay(parsed, .delete)) |response| return response;
+        if (try self.recoverOperation(parsed, .delete)) |response| return response;
 
         const current = self.store.findReplica(parsed.binding.placement_id) orelse return error.ReplicaNotFound;
         try validateGeneration(parsed.binding, current.attestation.binding);
         if (!std.meta.eql(parsed.binding, current.attestation.binding)) return error.BindingConflict;
-        if (current.state == .active) try self.backend.delete(parsed.binding);
-
-        const record: OperationRecord = .{
+        const prepared: OperationRecord = .{
             .operation_id = parsed.operation_id,
             .kind = .delete,
+            .status = .prepared,
             .result = .{ .state = .tombstoned, .attestation = current.attestation },
         };
-        try self.store.append(record);
-        return responseOf(record);
+        try self.store.append(prepared);
+        return self.completeDelete(prepared);
     }
 
-    fn replay(self: *Service, parsed: ParsedRequest, kind: OperationKind) !?Response {
+    fn recoverOperation(self: *Service, parsed: ParsedRequest, kind: OperationKind) !?Response {
         const existing = self.store.findOperation(parsed.operation_id) orelse return null;
         if (existing.kind != kind or !std.meta.eql(existing.result.attestation.binding, parsed.binding))
             return error.OperationConflict;
-        return responseOf(existing);
+        if (existing.status == .completed) return responseOf(existing);
+        return switch (kind) {
+            .ensure => try self.completeEnsure(existing),
+            .delete => try self.completeDelete(existing),
+        };
+    }
+
+    fn completeEnsure(self: *Service, prepared: OperationRecord) !Response {
+        const digest = if (try self.backend.inspect(prepared.result.attestation.binding)) |state| switch (state) {
+            .active => |digest| digest,
+            .absent, .deleted => try self.backend.ensure(prepared.result.attestation.binding),
+        } else try self.backend.ensure(prepared.result.attestation.binding);
+        var completed = prepared;
+        completed.status = .completed;
+        completed.result.attestation.backend_digest = digest;
+        try self.store.append(completed);
+        return responseOf(completed);
+    }
+
+    fn completeDelete(self: *Service, prepared: OperationRecord) !Response {
+        if (try self.backend.inspect(prepared.result.attestation.binding)) |state| switch (state) {
+            .active => try self.backend.delete(prepared.result.attestation.binding),
+            .absent, .deleted => {},
+        } else try self.backend.delete(prepared.result.attestation.binding);
+        var completed = prepared;
+        completed.status = .completed;
+        try self.store.append(completed);
+        return responseOf(completed);
     }
 };
 
@@ -217,7 +265,11 @@ fn isZero(bytes: []const u8) bool {
 }
 
 fn findOperation(records: []const OperationRecord, operation_id: Id) ?OperationRecord {
-    for (records) |record| if (std.mem.eql(u8, &record.operation_id, &operation_id)) return record;
+    var index = records.len;
+    while (index != 0) {
+        index -= 1;
+        if (std.mem.eql(u8, &records[index].operation_id, &operation_id)) return records[index];
+    }
     return null;
 }
 
@@ -225,6 +277,7 @@ fn findReplica(records: []const OperationRecord, target_placement_id: Id) ?Repli
     var index = records.len;
     while (index != 0) {
         index -= 1;
+        if (records[index].status != .completed) continue;
         const replica = records[index].result;
         if (std.mem.eql(u8, &replica.attestation.binding.placement_id, &target_placement_id)) return replica;
     }
@@ -280,13 +333,20 @@ pub const FileStore = struct {
     parent: std.Io.Dir,
     basename: []const u8,
     records: []OperationRecord,
+    faults: ?*Faults = null,
 
     const magic = "ZETDATA1".*;
-    const version: u16 = 1;
+    const legacy_version: u16 = 1;
+    const version: u16 = 2;
     const header_size: usize = 24;
     const record_size: usize = 144;
     const max_records: usize = 16 * 1024;
     const max_file_size = header_size + max_records * record_size;
+
+    const Faults = struct {
+        fail_replace_once_at_record_count: ?usize = null,
+        fail_directory_sync_once_at_record_count: ?usize = null,
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -335,17 +395,28 @@ pub const FileStore = struct {
 
     fn appendOpaque(context: *anyopaque, record: OperationRecord) !void {
         const self: *FileStore = @ptrCast(@alignCast(context));
-        if (self.records.len == max_records) return error.StoreFull;
+        const required_slots: usize = if (record.status == .prepared) 2 else 1;
+        if (required_slots > max_records - self.records.len) return error.StoreFull;
         const replacement = try self.allocator.alloc(OperationRecord, self.records.len + 1);
-        errdefer self.allocator.free(replacement);
+        var installed = false;
+        errdefer if (!installed) self.allocator.free(replacement);
         @memcpy(replacement[0..self.records.len], self.records);
         replacement[self.records.len] = record;
-        try self.persist(replacement);
-        if (self.records.len != 0) self.allocator.free(self.records);
+        try self.replace(replacement);
+        const previous = self.records;
         self.records = replacement;
+        installed = true;
+        if (previous.len != 0) self.allocator.free(previous);
+        try self.syncParent();
     }
 
-    fn persist(self: *FileStore, records: []const OperationRecord) !void {
+    fn replace(self: *FileStore, records: []const OperationRecord) !void {
+        if (self.faults) |faults| {
+            if (faults.fail_replace_once_at_record_count == records.len) {
+                faults.fail_replace_once_at_record_count = null;
+                return error.InjectedReplaceFailure;
+            }
+        }
         const bytes = try encode(std.heap.page_allocator, records);
         defer std.heap.page_allocator.free(bytes);
         var atomic_file = try self.parent.createFileAtomic(self.io, self.basename, .{ .replace = true });
@@ -353,6 +424,15 @@ pub const FileStore = struct {
         try atomic_file.file.writeStreamingAll(self.io, bytes);
         try atomic_file.file.sync(self.io);
         try atomic_file.replace(self.io);
+    }
+
+    fn syncParent(self: *FileStore) !void {
+        if (self.faults) |faults| {
+            if (faults.fail_directory_sync_once_at_record_count == self.records.len) {
+                faults.fail_directory_sync_once_at_record_count = null;
+                return error.InjectedDirectorySyncFailure;
+            }
+        }
         const parent_file = try self.parent.openFile(self.io, ".", .{ .mode = .read_only });
         defer parent_file.close(self.io);
         try parent_file.sync(self.io);
@@ -379,7 +459,8 @@ pub const FileStore = struct {
 
     fn decode(allocator: std.mem.Allocator, bytes: []const u8) ![]OperationRecord {
         if (bytes.len < header_size or !std.mem.eql(u8, bytes[0..8], &magic)) return error.StoreCorrupt;
-        if (std.mem.readInt(u16, bytes[8..10], .little) != version or
+        const file_version = std.mem.readInt(u16, bytes[8..10], .little);
+        if ((file_version != legacy_version and file_version != version) or
             std.mem.readInt(u16, bytes[10..12], .little) != record_size) return error.StoreCorrupt;
         const count = std.mem.readInt(u32, bytes[12..16], .little);
         if (count > max_records or bytes.len != header_size + @as(usize, count) * record_size) return error.StoreCorrupt;
@@ -388,7 +469,10 @@ pub const FileStore = struct {
             return error.StoreCorrupt;
         const records = try allocator.alloc(OperationRecord, count);
         errdefer allocator.free(records);
-        for (records, 0..) |*record, index| record.* = try decodeRecord(bytes[header_size + index * record_size ..][0..record_size]);
+        for (records, 0..) |*record, index| record.* = try decodeRecord(
+            bytes[header_size + index * record_size ..][0..record_size],
+            file_version,
+        );
         return records;
     }
 
@@ -397,6 +481,7 @@ pub const FileStore = struct {
         @memcpy(bytes[0..16], &record.operation_id);
         bytes[16] = @intFromEnum(record.kind);
         bytes[17] = @intFromEnum(record.result.state);
+        bytes[18] = @intFromEnum(record.status);
         const binding = record.result.attestation.binding;
         @memcpy(bytes[24..40], &binding.volume_id);
         @memcpy(bytes[40..56], &binding.placement_id);
@@ -408,10 +493,14 @@ pub const FileStore = struct {
         @memcpy(bytes[112..144], &record.result.attestation.backend_digest);
     }
 
-    fn decodeRecord(bytes: *const [record_size]u8) !OperationRecord {
-        if (!isZero(bytes[18..24])) return error.StoreCorrupt;
+    fn decodeRecord(bytes: *const [record_size]u8, file_version: u16) !OperationRecord {
+        if (!isZero(bytes[19..24])) return error.StoreCorrupt;
         const kind = std.enums.fromInt(OperationKind, bytes[16]) orelse return error.StoreCorrupt;
         const state = std.enums.fromInt(ReplicaState, bytes[17]) orelse return error.StoreCorrupt;
+        const status = if (file_version == legacy_version) blk: {
+            if (bytes[18] != 0) return error.StoreCorrupt;
+            break :blk OperationStatus.completed;
+        } else std.enums.fromInt(OperationStatus, bytes[18]) orelse return error.StoreCorrupt;
         const binding: Binding = .{
             .volume_id = bytes[24..40].*,
             .placement_id = bytes[40..56].*,
@@ -430,6 +519,7 @@ pub const FileStore = struct {
         return .{
             .operation_id = bytes[0..16].*,
             .kind = kind,
+            .status = status,
             .result = .{ .state = state, .attestation = .{
                 .binding = binding,
                 .backend_digest = bytes[112..144].*,
@@ -445,14 +535,50 @@ fn validUuidV7Bytes(bytes: []const u8) bool {
 const FakeBackend = struct {
     ensures: usize = 0,
     deletes: usize = 0,
+    ensure_calls: usize = 0,
+    delete_calls: usize = 0,
+    binding: ?Binding = null,
+    active: bool = false,
 
     fn backend(self: *FakeBackend) Backend {
         return .{ .context = self, .vtable = &vtable };
     }
 
+    fn backendWithoutInspect(self: *FakeBackend) Backend {
+        return .{ .context = self, .vtable = &vtable_without_inspect };
+    }
+
     fn ensureOpaque(context: *anyopaque, binding: Binding) !Digest {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
+        self.ensure_calls += 1;
+        if (self.binding) |existing| {
+            if (self.active and !std.meta.eql(existing, binding)) return error.BackendBindingConflict;
+            if (self.active) return digestOf(binding);
+        }
         self.ensures += 1;
+        self.binding = binding;
+        self.active = true;
+        return digestOf(binding);
+    }
+
+    fn deleteOpaque(context: *anyopaque, binding: Binding) !void {
+        const self: *FakeBackend = @ptrCast(@alignCast(context));
+        self.delete_calls += 1;
+        const existing = self.binding orelse return;
+        if (!std.meta.eql(existing, binding)) return error.BackendBindingConflict;
+        if (!self.active) return;
+        self.deletes += 1;
+        self.active = false;
+    }
+
+    fn inspectOpaque(context: *anyopaque, binding: Binding) !BackendState {
+        const self: *FakeBackend = @ptrCast(@alignCast(context));
+        const existing = self.binding orelse return .absent;
+        if (!std.meta.eql(existing, binding)) return error.BackendBindingConflict;
+        return if (self.active) .{ .active = digestOf(binding) } else .deleted;
+    }
+
+    fn digestOf(binding: Binding) Digest {
         var digest: Digest = @splat(0);
         digest[0..16].* = binding.allocation_id;
         std.mem.writeInt(u64, digest[16..24], binding.offset_bytes, .little);
@@ -460,12 +586,15 @@ const FakeBackend = struct {
         return digest;
     }
 
-    fn deleteOpaque(context: *anyopaque, _: Binding) !void {
-        const self: *FakeBackend = @ptrCast(@alignCast(context));
-        self.deletes += 1;
-    }
-
-    const vtable: Backend.VTable = .{ .ensure = ensureOpaque, .delete = deleteOpaque };
+    const vtable: Backend.VTable = .{
+        .inspect = inspectOpaque,
+        .ensure = ensureOpaque,
+        .delete = deleteOpaque,
+    };
+    const vtable_without_inspect: Backend.VTable = .{
+        .ensure = ensureOpaque,
+        .delete = deleteOpaque,
+    };
 };
 
 const volume_id = "0198f54d-5c2a-7000-8000-000000000011";
@@ -540,6 +669,93 @@ test "generation regression and malformed identities and geometry are rejected" 
     invalid = testRequest(inspect_operation_id, 2);
     invalid.offset_bytes = std.math.maxInt(u64);
     try std.testing.expectError(error.InvalidGeometry, service.inspectReplica(invalid));
+}
+
+test "pending operations provide durable at-least-once idempotent recovery" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{};
+
+    {
+        var faults: FileStore.Faults = .{ .fail_replace_once_at_record_count = 2 };
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        file_store.faults = &faults;
+        var service = Service.init(file_store.store(), backend.backendWithoutInspect());
+        try std.testing.expectError(
+            error.InjectedReplaceFailure,
+            service.ensureReplica(testRequest(ensure_operation_id, 1)),
+        );
+        try std.testing.expectEqual(@as(usize, 1), backend.ensures);
+        try std.testing.expectEqual(OperationStatus.prepared, file_store.records[0].status);
+
+        var conflict = testRequest(ensure_operation_id, 1);
+        conflict.length_bytes += 1;
+        try std.testing.expectError(error.OperationConflict, service.ensureReplica(conflict));
+    }
+    {
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        var service = Service.init(file_store.store(), backend.backendWithoutInspect());
+        const recovered = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+        try std.testing.expectEqual(ReplicaState.active, recovered.replica.state);
+        try std.testing.expectEqual(@as(usize, 1), backend.ensures);
+        try std.testing.expectEqual(@as(usize, 2), backend.ensure_calls);
+    }
+    {
+        var faults: FileStore.Faults = .{ .fail_replace_once_at_record_count = 4 };
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        file_store.faults = &faults;
+        var service = Service.init(file_store.store(), backend.backendWithoutInspect());
+        try std.testing.expectError(
+            error.InjectedReplaceFailure,
+            service.deleteReplica(testRequest(delete_operation_id, 1)),
+        );
+        try std.testing.expectEqual(@as(usize, 1), backend.deletes);
+    }
+    {
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        var service = Service.init(file_store.store(), backend.backendWithoutInspect());
+        const recovered = try service.deleteReplica(testRequest(delete_operation_id, 1));
+        try std.testing.expectEqual(ReplicaState.tombstoned, recovered.replica.state);
+        try std.testing.expectEqual(@as(usize, 1), backend.deletes);
+        try std.testing.expectEqual(@as(usize, 2), backend.delete_calls);
+    }
+}
+
+test "FileStore retains a record published before directory sync failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{};
+
+    {
+        var faults: FileStore.Faults = .{ .fail_directory_sync_once_at_record_count = 2 };
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        file_store.faults = &faults;
+        var service = Service.init(file_store.store(), backend.backend());
+        try std.testing.expectError(
+            error.InjectedDirectorySyncFailure,
+            service.ensureReplica(testRequest(ensure_operation_id, 1)),
+        );
+        try std.testing.expectEqual(@as(usize, 2), file_store.records.len);
+        try std.testing.expectEqual(OperationStatus.completed, file_store.records[1].status);
+
+        const retry = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+        try std.testing.expectEqual(ReplicaState.active, retry.replica.state);
+        try std.testing.expectEqual(@as(usize, 1), backend.ensures);
+        try std.testing.expectEqual(@as(usize, 1), backend.ensure_calls);
+    }
+    {
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        var service = Service.init(file_store.store(), backend.backend());
+        _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+        try std.testing.expectEqual(@as(usize, 1), backend.ensures);
+        try std.testing.expectEqual(@as(usize, 1), backend.ensure_calls);
+    }
 }
 
 test "FileStore recovers operations and rejects truncation and corruption" {
