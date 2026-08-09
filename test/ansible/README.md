@@ -213,7 +213,8 @@ fio JSON plus FUSE and Pool transport metrics under
 
 Every exit after modification first detaches all loop devices, restores and
 fully compares the backup, then verifies the original configured Pool ID as a
-mountable LittleFS Pool. Backups are retained by default. Existing
+LittleFS Pool with its original mountability status. Backups are retained by
+default. Existing
 `zettide_raw_keep_backup=false` removes one only after both the benchmark and
 verified restoration succeed. A power loss or `SIGKILL` can still require
 manual restoration from the retained image.

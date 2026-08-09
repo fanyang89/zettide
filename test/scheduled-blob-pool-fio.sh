@@ -60,6 +60,7 @@ device_read_only=false
 restore_verified=false
 original_verified=false
 original_before_verified=false
+original_mountable=""
 test_succeeded=false
 loops_detached=true
 capacity=0
@@ -126,10 +127,18 @@ set_device_writable() {
 
 inspect_original() {
     local output=$1
-    "$cli" pool inspect --device "$device" >"$output"
-    grep -q "^Pool: $original_pool_id$" "$output"
-    grep -q '^Filesystem: littlefs$' "$output"
-    grep -q '^Mountable: yes$' "$output"
+    local actual_mountable
+    "$cli" pool inspect --device "$device" >"$output" || return 1
+    grep -q "^Pool: $original_pool_id$" "$output" || return 1
+    grep -q '^Filesystem: littlefs$' "$output" || return 1
+    actual_mountable=$(grep '^Mountable: ' "$output") || return 1
+    actual_mountable=${actual_mountable#Mountable: }
+    [[ $actual_mountable == yes || $actual_mountable == no ]] || return 1
+    if [[ -z $original_mountable ]]; then
+        original_mountable=$actual_mountable
+    else
+        [[ $actual_mountable == "$original_mountable" ]] || return 1
+    fi
 }
 
 detach_loops() {
@@ -178,7 +187,7 @@ finish() {
             inspect_original "$log_dir/original-pool-inspect-restored.log"; then
             restore_verified=true
             original_verified=true
-            record_event "restore-verified bytes=$capacity pool=$original_pool_id filesystem=littlefs mountable=yes"
+            record_event "restore-verified bytes=$capacity pool=$original_pool_id filesystem=littlefs mountable=$original_mountable"
         else
             cleanup_result=1
             record_event "restore-failed"
@@ -201,6 +210,7 @@ finish() {
         echo "device=$device"
         echo "serial=$expected_serial"
         echo "original_pool_id=$original_pool_id"
+        echo "original_mountable=$original_mountable"
         echo "scheduled_pool_id=$scheduled_pool_id"
         echo "backup=$backup"
         echo "capacity=$capacity"
@@ -268,7 +278,7 @@ done < <(lsblk --noheadings --paths --raw --output NAME "$device")
 
 inspect_original "$log_dir/original-pool-inspect-before.log"
 original_before_verified=true
-record_event "original-verified pool=$original_pool_id filesystem=littlefs mountable=yes"
+record_event "original-verified pool=$original_pool_id filesystem=littlefs mountable=$original_mountable"
 set_device_read_only
 record_event "backup-start path=$backup bytes=$capacity"
 dd if="$device" of="$backup" bs=16M iflag=fullblock oflag=nofollow conv=sparse,fsync,excl status=none
