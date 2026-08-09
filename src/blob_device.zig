@@ -1,5 +1,4 @@
 const std = @import("std");
-const file_storage = @import("v3/file_storage.zig");
 const storage_api = @import("v3/storage.zig");
 
 const Io = std.Io;
@@ -55,20 +54,6 @@ pub const Device = struct {
         io_alignment: u32,
     ) !Device {
         var storage = try storage_api.Storage.createFile(io, parent, basename, capacity_bytes);
-        errdefer storage.close(io) catch {};
-        return init(storage, 0, capacity_bytes, io_alignment);
-    }
-
-    pub fn createFileWithMode(
-        allocator: std.mem.Allocator,
-        io: Io,
-        parent: Io.Dir,
-        basename: []const u8,
-        capacity_bytes: u64,
-        io_alignment: u32,
-        mode: file_storage.Mode,
-    ) !Device {
-        var storage = try file_storage.createFile(allocator, io, parent, basename, capacity_bytes, mode);
         errdefer storage.close(io) catch {};
         return init(storage, 0, capacity_bytes, io_alignment);
     }

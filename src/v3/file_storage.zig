@@ -17,48 +17,6 @@ pub const Mode = enum {
     }
 };
 
-pub fn createFile(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    parent: std.Io.Dir,
-    basename: []const u8,
-    capacity_bytes: u64,
-    mode: Mode,
-) !storage_api.Storage {
-    const file = try parent.createFile(io, basename, .{
-        .read = true,
-        .exclusive = true,
-        .lock = .exclusive,
-        .lock_nonblocking = true,
-    });
-    errdefer {
-        file.unlock(io);
-        file.close(io);
-    }
-    try file.setLength(io, capacity_bytes);
-    return initOwned(allocator, file, capacity_bytes, true, true, mode);
-}
-
-pub fn openFile(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    parent: std.Io.Dir,
-    basename: []const u8,
-    writable: bool,
-    mode: Mode,
-) !storage_api.Storage {
-    const file = try parent.openFile(io, basename, .{
-        .mode = if (writable) .read_write else .read_only,
-        .lock = if (writable) .exclusive else .shared,
-        .lock_nonblocking = true,
-    });
-    errdefer {
-        file.unlock(io);
-        file.close(io);
-    }
-    return initOwned(allocator, file, try file.length(io), writable, true, mode);
-}
-
 pub fn initOwned(
     allocator: std.mem.Allocator,
     file: std.Io.File,
