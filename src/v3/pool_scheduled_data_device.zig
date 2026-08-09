@@ -4,6 +4,8 @@ const ReplicaEndpoint = @import("replica_endpoint.zig").ReplicaEndpoint;
 const storage_api = @import("storage.zig");
 
 pub const minimum_io_size: u32 = 4096;
+pub const max_read_count: usize = 32;
+pub const max_read_size: usize = 1024 * 1024;
 pub const max_write_count: usize = 32;
 pub const max_write_size: usize = 1024 * 1024;
 pub const max_span_count: usize = 64;
@@ -20,6 +22,7 @@ const Member = struct {
 
 const Operation = union(enum) {
     read: struct { offset: u64, buffer: []u8 },
+    read_many: struct { reads: []const storage_api.Read, results: []storage_api.ReadResult },
     write_many: []const storage_api.Write,
     sync,
 };
@@ -97,11 +100,34 @@ pub const Device = struct {
         if (reads.len != results.len) return error.InvalidReadBatch;
         for (results) |*result| result.* = .{};
         for (reads) |read| try self.validateRange(read.offset, read.buffer.len);
-        for (reads, results) |read, *result| {
-            result.amount = self.readAt(read.buffer, read.offset) catch |err| {
-                result.failure = err;
+        var index: usize = 0;
+        while (index < reads.len) {
+            var batch_count: usize = 0;
+            var batch_bytes: usize = 0;
+            while (index + batch_count < reads.len and batch_count < max_read_count) {
+                const read = reads[index + batch_count];
+                if (self.spanLength(read.offset, read.buffer.len) != read.buffer.len or
+                    read.buffer.len > max_read_size - batch_bytes) break;
+                batch_bytes += read.buffer.len;
+                batch_count += 1;
+            }
+            if (batch_count != 0) {
+                self.readBatch(
+                    reads[index..][0..batch_count],
+                    results[index..][0..batch_count],
+                ) catch |err| {
+                    for (results[index..][0..batch_count]) |*result| result.failure = err;
+                };
+                index += batch_count;
+                continue;
+            }
+            const read = reads[index];
+            results[index].amount = self.readAt(read.buffer, read.offset) catch |err| {
+                results[index].failure = err;
+                index += 1;
                 continue;
             };
+            index += 1;
         }
     }
 
@@ -249,6 +275,117 @@ pub const Device = struct {
             error.ReplicaQuorumUnavailable;
     }
 
+    fn readBatch(
+        self: *Device,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+    ) !void {
+        std.debug.assert(reads.len == results.len and reads.len <= max_read_count);
+        var total_bytes: usize = 0;
+        for (reads) |read| total_bytes = std.math.add(usize, total_bytes, read.buffer.len) catch
+            return error.OutOfMemory;
+        const allocation_len = std.math.mul(usize, total_bytes, pool_blob_schedule.replica_count) catch
+            return error.OutOfMemory;
+        const copies = try self.allocator.alignedAlloc(
+            u8,
+            .fromByteUnits(minimum_io_size),
+            allocation_len,
+        );
+        defer self.allocator.free(copies);
+
+        const Target = struct { request: u8, lane: u8 };
+        var member_reads: [pool_blob_schedule.max_member_count][max_read_count]storage_api.Read = undefined;
+        var member_results: [pool_blob_schedule.max_member_count][max_read_count]storage_api.ReadResult = undefined;
+        var member_targets: [pool_blob_schedule.max_member_count][max_read_count]Target = undefined;
+        var member_read_counts: [pool_blob_schedule.max_member_count]usize = @splat(0);
+        var request_offsets: [max_read_count]usize = undefined;
+        var submitted_counts: [max_read_count]u8 = @splat(0);
+        var copy_offset: usize = 0;
+        for (reads, 0..) |read, request_index| {
+            request_offsets[request_index] = copy_offset;
+            const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
+            for (locations, 0..) |location, lane| {
+                const member_index = self.memberIndex(location.slot) orelse continue;
+                const member_read_index = member_read_counts[member_index];
+                member_reads[member_index][member_read_index] = .{
+                    .buffer = copies[copy_offset + lane * read.buffer.len ..][0..read.buffer.len],
+                    .offset = try self.physicalOffset(location, read.offset % self.plan.stripe_size),
+                };
+                member_results[member_index][member_read_index] = .{};
+                member_targets[member_index][member_read_index] = .{
+                    .request = @intCast(request_index),
+                    .lane = @intCast(lane),
+                };
+                member_read_counts[member_index] += 1;
+                submitted_counts[request_index] += 1;
+            }
+            copy_offset += read.buffer.len * pool_blob_schedule.replica_count;
+        }
+
+        var operations: [pool_blob_schedule.max_member_count]Operation = undefined;
+        var operation_members: [pool_blob_schedule.max_member_count]usize = undefined;
+        var errors: [pool_blob_schedule.max_member_count]?anyerror = @splat(null);
+        var operation_count: usize = 0;
+        for (member_read_counts, 0..) |count, member_index| {
+            if (count == 0) continue;
+            operations[operation_count] = .{ .read_many = .{
+                .reads = member_reads[member_index][0..count],
+                .results = member_results[member_index][0..count],
+            } };
+            operation_members[operation_count] = member_index;
+            operation_count += 1;
+        }
+        self.runOperations(
+            operations[0..operation_count],
+            operation_members[0..operation_count],
+            errors[0..operation_count],
+        ) catch {
+            for (results) |*result| result.failure = error.ReplicaQuorumUnavailable;
+            return;
+        };
+
+        var successful: [max_read_count][pool_blob_schedule.replica_count]bool =
+            @splat(@splat(false));
+        for (operation_members[0..operation_count], errors[0..operation_count]) |member_index, operation_error| {
+            if (operation_error != null) continue;
+            for (
+                member_results[member_index][0..member_read_counts[member_index]],
+                member_targets[member_index][0..member_read_counts[member_index]],
+            ) |endpoint_result, target| {
+                const request_index: usize = target.request;
+                if (endpoint_result.failure == null and endpoint_result.amount == reads[request_index].buffer.len)
+                    successful[request_index][target.lane] = true;
+            }
+        }
+
+        for (reads, results, 0..) |read, *result, request_index| {
+            const base = request_offsets[request_index];
+            var successful_count: u8 = 0;
+            for (successful[request_index]) |value| successful_count += @intFromBool(value);
+            for (0..pool_blob_schedule.replica_count) |left| {
+                if (!successful[request_index][left]) continue;
+                for (left + 1..pool_blob_schedule.replica_count) |right| {
+                    if (successful[request_index][right] and std.mem.eql(
+                        u8,
+                        copies[base + left * read.buffer.len ..][0..read.buffer.len],
+                        copies[base + right * read.buffer.len ..][0..read.buffer.len],
+                    )) {
+                        @memcpy(read.buffer, copies[base + left * read.buffer.len ..][0..read.buffer.len]);
+                        result.amount = read.buffer.len;
+                        break;
+                    }
+                } else continue;
+                break;
+            } else {
+                result.failure = if (submitted_counts[request_index] == pool_blob_schedule.replica_count and
+                    successful_count == pool_blob_schedule.replica_count)
+                    error.ReplicaDivergence
+                else
+                    error.ReplicaQuorumUnavailable;
+            }
+        }
+    }
+
     fn validateRange(self: *const Device, offset: u64, len: usize) !void {
         if (len == 0 or offset % minimum_io_size != 0 or len % minimum_io_size != 0 or
             offset > self.logical_capacity or len > self.logical_capacity - offset)
@@ -308,6 +445,7 @@ fn runOperation(endpoint: ReplicaEndpoint, operation: Operation, result: *?anyer
     result.* = null;
     (switch (operation) {
         .read => |read| endpoint.readData(read.offset, read.buffer),
+        .read_many => |batch| endpoint.readDataMany(batch.reads, batch.results),
         .write_many => |writes| endpoint.writeDataMany(writes),
         .sync => endpoint.sync(),
     }) catch |err| {
@@ -323,6 +461,8 @@ fn firstError(errors: []const ?anyerror) ?anyerror {
 const TestEndpoint = struct {
     bytes: []u8,
     read_calls: std.atomic.Value(usize) = .init(0),
+    read_batch_calls: std.atomic.Value(usize) = .init(0),
+    read_batch_items: std.atomic.Value(usize) = .init(0),
     write_calls: std.atomic.Value(usize) = .init(0),
     write_batch_calls: std.atomic.Value(usize) = .init(0),
     sync_calls: std.atomic.Value(usize) = .init(0),
@@ -339,6 +479,34 @@ const TestEndpoint = struct {
         const start = std.math.cast(usize, offset) orelse return error.OutOfBounds;
         if (start > self.bytes.len or buffer.len > self.bytes.len - start) return error.OutOfBounds;
         @memcpy(buffer, self.bytes[start..][0..buffer.len]);
+    }
+
+    fn readDataMany(
+        context: *anyopaque,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+    ) !void {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        const self: *@This() = @ptrCast(@alignCast(context));
+        _ = self.read_batch_calls.fetchAdd(1, .monotonic);
+        _ = self.read_batch_items.fetchAdd(reads.len, .monotonic);
+        for (results) |*result| result.* = .{};
+        for (reads, results) |read, *result| {
+            if (self.fail_read) {
+                result.failure = error.InjectedReadFault;
+                continue;
+            }
+            const start = std.math.cast(usize, read.offset) orelse {
+                result.failure = error.OutOfBounds;
+                continue;
+            };
+            if (start > self.bytes.len or read.buffer.len > self.bytes.len - start) {
+                result.failure = error.OutOfBounds;
+                continue;
+            }
+            @memcpy(read.buffer, self.bytes[start..][0..read.buffer.len]);
+            result.amount = read.buffer.len;
+        }
     }
 
     fn writeData(context: *anyopaque, offset: u64, bytes: []const u8) !void {
@@ -371,6 +539,7 @@ const TestEndpoint = struct {
     const vtable: ReplicaEndpoint.VTable = .{
         .read_metadata = readMetadata,
         .read_data = readData,
+        .read_data_many = readDataMany,
         .write_data = writeData,
         .write_data_many = writeDataMany,
         .write_metadata_durable = writeMetadataDurable,
@@ -526,6 +695,43 @@ test "scheduled writes cross stripes, keep three copies, and batch by member" {
     try std.testing.expectEqualSlices(u8, &input, &output);
 }
 
+test "scheduled readMany batches requests by physical member" {
+    const plan = try testPlan(12, 4096, 32);
+    var contexts: [12]TestEndpoint = undefined;
+    var endpoints: [12]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+
+    var input: [max_read_count][4096]u8 = undefined;
+    var output: [max_read_count][4096]u8 = undefined;
+    var writes: [max_read_count]storage_api.Write = undefined;
+    var reads: [max_read_count]storage_api.Read = undefined;
+    for (&input, &output, &writes, &reads, 0..) |*source, *destination, *write, *read, index| {
+        @memset(source, @intCast(index + 1));
+        @memset(destination, 0);
+        write.* = .{ .bytes = source, .offset = index * 4096 };
+        read.* = .{ .buffer = destination, .offset = index * 4096 };
+    }
+    try device.writeAllManyAt(&writes);
+    var results: [max_read_count]storage_api.ReadResult = undefined;
+    try device.readManyAt(&reads, &results);
+
+    var total_batch_items: usize = 0;
+    for (&contexts) |*context| {
+        const items = context.read_batch_items.load(.monotonic);
+        total_batch_items += items;
+        try std.testing.expectEqual(@as(usize, 0), context.read_calls.load(.monotonic));
+        try std.testing.expectEqual(@intFromBool(items != 0), context.read_batch_calls.load(.monotonic));
+    }
+    try std.testing.expectEqual(max_read_count * pool_blob_schedule.replica_count, total_batch_items);
+    for (&input, &output, results) |*source, *destination, result| {
+        try std.testing.expectEqual(@as(?anyerror, null), result.failure);
+        try std.testing.expectEqual(@as(usize, 4096), result.amount);
+        try std.testing.expectEqualSlices(u8, source, destination);
+    }
+}
+
 test "scheduled reads select a matching pair and classify quorum failures" {
     const plan = try testPlan(3, 4096, 4);
     var contexts: [3]TestEndpoint = undefined;
@@ -539,13 +745,53 @@ test "scheduled reads select a matching pair and classify quorum failures" {
     var output: [4096]u8 = undefined;
     _ = try device.readAt(&output, 0);
     try std.testing.expectEqual(@as(u8, 7), output[0]);
+    @memset(mappedBytes(&device, &contexts, 1, 0), 4);
+    @memset(mappedBytes(&device, &contexts, 1, 1), 5);
+    @memset(mappedBytes(&device, &contexts, 1, 2), 6);
+    var second_output: [4096]u8 = undefined;
+    var batch_results: [2]storage_api.ReadResult = undefined;
+    try device.readManyAt(&.{
+        .{ .buffer = &output, .offset = 0 },
+        .{ .buffer = &second_output, .offset = 4096 },
+    }, &batch_results);
+    try std.testing.expectEqual(@as(?anyerror, null), batch_results[0].failure);
+    try std.testing.expectEqual(@as(usize, output.len), batch_results[0].amount);
+    try std.testing.expectEqual(error.ReplicaDivergence, batch_results[1].failure.?);
 
     @memset(mappedBytes(&device, &contexts, 0, 0), 1);
     @memset(mappedBytes(&device, &contexts, 0, 1), 2);
     @memset(mappedBytes(&device, &contexts, 0, 2), 3);
     try std.testing.expectError(error.ReplicaDivergence, device.readAt(&output, 0));
+    try device.readManyAt(&.{.{ .buffer = &output, .offset = 0 }}, batch_results[0..1]);
+    try std.testing.expectEqual(error.ReplicaDivergence, batch_results[0].failure.?);
     contexts[device.memberIndex((try pool_blob_schedule.map(plan, 0))[0].slot).?].fail_read = true;
     try std.testing.expectError(error.ReplicaQuorumUnavailable, device.readAt(&output, 0));
+    try device.readManyAt(&.{.{ .buffer = &output, .offset = 0 }}, batch_results[0..1]);
+    try std.testing.expectEqual(error.ReplicaQuorumUnavailable, batch_results[0].failure.?);
+}
+
+test "scheduled readMany falls back for cross-stripe requests" {
+    const plan = try testPlan(3, 8192, 4);
+    var contexts: [3]TestEndpoint = undefined;
+    var endpoints: [3]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    var input: [8192]u8 = undefined;
+    for (&input, 0..) |*byte, index| byte.* = @truncate(index *% 19);
+    try device.writeAllAt(&input, 4096);
+
+    var output: [8192]u8 = undefined;
+    var results: [1]storage_api.ReadResult = undefined;
+    try device.readManyAt(&.{.{ .buffer = &output, .offset = 4096 }}, &results);
+    try std.testing.expectEqual(@as(?anyerror, null), results[0].failure);
+    try std.testing.expectEqualSlices(u8, &input, &output);
+    var total_read_calls: usize = 0;
+    for (&contexts) |*context| {
+        total_read_calls += context.read_calls.load(.monotonic);
+        try std.testing.expectEqual(@as(usize, 0), context.read_batch_calls.load(.monotonic));
+    }
+    try std.testing.expectEqual(@as(usize, 2 * pool_blob_schedule.replica_count), total_read_calls);
 }
 
 test "scheduled degraded reads require both remaining replicas and reject writes" {
@@ -569,7 +815,9 @@ test "scheduled degraded reads require both remaining replicas and reject writes
             available_count += 1;
         }
         var degraded = try Device.init(std.testing.allocator, std.testing.io, &available, plan);
-        _ = try degraded.readAt(&output, 0);
+        var read_results: [1]storage_api.ReadResult = undefined;
+        try degraded.readManyAt(&.{.{ .buffer = &output, .offset = 0 }}, &read_results);
+        try std.testing.expectEqual(@as(?anyerror, null), read_results[0].failure);
         try std.testing.expectEqual(@as(u8, 7), output[0]);
         try std.testing.expectError(error.DegradedDeviceReadOnly, degraded.writeAllAt(&input, 0));
 
@@ -579,7 +827,8 @@ test "scheduled degraded reads require both remaining replicas and reject writes
             @memset(mappedBytes(&full, &contexts, 0, lane), value);
             value += 1;
         }
-        try std.testing.expectError(error.ReplicaQuorumUnavailable, degraded.readAt(&output, 0));
+        try degraded.readManyAt(&.{.{ .buffer = &output, .offset = 0 }}, &read_results);
+        try std.testing.expectEqual(error.ReplicaQuorumUnavailable, read_results[0].failure.?);
     }
 
     try std.testing.expectError(
