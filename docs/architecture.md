@@ -307,11 +307,11 @@ their mapping and updated inode. The SCSI batch writes all staged payload and
 metadata objects, crosses one durability barrier, activates every object as
 live, and only then permits anchor publication.
 
-Zettide remains responsible for FUSE behavior and POSIX policy above this
-metadata core. Existing littlefs volumes stay single-writer; shared writable
-volumes use CAWFS. Overwrite, append, truncate, holes, multiple extents, mutable
-`.data` allocations, orphan reclaim, garbage collection, and general POSIX data
-semantics remain unsupported. Deletion, rename, symlinks, Unicode policy, and
-clocks are also outside the current metadata core. External fencing is still
-required before writable ownership or takeover; metadata publication does not
-prove that an old writer can no longer issue I/O.
+Zettide's backend-neutral FUSE and POSIX frontend uses BlobFilesystem for local
+single-writer volumes and CAWFS for shared writable volumes. Overwrite, append,
+truncate, holes, multiple extents, mutable `.data` allocations, orphan reclaim,
+garbage collection, and general POSIX data semantics remain unsupported.
+Deletion, rename, symlinks, Unicode policy, and clocks are also outside the
+current metadata core. External fencing is still required before writable
+ownership or takeover; metadata publication does not prove that an old writer
+can no longer issue I/O.

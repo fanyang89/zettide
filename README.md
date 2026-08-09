@@ -20,8 +20,8 @@ codes to the transaction engine.
 
 CAWFS owns the minimal persistent metadata model for shared writable volumes:
 an immutable filesystem root references inode, directory-entry, and extent
-B+trees. Zettide remains responsible for FUSE and POSIX policy, while littlefs
-remains its local single-writer backend.
+B+trees. Zettide's backend-neutral FUSE and POSIX frontend uses BlobFilesystem
+for local single-writer volumes and CAWFS for shared writable volumes.
 
 Current file data support is deliberately narrow: one non-empty immutable
 object and opaque extent reference may be written once to an existing empty
