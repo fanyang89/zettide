@@ -3,6 +3,7 @@ const linux_io_uring = @import("../linux_io_uring.zig");
 const storage_api = @import("storage.zig");
 
 const File = std.Io.File;
+const max_engine_lanes = 4;
 
 pub const Mode = enum {
     auto,
@@ -16,13 +17,39 @@ pub const Identity = struct {
     disk_sequence: u64,
 };
 
+const EnginePool = struct {
+    engines: [max_engine_lanes]linux_io_uring.Engine = undefined,
+    count: usize,
+
+    fn init(fd: std.os.linux.fd_t) !EnginePool {
+        var pool: EnginePool = .{ .count = 0 };
+        pool.engines[0] = try .init(fd);
+        pool.count = 1;
+        while (pool.count < pool.engines.len) {
+            pool.engines[pool.count] = linux_io_uring.Engine.init(fd) catch break;
+            pool.count += 1;
+        }
+        return pool;
+    }
+
+    fn initialized(self: *EnginePool) []linux_io_uring.Engine {
+        return self.engines[0..self.count];
+    }
+
+    fn deinit(self: *EnginePool) void {
+        for (self.initialized()) |*engine| engine.deinit();
+        self.* = undefined;
+    }
+};
+
 const Context = struct {
     allocator: std.mem.Allocator,
     file: File,
     capacity_bytes: u64,
     identity: Identity,
     writable: bool,
-    engine: ?linux_io_uring.Engine,
+    engine_pool: ?EnginePool,
+    read_lane: std.atomic.Value(u64) = .init(0),
     mutex: std.Io.RwLock = .init,
 };
 
@@ -43,10 +70,10 @@ pub fn initOwned(
         .capacity_bytes = capacity_bytes,
         .identity = identity,
         .writable = writable,
-        .engine = switch (mode) {
+        .engine_pool = switch (mode) {
             .posix => null,
             .io_uring => try .init(file.handle),
-            .auto => linux_io_uring.Engine.init(file.handle) catch |err|
+            .auto => EnginePool.init(file.handle) catch |err|
                 if (shouldFallback(mode, err)) null else return err,
         },
     };
@@ -100,10 +127,12 @@ fn readManyAt(
     if (reads.len != results.len) return error.InvalidReadBatch;
     for (reads) |read| try validateRange(context, read.offset, read.buffer.len);
 
-    if (context.engine != null and reads.len > 1) {
+    if (context.engine_pool != null and reads.len > 1) {
         context.mutex.lockShared(io) catch |err| return mapOperationError(err);
         defer context.mutex.unlockShared(io);
-        const engine = &context.engine.?;
+        const pool = &context.engine_pool.?;
+        const lane = nextReadLane(&context.read_lane, pool.count);
+        const engine = &pool.engines[lane];
         engine.readManyAt(io, reads, results) catch |err| return mapOperationError(err);
         for (results) |*result| {
             if (result.failure) |err| result.failure = mapOperationError(err);
@@ -128,8 +157,8 @@ fn writeAllAt(context_ptr: *anyopaque, io: std.Io, bytes: []const u8, offset: u6
     try validateRange(context, offset, bytes.len);
     if (!context.writable) return error.ReadOnlyStorage;
 
-    if (context.engine) |*engine|
-        engine.writeAllAt(io, bytes, offset) catch |err| return mapOperationError(err)
+    if (context.engine_pool) |*pool|
+        pool.engines[0].writeAllAt(io, bytes, offset) catch |err| return mapOperationError(err)
     else
         context.file.writePositionalAll(io, bytes, offset) catch |err| return mapOperationError(err);
 }
@@ -141,8 +170,8 @@ fn writeAllManyAt(context_ptr: *anyopaque, io: std.Io, writes: []const storage_a
     if (!context.writable) return error.ReadOnlyStorage;
     for (writes) |write| try validateRange(context, write.offset, write.bytes.len);
 
-    if (context.engine) |*engine|
-        engine.writeAllManyAt(io, writes) catch |err| return mapOperationError(err)
+    if (context.engine_pool) |*pool|
+        pool.engines[0].writeAllManyAt(io, writes) catch |err| return mapOperationError(err)
     else for (writes) |write|
         context.file.writePositionalAll(io, write.bytes, write.offset) catch |err|
             return mapOperationError(err);
@@ -153,8 +182,8 @@ fn syncData(context_ptr: *anyopaque, io: std.Io) !void {
     context.mutex.lock(io) catch |err| return mapOperationError(err);
     defer context.mutex.unlock(io);
 
-    if (context.engine) |*engine|
-        engine.sync(io, .data) catch |err| return mapOperationError(err)
+    if (context.engine_pool) |*pool|
+        pool.engines[0].sync(io, .data) catch |err| return mapOperationError(err)
     else
         std.posix.fdatasync(context.file.handle) catch |err| return mapOperationError(err);
 }
@@ -164,48 +193,57 @@ fn sync(context_ptr: *anyopaque, io: std.Io) !void {
     context.mutex.lock(io) catch |err| return mapOperationError(err);
     defer context.mutex.unlock(io);
 
-    if (context.engine) |*engine|
-        engine.sync(io, .full) catch |err| return mapOperationError(err)
+    if (context.engine_pool) |*pool|
+        pool.engines[0].sync(io, .full) catch |err| return mapOperationError(err)
     else
         context.file.sync(io) catch |err| return mapOperationError(err);
 }
 
 fn transportKind(context_ptr: *anyopaque) storage_api.TransportKind {
     const context: *const Context = @ptrCast(@alignCast(context_ptr));
-    return if (context.engine != null) .io_uring else .posix;
+    return if (context.engine_pool != null) .io_uring else .posix;
 }
 
 fn transportStats(context_ptr: *anyopaque, io: std.Io) storage_api.TransportStats {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.mutex.lockUncancelable(io);
     defer context.mutex.unlock(io);
-    const engine = if (context.engine) |*value| value else return .{};
-    const stats = engine.getStats(io);
-    return .{
-        .queue_capacity = stats.queue_capacity,
-        .submitted_sqes = stats.submitted_sqes,
-        .submit_calls = stats.submit_calls,
-        .completions = stats.completions,
-        .current_inflight = stats.current_inflight,
-        .max_inflight = stats.max_inflight,
-    };
+    const pool = if (context.engine_pool) |*value| value else return .{};
+    var total: storage_api.TransportStats = .{};
+    for (pool.initialized()) |*engine| addTransportStats(&total, engine.getStats(io));
+    return total;
 }
 
 fn resetTransportStats(context_ptr: *anyopaque, io: std.Io) void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.mutex.lockUncancelable(io);
     defer context.mutex.unlock(io);
-    if (context.engine) |*engine| engine.resetStats(io);
+    if (context.engine_pool) |*pool|
+        for (pool.initialized()) |*engine| engine.resetStats(io);
 }
 
 fn close(context_ptr: *anyopaque, io: std.Io) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.mutex.lockUncancelable(io);
-    if (context.engine) |*engine| engine.deinit();
+    if (context.engine_pool) |*pool| pool.deinit();
     context.file.close(io);
     const allocator = context.allocator;
     context.mutex.unlock(io);
     allocator.destroy(context);
+}
+
+fn nextReadLane(sequence: *std.atomic.Value(u64), lane_count: usize) usize {
+    std.debug.assert(lane_count > 0 and lane_count <= max_engine_lanes);
+    return @intCast(sequence.fetchAdd(1, .monotonic) % lane_count);
+}
+
+fn addTransportStats(total: *storage_api.TransportStats, stats: linux_io_uring.Stats) void {
+    total.queue_capacity +|= stats.queue_capacity;
+    total.submitted_sqes +|= stats.submitted_sqes;
+    total.submit_calls +|= stats.submit_calls;
+    total.completions +|= stats.completions;
+    total.current_inflight +|= stats.current_inflight;
+    total.max_inflight +|= stats.max_inflight;
 }
 
 fn validateRange(context: *const Context, offset: u64, len: usize) !void {
@@ -264,6 +302,42 @@ test "automatic raw transport only falls back when io_uring is unavailable" {
     try std.testing.expect(!shouldFallback(.auto, error.ProcessFdQuotaExceeded));
     try std.testing.expect(!shouldFallback(.auto, error.StorageIo));
     try std.testing.expect(!shouldFallback(.auto, error.InvalidStorageCompletion));
+}
+
+test "raw io_uring read lanes round robin across counter overflow" {
+    var sequence: std.atomic.Value(u64) = .init(std.math.maxInt(u64) - 1);
+    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 1));
+    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 1));
+
+    sequence.store(std.math.maxInt(u64) - 1, .monotonic);
+    try std.testing.expectEqual(@as(usize, 2), nextReadLane(&sequence, 4));
+    try std.testing.expectEqual(@as(usize, 3), nextReadLane(&sequence, 4));
+    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 4));
+    try std.testing.expectEqual(@as(usize, 1), nextReadLane(&sequence, 4));
+
+    sequence.store(std.math.maxInt(u64) - 1, .monotonic);
+    try std.testing.expectEqual(@as(usize, 2), nextReadLane(&sequence, 3));
+    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 3));
+    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 3));
+    try std.testing.expectEqual(@as(usize, 1), nextReadLane(&sequence, 3));
+}
+
+test "raw io_uring transport stats aggregate with saturation" {
+    var total: storage_api.TransportStats = .{ .submitted_sqes = std.math.maxInt(u64) - 1 };
+    addTransportStats(&total, .{
+        .queue_capacity = 7,
+        .submitted_sqes = 3,
+        .submit_calls = 5,
+        .completions = 4,
+        .current_inflight = 2,
+        .max_inflight = 6,
+    });
+    try std.testing.expectEqual(@as(u64, 7), total.queue_capacity);
+    try std.testing.expectEqual(std.math.maxInt(u64), total.submitted_sqes);
+    try std.testing.expectEqual(@as(u64, 5), total.submit_calls);
+    try std.testing.expectEqual(@as(u64, 4), total.completions);
+    try std.testing.expectEqual(@as(u64, 2), total.current_inflight);
+    try std.testing.expectEqual(@as(u64, 6), total.max_inflight);
 }
 
 test "forced POSIX raw storage preserves identity and bounds" {
@@ -351,6 +425,9 @@ test "forced io_uring raw storage uses positional singleton reads and engine bat
     for (results) |result| try std.testing.expectEqual(@as(usize, 4), result.amount);
     try std.testing.expectEqual(storage_api.TransportKind.io_uring, storage.transportKind());
     const stats = storage.transportStats(std.testing.io);
+    try std.testing.expect(stats.queue_capacity >= linux_io_uring.queue_entries);
+    try std.testing.expect(stats.queue_capacity <= max_engine_lanes * linux_io_uring.queue_entries);
+    try std.testing.expectEqual(@as(u64, 0), stats.queue_capacity % linux_io_uring.queue_entries);
     try std.testing.expectEqual(@as(u64, 4), stats.submitted_sqes);
     try std.testing.expectEqual(stats.submitted_sqes, stats.completions);
     try std.testing.expect(stats.max_inflight >= 1);
