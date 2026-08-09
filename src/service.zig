@@ -2,7 +2,7 @@ const std = @import("std");
 
 const grpc = @import("grpc_lite");
 const pb = @import("control_proto");
-const raft = @import("raft_zig");
+const raft = @import("raftz");
 const uuid = @import("uuid");
 const heartbeat = @import("heartbeat.zig");
 const state_machine = @import("state_machine.zig");

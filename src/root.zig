@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const pb = @import("control_proto");
 pub const grpc = @import("grpc_lite");
-pub const raft = @import("raft_zig");
+pub const raft = @import("raftz");
 pub const uuid = @import("uuid");
 pub const config = @import("config.zig");
 pub const runtime = @import("runtime.zig");

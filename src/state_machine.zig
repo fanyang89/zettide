@@ -2,7 +2,7 @@ const std = @import("std");
 
 const pb = @import("control_proto");
 const heartbeat = @import("heartbeat.zig");
-const raft = @import("raft_zig");
+const raft = @import("raftz");
 const uuid = @import("uuid");
 const wire = @import("protobuf_wire.zig");
 

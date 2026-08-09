@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const grpc = @import("grpc_lite");
-const raft = @import("raft_zig");
+const raft = @import("raftz");
 const config_mod = @import("config.zig");
 const heartbeat = @import("heartbeat.zig");
 const service_mod = @import("service.zig");

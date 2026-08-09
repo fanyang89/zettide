@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const pb = @import("control_proto");
-const raft = @import("raft_zig");
+const raft = @import("raftz");
 const state_machine = @import("state_machine.zig");
 
 const ProposalProbe = struct {

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const clap = @import("clap");
-const raft = @import("raft_zig");
+const raft = @import("raftz");
 const uuid = @import("uuid");
 
 const params = clap.parseParamsComptime(

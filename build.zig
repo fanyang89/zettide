@@ -1,11 +1,11 @@
 const std = @import("std");
-const raft_build = @import("raft_zig");
+const raft_build = @import("raftz");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const raft_dependency = b.dependency("raft_zig", .{
+    const raft_dependency = b.dependency("raftz", .{
         .target = target,
         .optimize = optimize,
     });
@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "clap", .module = clap_dependency.module("clap") },
             .{ .name = "control_proto", .module = control_proto },
             .{ .name = "grpc_lite", .module = grpc_module },
-            .{ .name = "raft_zig", .module = raft_dependency.module("raft_zig") },
+            .{ .name = "raftz", .module = raft_dependency.module("raftz") },
             .{ .name = "uuid", .module = uuid_dependency.module("uuid") },
         },
     });

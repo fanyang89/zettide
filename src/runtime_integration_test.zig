@@ -2,7 +2,7 @@ const std = @import("std");
 
 const pb = @import("control_proto");
 const grpc = @import("grpc_lite");
-const raft = @import("raft_zig");
+const raft = @import("raftz");
 const config_mod = @import("config.zig");
 const runtime_mod = @import("runtime.zig");
 
