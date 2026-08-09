@@ -155,7 +155,7 @@ the original image in the configured backup directory regardless of
 
 Set `-e zettide_raw_fuse_fio=true` to create the physical Pool first and run
 fio through its Zettide FUSE mount. This bypasses the original host filesystem
-while retaining the complete Zettide Pool, LittleFS, and FUSE path. The workload
+while retaining the complete Blob Pool and FUSE path. The workload
 uses `io_uring` with direct I/O and covers 1 MiB sequential QD32 plus 4 KiB random
 QD1, QD32, and four jobs at QD32. It uses one 2 GiB file and four 512 MiB files.
 The Pool is cleanly reopened between write and read phases. Override the
@@ -175,8 +175,8 @@ mount uses `--metrics`, so its archived log contains workload-specific FUSE,
 pipeline, and member transport metrics. It does not modify partition tables or
 restore the original device image.
 
-To benchmark a temporary native Blob Pool on the same physical disk while
-preserving the retained LittleFS Pool, run:
+To benchmark a temporary Blob Pool on a disk that currently holds a Catalog
+Pool, run:
 
 ```sh
 uv run ansible-playbook test/ansible/blob-pool-fio.yml --limit zettide-tier1 \
@@ -184,40 +184,12 @@ uv run ansible-playbook test/ansible/blob-pool-fio.yml --limit zettide-tier1 \
 ```
 
 This profile requires the configured raw device to contain the expected
-mountable LittleFS Pool with no mounted descendants or open holders. It creates
+mountable Catalog Pool with no mounted descendants or open holders. It creates
 and byte-compares a sparse full-device backup on another filesystem, replaces
 the disk with an unprotected native Blob Pool, runs the physical Pool fio matrix,
 then restores and byte-compares the original image. A final read-only inspection
 must recover the original Pool ID and mountability. The backup is retained by
 default; a power loss or `SIGKILL` can still require manual restoration.
-
-To benchmark the scheduled Blob data path with three synthetic members carved
-from the single configured Optane device, run the ReleaseSafe-only profile with
-the exact path and serial already present in `zettide_raw_device`:
-
-```sh
-uv run ansible-playbook test/ansible/scheduled-blob-pool-fio.yml --limit zettide-tier1 \
-  -e 'zettide_scheduled_blob_pool_fio_confirm=DESTROY:/dev/nvme1n1:PHYSICAL-DISK-SERIAL'
-```
-
-This destructive profile always creates and fully compares a whole-device
-backup before modification; there is no no-backup mode. It zeroes the device,
-attaches exactly three non-overlapping, equal 1 MiB-aligned loop slices, and
-creates a `scheduled-replicated` Blob Pool from them. The synthetic layout uses
-one physical device and does not measure physical replication or fault
-isolation. The FUSE benchmark prepares one 2 GiB file, then uses a clean mount
-for 1 MiB sequential QD32, 128 KiB sequential QD1, and 4 KiB random QD1/QD32
-reads. Measured cases default to 20 seconds after a 5-second ramp and archive
-fio JSON plus FUSE and Pool transport metrics under
-`scheduled-blob-pool-fio`.
-
-Every exit after modification first detaches all loop devices, restores and
-fully compares the backup, then verifies the original configured Pool ID as a
-LittleFS Pool with its original mountability status. Backups are retained by
-default. Existing
-`zettide_raw_keep_backup=false` removes one only after both the benchmark and
-verified restoration succeed. A power loss or `SIGKILL` can still require
-manual restoration from the retained image.
 
 Set `zettide_blob_pool_fio_backup_original=false` in inventory for a dedicated
 test disk. The profile then skips the original Pool checks, full-device backup,
@@ -304,7 +276,7 @@ uv run ansible-playbook test/ansible/nvmf-catalog-optane-fio.yml --limit zettide
 
 ## BlobDevice
 
-The BlobDevice profile measures the file-backed data plane without LittleFS,
+The BlobDevice profile measures the file-backed data plane without BlobStore,
 object metadata, or FUSE. Configure `zettide_blob_device_targets` and run:
 
 ```sh

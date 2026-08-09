@@ -15,7 +15,6 @@
     zettide_keep_test_artifacts: false
     zettide_io_timeout: 5400
     zettide_io_minimum_free_bytes: 4294967296
-    zettide_throughput_redo_journal_size: ""
     zettide_blob_device_size: 17179869184
     zettide_blob_device_block_size: 1048576
     zettide_blob_device_batch_depth: 32

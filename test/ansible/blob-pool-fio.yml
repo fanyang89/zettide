@@ -1,5 +1,5 @@
 ---
-- name: Benchmark a temporary Blob Pool and restore the existing physical Pool
+- name: Benchmark a temporary Blob Pool over an existing Catalog Pool
   ansible.builtin.import_playbook: playbook.yml
   vars:
     zettide_test_profile_override: blob-pool-fio

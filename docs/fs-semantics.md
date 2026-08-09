@@ -39,22 +39,21 @@ failure does not turn an otherwise successful read into an error.
 
 ## Persistence
 
-`fsync` commits file data through the selected filesystem backend and
+`fsync` commits file data through BlobFilesystem and
 synchronizes its backing storage. After a successful `fsync`, terminating the
 mount process must not lose the committed data. A clean unmount closes all FUSE
-handles before closing BlobFilesystem or the littlefs volume.
+handles before closing BlobFilesystem.
 
 Link counts are not stored in object metadata. Each mount rebuilds the in-memory
 `ObjectId` link-count index by scanning namespace ObjectRefs, which remain the
-persistent authority. Legacy images whose symlinks use file-kind ObjectRefs
-remain readable because node behavior comes from persisted object metadata.
+persistent authority.
 
 FIFO objects persist type, mode, ownership, and timestamps. Linux VFS manages
 their blocking and byte transport; Zettide does not store FIFO payload data.
 
-The `check` command validates both container headers, mounts the filesystem, and
-traverses allocated blocks. It is a structural readability check, not a repair
-tool or a complete offline fsck.
+The `check` command opens both BlobStore header copies and traverses the
+BlobFilesystem metadata records. It is a structural readability check, not a
+repair tool or a complete offline fsck.
 
 ## Unsupported Operations
 
@@ -73,9 +72,7 @@ success for these operations.
 ## Test Gates
 
 - `test-unit` covers codecs, geometry, block boundaries, and error handling.
-- `test-image` uses real sparse container files and always reopens persisted data.
 - `test-cli` runs the emitted executable and validates exit behavior.
-- `test-fault` injects deterministic block synchronization failures.
 - `test-fuse` performs real syscalls, a forced daemon crash, and 20 mount cycles.
 - `test-dufs` covers HTTP read/write, read-only serving, persistence, signal
   inheritance, active-request shutdown, child exit, and private-mount cleanup.

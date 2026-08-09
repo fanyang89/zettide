@@ -4,9 +4,10 @@
 
 This document freezes the v3 member header, topology record, replicated layout, genesis payload,
 control record, commit certificate codecs, member-local creation, fixed-three-member set creation,
-existing-set control authority, control journal scan, append, and the initial Pool volume data plane.
+existing-set control authority, control journal scan, append, and the Blob and Catalog Pool data modes.
 It defines no journal repair, signatures, manifest, erasure coding, member replacement, or rebalance.
-A Pool is mountable only after its volume data plane is initialized.
+A Blob Pool is mountable only after its BlobFilesystem root is durably formatted. Catalog is a block
+data mode and is not mounted as a filesystem.
 
 The multi-volume catalog codecs under development are specified separately in
 [`v3-multivolume-format.md`](v3-multivolume-format.md). They are not yet selected by Pool
@@ -123,14 +124,25 @@ The incompatible feature allocation is:
 | Bit | Meaning |
 |---:|---|
 | 0 | Dynamic Pool topology and layout |
-| 1 | Catalog data mode |
-| 2 | Blob Pool filesystem; absence selects LittleFS |
+| 1 | Catalog data is active |
+| 2 | Blob Pool filesystem |
+| 3 | Scheduled Blob data layout |
+| 4 | Catalog data-mode intent |
 
-All three incompatible bits are supported; the compatible and read-only-compatible supported masks
-remain zero. The Blob Pool filesystem bit requires the Dynamic Pool bit and conflicts with the
-catalog data bit; a static header carrying the Blob marker is invalid. Because the filesystem bit
-is incompatible, readers predating this allocation reject Blob Pool members while continuing to
-accept unchanged LittleFS headers.
+All five incompatible bits are supported; the compatible and read-only-compatible supported masks
+remain zero. Data mode is `blob` when bit 2 is set, `catalog` when bit 1 or bit 4 is set, and
+`legacy_unsupported` when none of those bits is set. Blob conflicts with either Catalog bit and
+requires the Dynamic Pool bit. Scheduled Blob requires both Dynamic Pool and Blob and selects layout
+format version 3. Headers with no current data-mode marker remain structurally decodable for
+diagnostics but are not a supported data plane.
+
+Catalog provisioning sets intent bit 4 before any Catalog data is authoritative. The Pool therefore
+retains Catalog identity throughout creation and reopen, while `hasCatalogData` remains false. After
+the Catalog root, volume metadata, and referenced data are durably published under Catalog and data
+claims, activation sets bit 1 through the member-header A/B durability protocol. An active Catalog
+header can retain intent bit 4; both intent-only and active headers classify as Catalog. Bit 1 is the
+write fence: after it is selected, ordinary metadata writes require a Catalog claim and ordinary data
+writes require a data-generation lease.
 
 ## Subformat Policy
 
@@ -211,10 +223,11 @@ block-device fd uses the shared io_uring engine for positional reads, positional
 fsync when the kernel and execution sandbox support it, otherwise setup-unavailable errors fall back
 to POSIX positional I/O and full fsync. Resource exhaustion and operation failures never trigger a
 fallback, and callers may force either transport. The storage interface remains synchronous to
-preserve littlefs ordering and durability semantics. These fds do not use `O_DIRECT`.
+preserve ordering and durability semantics. These fds do not use `O_DIRECT`.
 
-The Linux raw-pool CLI requires every device path explicitly. The initial mountable implementation
-accepts exactly one device for `unprotected` and exactly three devices for `replicated`.
+The Linux raw-pool CLI requires every device path explicitly. The mountable implementation accepts
+exactly one device for `unprotected`, exactly three devices for `replicated`, and 3 through 12 devices
+for `scheduled-replicated`.
 `pool plan-create` scans the complete capacity of every device and rejects any nonzero data. A
 confirmation token binds the ordered device instances, capacities, logical sector sizes, profile,
 and label. `pool create` acquires all devices with `O_EXCL`, reconstructs the plan from those fds,
@@ -222,100 +235,33 @@ performs one final full-capacity scan, requires the exact token, and only then s
 Tokens cease to match when a device path is rebound to a different `diskseq` instance.
 
 `pool inspect` reopens an explicitly supplied member set read-only, selects control authority, and
-reports the filesystem marker, topology, layout, generation, member classifications, and
-policy-level data access. LittleFS mountability requires a valid Pool volume header quorum. Blob
-mountability requires a successful read-only BlobFilesystem open; the incompatible marker alone is
-not sufficient. The policy value reflects available authoritative members only and is distinct from
-the stricter exact-width requirement of the initial mount command.
+reports data mode, topology, layout, generation, member classifications, and policy-level data
+access. Blob mountability requires a successful read-only BlobFilesystem open; the incompatible
+marker alone is not sufficient. Catalog and `legacy_unsupported` modes are not filesystem-mountable.
+The policy value reflects available authoritative members only and is distinct from the stricter
+exact-width requirement of the initial mount command.
 
-### Pool Volume Data Plane
+### Pool Data Planes
 
-The initial Pool volume stores the mirrored `LFSDRV2` container headers in each member's metadata
-region at relative offsets 0 and 4096. The littlefs and object-store block address space starts at
-relative offset zero in each member's data region. The common logical size is the smallest member's
-logical capacity, rounded down to a 4096-byte block, and is capped by the 32-bit littlefs block count.
+An unprotected Blob Pool reads and writes its one member. Replicated and scheduled Blob layouts map
+logical BlobDevice I/O through the Pool data-storage policy. A Blob Pool uses that device as one
+native BlobStore; creation formats the BlobStore, filesystem root, name profile, and current Linux
+root UID/GID while the provisioned members remain exclusively open. The product does not convert a
+Pool with `legacy_unsupported` data mode. Blob Pools currently exclude Catalog Volumes, encryption,
+erasure coding, garbage collection, online expansion, and protection migration.
 
-An unprotected Pool reads and writes its one member. A replicated Pool read succeeds only when two
-members return identical bytes. Program and sync operations are issued to all three members, and the
-operation succeeds only when all three succeed. Any program or sync failure freezes that mounted
-writer. Before a writable reopen, all three selected container headers and the complete logical data
-region must have the same static volume identity and byte-identical data. These runtime rules are
-intentionally stricter than the version 2 layout envelope's durable-write threshold of two and read
-threshold of one; the encoded policy fields remain unchanged for format compatibility and do not
-weaken this implementation's acknowledgement or read-validation requirements.
+Catalog mode uses member metadata for the Catalog graph and member data for block extents. Catalog
+Volumes are exported as blocks by the managed SPDK path, not mounted through BlobFilesystem. The
+Catalog descriptor codec intentionally retains the 4096-byte `LFSDRV2` Catalog volume header format:
+each referenced header page decodes the fixed legacy codec and must match its descriptor's volume ID,
+state, creation identity, and geometry. Catalog graph validation separately binds extent ownership.
+This retained codec is Catalog metadata; it does not make the removed LittleFS filesystem backend or
+standalone `LFSDRV2` containers supported.
 
-A Blob Pool maps the same common logical data capacity through the Pool replica device and uses that
-device as one native Blob Store. New Blob Pools may be unprotected or three-way replicated. The
-Blob Store, filesystem root, name profile, and current Linux root UID/GID are initialized while the
-provisioned members remain open, preserving exclusive device acquisition. Existing LittleFS Pools
-are never converted in place. Blob Pools currently exclude catalog mode, encryption, erasure coding,
-garbage collection, online expansion, and protection migration.
-
-### Optional Data Encryption
-
-The initial encrypted format is restricted to a one-member unprotected Pool backed by a regular
-file. The v3 member header, control region, metadata region, and mirrored `LFSDRV2` volume headers
-remain plaintext. Encryption applies to every byte in the member data region exposed as the
-littlefs block address space, so filesystem names, metadata, object metadata, and file contents are
-ciphertext at rest. Raw block devices and replicated Pools reject encrypted initialization and open.
-
-An encrypted `LFSDRV2` header has format minor 2 and feature bit 2 (`0x00000004`) set. Its extension
-starts at byte 256 of each 4096-byte header copy:
-
-| Offset | Width | Field |
-|---:|---:|---|
-| `0x100` | 8 | Magic `DDVENC1\0` |
-| `0x108` | 2 | Extension version, 1 |
-| `0x10a` | 2 | Cipher, 1 is AES-256-XTS |
-| `0x10c` | 2 | KDF, 1 is raw key and 2 is Argon2id |
-| `0x10e` | 2 | Reserved, zero |
-| `0x110` | 4 | Data-unit size, 512 |
-| `0x114` | 4 | Argon2 time cost; zero for a raw key |
-| `0x118` | 4 | Argon2 memory cost in KiB; zero for a raw key |
-| `0x11c` | 4 | Argon2 parallelism; zero for a raw key |
-| `0x120` | 32 | Random KDF and HKDF salt |
-| `0x140` | 32 | HMAC-SHA256 credential verifier |
-
-The raw-key KDF consumes exactly 32 bytes. The passphrase KDF is Argon2id; newly formatted targets
-persist time cost 2, memory cost 65536 KiB, and parallelism 1. The resulting 32-byte master key is
-passed through HKDF-SHA256 using the persisted salt. Expand labels
-`zettide-volume-xts-v1` and `zettide-volume-verifier-v1` produce the 64-byte XTS key and 32-byte
-verifier key respectively. The verifier is HMAC-SHA256 over the canonical cipher, KDF, data-unit,
-Argon2, and salt fields. It rejects incorrect credentials before littlefs access but does not
-authenticate stored data.
-
-AES-256-XTS operates on 512-byte data units. The tweak number is the little-endian 64-bit unit index
-relative to the start of the member data region. All encrypted reads and programs are 512-byte
-aligned and cover complete units. Format writes encrypted zeroes over the complete logical data
-region before littlefs initialization, so an encrypted regular-file target is fully allocated rather
-than sparse.
-
-This format provides confidentiality only. It does not detect ciphertext modification, deletion,
-sector relocation, or replay. Encryption mode and KDF are fixed at creation; this version defines no
-in-place enable, disable, or rekey operation.
-
-LittleFS Pool creation initializes the volume before reporting success. `pool inspect` emits an
-`initialize-empty-volume:<set-id>` token in either of two cases: the complete member set has no ready
-header but retains a valid creating header for one volume identity, or every header slot and every
-complete member data region is zero. Any valid ready header or ambiguous nonzero header damage blocks
-destructive initialization. `pool initialize` requires the exact token, writable control and data
-policy, the complete profile width with no extra supplied devices, and exclusive acquisition of every
-supplied device.
-
-Blob Pool creation initializes BlobFilesystem before reporting success. Blob Pools do not use the
-LittleFS initialization token, and `pool initialize` rejects their marker rather than attempting
-destructive recovery.
-
-Ready-header quorum compares static volume identity rather than member-local sequence. A single ready
-header is also sufficient when every other member retains a matching creating header. Writable reopen
-first requires complete logical data equality, then durably publishes ready B/A headers to those
-creating members without formatting or changing data. Member-local sequence differences left by an
-interrupted A/B publication are accepted.
-
-Writable `pool mount` requires the complete profile width, exclusively acquires writable devices, and
-verifies static ready-header identity plus complete replica data equality. `pool mount --read-only`
-exclusively acquires readable devices, passes `ro` to FUSE, permits read-only block devices, and
-performs majority reads without modifying access times or syncing the backing members. Fixed-width
+Writable `pool mount` requires the complete Blob profile width and exclusively acquires writable
+devices. `pool mount --read-only` exclusively acquires readable devices, passes `ro` to FUSE, permits
+read-only block devices, and performs majority reads without modifying access times or syncing the
+backing members. Fixed-width
 profiles still require every member. A scheduled Blob Pool may omit exactly one member; each read then
 requires its two remaining replicas to agree. Two missing scheduled members make data unavailable.
 

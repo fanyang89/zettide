@@ -1,9 +1,9 @@
 # Zettide
 
-Zettide is an experimental storage engine. Its current user-facing path mounts
-either [littlefs](https://github.com/littlefs-project/littlefs) or the native
-BlobFilesystem backend from a container file or an explicitly selected Linux
-raw-disk Pool.
+Zettide is an experimental storage engine. Its current filesystem product is
+BlobFilesystem, backed by either a regular Blob file or an explicitly selected
+Linux raw-disk Blob Pool. Catalog Pools provide block data for managed SPDK
+exports; they are not mounted as filesystems.
 
 The project currently implements the portable container core and a foreground
 Linux FUSE3 mount adapter. The core cross-compiles for Windows; the native
@@ -57,8 +57,8 @@ PKG_CONFIG_PATH=../third_party/spdk/build/lib/pkgconfig zig build -Dspdk=true
 
 ## Benchmarks
 
-The filesystem operations benchmark uses zBench on the `Volume` API with
-temporary file-backed containers. It excludes the mounted FUSE/VFS syscall path
+The filesystem operations benchmark uses zBench directly on BlobFilesystem with
+temporary file-backed Blob targets. It excludes the mounted FUSE/VFS syscall path
 as well as format, mount, setup, and cleanup time; backing-file syscalls remain
 included. Run the representative optimized build with:
 
@@ -69,17 +69,14 @@ zig build bench-fs-ops -Doptimize=ReleaseFast -- \
 
 Use `--operation NAME` to select one workload. The available workloads are
 `create`, `open`, `stat`, `read-readonly`, `read-writable-relatime`,
-`write-overwrite`, `rename`, and `remove`. Journaled writeback results measure
-accepted latency; the final sync and close drain happens outside the timed
-operation. The writable read workload includes the default relatime checks; the
-read-only workload isolates the data read path. Data workloads use a warmed
-fixed file and offset, so they measure steady-state hot-path latency rather than
-cold or streaming I/O. The pipeline line reports accepted and drained
-throughput, writeback backlog, SQE submission counts, and maximum in-flight I/O.
+`read-partial`, `write-overwrite`, `rename`, and `remove`. The writable read
+workload includes the default relatime checks; the read-only workload isolates
+the data read path. Data workloads use a warmed fixed file and offset, so they
+measure steady-state hot-path latency rather than cold or streaming I/O.
 zBench reports average, standard deviation, range, and percentiles without a
 performance pass/fail threshold. Run with `--help` for all options.
 
-The BlobDevice benchmark measures aligned sequential I/O without LittleFS,
+The BlobDevice benchmark measures aligned sequential I/O without BlobStore,
 object metadata, or FUSE:
 
 ```sh
@@ -88,13 +85,24 @@ zig build build-bench-blob-device -Doptimize=ReleaseSafe
   --operation write --path /mnt/data/blob-device.bin --size 64GiB
 ```
 
+BlobStore and BlobObject benchmarks add immutable blob framing and COW object
+maps respectively:
+
+```sh
+zig build bench-blob-store -Doptimize=ReleaseFast -- \
+  --operation write --path /mnt/data/blob-store.bin --size 64GiB
+zig build bench-blob-object -Doptimize=ReleaseFast -- \
+  --operation write --path /mnt/data/blob-object.bin --size 64GiB
+```
+
+`bench-blob-metadata-map` measures incremental filesystem metadata-map updates.
+Run each benchmark with `--help` for its complete workload and transport options.
+
 ## Tests
 
 ```sh
 zig build test-unit
-zig build test-image
 zig build test-cli
-zig build test-fault
 zig build test-cross
 zig build test-linux-block -Dblock-tests=required
 zig build test-spdk-link
@@ -120,7 +128,7 @@ zig build -j1 test-posix-nightly -Dfuse-tests=required -Dexternal-tests=required
 zig build ci
 ```
 
-`zig build test` runs the portable unit, image, and CLI suites. FUSE tests
+`zig build test` runs the portable unit and CLI suites. FUSE tests
 perform real Linux syscalls and require writable `/dev/fuse`, `fusermount3`,
 and `mountpoint`. Use `-Dfuse-tests=auto` to skip them when those capabilities
 are unavailable.
@@ -192,87 +200,48 @@ pins, manifests, and log controls are documented in
 ## Usage
 
 ```sh
-zettide format workspace.ddv --size 16GiB --label Workspace
-
-# Experimental regular-file BlobFilesystem backend.
-zettide format blob.ddv --filesystem blob --size 16GiB
-
-# Optional encrypted file-backed target using a generated 32-byte key.
-zettide key generate workspace.key
-zettide format private.ddv --size 16GiB --encrypt --key-file workspace.key
-zettide serve dufs private.ddv --key-file workspace.key -- -A -b 127.0.0.1 -p 5000
-
-# A hidden passphrase entered twice can be used instead of a key file.
-zettide format private-passphrase.ddv --size 16GiB --encrypt --passphrase
-zettide serve dufs private-passphrase.ddv --passphrase -- -A -b 127.0.0.1 -p 5000
-
-# Legacy container creation remains supported.
-zettide create legacy.ddv --size 16GiB --label Legacy
-zettide info legacy.ddv
-zettide check legacy.ddv
-zettide device inspect /dev/disk/by-id/example
+zettide format workspace.blob --size 16GiB --name-profile portable-v1
+zettide info workspace.blob
+zettide check workspace.blob
 mkdir workspace
-zettide mount workspace.ddv workspace
+zettide mount workspace.blob workspace
 # From another terminal:
 zettide unmount workspace
 
 # Alternatively, serve through the external dufs frontend until interrupted.
-zettide serve dufs workspace.ddv -- -A -b 127.0.0.1 -p 5000
+zettide serve dufs workspace.blob -- -A -b 127.0.0.1 -p 5000
 ```
 
 Mounts use relatime by default. Pass `--noatime` to disable automatic
 access-time updates.
-Pass `--read-only` to open either regular-file filesystem backend read-only.
+Pass `--read-only` to open the Blob filesystem read-only.
 Pass `--metrics` to print FUSE operation counters after a clean unmount.
-LittleFS mounts additionally print write-pipeline and member transport counters.
 Blob Pool mounts print aggregate Pool transport counters; standalone Blob file
 mounts expose FUSE counters only.
-`create --redo-journal-size <size>` appends a redo journal to a file-backed
-container; the journal must fit two maximum-size transactions.
 
-`format` creates a single-member unprotected v3 target. For a new regular file,
-`--size` is required and specifies the total backing-file length. The length
-must be at least 3 MiB and aligned to 1 MiB. Existing regular files and Linux
-block devices require a second invocation with the scan-bound confirmation
-token:
+`format` creates a standalone BlobFilesystem target in a regular file. For a
+new file, `--size` is required, must be at least 2 MiB, and must be aligned to
+1 MiB. An existing regular file requires a second invocation with the
+scan-bound confirmation token:
 
 ```sh
-zettide format /dev/disk/by-id/example --label Workspace
-zettide format /dev/disk/by-id/example --label Workspace --confirm <token>
+truncate -s 16GiB workspace.blob
+zettide format workspace.blob --name-profile portable-v1
+zettide format workspace.blob --name-profile portable-v1 --confirm <token>
 ```
 
 Formatting replaces the filesystem but does not securely erase every old data
-block. The confirmation token binds the target identity, geometry, path, label,
-complete content digest observed by the plan, and encryption KDF type.
+block. The confirmation token binds the target identity, geometry, path, name
+profile, and complete content digest observed by the plan. The selected name
+profile and current Linux UID/GID for the root directory are persisted.
+Standalone Blob targets support Linux FUSE mount, read-only mount, FUSE metrics,
+`info`, `check`, and `serve dufs`. They do not support labels, block devices,
+Pool transport metrics, encryption, or Windows mounts.
 
-`format --filesystem blob` selects the BlobFilesystem backend; omitting
-`--filesystem` or selecting `littlefs` preserves the existing format and
-confirmation tokens. BlobFilesystem currently supports regular backing files
-only. New files require a size of at least 2 MiB aligned to 1 MiB. Existing
-files use a Blob-specific scan-bound confirmation token. The selected name
-profile and the current Linux UID/GID for the root directory are persisted.
-Linux FUSE mount, read-only mount, FUSE metrics, `info`, and `check` are
-supported.
-Standalone Blob targets do not support labels, block devices, or transport
-metrics. Encryption, write-pipeline metrics, NFS, dufs, Windows mounts, and
-fallocate are not supported for BlobFilesystem.
-
-Encryption is available only when `format` creates a v3 single-member,
-unprotected regular-file target. Key files contain exactly 32 random bytes;
-`zettide key generate` creates them without replacing an existing path and with
-mode `0600` on POSIX systems. Loading rejects symlinks, non-regular files, other
-lengths, and group or world permissions. `--passphrase` reads only from
-`/dev/tty` with terminal echo disabled, asks twice during format, and uses
-Argon2id with persisted parameters. `info` reports the plaintext volume identity
-and encryption status without unlocking the filesystem.
-
-The first encrypted frontend is `serve dufs`; ordinary `mount`, `check`, raw
-devices, replicated Pools, legacy `create`, mode conversion, and rekey are not
-supported. AES-256-XTS encrypts the complete littlefs data region, including
-names, metadata, and file contents. It provides confidentiality, not
-authentication: raw block modification, deletion, and replay are not detected.
-Encrypted creation writes ciphertext across the complete data region and is not
-sparse.
+The removed `create`, `key`, `--filesystem`, `--encrypt`, key-file,
+passphrase, redo-journal, and `pool initialize` interfaces are not product
+commands. A regular file carrying `LFSDRV2` in either header slot is recognized
+only to return `UnsupportedLegacyFormat`; it is not opened or converted.
 
 `serve dufs` creates a private FUSE mount, starts the `dufs` executable found on
 `PATH`, and removes the mount when either process exits. Dufs keeps its own
@@ -281,12 +250,13 @@ TLS, or other dufs behavior. `--read-only` also opens and mounts the underlying
 Zettide target read-only:
 
 ```sh
-zettide serve dufs workspace.ddv --read-only -- -b 127.0.0.1 -p 5000
+zettide serve dufs workspace.blob --read-only -- -b 127.0.0.1 -p 5000
 ```
 
 Linux raw-disk Pools currently support exactly one unprotected device or three
-replicated devices. Creation destroys all data on the explicitly listed whole
-devices and requires the confirmation token produced by the full-device scan:
+replicated devices; `scheduled-replicated` accepts 3 through 12 devices.
+Creation destroys all data on the explicitly listed whole devices and requires
+the confirmation token produced by the full-device scan:
 
 ```sh
 zettide pool plan-create \
@@ -307,43 +277,38 @@ zettide pool mount workspace \
   --device /dev/disk/by-id/disk-c
 ```
 
-Pool creation defaults to LittleFS. Add `--filesystem blob` to both
-`pool plan-create` and `pool create` to create a native Blob Pool; the selector
-is part of the confirmation token. Mount and inspect select the backend from the
-persisted member marker. `pool mount --filesystem littlefs|blob` can enforce an
-expected backend and rejects a mismatch before filesystem data access.
+`pool plan-create` and `pool create` always provision Blob data mode and persist
+the BlobFilesystem root before reporting success. There is no backend selector
+or separate initialize step. `pool mount` accepts Blob mode only and determines
+the mode from member headers. Use `zettide pool inspect --device ...` to report
+the persisted data mode, authority, topology, layout, data policy, member state,
+and Blob mountability.
 
-Blob Pool support applies only to newly created unprotected or three-way
-replicated Pools. It does not migrate existing LittleFS Pools and does not yet
-support catalog mode, encryption, erasure coding, garbage collection, online
+Catalog is the separate block data mode used by the managed SPDK endpoint path.
+It stores Catalog Volumes and extent mappings and is not accepted by filesystem
+mount commands. Headers without a Blob or Catalog marker are reported as
+`legacy_unsupported` and rejected. Blob Pools do not migrate legacy Pools and do
+not yet support encryption, erasure coding, garbage collection, online
 expansion, or protection changes.
-
-Use `zettide pool inspect --device ...` to inspect authority and mountability.
-An interrupted LittleFS empty-volume initialization exposes a Pool-bound
-recovery token; pass it to `zettide pool initialize --device ... --confirm
-<token>`. Blob Pool inspection validates mountability by opening BlobFilesystem
-read-only and never offers this recovery token.
 
 ## Format limits
 
 - File names are at most 255 UTF-8 bytes.
 - Sparse files are supported up to 9,223,372,036,854,775,807 bytes.
 - File name matching is case-sensitive on every platform.
-- Version 2 containers are not encrypted.
-- `format` writes a v3 single-member target; legacy version 2 containers remain
-  readable.
+- Standalone Blob files require regular-file storage; raw devices use Pool
+  commands.
+- `LFSDRV2` regular-file containers are unsupported and rejected after format
+  recognition.
 
 The supported filesystem behavior and explicit exclusions are documented in
 `docs/fs-semantics.md`.
 
-The not-yet-persisted cross-platform name contract is documented in
+The persisted cross-platform name contract is documented in
 `docs/portable-name-profile.md`.
 
 The target POSIX.1-2024 filesystem semantics and completion criteria are
 defined in `docs/posix-profile.md`.
-
-littlefs is licensed under BSD-3-Clause. Its pinned source and license are in
-`vendor/littlefs`.
 
 utf8proc is licensed under MIT and includes Unicode-licensed generated data.
 Its pinned source, Unicode version, and license are in `vendor/utf8proc`.

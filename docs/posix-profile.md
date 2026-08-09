@@ -9,7 +9,7 @@ project conformance profile, not an operating-system POSIX certification.
 - The profile applies only to the Linux FUSE mount adapter.
 - The reference standard is POSIX.1-2024, Issue 8.
 - Required behavior must work through mounted filesystem syscalls, not only the
-  portable Volume API.
+  direct BlobFilesystem API.
 - A required test may not be skipped, marked unsupported, or accepted as a
   known failure.
 - Where POSIX permits multiple errors, the test manifest records the accepted

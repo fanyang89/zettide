@@ -2,11 +2,11 @@
 
 ## Status
 
-`portable-v1` is persisted in v2.1 container headers when selected with
-`--name-profile portable-v1`. Existing images and newly created images without
-that option use the v2.0 `legacy-raw` profile and retain byte-exact,
-case-sensitive namespace behavior. `portable-v1` is not yet enforced by
-`Volume`, FUSE, WinFsp, or macFUSE.
+`portable-v1` is persisted in the BlobFilesystem root when selected with
+`--name-profile portable-v1`. New Blob files and Pools without that option use
+`legacy-raw` and retain byte-exact, case-sensitive namespace behavior.
+BlobFilesystem enforces the selected profile for direct API, FUSE, dufs, SMB3,
+and NFS access. WinFsp and macFUSE adapters are not implemented.
 
 ## Stable Contract
 
