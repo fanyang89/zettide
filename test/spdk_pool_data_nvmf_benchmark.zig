@@ -16,6 +16,7 @@ const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
 const max_concurrent_groups = 4;
 const queue_capacity = 1024;
+const max_reactor_count = 16;
 const runtime_config =
     \\{"subsystems":[
     \\{"subsystem":"bdev","config":[
@@ -349,6 +350,10 @@ fn run(
         return error.InvalidNvmfTransport;
     const traddr = if (c.getenv("ZETTIDE_NVMF_TARGET_ADDR")) |value| std.mem.span(value) else "127.0.0.1";
     const trsvcid = if (c.getenv("ZETTIDE_NVMF_TARGET_PORT")) |value| std.mem.span(value) else "44220";
+    const reactor_count = try parseReactorCount(if (c.getenv("ZETTIDE_NVMF_REACTOR_COUNT")) |value|
+        std.mem.span(value)
+    else
+        null);
 
     var threaded: std.Io.Threaded = .init(allocator, .{ .environ = .empty });
     defer threaded.deinit();
@@ -393,8 +398,12 @@ fn run(
     if (pool_storage.capacity() == 0 or pool_storage.capacity() % block_size != 0)
         return error.InvalidPoolDataCapacity;
 
-    var reactor_mask_buffer: [32]u8 = undefined;
-    if (c.zettide_spdk_test_reactor_mask(&reactor_mask_buffer, reactor_mask_buffer.len) != 0)
+    var reactor_mask_buffer: [128]u8 = undefined;
+    if (c.zettide_spdk_test_reactor_mask_count(
+        &reactor_mask_buffer,
+        reactor_mask_buffer.len,
+        reactor_count,
+    ) != 0)
         return error.ReactorMaskUnavailable;
     const reactor_mask = std.mem.sliceTo(&reactor_mask_buffer, 0);
     var signals: c.sigset_t = undefined;
@@ -404,7 +413,7 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    std.debug.print("target-stage runtime start\n", .{});
+    std.debug.print("target-stage runtime start reactor_mask={s}\n", .{reactor_mask});
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_pool_data_nvmf_benchmark",
         .reactor_mask = reactor_mask,
@@ -459,6 +468,31 @@ fn run(
     std.debug.print("target-stage ready published\n", .{});
     var signal_number: c_int = undefined;
     if (c.sigwait(&signals, &signal_number) != 0) return error.SignalWaitFailed;
+}
+
+fn parseReactorCount(text: ?[]const u8) !usize {
+    const value = text orelse return 1;
+    if (value.len == 0) return error.InvalidReactorCount;
+    var count: usize = 0;
+    for (value) |digit| {
+        if (digit < '0' or digit > '9') return error.InvalidReactorCount;
+        count = std.math.mul(usize, count, 10) catch return error.InvalidReactorCount;
+        count = std.math.add(usize, count, digit - '0') catch return error.InvalidReactorCount;
+    }
+    if (count == 0 or count > max_reactor_count) return error.InvalidReactorCount;
+    return count;
+}
+
+test "reactor count defaults to one and accepts strict decimal values" {
+    try std.testing.expectEqual(@as(usize, 1), try parseReactorCount(null));
+    try std.testing.expectEqual(@as(usize, 1), try parseReactorCount("1"));
+    try std.testing.expectEqual(@as(usize, 16), try parseReactorCount("16"));
+}
+
+test "reactor count rejects invalid values" {
+    for ([_][]const u8{ "", "0", "17", "+1", " 1", "1 ", "1x" }) |value| {
+        try std.testing.expectError(error.InvalidReactorCount, parseReactorCount(value));
+    }
 }
 
 fn errorStatus(err: anyerror) c_int {
