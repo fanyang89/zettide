@@ -16,7 +16,6 @@ const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
 const max_concurrent_groups = 4;
 const queue_capacity = 1024;
-const max_reactor_count = 16;
 const runtime_config =
     \\{"subsystems":[
     \\{"subsystem":"bdev","config":[
@@ -61,6 +60,7 @@ const Worker = struct {
 
     io: std.Io,
     storage: *zettide.v3.storage.Storage,
+    batch_wait_us: usize,
     slots: [queue_capacity]Slot,
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
@@ -69,20 +69,25 @@ const Worker = struct {
     submit_attempts: std.atomic.Value(u64) = .init(0),
     accepted: std.atomic.Value(u64) = .init(0),
     queue_full_rejects: std.atomic.Value(u64) = .init(0),
+    queued_or_reserved: std.atomic.Value(usize) = .init(0),
     current_occupancy: std.atomic.Value(usize) = .init(0),
     high_water: std.atomic.Value(usize) = .init(0),
     read_group_count: std.atomic.Value(u64) = .init(0),
     grouped_request_count: std.atomic.Value(u64) = .init(0),
     grouped_bytes: std.atomic.Value(u64) = .init(0),
+    coalesce_waits: std.atomic.Value(u64) = .init(0),
+    coalesce_expirations: std.atomic.Value(u64) = .init(0),
+    coalesced_requests_added: std.atomic.Value(u64) = .init(0),
     completed_requests: std.atomic.Value(u64) = .init(0),
     thread: std.Thread,
 
-    fn create(io: std.Io, storage: *zettide.v3.storage.Storage) !*Worker {
+    fn create(io: std.Io, storage: *zettide.v3.storage.Storage, batch_wait_us: usize) !*Worker {
         const self = try std.heap.c_allocator.create(Worker);
         errdefer std.heap.c_allocator.destroy(self);
         self.* = undefined;
         self.io = io;
         self.storage = storage;
+        self.batch_wait_us = batch_wait_us;
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
@@ -91,11 +96,15 @@ const Worker = struct {
         self.submit_attempts = .init(0);
         self.accepted = .init(0);
         self.queue_full_rejects = .init(0);
+        self.queued_or_reserved = .init(0);
         self.current_occupancy = .init(0);
         self.high_water = .init(0);
         self.read_group_count = .init(0);
         self.grouped_request_count = .init(0);
         self.grouped_bytes = .init(0);
+        self.coalesce_waits = .init(0);
+        self.coalesce_expirations = .init(0);
+        self.coalesced_requests_added = .init(0);
         self.completed_requests = .init(0);
         self.thread = try std.Thread.spawn(.{}, Worker.run, .{self});
         return self;
@@ -107,16 +116,21 @@ const Worker = struct {
         self.wake.set(self.io);
         self.thread.join();
         std.debug.print(
-            "provider_worker_metrics submit_attempts={d} accepted={d} queue_full_rejects={d} current_occupancy={d} high_water={d} read_group_count={d} grouped_request_count={d} grouped_bytes={d} completed_requests={d}\n",
+            "provider_worker_metrics submit_attempts={d} accepted={d} queue_full_rejects={d} queued_or_reserved={d} current_occupancy={d} high_water={d} read_group_count={d} grouped_request_count={d} grouped_bytes={d} batch_wait_us={d} coalesce_waits={d} coalesce_expirations={d} coalesced_requests_added={d} completed_requests={d}\n",
             .{
                 self.submit_attempts.load(.monotonic),
                 self.accepted.load(.monotonic),
                 self.queue_full_rejects.load(.monotonic),
+                self.queued_or_reserved.load(.monotonic),
                 self.current_occupancy.load(.monotonic),
                 self.high_water.load(.monotonic),
                 self.read_group_count.load(.monotonic),
                 self.grouped_request_count.load(.monotonic),
                 self.grouped_bytes.load(.monotonic),
+                self.batch_wait_us,
+                self.coalesce_waits.load(.monotonic),
+                self.coalesce_expirations.load(.monotonic),
+                self.coalesced_requests_added.load(.monotonic),
                 self.completed_requests.load(.monotonic),
             },
         );
@@ -161,6 +175,7 @@ const Worker = struct {
                     position = observed;
                     continue;
                 }
+                _ = self.queued_or_reserved.fetchAdd(1, .monotonic);
                 slot.request = .{
                     .operation = operation,
                     .offset = offset,
@@ -202,6 +217,8 @@ const Worker = struct {
         const position = self.dequeue_position;
         const slot = &self.slots[position % queue_capacity];
         if (slot.sequence.load(.acquire) != position + 1) return null;
+        const queued_or_reserved = self.queued_or_reserved.fetchSub(1, .monotonic);
+        std.debug.assert(queued_or_reserved > 0);
         self.dequeue_position = position + 1;
         return .{ .slot = slot, .position = position };
     }
@@ -236,18 +253,70 @@ const Worker = struct {
             batch.queued[0] = queued;
             batch.count = 1;
             var total_bytes = queued.slot.request.length;
+            const deadline = if (self.batch_wait_us == 0)
+                std.Io.Clock.Timestamp{ .raw = .zero, .clock = .awake }
+            else
+                std.Io.Clock.Timestamp.now(self.io, .awake).addDuration(.{
+                    .raw = .{ .nanoseconds = @as(i96, @intCast(self.batch_wait_us)) * std.time.ns_per_us },
+                    .clock = .awake,
+                });
             while (batch.count < max_batch_requests) {
-                const candidate = self.dequeue() orelse break;
-                const request = candidate.slot.request;
+                if (self.batch_wait_us != 0 and deadlineReached(self.io, deadline)) {
+                    _ = self.coalesce_expirations.fetchAdd(1, .monotonic);
+                    break;
+                }
+                var candidate = self.dequeue();
+                if (candidate == null) {
+                    if (!mayWaitForCoalescing(
+                        self.batch_wait_us,
+                        total_bytes,
+                        self.current_occupancy.load(.monotonic),
+                        self.queued_or_reserved.load(.acquire),
+                    )) break;
+                    if (deadlineReached(self.io, deadline)) {
+                        _ = self.coalesce_expirations.fetchAdd(1, .monotonic);
+                        break;
+                    }
+
+                    self.wake.reset();
+                    candidate = self.dequeue();
+                    if (candidate == null) {
+                        if (!mayWaitForCoalescing(
+                            self.batch_wait_us,
+                            total_bytes,
+                            self.current_occupancy.load(.monotonic),
+                            self.queued_or_reserved.load(.acquire),
+                        )) break;
+                        if (deadlineReached(self.io, deadline)) {
+                            _ = self.coalesce_expirations.fetchAdd(1, .monotonic);
+                            break;
+                        }
+                        _ = self.coalesce_waits.fetchAdd(1, .monotonic);
+                        self.wake.waitTimeout(self.io, .{ .deadline = deadline }) catch |err| switch (err) {
+                            error.Timeout => {
+                                if (deadlineReached(self.io, deadline)) {
+                                    _ = self.coalesce_expirations.fetchAdd(1, .monotonic);
+                                    break;
+                                }
+                                continue;
+                            },
+                            else => unreachable,
+                        };
+                        continue;
+                    }
+                }
+                const dequeued = candidate.?;
+                const request = dequeued.slot.request;
                 if (request.operation != c.ZETTIDE_SPDK_BDEV_PROVIDER_READ or
                     total_bytes + request.length > max_batch_bytes)
                 {
-                    pending = candidate;
+                    pending = dequeued;
                     break;
                 }
-                batch.queued[batch.count] = candidate;
+                batch.queued[batch.count] = dequeued;
                 batch.count += 1;
                 total_bytes += request.length;
+                _ = self.coalesced_requests_added.fetchAdd(1, .monotonic);
             }
             _ = self.read_group_count.fetchAdd(1, .monotonic);
             _ = self.grouped_request_count.fetchAdd(batch.count, .monotonic);
@@ -350,7 +419,11 @@ fn run(
         return error.InvalidNvmfTransport;
     const traddr = if (c.getenv("ZETTIDE_NVMF_TARGET_ADDR")) |value| std.mem.span(value) else "127.0.0.1";
     const trsvcid = if (c.getenv("ZETTIDE_NVMF_TARGET_PORT")) |value| std.mem.span(value) else "44220";
-    const reactor_count = try parseReactorCount(if (c.getenv("ZETTIDE_NVMF_REACTOR_COUNT")) |value|
+    const reactor_count = try args.parseReactorCount(if (c.getenv("ZETTIDE_NVMF_REACTOR_COUNT")) |value|
+        std.mem.span(value)
+    else
+        null);
+    const batch_wait_us = try args.parseBatchWaitUs(if (c.getenv("ZETTIDE_NVMF_BATCH_WAIT_US")) |value|
         std.mem.span(value)
     else
         null);
@@ -427,7 +500,7 @@ fn run(
     const runtime_handle: *anyopaque = @ptrCast(runtime.handle orelse return error.RuntimeStopped);
     std.debug.print("target-stage runtime ready\n", .{});
     std.debug.print("target-stage worker start\n", .{});
-    const worker = try Worker.create(io, &pool_storage);
+    const worker = try Worker.create(io, &pool_storage, batch_wait_us);
     defer worker.close();
     std.debug.print("target-stage worker ready\n", .{});
     std.debug.print("target-stage provider start\n", .{});
@@ -470,29 +543,26 @@ fn run(
     if (c.sigwait(&signals, &signal_number) != 0) return error.SignalWaitFailed;
 }
 
-fn parseReactorCount(text: ?[]const u8) !usize {
-    const value = text orelse return 1;
-    if (value.len == 0) return error.InvalidReactorCount;
-    var count: usize = 0;
-    for (value) |digit| {
-        if (digit < '0' or digit > '9') return error.InvalidReactorCount;
-        count = std.math.mul(usize, count, 10) catch return error.InvalidReactorCount;
-        count = std.math.add(usize, count, digit - '0') catch return error.InvalidReactorCount;
-    }
-    if (count == 0 or count > max_reactor_count) return error.InvalidReactorCount;
-    return count;
+fn mayWaitForCoalescing(
+    batch_wait_us: usize,
+    total_bytes: usize,
+    current_occupancy: usize,
+    queued_or_reserved: usize,
+) bool {
+    return batch_wait_us != 0 and total_bytes < max_batch_bytes and
+        (current_occupancy > 1 or queued_or_reserved != 0);
 }
 
-test "reactor count defaults to one and accepts strict decimal values" {
-    try std.testing.expectEqual(@as(usize, 1), try parseReactorCount(null));
-    try std.testing.expectEqual(@as(usize, 1), try parseReactorCount("1"));
-    try std.testing.expectEqual(@as(usize, 16), try parseReactorCount("16"));
+fn deadlineReached(io: std.Io, deadline: std.Io.Clock.Timestamp) bool {
+    return std.Io.Clock.Timestamp.now(io, .awake).compare(.gte, deadline);
 }
 
-test "reactor count rejects invalid values" {
-    for ([_][]const u8{ "", "0", "17", "+1", " 1", "1 ", "1x" }) |value| {
-        try std.testing.expectError(error.InvalidReactorCount, parseReactorCount(value));
-    }
+test "coalescing wait requires another outstanding or reserved request" {
+    try std.testing.expect(!mayWaitForCoalescing(0, 4096, 2, 0));
+    try std.testing.expect(!mayWaitForCoalescing(25, 4096, 1, 0));
+    try std.testing.expect(mayWaitForCoalescing(25, 4096, 2, 0));
+    try std.testing.expect(mayWaitForCoalescing(25, 4096, 1, 1));
+    try std.testing.expect(!mayWaitForCoalescing(25, max_batch_bytes, 2, 1));
 }
 
 fn errorStatus(err: anyerror) c_int {

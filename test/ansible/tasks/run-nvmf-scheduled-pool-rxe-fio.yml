@@ -19,6 +19,13 @@
       - zettide_nvmf_scheduled_pool_reactor_count | string is match('^[0-9]+$')
       - zettide_nvmf_scheduled_pool_reactor_count | int >= 1
       - zettide_nvmf_scheduled_pool_reactor_count | int <= 16
+      - zettide_nvmf_scheduled_pool_batch_wait_us | string is match('^[0-9]+$')
+      - zettide_nvmf_scheduled_pool_batch_wait_us | int >= 0
+      - zettide_nvmf_scheduled_pool_batch_wait_us | int <= 100
+      - >-
+        zettide_nvmf_scheduled_pool_fio_case in
+        ['', 'seq-read-1m-qd32-j1', 'seq-read-128k-qd1-j1',
+        'randread-4k-qd1-j1', 'randread-4k-qd32-j1', 'randread-4k-qd32-j4']
       - >-
         ansible_facts.processor_vcpus is not defined or
         zettide_nvmf_scheduled_pool_reactor_count | int <= ansible_facts.processor_vcpus | int
@@ -134,8 +141,10 @@
     ZETTIDE_NVMF_TARGET_ADDR: 192.0.2.2
     ZETTIDE_NVMF_TARGET_PORT: "44220"
     ZETTIDE_NVMF_REACTOR_COUNT: "{{ zettide_nvmf_scheduled_pool_reactor_count }}"
+    ZETTIDE_NVMF_BATCH_WAIT_US: "{{ zettide_nvmf_scheduled_pool_batch_wait_us }}"
     ZETTIDE_NVMF_EXPECTED_SIZE: ""
     ZETTIDE_NVMF_FIO_SIZE: "{{ zettide_nvmf_scheduled_pool_fio_size }}"
+    ZETTIDE_NVMF_FIO_CASE: "{{ zettide_nvmf_scheduled_pool_fio_case }}"
     ZETTIDE_NVMF_FIO_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
     ZETTIDE_NVMF_FIO_RAMP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
     ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/nvmf-scheduled-pool-rxe-fio"

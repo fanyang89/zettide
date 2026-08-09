@@ -13,6 +13,7 @@ shift 3
 runtime=${ZETTIDE_NVMF_FIO_RUNTIME:-20}
 ramp_time=${ZETTIDE_NVMF_FIO_RAMP_TIME:-5}
 fio_size=${ZETTIDE_NVMF_FIO_SIZE:-8G}
+fio_case=${ZETTIDE_NVMF_FIO_CASE:-}
 expected_size=${ZETTIDE_NVMF_EXPECTED_SIZE-68719476736}
 nqn=nqn.2026-08.io.zettide:benchmark
 serial=ZETTIDEBENCH000001
@@ -26,6 +27,13 @@ rxe_target_device=ztnvmf_t
 rxe_target_link_created=false
 rxe_target_device_created=false
 target_arguments=("$@")
+case $fio_case in
+    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4) ;;
+    *)
+        echo "unknown NVMe-oF fio case: $fio_case" >&2
+        exit 2
+        ;;
+esac
 if [[ -n ${ZETTIDE_NVMF_TARGET_ARGUMENT:-} ]]; then
     target_arguments+=("$ZETTIDE_NVMF_TARGET_ARGUMENT")
 fi
@@ -198,15 +206,22 @@ run_case() {
         --ramp_time="$ramp_time" --randrepeat=0 --norandommap=1 \
         --percentile_list=50:95:99:99.9 --eta=never --output-format=json \
         --output="$log_dir/fio-$name.json"
+    fio_results+=("$log_dir/fio-$name.json")
 }
 
-run_case seq-read-1m-qd32-j1 read 1m 32 1 "$fio_size"
-run_case seq-read-128k-qd1-j1 read 128k 1 1 "$fio_size"
-run_case randread-4k-qd1-j1 randread 4k 1 1 "$fio_size"
-run_case randread-4k-qd32-j1 randread 4k 32 1 "$fio_size"
-run_case randread-4k-qd32-j4 randread 4k 32 4 "$fio_size"
+run_selected_case() {
+    [[ -z $fio_case || $fio_case == "$1" ]] || return 0
+    run_case "$@"
+}
 
-for result in "$log_dir"/fio-*.json; do
+fio_results=()
+run_selected_case seq-read-1m-qd32-j1 read 1m 32 1 "$fio_size"
+run_selected_case seq-read-128k-qd1-j1 read 128k 1 1 "$fio_size"
+run_selected_case randread-4k-qd1-j1 randread 4k 1 1 "$fio_size"
+run_selected_case randread-4k-qd32-j1 randread 4k 32 1 "$fio_size"
+run_selected_case randread-4k-qd32-j4 randread 4k 32 4 "$fio_size"
+
+for result in "${fio_results[@]}"; do
     jq -r '(.jobs[0].jobname) + " iops=" + (.jobs[0].read.iops|tostring) +
         " bw_bytes=" + (.jobs[0].read.bw_bytes|tostring) +
         " mean_ns=" + (.jobs[0].read.clat_ns.mean|tostring) +

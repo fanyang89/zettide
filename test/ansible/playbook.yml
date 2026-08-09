@@ -47,7 +47,9 @@
     zettide_nvmf_fio_ramp_time: 5
     zettide_nvmf_scheduled_pool_read_policy: first_available
     zettide_nvmf_scheduled_pool_fio_size: 1G
-    zettide_nvmf_scheduled_pool_reactor_count: 4
+    zettide_nvmf_scheduled_pool_reactor_count: 1
+    zettide_nvmf_scheduled_pool_batch_wait_us: 0
+    zettide_nvmf_scheduled_pool_fio_case: ""
     zettide_blob_fuse_fio_backing_size_effective: "{{ zettide_blob_fuse_fio_backing_size | default(34359738368) }}"
     zettide_blob_fuse_fio_file_size_effective: "{{ zettide_blob_fuse_fio_file_size | default(268435456) }}"
     zettide_blob_fuse_fio_runtime_effective: "{{ zettide_blob_fuse_fio_runtime | default(8) }}"
