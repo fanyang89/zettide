@@ -247,13 +247,17 @@ pub fn dataAccess(layout: Layout, topology: pool_topology.Topology) !pool_policy
     try validate(layout);
     try pool_topology.validate(topology);
     if (layout.topology_epoch > topology.epoch) return error.FutureTopologyEpoch;
+    return dataAccessForMemberCount(layout, activeDataMemberCount(topology));
+}
+
+pub fn dataAccessForMemberCount(layout: Layout, available_count: usize) !pool_policy.DataAccess {
+    try validate(layout);
     if (layout.scheduled_blob) |scheduled| {
-        const active_count = activeDataMemberCount(topology);
-        if (active_count == scheduled.member_count) return .read_write;
-        if (active_count + 1 == scheduled.member_count) return .read_only;
+        if (available_count == scheduled.member_count) return .read_write;
+        if (available_count == scheduled.member_count - 1) return .read_only;
         return .unavailable;
     }
-    return pool_policy.dataAccess(try layout.protection(), activeDataMemberCount(topology));
+    return pool_policy.dataAccess(try layout.protection(), available_count);
 }
 
 fn activeDataMemberCount(topology: pool_topology.Topology) usize {
@@ -394,6 +398,13 @@ test "scheduled blob supports capacities above 16 TiB and exact access threshold
     try std.testing.expectEqual(.read_write, try dataAccess(layout, try testTopology(6)));
     try std.testing.expectEqual(.read_only, try dataAccess(layout, try testTopology(5)));
     try std.testing.expectEqual(.unavailable, try dataAccess(layout, try testTopology(4)));
+}
+
+test "scheduled blob member availability requires all but at most one" {
+    const layout = try Layout.initScheduledBlob(try testPlan(12, 17), 1, 1);
+    try std.testing.expectEqual(.read_write, try dataAccessForMemberCount(layout, 12));
+    try std.testing.expectEqual(.read_only, try dataAccessForMemberCount(layout, 11));
+    try std.testing.expectEqual(.unavailable, try dataAccessForMemberCount(layout, 10));
 }
 
 test "layout magic and version pairs cannot be crossed" {

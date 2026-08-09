@@ -741,8 +741,8 @@ pub const PoolMemberSet = struct {
             ready.reclaim_required = ready.reclaim_required or needs_reclaim;
             self.statuses[index] = .active_voter;
         }
-        self.data_access_state = pool_policy.dataAccess(
-            selected_authority.layout.protection() catch unreachable,
+        self.data_access_state = pool_layout.dataAccessForMemberCount(
+            selected_authority.layout,
             available_data_members,
         ) catch .unavailable;
         if (intent == .writable and ready.active_count >= selected_authority.topology.quorum)
@@ -842,11 +842,10 @@ pub const PoolMemberSet = struct {
                 else => {},
             }
         }
-        const protection = self.authority_state.?.layout.protection() catch {
-            self.data_access_state = .unavailable;
-            return;
-        };
-        self.data_access_state = pool_policy.dataAccess(protection, available_data_members) catch .unavailable;
+        self.data_access_state = pool_layout.dataAccessForMemberCount(
+            self.authority_state.?.layout,
+            available_data_members,
+        ) catch .unavailable;
     }
 
     fn updateVoterStatuses(

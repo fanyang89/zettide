@@ -3,23 +3,62 @@ const blob_format_api = @import("../blob_format.zig");
 const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
 const pool_authority = @import("pool_authority.zig");
+const pool_blob_schedule = @import("pool_blob_schedule.zig");
 const pool_block_device = @import("pool_block_device.zig");
+const pool_layout = @import("pool_layout.zig");
 const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
+const pool_scheduled_data_device = @import("pool_scheduled_data_device.zig");
 const pool_topology = @import("pool_topology.zig");
 const ReplicaEndpoint = @import("replica_endpoint.zig").ReplicaEndpoint;
 const storage_api = @import("storage.zig");
 
 const Io = std.Io;
 const max_replica_count = 3;
+const max_member_count = pool_blob_schedule.max_member_count;
 const io_alignment = 4096;
+
+const Device = union(enum) {
+    mirrored: pool_block_device.PoolBlockDevice,
+    scheduled: pool_scheduled_data_device.Device,
+
+    fn readAt(self: *Device, buffer: []u8, offset: u64) !usize {
+        return switch (self.*) {
+            inline else => |*device| device.readAt(buffer, offset),
+        };
+    }
+
+    fn readManyAt(self: *Device, reads: []const storage_api.Read, results: []storage_api.ReadResult) !void {
+        return switch (self.*) {
+            inline else => |*device| device.readManyAt(reads, results),
+        };
+    }
+
+    fn writeAllAt(self: *Device, bytes: []const u8, offset: u64) !void {
+        return switch (self.*) {
+            inline else => |*device| device.writeAllAt(bytes, offset),
+        };
+    }
+
+    fn writeAllManyAt(self: *Device, writes: []const storage_api.Write) !void {
+        return switch (self.*) {
+            inline else => |*device| device.writeAllManyAt(writes),
+        };
+    }
+
+    fn sync(self: *Device) !void {
+        return switch (self.*) {
+            inline else => |*device| device.sync(),
+        };
+    }
+};
 
 const Context = struct {
     allocator: std.mem.Allocator,
     set: pool_member_set.PoolMemberSet,
-    device: pool_block_device.PoolBlockDevice,
-    endpoint_contexts: [max_replica_count]ClaimedReplicaContext,
-    data_claims: [max_replica_count]member_api.DataClaim,
+    device: Device,
+    endpoint_contexts: [max_member_count]ClaimedReplicaContext,
+    data_claims: [max_member_count]member_api.DataClaim,
     data_claim_count: usize,
     identity: [16]u8,
     writable: bool,
@@ -58,12 +97,9 @@ pub fn create(
     try context.set.claimCoordinator();
     context.coordinator_claimed = true;
 
-    var replicas: [max_replica_count]ReplicaEndpoint = undefined;
-    for (
-        validated.slots[0..validated.member_count],
-        context.endpoint_contexts[0..validated.member_count],
-        replicas[0..validated.member_count],
-    ) |slot, *endpoint_context, *replica| {
+    var replicas: [max_member_count]ReplicaEndpoint = undefined;
+    for (validated.slots[0..validated.member_count], 0..) |slot, index| {
+        const endpoint_context = &context.endpoint_contexts[index];
         const data_member = context.set.dataMemberForRead(slot) catch unreachable;
         endpoint_context.* = .{ .member = data_member.member, .data_claim = null };
         if (writable) {
@@ -72,17 +108,32 @@ pub fn create(
             context.data_claim_count += 1;
         }
         const header = data_member.member.header();
-        replica.* = ReplicaEndpoint.init(endpoint_context, .{
+        replicas[index] = ReplicaEndpoint.init(endpoint_context, .{
             .logical_capacity = header.logical_capacity,
             .data_length = header.data.length,
         }, &claimed_replica_vtable);
     }
-    context.device = try pool_block_device.PoolBlockDevice.initBytes(
-        io,
-        replicas[0..validated.member_count],
-        validated.layout,
-        validated.capacity,
-    );
+    if (validated.plan) |plan| {
+        var endpoints: [max_member_count]pool_scheduled_data_device.MemberEndpoint = undefined;
+        for (validated.slots[0..validated.member_count], replicas[0..validated.member_count], endpoints[0..validated.member_count]) |
+            slot,
+            replica,
+            *endpoint,
+        | endpoint.* = .{ .slot = slot, .endpoint = replica };
+        context.device = .{ .scheduled = try .init(
+            allocator,
+            io,
+            endpoints[0..validated.member_count],
+            plan,
+        ) };
+    } else {
+        context.device = .{ .mirrored = try .initBytes(
+            io,
+            replicas[0..validated.member_count],
+            validated.layout,
+            validated.capacity,
+        ) };
+    }
 
     return storage_api.Storage.initBackend(
         context,
@@ -111,8 +162,9 @@ fn rollbackConstruction(context: *Context, set_source: *pool_member_set.PoolMemb
 const ValidatedSet = struct {
     identity: [16]u8,
     capacity: u64,
-    layout: @import("pool_layout.zig").Layout,
-    slots: [max_replica_count]u16,
+    layout: pool_layout.Layout,
+    plan: ?pool_blob_schedule.PlacementPlan,
+    slots: [max_member_count]u16,
     member_count: usize,
 };
 
@@ -124,6 +176,9 @@ fn validateSet(set: *pool_member_set.PoolMemberSet, writable: bool) !ValidatedSe
         authority.topology.epoch != 1 or authority.layout.layout_epoch != 1 or
         authority.layout.topology_epoch != authority.topology.epoch)
         return error.NonGenesisPoolUnsupported;
+
+    if (authority.layout.scheduled_blob != null)
+        return validateScheduledSet(set, authority, writable);
 
     const required_count: usize = switch (authority.layout.kind) {
         .unprotected => 1,
@@ -144,6 +199,7 @@ fn validateSet(set: *pool_member_set.PoolMemberSet, writable: bool) !ValidatedSe
         .identity = authority.topology.set_id,
         .capacity = 0,
         .layout = authority.layout,
+        .plan = null,
         .slots = undefined,
         .member_count = required_count,
     };
@@ -176,6 +232,81 @@ fn validateSet(set: *pool_member_set.PoolMemberSet, writable: bool) !ValidatedSe
             result.capacity = header.logical_capacity;
         }
         result.slots[index] = descriptor.slot;
+    }
+    return result;
+}
+
+fn validateScheduledSet(
+    set: *pool_member_set.PoolMemberSet,
+    authority: pool_authority.Authority,
+    writable: bool,
+) !ValidatedSet {
+    const scheduled = authority.layout.scheduled_blob.?;
+    if (authority.topology.member_count != scheduled.member_count or
+        set.suppliedCount() != scheduled.member_count)
+        return error.UnsupportedDegradedScheduledPool;
+    if (writable) {
+        if (set.dataAccess() != .read_write) return error.DataWriteUnavailable;
+    } else if (set.dataAccess() != .read_write) {
+        return error.UnsupportedDegradedScheduledPool;
+    }
+
+    var result: ValidatedSet = .{
+        .identity = authority.topology.set_id,
+        .capacity = scheduled.logical_capacity,
+        .layout = authority.layout,
+        .plan = null,
+        .slots = undefined,
+        .member_count = scheduled.member_count,
+    };
+    var canonical_page: ?pool_blob_schedule.PlacementPage = null;
+    for (authority.topology.memberSlice()) |descriptor| {
+        if (descriptor.state != .active) return error.TransitionalPoolTopology;
+        const data_member = try set.dataMemberForRead(descriptor.slot);
+        const member = data_member.member;
+        if ((member.mode() == .writable) != writable) return error.PoolAccessModeMismatch;
+        const header = member.header();
+        if (member_format.poolFilesystem(header) != .blob)
+            return error.PoolDataRequiresBlobFilesystem;
+        if (member_format.hasCatalogData(header)) return error.CatalogPoolUnsupported;
+        if (!member_format.hasScheduledBlobData(header) or
+            header.layout_format_version != member_format.scheduled_layout_format_version)
+            return error.InvalidScheduledBlobHeader;
+        if (!std.mem.eql(u8, &header.set_id, &authority.topology.set_id) or
+            !std.mem.eql(u8, &header.member_id, &descriptor.member_id) or
+            header.member_slot != descriptor.slot or
+            header.member_count != scheduled.member_count or
+            header.chunk_size != authority.layout.chunk_size or
+            header.logical_capacity != scheduled.logical_capacity or
+            header.metadata.length < pool_blob_schedule.placement_page_size)
+            return error.InconsistentMemberGeometry;
+
+        var page: pool_blob_schedule.PlacementPage align(pool_blob_schedule.placement_page_size) = undefined;
+        try member.read(.metadata, 0, &page);
+        const plan = try pool_blob_schedule.decodePage(&page);
+        if (canonical_page) |expected| {
+            if (!std.mem.eql(u8, &expected, &page)) return error.InconsistentPlacementPage;
+        } else {
+            canonical_page = page;
+            result.plan = plan;
+        }
+    }
+
+    const plan = result.plan orelse return error.MissingPlacementPlan;
+    if (plan.member_count != scheduled.member_count or
+        plan.member_count != authority.topology.member_count or
+        plan.stripe_size != authority.layout.chunk_size or
+        std.math.mul(u64, plan.logical_stripe_count, plan.stripe_size) catch null != scheduled.logical_capacity or
+        !std.mem.eql(u8, &(try pool_blob_schedule.digest(plan)), &scheduled.placement_digest))
+        return error.InconsistentPlacementPlan;
+    for (plan.memberSlice(), 0..) |entry, index| {
+        const descriptor = pool_topology.findSlot(&authority.topology, entry.slot) orelse
+            return error.PlacementMemberNotInTopology;
+        const member = (try set.dataMemberForRead(descriptor.slot)).member;
+        const required = std.math.mul(u64, entry.assigned_stripes, plan.stripe_size) catch
+            return error.InvalidPoolDataGeometry;
+        if (member.header().data.length < required) return error.TruncatedMemberData;
+        result.slots[index] = entry.slot;
     }
     return result;
 }
@@ -379,6 +510,11 @@ const storage_vtable: storage_api.Storage.VTable = .{
 };
 
 const test_member_names = [_][]const u8{ "member-a", "member-b", "member-c" };
+const scheduled_test_member_names = [_][]const u8{
+    "member-00", "member-01", "member-02", "member-03",
+    "member-04", "member-05", "member-06", "member-07",
+    "member-08", "member-09", "member-10", "member-11",
+};
 
 fn provisionTestPool(
     dir: Io.Dir,
@@ -409,6 +545,178 @@ fn openTestSet(dir: Io.Dir, member_count: usize, intent: pool_member_set.OpenInt
     for (test_member_names[0..member_count], locations[0..member_count]) |name, *location|
         location.* = .{ .parent = dir, .basename = name };
     return pool_member_set.open(std.testing.io, std.testing.allocator, locations[0..member_count], intent);
+}
+
+fn provisionScheduledTestPool(dir: Io.Dir) !u64 {
+    const pool_provision = @import("pool_provision.zig");
+    var storages: [max_member_count]storage_api.Storage = undefined;
+    for (scheduled_test_member_names, &storages, 0..) |name, *storage, index|
+        storage.* = try storage_api.Storage.createFile(
+            std.testing.io,
+            dir,
+            name,
+            (8 + index) * 1024 * 1024,
+        );
+    const outcome = try pool_provision.create(
+        std.testing.io,
+        std.testing.allocator,
+        &storages,
+        .{ .filesystem = .blob, .scheduled_blob = true },
+    );
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    const capacity = provisioned.genesis.layout.scheduled_blob.?.logical_capacity;
+    try provisioned.close();
+    return capacity;
+}
+
+fn openScheduledTestSet(dir: Io.Dir, intent: pool_member_set.OpenIntent, reversed: bool) !pool_member_set.PoolMemberSet {
+    var locations: [max_member_count]pool_member_set.Location = undefined;
+    for (&locations, 0..) |*location, index| {
+        const name_index = if (reversed) locations.len - 1 - index else index;
+        location.* = .{ .parent = dir, .basename = scheduled_test_member_names[name_index] };
+    }
+    return pool_member_set.open(std.testing.io, std.testing.allocator, &locations, intent);
+}
+
+test "scheduled Pool data storage supports heterogeneous members and reordered reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const expected_capacity = try provisionScheduledTestPool(tmp.dir);
+
+    var set = try openScheduledTestSet(tmp.dir, .writable, false);
+    var minimum_data_length: u64 = std.math.maxInt(u64);
+    for (0..set.suppliedCount()) |index|
+        minimum_data_length = @min(minimum_data_length, (try set.memberAt(index)).?.header().data.length);
+    var storage = try create(std.testing.allocator, std.testing.io, &set, true);
+    try std.testing.expectEqual(expected_capacity, storage.capacity());
+    try std.testing.expect(storage.capacity() > minimum_data_length);
+
+    const bytes = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(io_alignment), 4 * io_alignment);
+    defer std.testing.allocator.free(bytes);
+    for (bytes, 0..) |*byte, index| byte.* = @truncate(index *% 37);
+    const crossing_offset = blob_format_api.blob_size - io_alignment;
+    try storage.writeAllAt(std.testing.io, bytes[0 .. 2 * io_alignment], crossing_offset);
+    const writes = [_]storage_api.Write{
+        .{ .bytes = bytes[2 * io_alignment .. 3 * io_alignment], .offset = 3 * blob_format_api.blob_size },
+        .{ .bytes = bytes[3 * io_alignment ..], .offset = 5 * blob_format_api.blob_size + io_alignment },
+    };
+    try storage.writeAllManyAt(std.testing.io, &writes);
+    try storage.sync(std.testing.io);
+    try storage.close(std.testing.io);
+
+    set = try openScheduledTestSet(tmp.dir, .read_only, true);
+    storage = try create(std.testing.allocator, std.testing.io, &set, false);
+    defer storage.close(std.testing.io) catch {};
+    const output = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(io_alignment), bytes.len);
+    defer std.testing.allocator.free(output);
+    @memset(output, 0);
+    try std.testing.expectEqual(
+        2 * io_alignment,
+        try storage.readAt(std.testing.io, output[0 .. 2 * io_alignment], crossing_offset),
+    );
+    const reads = [_]storage_api.Read{
+        .{ .buffer = output[2 * io_alignment .. 3 * io_alignment], .offset = writes[0].offset },
+        .{ .buffer = output[3 * io_alignment ..], .offset = writes[1].offset },
+    };
+    var results: [reads.len]storage_api.ReadResult = undefined;
+    try storage.readManyAt(std.testing.io, &reads, &results);
+    for (results) |result| try std.testing.expectEqual(@as(?anyerror, null), result.failure);
+    try std.testing.expectEqualSlices(u8, bytes, output);
+}
+
+test "scheduled Pool data rejects degraded and invalid placement without taking ownership" {
+    var degraded_tmp = std.testing.tmpDir(.{});
+    defer degraded_tmp.cleanup();
+    _ = try provisionScheduledTestPool(degraded_tmp.dir);
+    var full = try openScheduledTestSet(degraded_tmp.dir, .read_only, false);
+    try std.testing.expectEqual(pool_policy.DataAccess.read_write, full.dataAccess());
+    try full.close();
+
+    var locations: [max_member_count - 1]pool_member_set.Location = undefined;
+    for (&locations, 0..) |*location, index|
+        location.* = .{ .parent = degraded_tmp.dir, .basename = scheduled_test_member_names[index] };
+    var degraded = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .read_only);
+    try std.testing.expectEqual(pool_policy.DataAccess.read_only, degraded.dataAccess());
+    try std.testing.expectError(
+        error.UnsupportedDegradedScheduledPool,
+        create(std.testing.allocator, std.testing.io, &degraded, false),
+    );
+    try std.testing.expect((try degraded.memberAt(0)) != null);
+    try degraded.close();
+
+    var unavailable = try pool_member_set.open(
+        std.testing.io,
+        std.testing.allocator,
+        locations[0 .. locations.len - 1],
+        .read_only,
+    );
+    try std.testing.expectEqual(pool_policy.DataAccess.unavailable, unavailable.dataAccess());
+    try unavailable.close();
+
+    var corrupt_tmp = std.testing.tmpDir(.{});
+    defer corrupt_tmp.cleanup();
+    _ = try provisionScheduledTestPool(corrupt_tmp.dir);
+    var member = try member_api.openAt(
+        std.testing.io,
+        corrupt_tmp.dir,
+        scheduled_test_member_names[4],
+        .writable,
+    );
+    const metadata_offset = member.header().metadata.offset;
+    try member.close();
+    const file = try corrupt_tmp.dir.openFile(
+        std.testing.io,
+        scheduled_test_member_names[4],
+        .{ .mode = .read_write },
+    );
+    try file.writePositionalAll(
+        std.testing.io,
+        &.{1},
+        metadata_offset + pool_blob_schedule.placement_page_size - 1,
+    );
+    try file.sync(std.testing.io);
+    file.close(std.testing.io);
+    var corrupt = try openScheduledTestSet(corrupt_tmp.dir, .writable, true);
+    defer corrupt.deinit();
+    try std.testing.expectError(
+        error.NonZeroPageTail,
+        create(std.testing.allocator, std.testing.io, &corrupt, true),
+    );
+    try std.testing.expect((try corrupt.memberAt(0)) != null);
+}
+
+test "scheduled Pool data rejects truncated assigned geometry without taking ownership" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try provisionScheduledTestPool(tmp.dir);
+    var member = try member_api.openAt(std.testing.io, tmp.dir, scheduled_test_member_names[0], .writable);
+    var header = member.header();
+    var page: pool_blob_schedule.PlacementPage align(pool_blob_schedule.placement_page_size) = undefined;
+    try member.read(.metadata, 0, &page);
+    try member.close();
+    const plan = try pool_blob_schedule.decodePage(&page);
+    const entry = plan.memberSlice()[0];
+    try std.testing.expectEqual(header.member_slot, entry.slot);
+    header.data.length = (entry.assigned_stripes - 1) * plan.stripe_size;
+    header.member_bytes = header.data.offset + header.data.length;
+    const encoded = try member_format.encode(header);
+    const file = try tmp.dir.openFile(std.testing.io, scheduled_test_member_names[0], .{ .mode = .read_write });
+    try file.writePositionalAll(std.testing.io, &encoded, 0);
+    try file.writePositionalAll(std.testing.io, &encoded, member_format.encoded_size);
+    try file.setLength(std.testing.io, header.member_bytes);
+    try file.sync(std.testing.io);
+    file.close(std.testing.io);
+
+    var set = try openScheduledTestSet(tmp.dir, .writable, false);
+    defer set.deinit();
+    try std.testing.expectError(
+        error.TruncatedMemberData,
+        create(std.testing.allocator, std.testing.io, &set, true),
+    );
+    try std.testing.expect((try set.memberAt(0)) != null);
 }
 
 test "Pool data storage supports aligned byte IO across protection modes" {
@@ -730,7 +1038,12 @@ fn initOrderedTestContext(context: *Context, replicas: *[max_replica_count]Order
     context.* = .{
         .allocator = std.testing.allocator,
         .set = .{},
-        .device = try .initBytes(std.testing.io, &endpoints, layout, blob_format_api.minimum_device_size),
+        .device = .{ .mirrored = try .initBytes(
+            std.testing.io,
+            &endpoints,
+            layout,
+            blob_format_api.minimum_device_size,
+        ) },
         .endpoint_contexts = undefined,
         .data_claims = undefined,
         .data_claim_count = 0,
@@ -965,4 +1278,64 @@ test "Blob Store and Filesystem reopen over Pool data storage" {
     filesystem = try blob_filesystem.Filesystem.open(std.testing.allocator, std.testing.io, store, false);
     defer filesystem.close(std.testing.io) catch {};
     try std.testing.expectEqual(inode, try filesystem.resolvePath(std.testing.io, "/small"));
+}
+
+test "Blob Store and Filesystem reopen over scheduled Pool data storage" {
+    const blob_device = @import("../blob_device.zig");
+    const blob_filesystem = @import("../blob_filesystem.zig");
+    const blob_format = @import("../blob_format.zig");
+    const blob_store = @import("../blob_store.zig");
+    const name_profile = @import("../name_profile.zig");
+
+    var store_tmp = std.testing.tmpDir(.{});
+    defer store_tmp.cleanup();
+    _ = try provisionScheduledTestPool(store_tmp.dir);
+    var set = try openScheduledTestSet(store_tmp.dir, .writable, true);
+    var storage = try create(std.testing.allocator, std.testing.io, &set, true);
+    var device = try blob_device.Device.init(storage, 0, storage.capacity(), blob_format.allocation_unit);
+    var store = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    const reference = try store.put(std.testing.io, "Scheduled Pool-backed blob");
+    try store.commit(std.testing.io);
+    try store.close(std.testing.io);
+
+    set = try openScheduledTestSet(store_tmp.dir, .read_only, false);
+    storage = try create(std.testing.allocator, std.testing.io, &set, false);
+    device = try blob_device.Device.init(storage, 0, storage.capacity(), blob_format.allocation_unit);
+    store = try blob_store.Store.open(std.testing.allocator, std.testing.io, device);
+    const output = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(io_alignment), blob_format.blob_size);
+    defer std.testing.allocator.free(output);
+    const amount = try store.read(std.testing.io, reference, output);
+    try std.testing.expectEqualStrings("Scheduled Pool-backed blob", output[0..amount]);
+    try store.close(std.testing.io);
+
+    var filesystem_tmp = std.testing.tmpDir(.{});
+    defer filesystem_tmp.cleanup();
+    _ = try provisionScheduledTestPool(filesystem_tmp.dir);
+    set = try openScheduledTestSet(filesystem_tmp.dir, .writable, false);
+    storage = try create(std.testing.allocator, std.testing.io, &set, true);
+    device = try blob_device.Device.init(storage, 0, storage.capacity(), blob_format.allocation_unit);
+    store = try blob_store.Store.create(std.testing.allocator, std.testing.io, device);
+    var filesystem = try blob_filesystem.Filesystem.format(
+        std.testing.allocator,
+        std.testing.io,
+        store,
+        name_profile.Profile.legacy_raw,
+    );
+    const inode = try filesystem.createFile(std.testing.io, 1, "scheduled", 0o644, 0, 0);
+    _ = try filesystem.write(std.testing.io, inode, "scheduled data", 0);
+    try filesystem.close(std.testing.io);
+
+    set = try openScheduledTestSet(filesystem_tmp.dir, .read_only, true);
+    storage = try create(std.testing.allocator, std.testing.io, &set, false);
+    device = try blob_device.Device.init(storage, 0, storage.capacity(), blob_format.allocation_unit);
+    store = try blob_store.Store.open(std.testing.allocator, std.testing.io, device);
+    filesystem = try blob_filesystem.Filesystem.open(std.testing.allocator, std.testing.io, store, false);
+    defer filesystem.close(std.testing.io) catch {};
+    try std.testing.expectEqual(inode, try filesystem.resolvePath(std.testing.io, "/scheduled"));
+    var contents: [32]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(usize, "scheduled data".len),
+        try filesystem.read(std.testing.io, inode, &contents, 0),
+    );
+    try std.testing.expectEqualStrings("scheduled data", contents[0.."scheduled data".len]);
 }
