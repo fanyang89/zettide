@@ -14,6 +14,7 @@ const Io = std.Io;
 const inode_cache_ways = 4;
 const inode_cache_sets = 256;
 const inode_cache_entries = inode_cache_ways * inode_cache_sets;
+const mutation_reserve_units = 1024;
 
 const InodeCacheEntry = struct {
     root_generation: u64 = 0,
@@ -233,8 +234,13 @@ pub const Filesystem = struct {
 
     pub fn availableUnits(self: *const Filesystem) u64 {
         const free = self.blobs.header.unit_count - self.blobs.stagedUnits();
-        const protected = reservationCapacityUnits(self.reserved_bytes) catch return 0;
+        const reservations = reservationCapacityUnits(self.reserved_bytes) catch return 0;
+        const protected = std.math.add(u64, reservations, self.mutationReserveUnits()) catch return 0;
         return free -| protected;
+    }
+
+    fn mutationReserveUnits(self: *const Filesystem) u64 {
+        return @min(mutation_reserve_units, self.blobs.header.unit_count / 16);
     }
 
     fn syncUnlocked(self: *Filesystem, io: Io) !void {
@@ -1670,7 +1676,9 @@ pub const Filesystem = struct {
     }
 
     fn ensureCapacity(self: *const Filesystem, operation_units: u64, reserved_bytes: u64) !void {
-        const protected = try reservationCapacityUnits(reserved_bytes);
+        const reservations = try reservationCapacityUnits(reserved_bytes);
+        const protected = std.math.add(u64, reservations, self.mutationReserveUnits()) catch
+            return error.BlobStoreFull;
         const required = std.math.add(u64, operation_units, protected) catch return error.BlobStoreFull;
         if (required > self.blobs.header.unit_count - self.blobs.stagedUnits())
             return error.BlobStoreFull;
@@ -3027,7 +3035,7 @@ test "blob filesystem map capacity failure freezes deferred data transaction" {
     try filesystem.sync(std.testing.io);
 
     const available_units = filesystem.blobs.header.unit_count - filesystem.blobs.stagedUnits();
-    const filler_units = available_units - 1;
+    const filler_units = available_units - filesystem.mutationReserveUnits() - 1;
     const filler = try std.testing.allocator.alloc(u8, @intCast(filler_units * blob_format.allocation_unit));
     defer std.testing.allocator.free(filler);
     @memset(filler, 0x5a);
@@ -3036,8 +3044,15 @@ test "blob filesystem map capacity failure freezes deferred data transaction" {
     const root_before = filesystem.root;
     const authority_before = filesystem.authority_ref;
     try std.testing.expectEqual(@as(usize, 3), try filesystem.write(std.testing.io, inode, "new", 0));
+    const reserve_filler = try std.testing.allocator.alloc(
+        u8,
+        @intCast(filesystem.mutationReserveUnits() * blob_format.allocation_unit),
+    );
+    defer std.testing.allocator.free(reserve_filler);
+    @memset(reserve_filler, 0x6b);
+    _ = try filesystem.blobs.put(std.testing.io, reserve_filler);
     try std.testing.expectError(error.BlobStoreFull, filesystem.sync(std.testing.io));
-    try std.testing.expectEqual(checkpoint + 1, filesystem.blobs.stagedUnits());
+    try std.testing.expectEqual(checkpoint + 1 + filesystem.mutationReserveUnits(), filesystem.blobs.stagedUnits());
     try std.testing.expectEqualDeep(root_before, filesystem.root);
     try std.testing.expectEqualDeep(authority_before, filesystem.authority_ref);
     try std.testing.expect(filesystem.frozen);

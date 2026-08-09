@@ -1,7 +1,7 @@
 const std = @import("std");
 const crc32c = @import("crc32c");
 const metadata = @import("metadata.zig");
-const object_format = @import("object_format.zig");
+const filesystem_backend = @import("filesystem_backend.zig");
 
 pub const encoded_size = 44;
 const magic = [4]u8{ 'Z', 'N', 'F', 'H' };
@@ -9,7 +9,7 @@ const version: u8 = 1;
 
 pub const Handle = struct {
     kind: metadata.Kind,
-    identity: object_format.ObjectId,
+    identity: filesystem_backend.FileId,
 };
 
 pub fn encode(volume_uuid: [16]u8, handle: Handle) [encoded_size]u8 {
@@ -37,7 +37,7 @@ pub fn decode(expected_volume_uuid: [16]u8, bytes: []const u8) !Handle {
 
 test "NFS file handles have a stable canonical encoding" {
     const volume_uuid: [16]u8 = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-    const identity: object_format.ObjectId = .{
+    const identity: filesystem_backend.FileId = .{
         15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
     };
     const bytes = encode(volume_uuid, .{ .kind = .directory, .identity = identity });
@@ -53,7 +53,7 @@ test "NFS file handles have a stable canonical encoding" {
 
 test "NFS file handles reject malformed and foreign encodings" {
     const volume_uuid: [16]u8 = @splat(1);
-    const identity: object_format.ObjectId = @splat(2);
+    const identity: filesystem_backend.FileId = @splat(2);
     const canonical = encode(volume_uuid, .{ .kind = .file, .identity = identity });
     try std.testing.expectError(error.InvalidFileHandle, decode(volume_uuid, canonical[0 .. encoded_size - 1]));
 

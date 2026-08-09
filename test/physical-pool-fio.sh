@@ -467,7 +467,7 @@ check_identity
 grep -q '^Preflight: eligible$' "$log_dir/device-inspect.log"
 "$cli" pool inspect --device "$device" >"$log_dir/pool-inspect-before.log"
 grep -q "^Pool: $expected_pool_id$" "$log_dir/pool-inspect-before.log"
-grep -q "^Filesystem: $expected_filesystem$" "$log_dir/pool-inspect-before.log"
+grep -q "^Data mode: $([[ $expected_filesystem == littlefs ]] && echo catalog || echo "$expected_filesystem")$" "$log_dir/pool-inspect-before.log"
 grep -q '^Profile: unprotected$' "$log_dir/pool-inspect-before.log"
 grep -q '^Data policy: read_write$' "$log_dir/pool-inspect-before.log"
 grep -q '^Mountable: yes$' "$log_dir/pool-inspect-before.log"
@@ -499,6 +499,6 @@ run_fio_case randread-4k-qd32-j4 randread 4k 32 4 "$multi_size" 'multi.$jobnum.b
 check_identity
 "$cli" pool inspect --device "$device" >"$log_dir/pool-inspect-after.log"
 grep -q "^Pool: $expected_pool_id$" "$log_dir/pool-inspect-after.log"
-grep -q "^Filesystem: $expected_filesystem$" "$log_dir/pool-inspect-after.log"
+grep -q "^Data mode: $([[ $expected_filesystem == littlefs ]] && echo catalog || echo "$expected_filesystem")$" "$log_dir/pool-inspect-after.log"
 grep -q '^Mountable: yes$' "$log_dir/pool-inspect-after.log"
 echo "physical Pool fio passed"

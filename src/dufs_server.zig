@@ -1,7 +1,6 @@
 const std = @import("std");
-const volume_api = @import("volume.zig");
+const filesystem_backend = @import("filesystem_backend.zig");
 const linux_fuse = @import("linux_fuse.zig");
-const littlefs_volume_adapter = @import("littlefs_volume_adapter.zig");
 const linux = std.os.linux;
 
 var spawn_signal_received = std.atomic.Value(bool).init(false);
@@ -113,10 +112,10 @@ const PidFd = struct {
 pub fn serve(
     allocator: std.mem.Allocator,
     io: std.Io,
-    volume: *volume_api.Volume,
+    filesystem: filesystem_backend.Filesystem,
     target_path: []const u8,
     read_only: bool,
-    access_time: volume_api.AccessTimePolicy,
+    update_access_time: bool,
     dufs_args: []const []const u8,
     stdout: *std.Io.Writer,
 ) !void {
@@ -135,17 +134,14 @@ pub fn serve(
     var notification = try Notification.init();
     defer notification.deinit();
 
-    volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
-    try volume.mountOptions(.{ .access_time = .noatime });
-
     var session = try linux_fuse.Session.start(
         allocator,
-        littlefs_volume_adapter.filesystem(volume),
+        filesystem,
         io,
         mountpoint,
         .{
             .read_only = read_only,
-            .update_access_time = access_time == .relatime,
+            .update_access_time = update_access_time,
             .on_exit = Notification.notify,
             .on_exit_context = &notification,
         },

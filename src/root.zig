@@ -24,6 +24,7 @@ pub const dufs_server = if (@import("builtin").os.tag == .linux) @import("dufs_s
 pub const metadata = @import("metadata.zig");
 pub const name_profile = @import("name_profile.zig");
 pub const nfs_filesystem = @import("nfs_filesystem.zig");
+pub const nfs_handle = @import("nfs_handle.zig");
 pub const nfs_blob_adapter = @import("nfs_blob_adapter.zig");
 pub const nfs_littlefs_adapter = @import("nfs_littlefs_adapter.zig");
 pub const object_format = @import("object_format.zig");
@@ -79,6 +80,7 @@ test {
     _ = metadata;
     _ = name_profile;
     _ = nfs_filesystem;
+    _ = nfs_handle;
     _ = nfs_blob_adapter;
     _ = nfs_littlefs_adapter;
     _ = object_format;

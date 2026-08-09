@@ -78,7 +78,9 @@ pub fn build(b: *std.Build) void {
             .root_module = nfs_backend_module,
         });
         nfs_backend_library.bundle_compiler_rt = true;
-        b.installArtifact(nfs_backend_library);
+        const install_nfs_backend = b.addInstallArtifact(nfs_backend_library, .{});
+        install_nfs_backend.step.dependOn(&nfs_backend_library.step);
+        b.getInstallStep().dependOn(&install_nfs_backend.step);
         b.getInstallStep().dependOn(&b.addInstallHeaderFile(
             b.path("src/nfs_backend.h"),
             "zettide/nfs_backend.h",
@@ -132,7 +134,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_fs_ops_benchmark = b.addRunArtifact(fs_ops_benchmark);
     if (b.args) |args| run_fs_ops_benchmark.addArgs(args);
-    const fs_ops_benchmark_step = b.step("bench-fs-ops", "Benchmark direct Volume filesystem operations");
+    const fs_ops_benchmark_step = b.step("bench-fs-ops", "Benchmark direct Blob filesystem operations");
     fs_ops_benchmark_step.dependOn(&run_fs_ops_benchmark.step);
     const install_fs_ops_benchmark = b.addInstallArtifact(fs_ops_benchmark, .{});
     const build_fs_ops_benchmark_step = b.step("build-bench-fs-ops", "Build the filesystem operations benchmark");

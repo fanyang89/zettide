@@ -2,236 +2,94 @@
 set -euo pipefail
 
 exe=$1
-pty_passphrase_exec=${2:-}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/zettide-cli.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
-image="$tmp/image with spaces.ddv"
-"$exe" create "$image" --size 1MiB --label "CLI Test"
+image="$tmp/image with spaces.blob"
+"$exe" format "$image" --size 8MiB --name-profile portable-v1
 info=$("$exe" info "$image")
-[[ "$info" == *"Label: CLI Test"* ]]
-[[ "$info" == *"Capacity: 1.00MiB"* ]]
-[[ "$info" == *"Name profile: legacy-raw"* ]]
-[[ "$info" == *"Encrypted: no"* ]]
+[[ "$info" == *"Data mode: blob"* ]]
+[[ "$info" == *"Capacity: 8.00MiB"* ]]
+[[ "$info" == *"Name profile: portable-v1"* ]]
 "$exe" check "$image" | grep -q '^Filesystem traversal succeeded:'
 
-default_image="$tmp/default-label.ddv"
-"$exe" create "$default_image" --size 1MiB >/dev/null
-"$exe" info "$default_image" | grep -q '^Label: Zettide$'
+default_image="$tmp/default.blob"
+"$exe" format "$default_image" --size 8MiB >/dev/null
+"$exe" info "$default_image" | grep -q '^Name profile: legacy-raw$'
 
-portable_image="$tmp/portable.ddv"
-"$exe" create "$portable_image" --size 1MiB --name-profile portable-v1 >/dev/null
-"$exe" info "$portable_image" | grep -q '^Name profile: portable-v1$'
+for removed in \
+    "create $tmp/create.blob --size 8MiB" \
+    "key generate $tmp/key" \
+    "format $tmp/filesystem.blob --filesystem blob --size 8MiB" \
+    "format $tmp/label.blob --label old --size 8MiB" \
+    "format $tmp/encrypted.blob --encrypt --size 8MiB"; do
+    if "$exe" $removed >/dev/null 2>&1; then
+        echo "removed product option unexpectedly succeeded: $removed" >&2
+        exit 1
+    fi
+done
 
-if "$exe" create "$image" --size 1MiB >/dev/null 2>&1; then
-    echo "duplicate create unexpectedly succeeded" >&2
-    exit 1
-fi
-if "$exe" create "$tmp/bad.ddv" --size nonsense >/dev/null 2>&1; then
-    echo "invalid size unexpectedly succeeded" >&2
-    exit 1
-fi
-if "$exe" create "$tmp/missing.ddv" >/dev/null 2>&1; then
-    echo "missing size unexpectedly succeeded" >&2
-    exit 1
-fi
-if "$exe" create "$tmp/unknown-profile.ddv" --size 1MiB --name-profile unknown >/dev/null 2>&1; then
-    echo "unknown name profile unexpectedly succeeded" >&2
-    exit 1
-fi
-
-formatted="$tmp/formatted.ddv"
-"$exe" format "$formatted" --size 8MiB --label "Format Test"
-"$exe" info "$formatted" | grep -q '^Label: Format Test$'
-"$exe" check "$formatted" | grep -q '^Filesystem traversal succeeded:'
-
-explicit_littlefs="$tmp/explicit-littlefs.ddv"
-"$exe" format "$explicit_littlefs" --filesystem littlefs --size 8MiB >/dev/null
-"$exe" info "$explicit_littlefs" | grep -q '^Label: Zettide$'
-
-blob="$tmp/blob.ddv"
-"$exe" format "$blob" --filesystem blob --size 8MiB --name-profile portable-v1
-blob_info=$("$exe" info "$blob")
-[[ "$blob_info" == *"Filesystem: blob"* ]]
-[[ "$blob_info" == *"Capacity: 8.00MiB"* ]]
-[[ "$blob_info" == *"Name profile: portable-v1"* ]]
-"$exe" check "$blob" | grep -q '^Filesystem traversal succeeded:'
-
-blob_existing="$tmp/blob-existing.ddv"
-truncate -s 8MiB "$blob_existing"
-blob_plan=$("$exe" format "$blob_existing" --filesystem blob)
-[[ "$blob_plan" == *"Filesystem: blob"* ]]
-blob_token=$(printf '%s\n' "$blob_plan" | grep '^Confirm token: ' | cut -d' ' -f3)
-if "$exe" format "$blob_existing" --filesystem blob --name-profile portable-v1 --confirm "$blob_token" >/dev/null 2>&1; then
-    echo "blob format accepted a confirmation for another name profile" >&2
-    exit 1
-fi
-"$exe" format "$blob_existing" --filesystem blob --confirm "$blob_token" >/dev/null
-"$exe" info "$blob_existing" | grep -q '^Filesystem: blob$'
-
-if "$exe" format "$tmp/blob-label.ddv" --filesystem blob --size 8MiB --label unsupported >/dev/null 2>&1; then
-    echo "blob format accepted a label" >&2
-    exit 1
-fi
-if "$exe" format "$tmp/blob-encrypted.ddv" --filesystem blob --size 8MiB --encrypt --key-file missing >/dev/null 2>&1; then
-    echo "blob format accepted encryption" >&2
-    exit 1
-fi
-if "$exe" format "$tmp/blob-geometry.ddv" --filesystem blob --size 3145729 >/dev/null 2>&1; then
-    echo "blob format accepted invalid geometry" >&2
-    exit 1
-fi
-if "$exe" format "$tmp/unknown-filesystem.ddv" --filesystem unknown --size 8MiB >/dev/null 2>&1; then
-    echo "format accepted an unknown filesystem" >&2
-    exit 1
-fi
-if "$exe" format "$tmp/duplicate-filesystem.ddv" --filesystem littlefs --filesystem blob --size 8MiB >/dev/null 2>&1; then
-    echo "format accepted duplicate filesystem options" >&2
-    exit 1
-fi
-if "$exe" serve dufs "$blob" --read-only >/dev/null 2>&1; then
-    echo "dufs accepted a blob filesystem" >&2
-    exit 1
-fi
-if "$exe" format /dev/null --filesystem blob >/dev/null 2>&1; then
-    echo "blob format accepted a non-regular target" >&2
-    exit 1
-fi
-
-existing="$tmp/existing.ddv"
-truncate -s 8MiB "$existing"
-plan=$("$exe" format "$existing" --label "Existing Test")
-[[ "$plan" == *"Type: regular_file"* ]]
-[[ "$plan" == *"Contains data: no"* ]]
-token=$(printf '%s\n' "$plan" | grep '^Confirm token: ' | cut -d' ' -f3)
-if "$exe" format "$existing" --label "Existing Test" --name-profile portable-v1 --confirm "$token" >/dev/null 2>&1; then
-    echo "format accepted a confirmation for another name profile" >&2
-    exit 1
-fi
-"$exe" format "$existing" --label "Existing Test" --confirm "$token"
-"$exe" info "$existing" | grep -q '^Label: Existing Test$'
-
-portable_formatted="$tmp/portable-formatted.ddv"
-"$exe" format "$portable_formatted" --size 8MiB --name-profile portable-v1 >/dev/null
-"$exe" info "$portable_formatted" | grep -q '^Name profile: portable-v1$'
-
-portable_existing="$tmp/portable-existing.ddv"
-truncate -s 8MiB "$portable_existing"
-portable_plan=$("$exe" format "$portable_existing" --name-profile portable-v1)
-portable_token=$(printf '%s\n' "$portable_plan" | grep '^Confirm token: ' | cut -d' ' -f3)
-"$exe" format "$portable_existing" --name-profile portable-v1 --confirm "$portable_token" >/dev/null
-"$exe" info "$portable_existing" | grep -q '^Name profile: portable-v1$'
-
-changed="$tmp/changed.ddv"
-truncate -s 8MiB "$changed"
-printf first | dd of="$changed" conv=notrunc status=none
-changed_plan=$("$exe" format "$changed")
-changed_token=$(printf '%s\n' "$changed_plan" | grep '^Confirm token: ' | cut -d' ' -f3)
-printf second | dd of="$changed" conv=notrunc status=none
-if "$exe" format "$changed" --confirm "$changed_token" >/dev/null 2>&1; then
-    echo "changed target unexpectedly accepted stale confirmation" >&2
-    exit 1
-fi
-
-if "$exe" format "$tmp/unaligned.ddv" --size 7340033 >/dev/null 2>&1; then
-    echo "unaligned format size unexpectedly succeeded" >&2
-    exit 1
-fi
-if "$exe" format "$formatted" --size 8MiB >/dev/null 2>&1; then
+if "$exe" format "$image" --size 8MiB >/dev/null 2>&1; then
     echo "existing format target unexpectedly accepted --size" >&2
     exit 1
 fi
+if "$exe" format "$tmp/bad.blob" --size nonsense >/dev/null 2>&1; then
+    echo "invalid size unexpectedly succeeded" >&2
+    exit 1
+fi
+if "$exe" format "$tmp/missing.blob" >/dev/null 2>&1; then
+    echo "missing size unexpectedly succeeded" >&2
+    exit 1
+fi
+if "$exe" format /dev/null >/dev/null 2>&1; then
+    echo "format accepted a non-regular target" >&2
+    exit 1
+fi
 
-key_file="$tmp/workspace.key"
-"$exe" key generate "$key_file" >/dev/null
-[[ $(wc -c <"$key_file") -eq 32 ]]
+existing="$tmp/existing.blob"
+truncate -s 8MiB "$existing"
+plan=$("$exe" format "$existing")
+[[ "$plan" == *"Filesystem: blob"* ]]
+[[ "$plan" == *"Type: regular_file"* ]]
+token=$(grep '^Confirm token: ' <<<"$plan")
+token=${token#Confirm token: }
+if "$exe" format "$existing" --name-profile portable-v1 --confirm "$token" >/dev/null 2>&1; then
+    echo "format accepted a confirmation for another name profile" >&2
+    exit 1
+fi
+"$exe" format "$existing" --confirm "$token" >/dev/null
+
+changed="$tmp/changed.blob"
+truncate -s 8MiB "$changed"
+printf first | dd of="$changed" conv=notrunc status=none
+changed_plan=$("$exe" format "$changed")
+changed_token=$(grep '^Confirm token: ' <<<"$changed_plan")
+changed_token=${changed_token#Confirm token: }
+printf second | dd of="$changed" conv=notrunc status=none
+if "$exe" format "$changed" --confirm "$changed_token" >/dev/null 2>&1; then
+    echo "changed target accepted stale confirmation" >&2
+    exit 1
+fi
+
+legacy="$tmp/legacy.ddv"
+truncate -s 8MiB "$legacy"
+printf 'LFSDRV2\0' | dd of="$legacy" conv=notrunc status=none
+printf 'LFSDRV2\0' | dd of="$legacy" bs=1 seek=4096 conv=notrunc status=none
+for command in info check; do
+    if "$exe" "$command" "$legacy" >"$tmp/legacy.out" 2>"$tmp/legacy.err"; then
+        echo "$command accepted a legacy regular file" >&2
+        exit 1
+    fi
+    grep -q '^error: UnsupportedLegacyFormat$' "$tmp/legacy.err"
+done
+
 if [[ $(uname -s) == Linux ]]; then
-    [[ $(stat -c '%a' "$key_file") == 600 ]]
-fi
-if "$exe" key generate "$key_file" >/dev/null 2>&1; then
-    echo "key generation replaced an existing file" >&2
-    exit 1
-fi
-
-short_key="$tmp/short.key"
-printf short >"$short_key"
-chmod 600 "$short_key"
-if "$exe" format "$tmp/short-key.ddv" --size 8MiB --encrypt --key-file "$short_key" >/dev/null 2>&1; then
-    echo "format accepted a short key file" >&2
-    exit 1
-fi
-insecure_key="$tmp/insecure.key"
-cp "$key_file" "$insecure_key"
-chmod 644 "$insecure_key"
-if "$exe" format "$tmp/insecure-key.ddv" --size 8MiB --encrypt --key-file "$insecure_key" >/dev/null 2>&1; then
-    echo "format accepted an insecure key file" >&2
-    exit 1
-fi
-key_link="$tmp/key-link"
-ln -s "$key_file" "$key_link"
-if "$exe" format "$tmp/symlink-key.ddv" --size 8MiB --encrypt --key-file "$key_link" >/dev/null 2>&1; then
-    echo "format accepted a symlink key file" >&2
-    exit 1
-fi
-if [[ $(uname -s) == Linux ]]; then
-    key_fifo="$tmp/key-fifo"
-    mkfifo "$key_fifo"
-    set +e
-    timeout 5s "$exe" format "$tmp/fifo-key.ddv" --size 8MiB --encrypt --key-file "$key_fifo" >/dev/null 2>&1
-    fifo_status=$?
-    set -e
-    if [[ $fifo_status -eq 0 || $fifo_status -eq 124 ]]; then
-        echo "format did not promptly reject a FIFO key file" >&2
+    if "$exe" pool plan-create --device /dev/null --profile unprotected --filesystem blob >/dev/null 2>&1; then
+        echo "pool plan accepted a filesystem selector" >&2
         exit 1
     fi
-fi
-if "$exe" format "$tmp/missing-credential.ddv" --size 8MiB --encrypt >/dev/null 2>&1; then
-    echo "encrypted format accepted no credential" >&2
-    exit 1
-fi
-if "$exe" format "$tmp/missing-encrypt.ddv" --size 8MiB --key-file "$key_file" >/dev/null 2>&1; then
-    echo "format accepted a key without --encrypt" >&2
-    exit 1
-fi
-
-encrypted="$tmp/encrypted.ddv"
-"$exe" format "$encrypted" --size 8MiB --label "Encrypted Test" --encrypt --key-file "$key_file" >/dev/null
-encrypted_info=$("$exe" info "$encrypted")
-[[ "$encrypted_info" == *"Label: Encrypted Test"* ]]
-[[ "$encrypted_info" == *"Encrypted: yes"* ]]
-if "$exe" check "$encrypted" >/dev/null 2>&1; then
-    echo "check unexpectedly unlocked an encrypted target" >&2
-    exit 1
-fi
-
-if [[ $(uname -s) == Linux && -x "$pty_passphrase_exec" ]]; then
-    passphrase_image="$tmp/passphrase.ddv"
-    "$pty_passphrase_exec" 2 "test passphrase" "test passphrase" -- \
-        "$exe" format "$passphrase_image" --size 8MiB --encrypt --passphrase >/dev/null
-    "$exe" info "$passphrase_image" | grep -q '^Encrypted: yes$'
-fi
-
-if [[ "$(uname -s)" == "Linux" ]]; then
-    if "$exe" device inspect /dev/null >/dev/null 2>&1; then
-        echo "character device unexpectedly passed inspection" >&2
+    if "$exe" pool initialize --device /dev/null --confirm invalid >/dev/null 2>&1; then
+        echo "removed pool initialize command succeeded" >&2
         exit 1
     fi
-    if "$exe" pool plan-create --device /dev/null --profile unprotected \
-        --filesystem blob --filesystem littlefs >/dev/null 2>&1; then
-        echo "pool plan accepted duplicate filesystem options" >&2
-        exit 1
-    fi
-    if "$exe" pool plan-create --device /dev/null --profile unprotected \
-        --filesystem unknown >/dev/null 2>&1; then
-        echo "pool plan accepted an unknown filesystem" >&2
-        exit 1
-    fi
-fi
-
-cp "$image" "$tmp/corrupt.ddv"
-printf X | dd of="$tmp/corrupt.ddv" bs=1 seek=0 conv=notrunc status=none
-printf Y | dd of="$tmp/corrupt.ddv" bs=1 seek=4096 conv=notrunc status=none
-if "$exe" check "$tmp/corrupt.ddv" >/dev/null 2>&1; then
-    echo "corrupt container unexpectedly passed check" >&2
-    exit 1
 fi

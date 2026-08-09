@@ -4,9 +4,7 @@ const zbench = @import("zbench");
 const zettide = @import("zettide");
 
 const Io = std.Io;
-const Volume = zettide.volume.Volume;
-const FileHandle = zettide.volume.FileHandle;
-const c = zettide.volume.c;
+const backend = zettide.filesystem_backend;
 
 const Operation = enum {
     create,
@@ -34,57 +32,7 @@ const Operation = enum {
     }
 };
 
-const all_operations = [_]Operation{
-    .create,
-    .open,
-    .stat,
-    .read_readonly,
-    .read_partial,
-    .read_writable_relatime,
-    .write_overwrite,
-    .rename,
-    .remove,
-};
-
-const DurabilityMode = enum {
-    durable,
-    writeback,
-
-    fn parse(value: []const u8) !DurabilityMode {
-        if (std.mem.eql(u8, value, "durable")) return .durable;
-        if (std.mem.eql(u8, value, "writeback")) return .writeback;
-        return error.InvalidDurability;
-    }
-
-    fn mountValue(self: DurabilityMode) zettide.block_device.Durability {
-        return switch (self) {
-            .durable => .durable,
-            .writeback => .{ .writeback = .{} },
-        };
-    }
-};
-
-const FileIoMode = enum {
-    auto,
-    posix,
-    io_uring,
-
-    fn parse(value: []const u8) !FileIoMode {
-        if (std.mem.eql(u8, value, "auto")) return .auto;
-        if (std.mem.eql(u8, value, "posix")) return .posix;
-        if (std.mem.eql(u8, value, "io_uring")) return .io_uring;
-        return error.InvalidFileIo;
-    }
-
-    fn volumeValue(self: FileIoMode) zettide.file_io.Mode {
-        return switch (self) {
-            .auto => .auto,
-            .posix => .posix,
-            .io_uring => .io_uring,
-        };
-    }
-};
-
+const all_operations = std.enums.values(Operation);
 const benchmark_name_width = blk: {
     var width: usize = 0;
     for (all_operations) |operation| width = @max(width, @tagName(operation).len);
@@ -98,9 +46,6 @@ const Config = struct {
     block_size: usize = 4096,
     image_size: u64 = 512 * 1024 * 1024,
     workspace_root: []const u8 = ".zig-cache/benchmarks",
-    journaled: bool = false,
-    durability: DurabilityMode = .writeback,
-    file_io: FileIoMode = .auto,
     help: bool = false,
 };
 
@@ -111,17 +56,15 @@ const TempWorkspace = struct {
     fn init(io: Io, parent_path: []const u8) !TempWorkspace {
         const cwd = Io.Dir.cwd();
         try cwd.createDirPath(io, parent_path);
-
-        var random_bytes: [12]u8 = undefined;
-        var encoded: [std.base64.url_safe.Encoder.calcSize(random_bytes.len)]u8 = undefined;
+        var random: [12]u8 = undefined;
+        var encoded: [std.base64.url_safe.Encoder.calcSize(random.len)]u8 = undefined;
         for (0..8) |_| {
-            io.random(&random_bytes);
-            _ = std.base64.url_safe.Encoder.encode(&encoded, &random_bytes);
+            io.random(&random);
+            _ = std.base64.url_safe.Encoder.encode(&encoded, &random);
             var result: TempWorkspace = .{ .path_buffer = undefined, .path_length = 0 };
-            const workspace_path = try std.fmt.bufPrint(&result.path_buffer, "{s}/{s}", .{ parent_path, encoded });
-            result.path_length = workspace_path.len;
-            const status = try cwd.createDirPathStatus(io, workspace_path, .default_dir);
-            if (status == .created) return result;
+            const candidate = try std.fmt.bufPrint(&result.path_buffer, "{s}/{s}", .{ parent_path, encoded });
+            result.path_length = candidate.len;
+            if (try cwd.createDirPathStatus(io, candidate, .default_dir) == .created) return result;
         }
         return error.TemporaryDirectoryCollision;
     }
@@ -129,58 +72,44 @@ const TempWorkspace = struct {
     fn path(self: *const TempWorkspace) []const u8 {
         return self.path_buffer[0..self.path_length];
     }
-
-    fn cleanup(self: *TempWorkspace, io: Io) !void {
-        try Io.Dir.cwd().deleteTree(io, self.path());
-    }
 };
 
 const CaseState = struct {
     allocator: std.mem.Allocator,
-    volume: *Volume,
+    filesystem: backend.Filesystem,
     operation: Operation,
     payload: []u8,
     read_buffer: []u8,
-    handle: FileHandle = undefined,
+    handle: backend.FileHandle = undefined,
     handle_open: bool = false,
-    transient_handle: FileHandle = undefined,
+    transient: backend.FileHandle = undefined,
     transient_open: bool = false,
     rename_source_is_primary: bool = true,
     failure: ?anyerror = null,
 
-    fn init(
-        allocator: std.mem.Allocator,
-        volume: *Volume,
-        operation: Operation,
-        block_size: usize,
-    ) !CaseState {
+    fn init(allocator: std.mem.Allocator, filesystem: backend.Filesystem, operation: Operation, block_size: usize) !CaseState {
         const payload = try allocator.alloc(u8, block_size);
         errdefer allocator.free(payload);
         @memset(payload, 0x5a);
         const read_buffer = try allocator.alloc(u8, block_size);
         errdefer allocator.free(read_buffer);
-        return .{
-            .allocator = allocator,
-            .volume = volume,
-            .operation = operation,
-            .payload = payload,
-            .read_buffer = read_buffer,
-        };
+        return .{ .allocator = allocator, .filesystem = filesystem, .operation = operation, .payload = payload, .read_buffer = read_buffer };
     }
 
     fn deinit(self: *CaseState) void {
-        if (self.transient_open) self.volume.closeFile(&self.transient_handle) catch {};
-        if (self.handle_open) self.volume.closeFile(&self.handle) catch {};
+        if (self.transient_open) self.transient.close() catch {};
+        if (self.handle_open) self.handle.close() catch {};
         self.allocator.free(self.read_buffer);
         self.allocator.free(self.payload);
-        self.* = undefined;
     }
 
-    fn close(self: *CaseState) !void {
-        try self.closeTransient();
-        if (!self.handle_open) return;
-        try self.volume.closeFile(&self.handle);
-        self.handle_open = false;
+    fn createClosedFile(self: *CaseState, path: [*:0]const u8) !void {
+        var file = try self.filesystem.openFile(self.allocator, path, .{
+            .access = .read_write,
+            .create = true,
+            .exclusive = true,
+        }, .{ .mode = 0o644, .uid = 0, .gid = 0 });
+        try file.close();
     }
 
     fn prepare(self: *CaseState) !void {
@@ -188,21 +117,13 @@ const CaseState = struct {
             .create, .remove => {},
             .open, .stat, .rename => try self.createClosedFile("/subject"),
             .read_readonly, .read_partial => {
-                try self.volume.openFile(&self.handle, "/data", c.LFS_O_RDONLY, 0, 0, 0);
+                self.handle = try self.filesystem.openFile(self.allocator, "/data", .{ .access = .read_only }, .{ .mode = 0, .uid = 0, .gid = 0 });
                 self.handle_open = true;
             },
             .read_writable_relatime, .write_overwrite => {
-                try self.volume.openFile(
-                    &self.handle,
-                    "/data",
-                    c.LFS_O_CREAT | c.LFS_O_EXCL | c.LFS_O_RDWR,
-                    0o100644,
-                    0,
-                    0,
-                );
+                self.handle = try self.filesystem.openFile(self.allocator, "/data", .{ .access = .read_write, .create = true, .exclusive = true }, .{ .mode = 0o644, .uid = 0, .gid = 0 });
                 self.handle_open = true;
-                if (try self.volume.writeFile(&self.handle, self.payload, 0) != self.payload.len)
-                    return error.ShortWrite;
+                if (try self.handle.write(self.payload, 0) != self.payload.len) return error.ShortWrite;
             },
         }
     }
@@ -216,7 +137,7 @@ const CaseState = struct {
         switch (self.operation) {
             .create => {
                 try self.closeTransient();
-                try self.volume.remove("/create");
+                try self.filesystem.remove("/create");
             },
             .open => try self.closeTransient(),
             else => {},
@@ -226,62 +147,33 @@ const CaseState = struct {
     fn execute(self: *CaseState) !void {
         switch (self.operation) {
             .create => {
-                try self.volume.openFile(
-                    &self.transient_handle,
-                    "/create",
-                    c.LFS_O_CREAT | c.LFS_O_EXCL | c.LFS_O_RDWR,
-                    0o100644,
-                    0,
-                    0,
-                );
+                self.transient = try self.filesystem.openFile(self.allocator, "/create", .{ .access = .read_write, .create = true, .exclusive = true }, .{ .mode = 0o644, .uid = 0, .gid = 0 });
                 self.transient_open = true;
             },
             .open => {
-                try self.volume.openFile(&self.transient_handle, "/subject", c.LFS_O_RDONLY, 0, 0, 0);
+                self.transient = try self.filesystem.openFile(self.allocator, "/subject", .{ .access = .read_only }, .{ .mode = 0, .uid = 0, .gid = 0 });
                 self.transient_open = true;
             },
-            .stat => {
-                const info = try self.volume.stat("/subject");
-                std.mem.doNotOptimizeAway(info.size);
-            },
+            .stat => std.mem.doNotOptimizeAway(try self.filesystem.statPath("/subject")),
             .read_readonly, .read_partial, .read_writable_relatime => {
-                const offset = if (self.operation == .read_partial) zettide.object_format.chunk_size / 2 else 0;
-                const amount = try self.volume.readFile(&self.handle, self.read_buffer, offset);
-                if (amount != self.read_buffer.len) return error.ShortRead;
+                const offset = if (self.operation == .read_partial) zettide.blob_format.allocation_unit / 2 else 0;
+                if (try self.handle.read(self.read_buffer, offset) != self.read_buffer.len) return error.ShortRead;
                 std.mem.doNotOptimizeAway(self.read_buffer);
             },
-            .write_overwrite => {
-                if (try self.volume.writeFile(&self.handle, self.payload, 0) != self.payload.len)
-                    return error.ShortWrite;
-            },
+            .write_overwrite => if (try self.handle.write(self.payload, 0) != self.payload.len) return error.ShortWrite,
             .rename => {
                 const old_path: [*:0]const u8 = if (self.rename_source_is_primary) "/subject" else "/renamed";
                 const new_path: [*:0]const u8 = if (self.rename_source_is_primary) "/renamed" else "/subject";
-                if (try self.volume.renameWithResult(old_path, new_path) != .renamed)
-                    return error.RenameDidNotMove;
+                if (try self.filesystem.rename(old_path, new_path, false) != .renamed) return error.RenameDidNotMove;
                 self.rename_source_is_primary = !self.rename_source_is_primary;
             },
-            .remove => try self.volume.remove("/remove"),
+            .remove => try self.filesystem.remove("/remove"),
         }
-    }
-
-    fn createClosedFile(self: *CaseState, path: [*:0]const u8) !void {
-        var file: FileHandle = undefined;
-        try self.volume.openFile(
-            &file,
-            path,
-            c.LFS_O_CREAT | c.LFS_O_EXCL | c.LFS_O_RDWR,
-            0o100644,
-            0,
-            0,
-        );
-        errdefer self.volume.closeFile(&file) catch {};
-        try self.volume.closeFile(&file);
     }
 
     fn closeTransient(self: *CaseState) !void {
         if (!self.transient_open) return;
-        try self.volume.closeFile(&self.transient_handle);
+        try self.transient.close();
         self.transient_open = false;
     }
 
@@ -292,20 +184,16 @@ const CaseState = struct {
 
 const BenchmarkCase = struct {
     state: *CaseState,
-
     pub fn run(self: *BenchmarkCase, _: std.mem.Allocator) void {
-        if (self.state.failure != null) return;
-        self.state.execute() catch |err| self.state.recordFailure(err);
+        if (self.state.failure == null) self.state.execute() catch |err| self.state.recordFailure(err);
     }
 };
 
-// zBench 0.16 hooks have no context, and this runner executes one case at a time.
 var active_state: ?*CaseState = null;
 
 fn beforeEachHook() void {
     const state = active_state orelse @panic("missing active benchmark state");
-    if (state.failure != null) return;
-    state.beforeEach() catch |err| state.recordFailure(err);
+    if (state.failure == null) state.beforeEach() catch |err| state.recordFailure(err);
 }
 
 fn afterEachHook() void {
@@ -314,277 +202,99 @@ fn afterEachHook() void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const config = parseArgs(args) catch |err| {
-        std.debug.print("invalid arguments: {s}\n", .{@errorName(err)});
-        return err;
-    };
-
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
-    const stdout = &stdout_file_writer.interface;
+    const config = try parseArgs(args);
+    var buffer: [4096]u8 = undefined;
+    var file_writer: Io.File.Writer = .init(.stdout(), init.io, &buffer);
+    const stdout = &file_writer.interface;
     defer stdout.flush() catch {};
-
-    if (config.help) {
-        try usage(stdout);
-        return;
-    }
-
-    try stdout.print(
-        "benchmark=zettide_fs_ops framework=zbench optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} workspace_root={s} journaled={} durability={s} file_io={s}\n",
-        .{
-            @tagName(builtin.mode),
-            @tagName(builtin.os.tag),
-            @tagName(builtin.cpu.arch),
-            config.iterations,
-            config.warmup,
-            config.block_size,
-            config.image_size,
-            config.workspace_root,
-            config.journaled,
-            @tagName(config.durability),
-            @tagName(config.file_io),
-        },
-    );
+    if (config.help) return usage(stdout);
+    try stdout.print("benchmark=zettide_fs_ops framework=zbench backend=blob optimize={s} target_os={s} target_arch={s} iterations={} warmup={} block_size={} image_size={} workspace_root={s}\n", .{
+        @tagName(builtin.mode), @tagName(builtin.os.tag), @tagName(builtin.cpu.arch), config.iterations, config.warmup, config.block_size, config.image_size, config.workspace_root,
+    });
     try stdout.flush();
     try zbench.prettyPrintHeader(init.io, .stdout(), benchmark_name_width);
-
-    if (config.operation) |operation| {
-        try runOperation(allocator, init.io, stdout, config, operation);
-    } else {
-        for (all_operations) |operation| try runOperation(allocator, init.io, stdout, config, operation);
-    }
+    if (config.operation) |operation| try runOperation(init.gpa, init.io, config, operation) else for (all_operations) |operation| try runOperation(init.gpa, init.io, config, operation);
 }
 
-fn runOperation(
-    allocator: std.mem.Allocator,
-    io: Io,
-    stdout: *Io.Writer,
-    config: Config,
-    operation: Operation,
-) !void {
+fn runOperation(allocator: std.mem.Allocator, io: Io, config: Config, operation: Operation) !void {
     var workspace = try TempWorkspace.init(io, config.workspace_root);
-    errdefer workspace.cleanup(io) catch {};
-    var image_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-    const image_path = try std.fmt.bufPrint(&image_path_buffer, "{s}/image.ddv", .{workspace.path()});
-    try Volume.createOptions(io, image_path, config.image_size, "FsOpsBenchmark", .{
-        .file_io = config.file_io.volumeValue(),
-        .redo_journal = if (config.journaled) .{
-            .length = 1024 * 1024 * 1024,
-            .max_transaction_blocks = 1024,
-        } else null,
-    });
-
+    defer Io.Dir.cwd().deleteTree(io, workspace.path()) catch {};
+    var path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const image_path = try std.fmt.bufPrint(&path_buffer, "{s}/image.blob", .{workspace.path()});
+    try zettide.filesystem_target.formatNewBlobFile(io, allocator, image_path, config.image_size, .portable_v1, .{});
     const read_only = operation == .read_readonly or operation == .read_partial;
-    if (read_only) try populateReadOnlyImage(
-        allocator,
-        io,
-        image_path,
-        if (operation == .read_partial) zettide.object_format.chunk_size else config.block_size,
-    );
-
-    var volume = try Volume.openOptions(io, image_path, !read_only, .{
-        .file_io = config.file_io.volumeValue(),
-    });
-    defer volume.deinit();
-    try volume.mountOptions(.{ .journal_durability = config.durability.mountValue() });
-
-    var state = try CaseState.init(allocator, &volume, operation, config.block_size);
+    if (read_only) try populateReadOnlyImage(allocator, io, image_path, if (operation == .read_partial) zettide.blob_format.allocation_unit else config.block_size);
+    var native = try zettide.filesystem_target.openBlobFilesystem(allocator, io, image_path, !read_only);
+    var adapter = zettide.blob_filesystem_adapter.Adapter.init(&native, io);
+    var state = try CaseState.init(allocator, adapter.filesystem(), operation, config.block_size);
     defer state.deinit();
     try state.prepare();
-    for (0..config.warmup) |_| try runWarmup(&state);
-    try volume.sync();
-    volume.device.resetFileIoStats();
-
+    for (0..config.warmup) |_| {
+        try state.beforeEach();
+        try state.execute();
+        try state.afterEach();
+    }
     const benchmark_case: BenchmarkCase = .{ .state = &state };
-    var benchmark = zbench.Benchmark.init(allocator, .{
-        .iterations = config.iterations,
-        .hooks = .{
-            .before_each = beforeEachHook,
-            .after_each = afterEachHook,
-        },
-    });
+    var benchmark = zbench.Benchmark.init(allocator, .{ .iterations = config.iterations, .hooks = .{ .before_each = beforeEachHook, .after_each = afterEachHook } });
     defer benchmark.deinit();
     try benchmark.addParam(@tagName(operation), &benchmark_case, .{});
-
-    if (active_state != null) return error.BenchmarkAlreadyActive;
     active_state = &state;
     defer active_state = null;
     var iterator = try benchmark.iterator();
     var result: ?zbench.Result = null;
-    const accepted_start = Io.Clock.awake.now(io).nanoseconds;
     while (try iterator.next(io)) |step| switch (step) {
         .progress => {},
         .result => |value| result = value,
     };
-    const accepted_end = Io.Clock.awake.now(io).nanoseconds;
-    const accepted_writeback = volume.device.writebackState();
     active_state = null;
-
-    const benchmark_error = state.failure;
-    try state.close();
-    try volume.close();
-    const drained_end = Io.Clock.awake.now(io).nanoseconds;
-    const drained_writeback = volume.device.writebackState();
-    const io_stats = volume.device.fileIoStats();
-    const selected_backend = volume.device.fileIoKind();
-    try workspace.cleanup(io);
-    if (benchmark_error) |err| return err;
-
+    if (state.failure) |err| return err;
+    if (state.transient_open) try state.closeTransient();
+    if (state.handle_open) {
+        try state.handle.close();
+        state.handle_open = false;
+    }
+    try native.close(io);
     const completed = result orelse return error.MissingBenchmarkResult;
     defer completed.deinit();
     try completed.prettyPrint(io, .stdout(), benchmark_name_width);
-    try printPipelineStats(
-        stdout,
-        operation,
-        selected_backend,
-        config.iterations,
-        @intCast(accepted_end - accepted_start),
-        @intCast(drained_end - accepted_end),
-        accepted_writeback,
-        drained_writeback,
-        io_stats,
-    );
 }
 
-fn printPipelineStats(
-    writer: *Io.Writer,
-    operation: Operation,
-    backend: zettide.file_io.Kind,
-    iterations: u32,
-    accepted_elapsed_ns: u64,
-    drain_elapsed_ns: u64,
-    accepted_writeback: zettide.block_device.WritebackState,
-    drained_writeback: zettide.block_device.WritebackState,
-    io_stats: zettide.file_io.Stats,
-) !void {
-    const total_elapsed_ns = accepted_elapsed_ns + drain_elapsed_ns;
-    const accepted_rate = @as(u128, iterations) * std.time.ns_per_s / @max(accepted_elapsed_ns, 1);
-    const durable_rate = @as(u128, iterations) * std.time.ns_per_s / @max(total_elapsed_ns, 1);
-    try writer.print(
-        "pipeline operation={s} backend={s} accepted_elapsed_ns={} drain_elapsed_ns={} accepted_ops_per_s={} durable_ops_per_s={} accepted_epoch={} durable_epoch_at_accept={} backlog_at_accept={} durable_epoch_after_drain={} foreground_sqes={} foreground_submits={} foreground_cqes={} foreground_max_inflight={} writeback_sqes={} writeback_submits={} writeback_cqes={} writeback_max_inflight={}\n",
-        .{
-            @tagName(operation),
-            @tagName(backend),
-            accepted_elapsed_ns,
-            drain_elapsed_ns,
-            accepted_rate,
-            durable_rate,
-            accepted_writeback.accepted_epoch,
-            accepted_writeback.durable_epoch,
-            accepted_writeback.accepted_epoch - accepted_writeback.durable_epoch,
-            drained_writeback.durable_epoch,
-            io_stats.foreground.submitted_sqes,
-            io_stats.foreground.submit_calls,
-            io_stats.foreground.completions,
-            io_stats.foreground.max_inflight,
-            io_stats.writeback.submitted_sqes,
-            io_stats.writeback.submit_calls,
-            io_stats.writeback.completions,
-            io_stats.writeback.max_inflight,
-        },
-    );
-}
-
-fn runWarmup(state: *CaseState) !void {
-    try state.beforeEach();
-    errdefer state.afterEach() catch {};
-    try state.execute();
-    try state.afterEach();
-}
-
-fn populateReadOnlyImage(
-    allocator: std.mem.Allocator,
-    io: Io,
-    image_path: []const u8,
-    block_size: usize,
-) !void {
-    const payload = try allocator.alloc(u8, block_size);
+fn populateReadOnlyImage(allocator: std.mem.Allocator, io: Io, path: []const u8, size: usize) !void {
+    var native = try zettide.filesystem_target.openBlobFilesystem(allocator, io, path, true);
+    var adapter = zettide.blob_filesystem_adapter.Adapter.init(&native, io);
+    var file = try adapter.filesystem().openFile(allocator, "/data", .{ .access = .read_write, .create = true, .exclusive = true }, .{ .mode = 0o644, .uid = 0, .gid = 0 });
+    const payload = try allocator.alloc(u8, size * 2);
     defer allocator.free(payload);
     @memset(payload, 0x5a);
-
-    var volume = try Volume.open(io, image_path, true);
-    defer volume.deinit();
-    try volume.mount();
-    var handle: FileHandle = undefined;
-    try volume.openFile(
-        &handle,
-        "/data",
-        c.LFS_O_CREAT | c.LFS_O_EXCL | c.LFS_O_RDWR,
-        0o100644,
-        0,
-        0,
-    );
-    errdefer volume.closeFile(&handle) catch {};
-    if (try volume.writeFile(&handle, payload, 0) != payload.len) return error.ShortWrite;
-    try volume.syncFile(&handle);
-    try volume.closeFile(&handle);
-    try volume.close();
+    if (try file.write(payload, 0) != payload.len) return error.ShortWrite;
+    try file.close();
+    try native.close(io);
 }
 
 fn parseArgs(args: []const []const u8) !Config {
     var config: Config = .{};
     var index: usize = 1;
-    while (index < args.len) {
+    while (index < args.len) : (index += 2) {
         const argument = args[index];
         if (std.mem.eql(u8, argument, "--help")) {
             config.help = true;
             return config;
         }
-        if (std.mem.eql(u8, argument, "--journaled")) {
-            config.journaled = true;
-            index += 1;
-            continue;
-        }
-        const known_option = std.mem.eql(u8, argument, "--operation") or
-            std.mem.eql(u8, argument, "--iterations") or
-            std.mem.eql(u8, argument, "--warmup") or
-            std.mem.eql(u8, argument, "--block-size") or
-            std.mem.eql(u8, argument, "--image-size") or
-            std.mem.eql(u8, argument, "--workspace-root") or
-            std.mem.eql(u8, argument, "--durability") or
-            std.mem.eql(u8, argument, "--file-io");
-        if (!known_option) return error.UnknownArgument;
         if (index + 1 >= args.len) return error.MissingArgumentValue;
         const value = args[index + 1];
-        if (std.mem.eql(u8, argument, "--operation")) {
-            config.operation = try Operation.parse(value);
-        } else if (std.mem.eql(u8, argument, "--iterations")) {
-            config.iterations = try parsePositiveU32(value);
-        } else if (std.mem.eql(u8, argument, "--warmup")) {
-            config.warmup = try std.fmt.parseUnsigned(u32, value, 10);
-        } else if (std.mem.eql(u8, argument, "--block-size")) {
-            config.block_size = try parsePositiveUsize(value);
-        } else if (std.mem.eql(u8, argument, "--image-size")) {
-            config.image_size = try std.fmt.parseUnsigned(u64, value, 10);
-        } else if (std.mem.eql(u8, argument, "--workspace-root")) {
+        if (std.mem.eql(u8, argument, "--operation")) config.operation = try Operation.parse(value) else if (std.mem.eql(u8, argument, "--iterations")) config.iterations = try parsePositive(u32, value) else if (std.mem.eql(u8, argument, "--warmup")) config.warmup = try std.fmt.parseUnsigned(u32, value, 10) else if (std.mem.eql(u8, argument, "--block-size")) config.block_size = try parsePositive(usize, value) else if (std.mem.eql(u8, argument, "--image-size")) config.image_size = try std.fmt.parseUnsigned(u64, value, 10) else if (std.mem.eql(u8, argument, "--workspace-root")) {
             if (value.len == 0) return error.EmptyWorkspaceRoot;
             config.workspace_root = value;
-        } else if (std.mem.eql(u8, argument, "--durability")) {
-            config.durability = try DurabilityMode.parse(value);
-        } else if (std.mem.eql(u8, argument, "--file-io")) {
-            config.file_io = try FileIoMode.parse(value);
-        }
-        index += 2;
+        } else return error.UnknownArgument;
     }
-    if (config.image_size < zettide.container.min_volume_size or
-        config.image_size % zettide.container.default_block_size != 0)
-        return error.InvalidImageSize;
+    if (config.image_size < zettide.blob_format.minimum_device_size or config.image_size % zettide.blob_format.blob_size != 0) return error.InvalidImageSize;
     if (config.block_size > config.image_size / 4) return error.BlockSizeTooLarge;
-    if (config.journaled and config.block_size > zettide.object_format.chunk_size)
-        return error.JournaledBlockSizeTooLarge;
     return config;
 }
 
-fn parsePositiveU32(value: []const u8) !u32 {
-    const parsed = try std.fmt.parseUnsigned(u32, value, 10);
-    if (parsed == 0) return error.ZeroValue;
-    return parsed;
-}
-
-fn parsePositiveUsize(value: []const u8) !usize {
-    const parsed = try std.fmt.parseUnsigned(usize, value, 10);
+fn parsePositive(comptime T: type, value: []const u8) !T {
+    const parsed = try std.fmt.parseUnsigned(T, value, 10);
     if (parsed == 0) return error.ZeroValue;
     return parsed;
 }
@@ -593,77 +303,24 @@ fn usage(writer: *Io.Writer) !void {
     try writer.writeAll(
         \\Usage: zettide-fs-ops-benchmark [options]
         \\
-        \\Options:
-        \\  --operation NAME   all, create, open, stat, read-readonly,
-        \\                     read-partial, read-writable-relatime, write-overwrite,
-        \\                     rename, or remove
-        \\  --iterations N     measured operations per workload (default: 100)
-        \\  --warmup N         warmup operations per workload (default: 5)
-        \\  --block-size N      data operation size in bytes (default: 4096)
-        \\  --image-size N      container logical size in bytes (default: 536870912)
-        \\  --workspace-root P  benchmark workspace parent (default: .zig-cache/benchmarks)
-        \\  --journaled         use redo journaling (block size up to 1048576)
-        \\  --durability NAME   durable or writeback (default: writeback)
-        \\  --file-io NAME      auto, posix, or io_uring (default: auto)
+        \\  --operation NAME    workload name or all
+        \\  --iterations N      measured operations (default: 100)
+        \\  --warmup N          warmup operations (default: 5)
+        \\  --block-size N      data operation size (default: 4096)
+        \\  --image-size N      Blob image size (default: 536870912)
+        \\  --workspace-root P  workspace parent (default: .zig-cache/benchmarks)
         \\  --help              show this help
         \\
     );
 }
 
-test "parse filesystem benchmark defaults and options" {
+test "parse Blob filesystem benchmark options" {
     const defaults = try parseArgs(&.{"benchmark"});
     try std.testing.expectEqual(@as(?Operation, null), defaults.operation);
     try std.testing.expectEqual(@as(u32, 100), defaults.iterations);
-    try std.testing.expectEqual(@as(u32, 5), defaults.warmup);
-    try std.testing.expectEqual(@as(usize, 4096), defaults.block_size);
-    try std.testing.expectEqualStrings(".zig-cache/benchmarks", defaults.workspace_root);
-    try std.testing.expect(!defaults.journaled);
-    try std.testing.expectEqual(DurabilityMode.writeback, defaults.durability);
-    try std.testing.expectEqual(FileIoMode.auto, defaults.file_io);
-
-    const configured = try parseArgs(&.{
-        "benchmark",
-        "--operation",
-        "write-overwrite",
-        "--iterations",
-        "12",
-        "--warmup",
-        "0",
-        "--block-size",
-        "8192",
-        "--image-size",
-        "67108864",
-        "--workspace-root",
-        "/var/tmp/zettide-bench",
-        "--journaled",
-        "--durability",
-        "durable",
-        "--file-io",
-        "io_uring",
-    });
+    const configured = try parseArgs(&.{ "benchmark", "--operation", "write-overwrite", "--iterations", "12", "--warmup", "0", "--block-size", "8192", "--image-size", "67108864", "--workspace-root", "/tmp/bench" });
     try std.testing.expectEqual(Operation.write_overwrite, configured.operation.?);
     try std.testing.expectEqual(@as(u32, 12), configured.iterations);
-    try std.testing.expectEqual(@as(u32, 0), configured.warmup);
-    try std.testing.expectEqual(@as(usize, 8192), configured.block_size);
-    try std.testing.expectEqual(@as(u64, 64 * 1024 * 1024), configured.image_size);
-    try std.testing.expectEqualStrings("/var/tmp/zettide-bench", configured.workspace_root);
-    try std.testing.expect(configured.journaled);
-    try std.testing.expectEqual(DurabilityMode.durable, configured.durability);
-    try std.testing.expectEqual(FileIoMode.io_uring, configured.file_io);
-}
-
-test "reject invalid filesystem benchmark options" {
-    try std.testing.expectError(error.InvalidOperation, parseArgs(&.{ "benchmark", "--operation", "other" }));
+    try std.testing.expectError(error.UnknownArgument, parseArgs(&.{ "benchmark", "--journaled", "true" }));
     try std.testing.expectError(error.ZeroValue, parseArgs(&.{ "benchmark", "--iterations", "0" }));
-    try std.testing.expectError(error.MissingArgumentValue, parseArgs(&.{ "benchmark", "--warmup" }));
-    try std.testing.expectError(error.UnknownArgument, parseArgs(&.{ "benchmark", "--other" }));
-    try std.testing.expectError(error.InvalidImageSize, parseArgs(&.{ "benchmark", "--image-size", "12345" }));
-    try std.testing.expectError(error.EmptyWorkspaceRoot, parseArgs(&.{ "benchmark", "--workspace-root", "" }));
-    try std.testing.expectError(error.InvalidDurability, parseArgs(&.{ "benchmark", "--durability", "other" }));
-    try std.testing.expectError(error.InvalidFileIo, parseArgs(&.{ "benchmark", "--file-io", "other" }));
-    try std.testing.expectError(
-        error.JournaledBlockSizeTooLarge,
-        parseArgs(&.{ "benchmark", "--journaled", "--block-size", "4194304" }),
-    );
-    try std.testing.expect((try parseArgs(&.{ "benchmark", "--help", "--other" })).help);
 }

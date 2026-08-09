@@ -408,8 +408,8 @@ static void verify_crash_fallocate(const char *root) {
     char block[4096];
     memset(block, 0x6b, sizeof(block));
     int exhausted = 0;
-    for (off_t index = 0; index < 4096; ++index) {
-        ssize_t amount = pwrite(hog_fd, block, sizeof(block), index * (off_t)(1024 * 1024));
+    for (off_t index = 0; index < 32768; ++index) {
+        ssize_t amount = pwrite(hog_fd, block, sizeof(block), index * (off_t)sizeof(block));
         if (amount < 0 && errno == ENOSPC) {
             exhausted = 1;
             break;
@@ -421,6 +421,12 @@ static void verify_crash_fallocate(const char *root) {
                 break;
             }
             fail("sync unreserved crash file");
+        }
+        struct statvfs stats;
+        if (fstatvfs(hog_fd, &stats) != 0) fail("stat unreserved crash file capacity");
+        if ((uint64_t)stats.f_bavail * stats.f_frsize < 8 * 1024 * 1024) {
+            exhausted = 1;
+            break;
         }
     }
     if (!exhausted) {

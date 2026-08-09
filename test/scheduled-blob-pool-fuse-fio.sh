@@ -72,7 +72,7 @@ EOF
 
 "$cli" pool inspect "${device_args[@]}" >"$log_dir/pool-inspect-before-fio.log"
 grep -q "^Pool: $pool_id$" "$log_dir/pool-inspect-before-fio.log"
-grep -q '^Filesystem: blob$' "$log_dir/pool-inspect-before-fio.log"
+grep -q '^Data mode: blob$' "$log_dir/pool-inspect-before-fio.log"
 grep -q '^Profile: scheduled-replicated$' "$log_dir/pool-inspect-before-fio.log"
 grep -q '^Members: 3/3$' "$log_dir/pool-inspect-before-fio.log"
 grep -q '^Data policy: read_write$' "$log_dir/pool-inspect-before-fio.log"

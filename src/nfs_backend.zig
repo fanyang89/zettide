@@ -3,8 +3,7 @@ const zettide = @import("zettide");
 
 const allocator = std.heap.c_allocator;
 const filesystem_api = zettide.nfs_filesystem;
-const nfs_handle = zettide.volume.nfs_handle;
-const volume_mod = zettide.volume;
+const nfs_handle = zettide.nfs_handle;
 
 const Status = enum(c_int) {
     ok = 0,
@@ -31,8 +30,7 @@ const BlobOwner = struct {
     adapter: zettide.nfs_blob_adapter.Adapter,
 };
 
-const FilesystemOwner = union(enum) {
-    littlefs: volume_mod.Volume,
+const FilesystemOwner = struct {
     blob: BlobOwner,
 
     fn openInto(
@@ -59,20 +57,9 @@ const FilesystemOwner = union(enum) {
                 return;
             },
             .pool_member => return self.openPoolInto(io, allocator_value, path, writable),
-            .littlefs_container, .unknown => {},
+            .littlefs_container => return error.UnsupportedLegacyFormat,
+            .unknown => return error.UnsupportedFilesystemFormat,
         }
-
-        self.* = .{ .littlefs = undefined };
-        try zettide.target.openVolumeIntoOptions(
-            &self.littlefs,
-            io,
-            allocator_value,
-            path,
-            writable,
-            .{},
-        );
-        errdefer self.littlefs.deinit();
-        try self.littlefs.mount();
     }
 
     fn openPoolInto(
@@ -85,18 +72,7 @@ const FilesystemOwner = union(enum) {
         var set = try openSingleMemberPool(io, allocator_value, path, writable);
         defer set.deinit();
         switch (try set.dataMode()) {
-            .catalog => {
-                self.* = .{ .littlefs = undefined };
-                try volume_mod.Volume.openPoolInto(
-                    &self.littlefs,
-                    io,
-                    allocator_value,
-                    &set,
-                    writable,
-                );
-                errdefer self.littlefs.deinit();
-                try self.littlefs.mount();
-            },
+            .catalog => return error.CatalogPoolUnsupported,
             .blob => {
                 self.* = .{ .blob = undefined };
                 self.blob.native = try zettide.filesystem_target.openBlobPoolFilesystem(
@@ -112,17 +88,11 @@ const FilesystemOwner = union(enum) {
     }
 
     fn filesystem(self: *FilesystemOwner) filesystem_api.Filesystem {
-        return switch (self.*) {
-            .littlefs => |*volume| zettide.nfs_littlefs_adapter.filesystem(volume),
-            .blob => |*blob| blob.adapter.filesystem(),
-        };
+        return self.blob.adapter.filesystem();
     }
 
     fn close(self: *FilesystemOwner, io: std.Io) !void {
-        return switch (self.*) {
-            .littlefs => |*volume| volume.close(),
-            .blob => |*blob| blob.native.close(io),
-        };
+        return self.blob.native.close(io);
     }
 };
 
@@ -175,17 +145,11 @@ const Export = struct {
     }
 
     fn lockDataRead(self: *Export) !void {
-        switch (self.owner) {
-            .littlefs => try self.lock(),
-            .blob => try self.mutex.lockShared(self.io()),
-        }
+        try self.mutex.lockShared(self.io());
     }
 
     fn unlockDataRead(self: *Export) void {
-        switch (self.owner) {
-            .littlefs => self.unlock(),
-            .blob => self.mutex.unlockShared(self.io()),
-        }
+        self.mutex.unlockShared(self.io());
     }
 };
 
@@ -751,10 +715,6 @@ fn decodeExisting(self: *Export, handle: *const Handle) !nfs_handle.Handle {
 
 fn decodeDataHandle(self: *Export, handle: *const Handle) !nfs_handle.Handle {
     const decoded = try decodeHandle(self, handle);
-    switch (self.owner) {
-        .littlefs => try validateExisting(self, decoded),
-        .blob => {},
-    }
     return decoded;
 }
 
@@ -816,7 +776,13 @@ fn statusFor(err: anyerror, stale_context: bool) c_int {
         error.FileTooLarge => .file_too_large,
         error.NameTooLong => .name_too_long,
         error.InputOutput, error.CorruptFilesystem, error.VolumeRequiresReopen => .input_output,
-        error.OperationNotSupported, error.UnsupportedFilesystemBackend => .not_supported,
+        error.OperationNotSupported,
+        error.UnsupportedFilesystemBackend,
+        error.UnsupportedLegacyFormat,
+        error.UnsupportedFilesystemFormat,
+        error.CatalogPoolUnsupported,
+        error.LegacyPoolDataModeUnsupported,
+        => .not_supported,
         error.PermissionDenied => .permission_denied,
         error.DirectoryNotEmpty => .directory_not_empty,
         error.TooManyLinks => .too_many_links,
@@ -833,16 +799,25 @@ test "direct NFS backend resolves and reads stable handles" {
     const suffix = "/nfs-backend.ddv";
     @memcpy(path_buffer[root_length .. root_length + suffix.len], suffix);
     const path = path_buffer[0 .. root_length + suffix.len];
-    try volume_mod.Volume.create(std.testing.io, path, 1024 * 1024, "NfsBackend");
+    try zettide.filesystem_target.formatNewBlobFile(
+        std.testing.io,
+        std.testing.allocator,
+        path,
+        8 * 1024 * 1024,
+        .portable_v1,
+        .{},
+    );
     {
-        var volume = try volume_mod.Volume.open(std.testing.io, path, true);
-        defer volume.deinit();
-        try volume.mount();
-        try volume.makeDirectory("/directory", 0o40755, 10, 20);
-        var file: volume_mod.FileHandle = undefined;
-        try volume.openFile(&file, "/payload", volume_mod.c.LFS_O_CREAT | volume_mod.c.LFS_O_RDWR, 0o100644, 10, 20);
-        _ = try volume.writeFile(&file, "direct backend", 0);
-        try volume.closeFile(&file);
+        var filesystem = try zettide.filesystem_target.openBlobFilesystem(
+            std.testing.allocator,
+            std.testing.io,
+            path,
+            true,
+        );
+        _ = try filesystem.createDirectory(std.testing.io, 1, "directory", 0o755, 10, 20);
+        const inode = try filesystem.createFile(std.testing.io, 1, "payload", 0o644, 10, 20);
+        _ = try filesystem.write(std.testing.io, inode, "direct backend", 0);
+        try filesystem.close(std.testing.io);
     }
 
     const path_z = try std.testing.allocator.dupeZ(u8, path);

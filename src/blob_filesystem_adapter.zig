@@ -239,22 +239,39 @@ fn patchMetadata(raw: *anyopaque, file_id: backend.FileId, patch: metadata.Patch
 fn makeDirectory(raw: *anyopaque, raw_path: [*:0]const u8, attributes: backend.CreateAttributes) !void {
     const value = adapter(raw);
     const target = try resolveParent(value, path(raw_path));
-    _ = value.native.createDirectory(value.io, target.inode, target.name, attributes.mode, attributes.uid, attributes.gid) catch |err|
+    const inherited = try inheritCreateAttributes(value, target.inode, attributes, true);
+    _ = value.native.createDirectory(value.io, target.inode, target.name, inherited.mode, inherited.uid, inherited.gid) catch |err|
         return frontendError(err);
 }
 
 fn makeSymlink(raw: *anyopaque, raw_path: [*:0]const u8, target_value: []const u8, uid: u32, gid: u32) !void {
     const value = adapter(raw);
     const target = try resolveParent(value, path(raw_path));
-    _ = value.native.createSymlink(value.io, target.inode, target.name, target_value, uid, gid) catch |err|
+    const inherited = try inheritCreateAttributes(value, target.inode, .{ .mode = 0, .uid = uid, .gid = gid }, false);
+    _ = value.native.createSymlink(value.io, target.inode, target.name, target_value, inherited.uid, inherited.gid) catch |err|
         return frontendError(err);
 }
 
 fn makeFifo(raw: *anyopaque, raw_path: [*:0]const u8, attributes: backend.CreateAttributes) !void {
     const value = adapter(raw);
     const target = try resolveParent(value, path(raw_path));
-    _ = value.native.createFifo(value.io, target.inode, target.name, attributes.mode, attributes.uid, attributes.gid) catch |err|
+    const inherited = try inheritCreateAttributes(value, target.inode, attributes, false);
+    _ = value.native.createFifo(value.io, target.inode, target.name, inherited.mode, inherited.uid, inherited.gid) catch |err|
         return frontendError(err);
+}
+
+fn inheritCreateAttributes(
+    value: *Adapter,
+    parent_inode: u64,
+    attributes: backend.CreateAttributes,
+    directory: bool,
+) !backend.CreateAttributes {
+    const parent = try value.native.stat(value.io, parent_inode);
+    if (parent.metadata.mode & 0o2000 == 0) return attributes;
+    var inherited = attributes;
+    inherited.gid = parent.metadata.gid;
+    if (directory) inherited.mode |= 0o2000 else inherited.mode &= ~@as(u32, 0o2000);
+    return inherited;
 }
 
 fn link(raw: *anyopaque, old_path: [*:0]const u8, new_path: [*:0]const u8) !backend.NodeInfo {
@@ -369,13 +386,14 @@ fn resolveOrCreateFile(
             error.FileNotFound => create: {
                 if (!options.create) return error.FileNotFound;
                 const target = try resolveParent(value, input);
+                const inherited = try inheritCreateAttributes(value, target.inode, attributes, false);
                 const inode = value.native.createFile(
                     value.io,
                     target.inode,
                     target.name,
-                    attributes.mode,
-                    attributes.uid,
-                    attributes.gid,
+                    inherited.mode,
+                    inherited.uid,
+                    inherited.gid,
                 ) catch |create_err| switch (create_err) {
                     error.PathAlreadyExists => {
                         if (options.exclusive) return error.PathAlreadyExists;

@@ -130,7 +130,7 @@ inspect_original() {
     local actual_mountable
     "$cli" pool inspect --device "$device" >"$output" || return 1
     grep -q "^Pool: $original_pool_id$" "$output" || return 1
-    grep -q '^Filesystem: littlefs$' "$output" || return 1
+    grep -q '^Data mode: catalog$' "$output" || return 1
     actual_mountable=$(grep '^Mountable: ' "$output") || return 1
     actual_mountable=${actual_mountable#Mountable: }
     [[ $actual_mountable == yes || $actual_mountable == no ]] || return 1
@@ -358,10 +358,10 @@ device_args=()
 for loop in "${loops[@]}"; do device_args+=(--device "$loop"); done
 label=synthetic-single-device-scheduled-blob-fio
 "$cli" pool plan-create "${device_args[@]}" --profile scheduled-replicated \
-    --filesystem blob --name-profile portable-v1 --label "$label" >"$log_dir/scheduled-plan.log"
+    --name-profile portable-v1 --label "$label" >"$log_dir/scheduled-plan.log"
 grep -q '^Profile: scheduled-replicated$' "$log_dir/scheduled-plan.log"
 grep -q '^Devices: 3$' "$log_dir/scheduled-plan.log"
-grep -q '^Filesystem: blob$' "$log_dir/scheduled-plan.log"
+grep -q '^Data mode: blob$' "$log_dir/scheduled-plan.log"
 grep -q '^Name profile: portable-v1$' "$log_dir/scheduled-plan.log"
 grep -q '^Plan: ready$' "$log_dir/scheduled-plan.log"
 token=$(grep '^Confirm token: ' "$log_dir/scheduled-plan.log")
@@ -371,7 +371,7 @@ token=${token#Confirm token: }
     exit 1
 }
 "$cli" pool create "${device_args[@]}" --profile scheduled-replicated \
-    --filesystem blob --name-profile portable-v1 --label "$label" --confirm "$token" \
+    --name-profile portable-v1 --label "$label" --confirm "$token" \
     >"$log_dir/scheduled-create.log"
 scheduled_pool_id=$(grep '^Created pool: ' "$log_dir/scheduled-create.log")
 scheduled_pool_id=${scheduled_pool_id#Created pool: }
@@ -382,7 +382,7 @@ scheduled_pool_id=${scheduled_pool_id#Created pool: }
 
 "$cli" pool inspect "${device_args[@]}" >"$log_dir/scheduled-inspect.log"
 grep -q "^Pool: $scheduled_pool_id$" "$log_dir/scheduled-inspect.log"
-grep -q '^Filesystem: blob$' "$log_dir/scheduled-inspect.log"
+grep -q '^Data mode: blob$' "$log_dir/scheduled-inspect.log"
 grep -q '^Profile: scheduled-replicated$' "$log_dir/scheduled-inspect.log"
 grep -q '^Members: 3/3$' "$log_dir/scheduled-inspect.log"
 grep -q '^Data policy: read_write$' "$log_dir/scheduled-inspect.log"

@@ -5,7 +5,6 @@ ZETTIDE_KEEP_TEST_ARTIFACTS=${ZETTIDE_KEEP_TEST_ARTIFACTS:-${DEVDRIVE_KEEP_TEST_
 ZETTIDE_TEST_LOG_DIR=${ZETTIDE_TEST_LOG_DIR:-${DEVDRIVE_TEST_LOG_DIR:-}}
 ZETTIDE_ALLOW_OTHER=${ZETTIDE_ALLOW_OTHER:-${DEVDRIVE_ALLOW_OTHER:-0}}
 ZETTIDE_MOUNT_METRICS=${ZETTIDE_MOUNT_METRICS:-0}
-ZETTIDE_REDO_JOURNAL_SIZE=${ZETTIDE_REDO_JOURNAL_SIZE:-}
 
 external_skip_or_fail() {
     local reason=$1
@@ -22,7 +21,7 @@ external_require_root() {
     if command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
         local environment=(env "PATH=$PATH")
         local name
-        for name in ZETTIDE_EXTERNAL_ROOT ZETTIDE_KEEP_TEST_ARTIFACTS ZETTIDE_TEST_LOG_DIR ZETTIDE_MOUNT_METRICS ZETTIDE_REDO_JOURNAL_SIZE; do
+        for name in ZETTIDE_EXTERNAL_ROOT ZETTIDE_KEEP_TEST_ARTIFACTS ZETTIDE_TEST_LOG_DIR ZETTIDE_MOUNT_METRICS; do
             if [[ -v $name ]]; then
                 environment+=("$name=${!name}")
             fi
@@ -85,9 +84,7 @@ external_initialize() {
     external_mount_pid=
     chmod 0711 "$external_tmp"
     mkdir "$external_mount_dir"
-    local create_args=(create "$external_image" --size "$external_image_size" --label "External Test")
-    [[ -z $ZETTIDE_REDO_JOURNAL_SIZE ]] || create_args+=(--redo-journal-size "$ZETTIDE_REDO_JOURNAL_SIZE")
-    "$external_exe" "${create_args[@]}" >/dev/null
+    "$external_exe" format "$external_image" --size "$external_image_size" >/dev/null
     if [[ -n $ZETTIDE_TEST_LOG_DIR ]]; then
         mkdir -p "$ZETTIDE_TEST_LOG_DIR"
         exec > >(tee "$ZETTIDE_TEST_LOG_DIR/$external_suite.log") 2>&1

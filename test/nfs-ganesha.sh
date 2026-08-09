@@ -173,7 +173,7 @@ if ! rpcinfo -p 127.0.0.1 >/dev/null 2>&1; then
 fi
 
 mkdir "$mount_dir"
-"$exe" format "$image" --filesystem blob --size 64MiB >/dev/null
+"$exe" format "$image" --size 64MiB >/dev/null
 write_config RW true
 start_ganesha
 mount_export

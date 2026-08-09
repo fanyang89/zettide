@@ -238,7 +238,7 @@ run_fio_case() {
     echo "Blob FUSE backing path must not exist: $backing" >&2
     exit 2
 }
-"$cli" format "$backing" --filesystem blob --size "$backing_size" >"$log_dir/format.log"
+"$cli" format "$backing" --size "$backing_size" >"$log_dir/format.log"
 [[ -f $backing && ! -L $backing ]] || {
     echo "Blob FUSE backing path is not a regular file: $backing" >&2
     exit 2

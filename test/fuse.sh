@@ -130,7 +130,7 @@ run_durability_crash() {
 }
 
 mkdir "$mount_dir"
-"$exe" create "$image" --size 8MiB --label "FUSE Test"
+"$exe" format "$image" --size 64MiB
 start_mount
 
 root_mtime_before=$(stat -c %Y "$mount_dir")
@@ -204,25 +204,3 @@ if mountpoint -q "$mount_dir"; then
     echo "mount remained active after unmount" >&2
     exit 1
 fi
-
-# BlobFilesystem has a focused lifecycle smoke test; broader POSIX gates remain littlefs-only.
-image="$tmp/blob.ddv"
-"$exe" format "$image" --filesystem blob --size 16MiB >/dev/null
-start_mount --metrics
-[[ $(stat -c '%u:%g' "$mount_dir") == "$(id -u):$(id -g)" ]]
-printf 'blob smoke' >"$mount_dir/blob.txt"
-[[ $(<"$mount_dir/blob.txt") == "blob smoke" ]]
-stop_mount
-grep -q '^fuse_metrics ' "$log"
-if grep -Eq '^(pipeline_metrics|member_transport_metrics) ' "$log"; then
-    echo "blob mount printed LittleFS metrics" >&2
-    exit 1
-fi
-"$exe" check "$image" >/dev/null
-start_mount --read-only
-[[ $(<"$mount_dir/blob.txt") == "blob smoke" ]]
-if (printf x >"$mount_dir/rejected.txt") 2>/dev/null; then
-    echo "read-only blob mount accepted a write" >&2
-    exit 1
-fi
-stop_mount

@@ -51,7 +51,6 @@
     TMPDIR: "{{ zettide_io_target.tmpdir }}"
     ZETTIDE_KEEP_TEST_ARTIFACTS: "{{ '1' if zettide_keep_test_artifacts | bool else '0' }}"
     ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_io_target.name }}"
-    ZETTIDE_REDO_JOURNAL_SIZE: "{{ zettide_throughput_redo_journal_size }}"
   async: "{{ zettide_io_timeout }}"
   poll: 15
   changed_when: false

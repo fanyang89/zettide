@@ -102,7 +102,7 @@ set_device_writable() {
 inspect_original() {
     "$cli" pool inspect --device "$device" >"$log_dir/pool-inspect-restored.log"
     grep -q "^Pool: $original_pool_id$" "$log_dir/pool-inspect-restored.log"
-    grep -q '^Filesystem: littlefs$' "$log_dir/pool-inspect-restored.log"
+    grep -q '^Data mode: catalog$' "$log_dir/pool-inspect-restored.log"
     grep -q '^Mountable: yes$' "$log_dir/pool-inspect-restored.log"
 }
 
@@ -189,7 +189,7 @@ if [[ $backup_original == 1 ]]; then
 
     "$cli" pool inspect --device "$device" >"$log_dir/original-pool-inspect-before.log"
     grep -q "^Pool: $original_pool_id$" "$log_dir/original-pool-inspect-before.log"
-    grep -q '^Filesystem: littlefs$' "$log_dir/original-pool-inspect-before.log"
+    grep -q '^Data mode: catalog$' "$log_dir/original-pool-inspect-before.log"
     grep -q '^Mountable: yes$' "$log_dir/original-pool-inspect-before.log"
 
     set_device_read_only
@@ -221,9 +221,9 @@ udevadm settle
 
 check_identity
 require_idle_device
-"$cli" pool plan-create --device "$device" --profile unprotected --filesystem blob \
+"$cli" pool plan-create --device "$device" --profile unprotected \
     --name-profile portable-v1 --label physical-blob-fio >"$log_dir/blob-plan.log"
-grep -q '^Filesystem: blob$' "$log_dir/blob-plan.log"
+grep -q '^Data mode: blob$' "$log_dir/blob-plan.log"
 grep -q '^Plan: ready$' "$log_dir/blob-plan.log"
 token=$(grep '^Confirm token: ' "$log_dir/blob-plan.log")
 token=${token#Confirm token: }
@@ -232,7 +232,7 @@ token=${token#Confirm token: }
     exit 1
 }
 check_identity
-"$cli" pool create --device "$device" --profile unprotected --filesystem blob \
+"$cli" pool create --device "$device" --profile unprotected \
     --name-profile portable-v1 --label physical-blob-fio --confirm "$token" >"$log_dir/blob-create.log"
 blob_pool_id=$(grep '^Created pool: ' "$log_dir/blob-create.log")
 blob_pool_id=${blob_pool_id#Created pool: }
@@ -243,7 +243,7 @@ blob_pool_id=${blob_pool_id#Created pool: }
 
 "$cli" pool inspect --device "$device" >"$log_dir/blob-inspect.log"
 grep -q "^Pool: $blob_pool_id$" "$log_dir/blob-inspect.log"
-grep -q '^Filesystem: blob$' "$log_dir/blob-inspect.log"
+grep -q '^Data mode: blob$' "$log_dir/blob-inspect.log"
 grep -q '^Mountable: yes$' "$log_dir/blob-inspect.log"
 
 bash test/physical-pool-fio.sh "$cli" "$device" "$expected_serial" "$blob_pool_id" blob
