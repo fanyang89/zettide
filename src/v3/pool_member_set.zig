@@ -233,20 +233,20 @@ pub const PoolMemberSet = struct {
         return self.data_access_state;
     }
 
-    pub fn filesystem(self: *const PoolMemberSet) !member_format.PoolFilesystem {
+    pub fn dataMode(self: *const PoolMemberSet) !member_format.PoolDataMode {
         if (self.authority_state == null) return error.MissingAuthority;
-        var selected: ?member_format.PoolFilesystem = null;
+        var selected: ?member_format.PoolDataMode = null;
         for (self.members[0..self.supplied_count], self.statuses[0..self.supplied_count]) |maybe_member, status| {
             switch (status) {
                 .authority, .active_voter, .catalog_failed => {},
                 else => continue,
             }
             const member = maybe_member orelse continue;
-            const filesystem_marker = member_format.poolFilesystem(member.header());
+            const data_mode = member_format.poolDataMode(member.header());
             if (selected) |expected| {
-                if (filesystem_marker != expected) return error.InconsistentMemberGeometry;
+                if (data_mode != expected) return error.InconsistentMemberGeometry;
             } else {
-                selected = filesystem_marker;
+                selected = data_mode;
             }
         }
         return selected orelse error.MemberUnavailable;
@@ -292,6 +292,7 @@ pub const PoolMemberSet = struct {
         self: *PoolMemberSet,
         output: []CatalogVoter,
     ) ![]CatalogVoter {
+        if (try self.dataMode() != .catalog) return error.PoolDataRequiresCatalogMode;
         const selected = self.authority_state orelse return error.MissingAuthority;
         const ready = self.control_write_state orelse return error.WriteQuorumUnavailable;
         var count: usize = 0;
@@ -315,6 +316,7 @@ pub const PoolMemberSet = struct {
         self: *PoolMemberSet,
         output: []pool_catalog_graph.MemberGeometry,
     ) ![]pool_catalog_graph.MemberGeometry {
+        if (try self.dataMode() != .catalog) return error.PoolDataRequiresCatalogMode;
         const selected = self.authority_state orelse return error.MissingAuthority;
         if (output.len < selected.topology.member_count) return error.OutputTooSmall;
         var count: usize = 0;
@@ -346,6 +348,7 @@ pub const PoolMemberSet = struct {
         self: *PoolMemberSet,
         scratch: *pool_catalog_store.LoadScratch,
     ) !pool_catalog_graph.ValidatedCatalog {
+        if (try self.dataMode() != .catalog) return error.PoolDataRequiresCatalogMode;
         const selected = self.authority_state orelse return error.MissingAuthority;
         if (selected.generation == 0) return error.GenesisHasNoCatalogRoot;
         if (self.data_access_state == .unavailable) return error.DataReadUnavailable;
@@ -889,7 +892,7 @@ pub const PoolMemberSet = struct {
 };
 
 fn samePoolGeometry(a: member_format.Header, b: member_format.Header) bool {
-    return member_format.poolFilesystem(a) == member_format.poolFilesystem(b) and
+    return member_format.poolDataMode(a) == member_format.poolDataMode(b) and
         a.logical_capacity == b.logical_capacity and
         a.control.offset == b.control.offset and a.control.length == b.control.length and
         a.metadata.offset == b.metadata.offset and a.metadata.length == b.metadata.length and
@@ -1058,7 +1061,8 @@ fn createTestPoolWithControlBytes(
     };
     const header: member_format.Header = .{
         .header_sequence = 1,
-        .incompat_features = member_format.dynamic_pool_incompat_feature,
+        .incompat_features = member_format.dynamic_pool_incompat_feature |
+            member_format.catalog_intent_incompat_feature,
         .set_id = payload.topology.set_id,
         .member_id = id(2),
         .member_slot = 7,
@@ -1084,13 +1088,16 @@ fn createTestPoolWithControlBytes(
     try member.close();
 }
 
-fn rewriteFilesystemMarker(dir: std.Io.Dir, name: []const u8, filesystem: member_format.PoolFilesystem) !void {
+fn rewriteDataMode(dir: std.Io.Dir, name: []const u8, data_mode: member_format.PoolDataMode) !void {
     var member = try member_api.openAt(std.testing.io, dir, name, .writable);
     var header = member.header();
     try member.close();
-    switch (filesystem) {
-        .littlefs => header.incompat_features &= ~member_format.blob_filesystem_incompat_feature,
+    header.incompat_features &= ~(member_format.blob_filesystem_incompat_feature |
+        member_format.catalog_intent_incompat_feature | member_format.catalog_data_incompat_feature);
+    switch (data_mode) {
+        .catalog => header.incompat_features |= member_format.catalog_intent_incompat_feature,
         .blob => header.incompat_features |= member_format.blob_filesystem_incompat_feature,
+        .legacy_unsupported => {},
     }
     const bytes = try member_format.encode(header);
     const file = try dir.openFile(std.testing.io, name, .{ .mode = .read_write });
@@ -1167,14 +1174,14 @@ test "authority geometry rejects mixed Pool filesystem members" {
     var storages: [names.len]storage_api.Storage = undefined;
     for (names, 0..) |name, index|
         storages[index] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, name, 8 * 1024 * 1024);
-    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{});
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{ .data_mode = .catalog });
     var provisioned = switch (outcome) {
         .complete => |value| value,
         .partial => return error.UnexpectedPartialCreation,
     };
     defer provisioned.deinit();
     try provisioned.close();
-    try rewriteFilesystemMarker(tmp.dir, "c", .blob);
+    try rewriteDataMode(tmp.dir, "c", .blob);
 
     const locations = [_]Location{
         .{ .parent = tmp.dir, .basename = "a" },
@@ -1194,7 +1201,7 @@ test "Pool filesystem marker ignores stale members" {
     var storages: [names.len]storage_api.Storage = undefined;
     for (names, 0..) |name, index|
         storages[index] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, name, 8 * 1024 * 1024);
-    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{});
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{ .data_mode = .catalog });
     var provisioned = switch (outcome) {
         .complete => |value| value,
         .partial => return error.UnexpectedPartialCreation,
@@ -1211,7 +1218,7 @@ test "Pool filesystem marker ignores stale members" {
     defer set.deinit();
     set.statuses[0] = .stale;
     set.members[0].?.selected_header.incompat_features |= member_format.blob_filesystem_incompat_feature;
-    try std.testing.expectEqual(member_format.PoolFilesystem.littlefs, try set.filesystem());
+    try std.testing.expectEqual(member_format.PoolDataMode.catalog, try set.dataMode());
 }
 
 test "catalog bootstrap target geometry rejects a mixed Pool filesystem" {
@@ -1219,7 +1226,7 @@ test "catalog bootstrap target geometry rejects a mixed Pool filesystem" {
     defer tmp.cleanup();
     try createTestPool(tmp.dir, "source", .unprotected);
     try createTestPool(tmp.dir, "target", .unprotected);
-    try rewriteFilesystemMarker(tmp.dir, "target", .blob);
+    try rewriteDataMode(tmp.dir, "target", .blob);
 
     const source = try member_api.openAt(std.testing.io, tmp.dir, "source", .writable);
     const target = try member_api.openAt(std.testing.io, tmp.dir, "target", .writable);

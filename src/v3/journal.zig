@@ -921,7 +921,8 @@ fn dynamicGenesisFirstRecord() !DynamicFirstRecord {
         .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
     };
     var header = try testHeader(4);
-    header.incompat_features = member_format.dynamic_pool_incompat_feature;
+    header.incompat_features = member_format.dynamic_pool_incompat_feature |
+        member_format.catalog_intent_incompat_feature;
     header.member_slot = members[0].slot;
     header.member_count = 1;
     header.layout_format_version = member_format.dynamic_layout_format_version;
@@ -949,7 +950,8 @@ fn dynamicBootstrapFirstRecord() !DynamicFirstRecord {
         .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
     };
     var header = try testHeader(4);
-    header.incompat_features = member_format.dynamic_pool_incompat_feature;
+    header.incompat_features = member_format.dynamic_pool_incompat_feature |
+        member_format.catalog_intent_incompat_feature;
     header.member_slot = evidence.target_slot;
     header.member_count = evidence.topology.member_count;
     header.role_flags = member_format.data_role;

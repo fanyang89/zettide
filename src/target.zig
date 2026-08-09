@@ -572,6 +572,7 @@ fn provision(
     var storages = [_]storage_api.Storage{storage.*};
     const outcome = try pool_provision.create(io, allocator, &storages, .{
         .protection = .unprotected,
+        .data_mode = .catalog,
         .label = label,
     });
     switch (outcome) {

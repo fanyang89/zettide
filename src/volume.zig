@@ -2366,7 +2366,7 @@ fn makeReplicaEndpoints(
 
 fn requireLittleFsPoolMembers(members: []const *@import("v3/member.zig").Member) !void {
     for (members) |member| {
-        if (member_format.poolFilesystem(member.header()) != .littlefs)
+        if (member_format.poolDataMode(member.header()) != .catalog)
             return error.UnsupportedPoolFilesystem;
     }
 }
@@ -2592,7 +2592,7 @@ test "LittleFS Pool APIs reject Blob Pools without changing pool data" {
     };
     const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{
         .protection = .unprotected,
-        .filesystem = .blob,
+        .data_mode = .blob,
     });
     var provisioned = switch (outcome) {
         .complete => |value| value,

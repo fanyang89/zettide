@@ -11,7 +11,7 @@ pub const Options = struct {
     protection: pool_policy.Protection,
     label: []const u8,
     name_profile: name_profile.Profile = .legacy_raw,
-    filesystem: member_format.PoolFilesystem = .littlefs,
+    data_mode: member_format.PoolDataMode = .blob,
     scheduled_blob: bool = false,
 };
 
@@ -25,7 +25,7 @@ pub const Plan = struct {
 
     pub fn ready(self: *const Plan) bool {
         for (self.devices, self.contains_data) |device, contains_data| {
-            if (!deviceReadyForFilesystem(device, self.options.filesystem) or contains_data) return false;
+            if (!deviceReadyForDataMode(device, self.options.data_mode) or contains_data) return false;
         }
         return true;
     }
@@ -157,11 +157,11 @@ pub fn acquire(plan: *const Plan, io: std.Io, allocator: std.mem.Allocator) ![]s
 }
 
 pub fn deviceReady(device: linux_block.DeviceInfo) bool {
-    return deviceReadyForFilesystem(device, .littlefs);
+    return deviceReadyForDataMode(device, .blob);
 }
 
-pub fn deviceReadyForFilesystem(device: linux_block.DeviceInfo, filesystem: member_format.PoolFilesystem) bool {
-    const minimum_capacity = pool_provision.minimumMemberBytes(.{ .filesystem = filesystem }) catch return false;
+pub fn deviceReadyForDataMode(device: linux_block.DeviceInfo, data_mode: member_format.PoolDataMode) bool {
+    const minimum_capacity = pool_provision.minimumMemberBytes(.{ .data_mode = data_mode }) catch return false;
     return device.preflightEligible() and
         std.math.isPowerOfTwo(device.logical_sector_size) and
         device.logical_sector_size <= 4096 and
@@ -173,7 +173,7 @@ fn validateRequest(paths: []const []const u8, options: Options) !void {
     if (paths.len == 0 or paths.len > @import("pool_topology.zig").max_member_count)
         return error.InvalidMemberCount;
     if (options.scheduled_blob) {
-        if (options.filesystem != .blob or
+        if (options.data_mode != .blob or
             options.protection != .replicated or
             paths.len < pool_blob_schedule.replica_count or
             paths.len > pool_blob_schedule.max_member_count)
@@ -187,18 +187,10 @@ fn validateRequest(paths: []const []const u8, options: Options) !void {
 
 fn computeToken(devices: []const linux_block.DeviceInfo, contains_data: []const bool, options: Options) [32]u8 {
     var hasher = std.crypto.hash.Blake3.init(.{});
-    if (options.scheduled_blob) {
-        hasher.update("zettide-linux-pool-plan-v3\x00");
-        hasher.update(@tagName(options.filesystem));
-        hasher.update("\x00");
-        hasher.update(&.{@intFromBool(options.scheduled_blob)});
-    } else if (options.filesystem == .littlefs) {
-        hasher.update("zettide-linux-pool-plan-v1\x00");
-    } else {
-        hasher.update("zettide-linux-pool-plan-v2\x00");
-        hasher.update(@tagName(options.filesystem));
-        hasher.update("\x00");
-    }
+    hasher.update("zettide-linux-pool-plan-v4\x00");
+    hasher.update(@tagName(options.data_mode));
+    hasher.update("\x00");
+    hasher.update(&.{@intFromBool(options.scheduled_blob)});
     var plan_header: [10]u8 = undefined;
     std.mem.writeInt(u64, plan_header[0..8], options.label.len, .little);
     plan_header[8] = @intFromEnum(std.meta.activeTag(options.protection));
@@ -244,20 +236,14 @@ test "plan token binds device order geometry and options" {
     const reversed = [_]linux_block.DeviceInfo{ second, first };
     const contains_data = [_]bool{ false, false };
     const options: Options = .{ .protection = .unprotected, .label = "pool" };
-    const legacy_token = computeToken(&devices, &contains_data, options);
-    var expected_legacy_token: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(
-        &expected_legacy_token,
-        "15462a01afe240a6751f24a1e69d222bd5b1fb3129319809e30f9c8d89d6ebcc",
-    );
-    try std.testing.expectEqualSlices(u8, &expected_legacy_token, &legacy_token);
+    const blob_token = computeToken(&devices, &contains_data, options);
     try std.testing.expectEqualSlices(
         u8,
-        &legacy_token,
+        &blob_token,
         &computeToken(&devices, &contains_data, .{
             .protection = .unprotected,
             .label = "pool",
-            .filesystem = .littlefs,
+            .data_mode = .blob,
         }),
     );
     try std.testing.expect(!std.mem.eql(
@@ -265,23 +251,23 @@ test "plan token binds device order geometry and options" {
         &computeToken(&devices, &contains_data, options),
         &computeToken(&reversed, &contains_data, options),
     ));
-    const blob_options: Options = .{
+    const catalog_options: Options = .{
         .protection = .unprotected,
         .label = "pool",
-        .filesystem = .blob,
+        .data_mode = .catalog,
     };
     try std.testing.expect(!std.mem.eql(
         u8,
-        &legacy_token,
-        &computeToken(&devices, &contains_data, blob_options),
+        &blob_token,
+        &computeToken(&devices, &contains_data, catalog_options),
     ));
     try std.testing.expectEqualSlices(
         u8,
-        &computeToken(&devices, &contains_data, blob_options),
+        &computeToken(&devices, &contains_data, catalog_options),
         &computeToken(&devices, &contains_data, .{
             .protection = .unprotected,
             .label = "pool",
-            .filesystem = .blob,
+            .data_mode = .catalog,
         }),
     );
     try std.testing.expect(!std.mem.eql(
@@ -306,12 +292,12 @@ test "plan token binds device order geometry and options" {
     const scheduled_options: Options = .{
         .protection = .replicated,
         .label = "pool",
-        .filesystem = .blob,
+        .data_mode = .blob,
         .scheduled_blob = true,
     };
     try std.testing.expect(!std.mem.eql(
         u8,
-        &computeToken(&devices, &contains_data, blob_options),
+        &computeToken(&devices, &contains_data, options),
         &computeToken(&devices, &contains_data, scheduled_options),
     ));
     var changed = devices;
@@ -340,7 +326,7 @@ test "scheduled Blob request validates profile and member count" {
     const scheduled: Options = .{
         .protection = .replicated,
         .label = "pool",
-        .filesystem = .blob,
+        .data_mode = .blob,
         .scheduled_blob = true,
     };
     const paths: [pool_blob_schedule.max_member_count][]const u8 = @splat("device");
@@ -360,18 +346,19 @@ test "scheduled Blob request validates profile and member count" {
     try std.testing.expectError(error.InvalidScheduledBlobOptions, validateRequest(paths[0..3], .{
         .protection = .unprotected,
         .label = "pool",
-        .filesystem = .blob,
+        .data_mode = .blob,
         .scheduled_blob = true,
     }));
     try std.testing.expectError(error.InvalidScheduledBlobOptions, validateRequest(paths[0..3], .{
         .protection = .replicated,
         .label = "pool",
+        .data_mode = .catalog,
         .scheduled_blob = true,
     }));
     try std.testing.expectError(error.UnsupportedPoolWidth, validateRequest(paths[0..4], .{
         .protection = .replicated,
         .label = "pool",
-        .filesystem = .blob,
+        .data_mode = .blob,
     }));
 }
 
@@ -385,10 +372,10 @@ test "device readiness rejects unsupported geometry" {
         .sysfs_path_len = 0,
         .eligibility = .{},
     };
-    try std.testing.expect(deviceReady(device));
-    try std.testing.expect(!deviceReadyForFilesystem(device, .blob));
-    device.capacity_bytes -= 1;
+    try std.testing.expect(deviceReadyForDataMode(device, .catalog));
     try std.testing.expect(!deviceReady(device));
+    device.capacity_bytes -= 1;
+    try std.testing.expect(!deviceReadyForDataMode(device, .catalog));
     device.capacity_bytes += 1;
     device.logical_sector_size = 8192;
     try std.testing.expect(!deviceReady(device));
@@ -398,14 +385,14 @@ test "Blob device readiness enforces Blob logical capacity" {
     var device: linux_block.DeviceInfo = .{
         .id = .{ .major = 8, .minor = 0 },
         .disk_sequence = 10,
-        .capacity_bytes = try pool_provision.minimumMemberBytes(.{ .filesystem = .blob }),
+        .capacity_bytes = try pool_provision.minimumMemberBytes(.{ .data_mode = .blob }),
         .logical_sector_size = 512,
         .sysfs_path = undefined,
         .sysfs_path_len = 0,
         .eligibility = .{},
     };
-    try std.testing.expect(deviceReadyForFilesystem(device, .blob));
+    try std.testing.expect(deviceReadyForDataMode(device, .blob));
     device.capacity_bytes -= 1;
-    try std.testing.expect(!deviceReadyForFilesystem(device, .blob));
-    try std.testing.expect(deviceReady(device));
+    try std.testing.expect(!deviceReadyForDataMode(device, .blob));
+    try std.testing.expect(deviceReadyForDataMode(device, .catalog));
 }

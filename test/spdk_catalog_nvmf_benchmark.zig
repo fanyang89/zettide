@@ -134,7 +134,7 @@ fn serveReformatted(
         io,
         allocator,
         &storages,
-        .{ .protection = .unprotected, .filesystem = .littlefs, .label = "NVMe benchmark" },
+        .{ .protection = .unprotected, .data_mode = .catalog, .label = "NVMe benchmark" },
     );
     var provisioned = switch (outcome) {
         .complete => |value| value,
@@ -302,8 +302,8 @@ fn publishCatalog(
     const extent_size = authority.layout.chunk_size;
     const extent_count = member.header().data.length / extent_size;
 
-    var header = try zettide.container.Header.init(io, catalog_size, "benchmark");
-    header.chunk_size = extent_size;
+    var header = try zettide.v3.catalog_volume_header.Header.init(io, catalog_size, "benchmark");
+    header.extent_size = extent_size;
     header.state = .ready;
     const header_bytes = header.encode();
     const header_reference = try page.pageReference(6 * catalog.page_size, &header_bytes);

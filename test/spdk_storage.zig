@@ -210,7 +210,9 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
 
     // Provisioning consumes every supplied storage on both success and failure.
     opened_count = 0;
-    const outcome = try zettide.v3.pool_provision.create(context.io, context.allocator, &storages, .{});
+    const outcome = try zettide.v3.pool_provision.create(context.io, context.allocator, &storages, .{
+        .data_mode = .catalog,
+    });
     var provisioned = switch (outcome) {
         .complete => |value| value,
         .partial => |partial| return partial.cause,

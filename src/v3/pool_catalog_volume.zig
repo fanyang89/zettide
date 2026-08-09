@@ -362,6 +362,7 @@ const BoundCatalog = struct {
 };
 
 fn loadBoundCatalog(set: *pool_member_set.PoolMemberSet) !BoundCatalog {
+    if (try set.dataMode() != .catalog) return error.PoolDataRequiresCatalogMode;
     const initial_authority = set.authority() orelse return error.MissingAuthority;
     if (initial_authority.generation == 0 or codec.isZero(&initial_authority.data_root_digest))
         return error.GenesisHasNoCatalogRoot;

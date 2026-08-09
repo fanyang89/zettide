@@ -164,7 +164,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     var profile: PoolProfile = .replicated;
     var label: []const u8 = "Zettide";
     var name_profile: zettide.name_profile.Profile = .legacy_raw;
-    var filesystem: zettide.v3.member_format.PoolFilesystem = .littlefs;
+    var data_mode: zettide.v3.member_format.PoolDataMode = .blob;
     var filesystem_explicit = false;
     var confirmation: ?[]const u8 = null;
     var index: usize = 1;
@@ -192,7 +192,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
             if (filesystem_explicit) return error.DuplicateOption;
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
-            filesystem = try parsePoolFilesystem(args[index]);
+            data_mode = try parsePoolDataMode(args[index]);
             filesystem_explicit = true;
         } else if (std.mem.eql(u8, option, "--confirm")) {
             index += 1;
@@ -209,9 +209,9 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         .unprotected => .unprotected,
     };
     if (scheduled_blob) {
-        if (filesystem_explicit and filesystem != .blob)
+        if (filesystem_explicit and data_mode != .blob)
             return error.InvalidScheduledBlobOptions;
-        filesystem = .blob;
+        data_mode = .blob;
     }
     if (planning and confirmation != null) return error.UnknownOption;
     if (creating and confirmation == null) return error.MissingConfirmation;
@@ -220,7 +220,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         .protection = protection,
         .label = label,
         .name_profile = name_profile,
-        .filesystem = filesystem,
+        .data_mode = data_mode,
         .scheduled_blob = scheduled_blob,
     };
     if (planning) {
@@ -246,7 +246,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
     defer allocator.free(storages);
     const outcome = try zettide.v3.pool_provision.create(io, allocator, storages, .{
         .protection = protection,
-        .filesystem = filesystem,
+        .data_mode = data_mode,
         .label = label,
         .scheduled_blob = scheduled_blob,
     });
@@ -254,7 +254,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         .complete => |value| {
             var provisioned = value;
             defer provisioned.deinit();
-            if (filesystem == .blob) {
+            if (data_mode == .blob) {
                 const pool_id = provisioned.genesis.topology.set_id;
                 const owner = currentOwner();
                 var native = zettide.filesystem_target.formatProvisionedBlobPool(
@@ -337,12 +337,12 @@ fn poolInspectCommand(
     var set = try openRawPoolSet(allocator, io, paths[0..path_count], false, false, .read_only);
     defer set.deinit();
     const authority = set.authority() orelse return error.MissingAuthority;
-    const filesystem = try set.filesystem();
+    const data_mode = try set.dataMode();
     var statuses: [zettide.v3.pool_topology.max_member_count]zettide.v3.pool_member_set.MemberStatus = undefined;
     for (statuses[0..path_count], 0..) |*status, member_index|
         status.* = try set.statusAt(member_index);
     try stdout.print("Pool: {x}\n", .{authority.topology.set_id});
-    try stdout.print("Filesystem: {s}\n", .{@tagName(filesystem)});
+    try stdout.print("Filesystem: {s}\n", .{@tagName(data_mode)});
     try stdout.print("Authority: {s}\n", .{@tagName(authority.kind)});
     try stdout.print("Generation: {d}\n", .{authority.generation});
     try stdout.print("Topology epoch: {d}\n", .{authority.topology.epoch});
@@ -353,8 +353,8 @@ fn poolInspectCommand(
         @tagName(authority.layout.kind)});
     try stdout.print("Members: {d}/{d}\n", .{ path_count, authority.topology.member_count });
     try stdout.print("Data policy: {s}\n", .{@tagName(set.dataAccess())});
-    const mountable = switch (filesystem) {
-        .littlefs => (zettide.volume.Volume.inspectPoolHeader(io, &set) catch null) != null,
+    const mountable = switch (data_mode) {
+        .catalog => (zettide.volume.Volume.inspectPoolHeader(io, &set) catch null) != null,
         .blob => mountable: {
             var native = zettide.filesystem_target.openBlobPoolFilesystem(
                 allocator,
@@ -365,9 +365,10 @@ fn poolInspectCommand(
             native.close(io) catch break :mountable false;
             break :mountable true;
         },
+        .legacy_unsupported => false,
     };
     try stdout.print("Mountable: {s}\n", .{if (mountable) "yes" else "no"});
-    const can_initialize = filesystem == .littlefs and
+    const can_initialize = data_mode == .catalog and
         (zettide.volume.Volume.canInitializePool(io, &set) catch false);
     if (can_initialize) {
         try stdout.print("Initialize name profile: {s}\n", .{name_profile.name()});
@@ -421,8 +422,7 @@ fn poolInitializeCommand(
     const supplied_confirmation = confirmation orelse return error.MissingConfirmation;
     var set = try openRawPoolSet(allocator, io, paths[0..path_count], true, true, .writable);
     defer set.deinit();
-    if (try set.filesystem() == .blob)
-        return error.BlobPoolInitializationUnsupported;
+    if (try set.dataMode() != .catalog) return error.CatalogPoolInitializationUnsupported;
     const authority = set.authority() orelse return error.MissingAuthority;
     var expected_buffer: [96]u8 = undefined;
     const expected = poolInitializeToken(&expected_buffer, authority.topology.set_id, name_profile);
@@ -446,7 +446,7 @@ fn poolMountCommand(
     var writable = true;
     var allow_other = false;
     var metrics = false;
-    var filesystem: ?zettide.v3.member_format.PoolFilesystem = null;
+    var data_mode: ?zettide.v3.member_format.PoolDataMode = null;
     var access_time: zettide.volume.AccessTimePolicy = .relatime;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -465,10 +465,10 @@ fn poolMountCommand(
         } else if (std.mem.eql(u8, args[index], "--noatime")) {
             access_time = .noatime;
         } else if (std.mem.eql(u8, args[index], "--filesystem")) {
-            if (filesystem != null) return error.DuplicateOption;
+            if (data_mode != null) return error.DuplicateOption;
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
-            filesystem = try parsePoolFilesystem(args[index]);
+            data_mode = try parsePoolDataMode(args[index]);
         } else {
             return error.UnknownOption;
         }
@@ -479,11 +479,11 @@ fn poolMountCommand(
     const pool_allocator = std.heap.c_allocator;
     var set = try openRawPoolSet(pool_allocator, io, paths[0..path_count], writable, true, intent);
     defer set.deinit();
-    const detected_filesystem = try set.filesystem();
-    if (filesystem) |selected| {
-        if (selected != detected_filesystem) return error.PoolFilesystemMismatch;
+    const detected_data_mode = try set.dataMode();
+    if (data_mode) |selected| {
+        if (selected != detected_data_mode) return error.PoolFilesystemMismatch;
     }
-    if (detected_filesystem == .blob) {
+    if (detected_data_mode == .blob) {
         var native = try zettide.filesystem_target.openBlobPoolFilesystem(
             pool_allocator,
             io,
@@ -521,6 +521,7 @@ fn poolMountCommand(
         try native.close(io);
         return;
     }
+    if (detected_data_mode != .catalog) return error.LegacyPoolDataModeUnsupported;
     var volume = try zettide.volume.Volume.openPool(io, allocator, &set, writable);
     defer volume.deinit();
     volume.setFallbackOwner(@intCast(std.os.linux.getuid()), @intCast(std.os.linux.getgid()));
@@ -629,7 +630,7 @@ fn printPoolPlan(plan: *const zettide.v3.linux_pool_plan.Plan, stdout: *Io.Write
                 "rejected"
             else if (has_data)
                 "contains data"
-            else if (!zettide.v3.linux_pool_plan.deviceReadyForFilesystem(device, plan.options.filesystem))
+            else if (!zettide.v3.linux_pool_plan.deviceReadyForDataMode(device, plan.options.data_mode))
                 "unsupported geometry"
             else
                 "ready",
@@ -641,13 +642,13 @@ fn printPoolPlan(plan: *const zettide.v3.linux_pool_plan.Plan, stdout: *Io.Write
         @tagName(std.meta.activeTag(plan.options.protection))});
     if (plan.options.scheduled_blob)
         try stdout.print("Devices: {d}\n", .{plan.paths.len});
-    try stdout.print("Filesystem: {s}\n", .{@tagName(plan.options.filesystem)});
+    try stdout.print("Filesystem: {s}\n", .{@tagName(plan.options.data_mode)});
     try stdout.print("Name profile: {s}\n", .{plan.options.name_profile.name()});
     try stdout.print("Plan: {s}\n", .{if (plan.ready()) "ready" else "rejected"});
 }
 
-fn parsePoolFilesystem(value: []const u8) !zettide.v3.member_format.PoolFilesystem {
-    if (std.mem.eql(u8, value, "littlefs")) return .littlefs;
+fn parsePoolDataMode(value: []const u8) !zettide.v3.member_format.PoolDataMode {
+    if (std.mem.eql(u8, value, "littlefs") or std.mem.eql(u8, value, "catalog")) return .catalog;
     if (std.mem.eql(u8, value, "blob")) return .blob;
     return error.InvalidFilesystem;
 }

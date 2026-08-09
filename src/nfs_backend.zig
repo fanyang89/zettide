@@ -84,8 +84,8 @@ const FilesystemOwner = union(enum) {
     ) !void {
         var set = try openSingleMemberPool(io, allocator_value, path, writable);
         defer set.deinit();
-        switch (try set.filesystem()) {
-            .littlefs => {
+        switch (try set.dataMode()) {
+            .catalog => {
                 self.* = .{ .littlefs = undefined };
                 try volume_mod.Volume.openPoolInto(
                     &self.littlefs,
@@ -107,6 +107,7 @@ const FilesystemOwner = union(enum) {
                 );
                 self.blob.adapter = .init(&self.blob.native, io);
             },
+            .legacy_unsupported => return error.LegacyPoolDataModeUnsupported,
         }
     }
 
@@ -1247,7 +1248,7 @@ test "direct NFS backend exports a single-member Blob Pool" {
         std.testing.io,
         std.testing.allocator,
         &storages,
-        .{ .protection = .unprotected, .filesystem = .blob },
+        .{ .protection = .unprotected, .data_mode = .blob },
     );
     var provisioned = switch (outcome) {
         .complete => |value| value,

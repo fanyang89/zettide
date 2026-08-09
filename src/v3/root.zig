@@ -1,4 +1,5 @@
 pub const codec = @import("codec.zig");
+pub const catalog_volume_header = @import("catalog_volume_header.zig");
 pub const control_record = @import("control_record.zig");
 pub const file_storage = @import("file_storage.zig");
 pub const genesis_payload = @import("genesis_payload.zig");
@@ -23,6 +24,7 @@ pub const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
 pub const pool_block_device = @import("pool_block_device.zig");
 pub const pool_blob_schedule = @import("pool_blob_schedule.zig");
 pub const pool_data_storage = @import("pool_data_storage.zig");
+pub const pool_data_device = @import("pool_data_device.zig");
 pub const pool_scheduled_data_device = @import("pool_scheduled_data_device.zig");
 pub const pool_catalog = @import("pool_catalog.zig");
 pub const pool_catalog_mutation = @import("pool_catalog_mutation.zig");
@@ -38,6 +40,7 @@ pub const topology = @import("topology.zig");
 
 test {
     _ = codec;
+    _ = catalog_volume_header;
     _ = control_record;
     _ = file_storage;
     _ = genesis_payload;
@@ -62,6 +65,7 @@ test {
     _ = pool_block_device;
     _ = pool_blob_schedule;
     _ = pool_data_storage;
+    _ = pool_data_device;
     _ = pool_scheduled_data_device;
     _ = pool_catalog;
     _ = pool_catalog_mutation;
@@ -74,4 +78,30 @@ test {
     _ = replicated_journal;
     _ = storage;
     _ = topology;
+}
+
+test "catalog volume header remains byte-compatible with base LFSDRV2" {
+    const std = @import("std");
+    const container = @import("../container.zig");
+    const catalog_header: catalog_volume_header.Header = .{
+        .sequence = 7,
+        .state = .ready,
+        .uuid = @splat(3),
+        .created_ns = 123,
+        .logical_size = 1024 * 1024,
+        .block_count = 256,
+        .label = .{ 'p', 'o', 'o', 'l' } ++ @as([123]u8, @splat(0)),
+        .label_length = 4,
+    };
+    const container_header: container.Header = .{
+        .sequence = catalog_header.sequence,
+        .state = .ready,
+        .uuid = catalog_header.uuid,
+        .created_ns = catalog_header.created_ns,
+        .logical_size = catalog_header.logical_size,
+        .block_count = catalog_header.block_count,
+        .label = catalog_header.label,
+        .label_len = catalog_header.label_length,
+    };
+    try std.testing.expectEqualSlices(u8, &container_header.encode(), &catalog_header.encode());
 }

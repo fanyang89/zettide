@@ -19,7 +19,7 @@ const region_alignment: u64 = 1024 * 1024;
 
 pub const Options = struct {
     protection: pool_policy.Protection = .replicated,
-    filesystem: member_format.PoolFilesystem = .littlefs,
+    data_mode: member_format.PoolDataMode = .blob,
     label: []const u8 = "Zettide",
     chunk_size: u32 = default_chunk_size,
     control_bytes: u64 = default_control_bytes,
@@ -30,9 +30,10 @@ pub const Options = struct {
 
 pub fn minimumMemberBytes(options: Options) !u64 {
     const data_offset = try dataOffset(options);
-    const minimum_logical_capacity: u64 = switch (options.filesystem) {
-        .littlefs => 1,
+    const minimum_logical_capacity: u64 = switch (options.data_mode) {
+        .catalog => 1,
         .blob => blob_format.minimum_device_size,
+        .legacy_unsupported => return error.InvalidPoolDataMode,
     };
     const required_bytes = std.math.add(u64, data_offset, minimum_logical_capacity) catch
         return error.InvalidGeometry;
@@ -107,7 +108,8 @@ pub fn create(
     errdefer storage_api.closeAll(storages[consumed_count..], io) catch {};
     if (storages.len == 0 or storages.len > pool_topology.max_member_count)
         return error.InvalidMemberCount;
-    if (options.scheduled_blob and (options.filesystem != .blob or
+    if (options.data_mode == .legacy_unsupported) return error.InvalidPoolDataMode;
+    if (options.scheduled_blob and (options.data_mode != .blob or
         options.protection != .replicated or
         storages.len < pool_blob_schedule.replica_count or
         storages.len > pool_blob_schedule.max_member_count))
@@ -154,11 +156,12 @@ pub fn create(
         if (!options.scheduled_blob)
             minimum_data_bytes = @min(minimum_data_bytes, member_bytes[index] - data_offset);
     }
-    var logical_capacity: u64 = if (options.scheduled_blob) 0 else switch (options.filesystem) {
-        .littlefs => minimum_data_bytes,
+    var logical_capacity: u64 = if (options.scheduled_blob) 0 else switch (options.data_mode) {
+        .catalog => minimum_data_bytes,
         .blob => minimum_data_bytes / blob_format.blob_size * blob_format.blob_size,
+        .legacy_unsupported => unreachable,
     };
-    if (!options.scheduled_blob and options.filesystem == .blob and
+    if (!options.scheduled_blob and options.data_mode == .blob and
         logical_capacity < blob_format.minimum_device_size)
         return error.StorageTooSmall;
 
@@ -222,7 +225,11 @@ pub fn create(
         header.* = .{
             .header_sequence = 1,
             .incompat_features = member_format.dynamic_pool_incompat_feature |
-                (if (options.filesystem == .blob) member_format.blob_filesystem_incompat_feature else 0) |
+                (switch (options.data_mode) {
+                    .blob => member_format.blob_filesystem_incompat_feature,
+                    .catalog => member_format.catalog_intent_incompat_feature,
+                    .legacy_unsupported => unreachable,
+                }) |
                 (if (options.scheduled_blob) member_format.scheduled_blob_data_incompat_feature else 0),
             .set_id = set_id,
             .member_id = descriptor.member_id,
@@ -328,7 +335,7 @@ fn expectScheduledRejected(options: Options, member_count: usize, expected: anye
 }
 
 test "provisioning validates all file storages then creates a reopenable pool" {
-    try std.testing.expectEqual(member_format.PoolFilesystem.littlefs, (Options{}).filesystem);
+    try std.testing.expectEqual(member_format.PoolDataMode.blob, (Options{}).data_mode);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const names = [_][]const u8{ "a", "b", "c" };
@@ -342,7 +349,7 @@ test "provisioning validates all file storages then creates a reopenable pool" {
         .partial => return error.UnexpectedPartialCreation,
     };
     try std.testing.expectEqual(@as(usize, 3), provisioned.members.len);
-    try std.testing.expectEqual(member_format.PoolFilesystem.littlefs, member_format.poolFilesystem(provisioned.members[0].header()));
+    try std.testing.expectEqual(member_format.PoolDataMode.blob, member_format.poolDataMode(provisioned.members[0].header()));
     try std.testing.expectEqual(pool_layout.Kind.replicated, provisioned.genesis.layout.kind);
     try std.testing.expectEqual(@as(u64, 240 * 4096), provisioned.members[0].header().control.length);
     try std.testing.expectEqual(@as(u64, 1024 * 1024), provisioned.members[0].header().metadata.offset);
@@ -376,7 +383,7 @@ test "provisioning marks every Blob Pool member" {
 
         const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
             .protection = case.protection,
-            .filesystem = .blob,
+            .data_mode = .blob,
         });
         var provisioned = switch (outcome) {
             .complete => |value| value,
@@ -384,7 +391,7 @@ test "provisioning marks every Blob Pool member" {
         };
         defer provisioned.deinit();
         for (provisioned.members) |*member|
-            try std.testing.expectEqual(member_format.PoolFilesystem.blob, member_format.poolFilesystem(member.header()));
+            try std.testing.expectEqual(member_format.PoolDataMode.blob, member_format.poolDataMode(member.header()));
         try provisioned.close();
 
         for (names[0..case.member_count]) |name| {
@@ -394,7 +401,7 @@ test "provisioning marks every Blob Pool member" {
                 var bytes: [member_format.encoded_size]u8 = undefined;
                 _ = try file.readPositionalAll(std.testing.io, &bytes, offset);
                 const header = try member_format.decode(&bytes);
-                try std.testing.expectEqual(member_format.PoolFilesystem.blob, member_format.poolFilesystem(header));
+                try std.testing.expectEqual(member_format.PoolDataMode.blob, member_format.poolDataMode(header));
             }
         }
     }
@@ -408,7 +415,7 @@ test "provisioned members transfer into a set only on success" {
     };
     const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
         .protection = .unprotected,
-        .filesystem = .blob,
+        .data_mode = .blob,
     });
     var provisioned = switch (outcome) {
         .complete => |value| value,
@@ -431,8 +438,9 @@ test "provisioned members transfer into a set only on success" {
 }
 
 test "Blob Pool provisioning requires minimum Blob logical capacity" {
-    try std.testing.expectEqual(@as(u64, 3 * 1024 * 1024), try minimumMemberBytes(.{}));
-    try std.testing.expectEqual(@as(u64, 4 * 1024 * 1024), try minimumMemberBytes(.{ .filesystem = .blob }));
+    try std.testing.expectEqual(@as(u64, 4 * 1024 * 1024), try minimumMemberBytes(.{}));
+    try std.testing.expectEqual(@as(u64, 3 * 1024 * 1024), try minimumMemberBytes(.{ .data_mode = .catalog }));
+    try std.testing.expectEqual(@as(u64, 4 * 1024 * 1024), try minimumMemberBytes(.{ .data_mode = .blob }));
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -443,7 +451,7 @@ test "Blob Pool provisioning requires minimum Blob logical capacity" {
         error.StorageTooSmall,
         create(std.testing.io, std.testing.allocator, &storages, .{
             .protection = .unprotected,
-            .filesystem = .blob,
+            .data_mode = .blob,
         }),
     );
 }
@@ -462,7 +470,7 @@ test "Blob Pool logical capacity is common and Blob-aligned with 4KiB chunks" {
         storages[index] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, name, size);
 
     const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
-        .filesystem = .blob,
+        .data_mode = .blob,
         .chunk_size = 4096,
     });
     var provisioned = switch (outcome) {
@@ -484,7 +492,7 @@ test "scheduled Blob Pool provisions heterogeneous members and persists placemen
     var storages: [member_count]storage_api.Storage = undefined;
     var names: [member_count][16]u8 = undefined;
     var sizes: [member_count]u64 = undefined;
-    const options: Options = .{ .filesystem = .blob, .scheduled_blob = true };
+    const options: Options = .{ .data_mode = .blob, .scheduled_blob = true };
     const data_offset = try dataOffset(options);
     for (&storages, &names, &sizes, 0..) |*storage, *name, *size, index| {
         const basename = try std.fmt.bufPrint(name, "member-{d}", .{index});
@@ -538,22 +546,22 @@ test "scheduled Blob Pool provisions heterogeneous members and persists placemen
 }
 
 test "scheduled Blob Pool rejects unsupported options before identity publication" {
-    try expectScheduledRejected(.{ .scheduled_blob = true }, 3, error.InvalidScheduledBlobOptions);
+    try expectScheduledRejected(.{ .data_mode = .catalog, .scheduled_blob = true }, 3, error.InvalidScheduledBlobOptions);
     try expectScheduledRejected(.{
-        .filesystem = .blob,
+        .data_mode = .blob,
         .protection = .unprotected,
         .scheduled_blob = true,
     }, 3, error.InvalidScheduledBlobOptions);
     try expectScheduledRejected(.{
-        .filesystem = .blob,
+        .data_mode = .blob,
         .scheduled_blob = true,
     }, 2, error.InvalidScheduledBlobOptions);
     try expectScheduledRejected(.{
-        .filesystem = .blob,
+        .data_mode = .blob,
         .scheduled_blob = true,
     }, 13, error.InvalidScheduledBlobOptions);
     try expectScheduledRejected(.{
-        .filesystem = .blob,
+        .data_mode = .blob,
         .scheduled_blob = true,
         .chunk_size = 4096,
     }, 3, error.InvalidScheduledBlobChunkSize);
@@ -561,7 +569,7 @@ test "scheduled Blob Pool rejects unsupported options before identity publicatio
 
 test "Blob minimum member geometry reports overflow" {
     try std.testing.expectError(error.RegionOverflow, minimumMemberBytes(.{
-        .filesystem = .blob,
+        .data_mode = .blob,
         .control_bytes = std.math.maxInt(u64) - 4095,
     }));
 }

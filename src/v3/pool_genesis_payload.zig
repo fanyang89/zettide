@@ -179,7 +179,7 @@ fn testHeader(payload: GenesisPayload, member: pool_topology.Member) !member_for
             (if (scheduled != null)
                 member_format.blob_filesystem_incompat_feature | member_format.scheduled_blob_data_incompat_feature
             else
-                0),
+                member_format.catalog_intent_incompat_feature),
         .set_id = payload.topology.set_id,
         .member_id = member.member_id,
         .member_slot = member.slot,

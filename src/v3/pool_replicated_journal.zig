@@ -1844,7 +1844,7 @@ pub fn open(io: std.Io, set: *pool_member_set.PoolMemberSet) !ReplicatedJournal 
 
 const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
-const container = @import("../container.zig");
+const catalog_volume_header = @import("catalog_volume_header.zig");
 const pool_genesis = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_provision = @import("pool_provision.zig");
@@ -1902,7 +1902,7 @@ fn createThreeVoterTestSet(dir: std.Io.Dir) !pool_member_set.PoolMemberSet {
             return err;
         };
     }
-    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{});
+    const outcome = try pool_provision.create(std.testing.io, std.testing.allocator, &storages, .{ .data_mode = .catalog });
     var provisioned = switch (outcome) {
         .complete => |value| value,
         .partial => return error.UnexpectedPartialCreation,
@@ -2201,7 +2201,7 @@ test "genesis active non-voter catches up installs catalog and promotes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const locations = fourMemberTestLocations(tmp.dir);
-    var set = try createFourMemberTestSet(tmp.dir, .{});
+    var set = try createFourMemberTestSet(tmp.dir, .{ .data_mode = .catalog });
     defer set.deinit();
     var coordinator = try open(std.testing.io, &set);
     defer coordinator.deinit();
@@ -2294,9 +2294,9 @@ test "active non-voter catchup preflights capacity and checkpoint ancestry" {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         const options: pool_provision.Options = if (cross_checkpoint)
-            .{}
+            .{ .data_mode = .catalog }
         else
-            .{ .control_bytes = 5 * control_record.encoded_size };
+            .{ .data_mode = .catalog, .control_bytes = 5 * control_record.encoded_size };
         var set = try createFourMemberTestSet(tmp.dir, options);
         defer set.deinit();
         var coordinator = try open(std.testing.io, &set);
@@ -2332,7 +2332,7 @@ test "active non-voter catchup preflights capacity and checkpoint ancestry" {
 test "active non-voter catchup failure only isolates target" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    var set = try createFourMemberTestSet(tmp.dir, .{});
+    var set = try createFourMemberTestSet(tmp.dir, .{ .data_mode = .catalog });
     defer set.deinit();
     var coordinator = try open(std.testing.io, &set);
     defer coordinator.deinit();
@@ -2376,7 +2376,7 @@ test "mapped extents are durable before catalog publication" {
             std.testing.io,
             std.testing.allocator,
             &storages,
-            .{ .protection = .unprotected },
+            .{ .protection = .unprotected, .data_mode = .catalog },
         );
         var provisioned = switch (outcome) {
             .complete => |value| value,
@@ -2395,8 +2395,8 @@ test "mapped extents are durable before catalog publication" {
         const extent_size = authority.layout.chunk_size;
         const extent_count = member.header().data.length / extent_size;
 
-        var volume_header = try container.Header.init(std.testing.io, 2 * extent_size, "mapped");
-        volume_header.chunk_size = extent_size;
+        var volume_header = try catalog_volume_header.Header.init(std.testing.io, 2 * extent_size, "mapped");
+        volume_header.extent_size = extent_size;
         volume_header.state = .ready;
         const volume_header_bytes = volume_header.encode();
         const volume_header_reference = try pool_catalog_page.pageReference(6 * pool_catalog.page_size, &volume_header_bytes);
@@ -2846,7 +2846,8 @@ test "one-member coordinator commits generation and membership then reopens" {
     };
     const header: member_format.Header = .{
         .header_sequence = 1,
-        .incompat_features = member_format.dynamic_pool_incompat_feature,
+        .incompat_features = member_format.dynamic_pool_incompat_feature |
+            member_format.catalog_intent_incompat_feature,
         .set_id = payload.topology.set_id,
         .member_id = id(2),
         .member_slot = 7,
@@ -3051,7 +3052,8 @@ test "one-member coordinator commits generation and membership then reopens" {
     };
     const joining_header: member_format.Header = .{
         .header_sequence = 1,
-        .incompat_features = member_format.dynamic_pool_incompat_feature,
+        .incompat_features = member_format.dynamic_pool_incompat_feature |
+            member_format.catalog_intent_incompat_feature,
         .set_id = joining_authority.topology.set_id,
         .member_id = id(5),
         .member_slot = 19,
@@ -3132,10 +3134,10 @@ test "one-member coordinator commits generation and membership then reopens" {
     try std.testing.expectEqual(@as(u16, 2), (try resumed.resumeRollover()).active_count);
 }
 
-test "member bootstrap rejects mixed Pool filesystem markers without mutation" {
+test "member bootstrap rejects mixed Pool data modes without mutation" {
     inline for (.{
-        .{ .authority = member_format.PoolFilesystem.littlefs, .target = member_format.PoolFilesystem.blob },
-        .{ .authority = member_format.PoolFilesystem.blob, .target = member_format.PoolFilesystem.littlefs },
+        .{ .authority = member_format.PoolDataMode.catalog, .target = member_format.PoolDataMode.blob },
+        .{ .authority = member_format.PoolDataMode.blob, .target = member_format.PoolDataMode.catalog },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -3173,8 +3175,10 @@ test "member bootstrap rejects mixed Pool filesystem markers without mutation" {
             .label = try member_format.Label.init("bootstrap-filesystem-source"),
             .genesis_topology_digest = try pool_topology.digest(payload.topology),
         };
-        if (case.authority == .blob)
-            source_header.incompat_features |= member_format.blob_filesystem_incompat_feature;
+        source_header.incompat_features |= if (case.authority == .blob)
+            member_format.blob_filesystem_incompat_feature
+        else
+            member_format.catalog_intent_incompat_feature;
         var source = try member_api.createPoolAt(std.testing.io, tmp.dir, "source", source_header, payload, .{});
         try source.close();
 
@@ -3238,12 +3242,14 @@ test "member bootstrap rejects mixed Pool filesystem markers without mutation" {
         target_header.created_ns = 2;
         target_header.label = try member_format.Label.init("bootstrap-filesystem-target");
         target_header.genesis_topology_digest = try pool_topology.digest(authority_before.topology);
-        switch (case.target) {
-            .littlefs => target_header.incompat_features &= ~member_format.blob_filesystem_incompat_feature,
-            .blob => target_header.incompat_features |= member_format.blob_filesystem_incompat_feature,
-        }
-        try std.testing.expectEqual(case.authority, member_format.poolFilesystem(source_member.header()));
-        try std.testing.expectEqual(case.target, member_format.poolFilesystem(target_header));
+        target_header.incompat_features &= ~(member_format.blob_filesystem_incompat_feature |
+            member_format.catalog_intent_incompat_feature);
+        target_header.incompat_features |= if (case.target == .blob)
+            member_format.blob_filesystem_incompat_feature
+        else
+            member_format.catalog_intent_incompat_feature;
+        try std.testing.expectEqual(case.authority, member_format.poolDataMode(source_member.header()));
+        try std.testing.expectEqual(case.target, member_format.poolDataMode(target_header));
         try std.testing.expect(case.authority != case.target);
         var bootstrap_record: control_record.Record = .{
             .kind = control_record.member_bootstrap_kind,
@@ -3291,7 +3297,7 @@ test "member bootstrap rejects mixed Pool filesystem markers without mutation" {
         var reopened = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
         defer reopened.deinit();
         try std.testing.expectEqualDeep(authority_before, reopened.authority().?);
-        try std.testing.expectEqual(case.authority, member_format.poolFilesystem((try reopened.memberAt(0)).?.header()));
+        try std.testing.expectEqual(case.authority, member_format.poolDataMode((try reopened.memberAt(0)).?.header()));
     }
 }
 
@@ -3310,7 +3316,8 @@ test "administrative recovery converts a lost two-of-two quorum to one-of-one" {
     for (names, 0..) |name, index| {
         const header: member_format.Header = .{
             .header_sequence = 1,
-            .incompat_features = member_format.dynamic_pool_incompat_feature,
+            .incompat_features = member_format.dynamic_pool_incompat_feature |
+                member_format.catalog_intent_incompat_feature,
             .set_id = payload.topology.set_id,
             .member_id = members[index].member_id,
             .member_slot = members[index].slot,

@@ -21,10 +21,12 @@ pub const dynamic_pool_incompat_feature: u64 = 1 << 0;
 pub const catalog_data_incompat_feature: u64 = 1 << 1;
 pub const blob_filesystem_incompat_feature: u64 = 1 << 2;
 pub const scheduled_blob_data_incompat_feature: u64 = 1 << 3;
+pub const catalog_intent_incompat_feature: u64 = 1 << 4;
 pub const supported_incompat_features: u64 = dynamic_pool_incompat_feature |
     catalog_data_incompat_feature |
     blob_filesystem_incompat_feature |
-    scheduled_blob_data_incompat_feature;
+    scheduled_blob_data_incompat_feature |
+    catalog_intent_incompat_feature;
 pub const max_dynamic_member_count: u16 = 96;
 
 const magic = [8]u8{ 'D', 'D', 'V', 'M', 'E', 'M', '3', 0 };
@@ -89,7 +91,7 @@ pub const Header = struct {
 };
 
 pub const OpenMode = enum { read_only, writable };
-pub const PoolFilesystem = enum { littlefs, blob };
+pub const PoolDataMode = enum { blob, catalog, legacy_unsupported };
 
 pub fn isDynamicPool(header: Header) bool {
     return header.incompat_features & dynamic_pool_incompat_feature != 0;
@@ -109,8 +111,11 @@ pub fn expectedLayoutFormatVersion(header: Header) u16 {
     return supported_layout_format_version;
 }
 
-pub fn poolFilesystem(header: Header) PoolFilesystem {
-    return if (header.incompat_features & blob_filesystem_incompat_feature != 0) .blob else .littlefs;
+pub fn poolDataMode(header: Header) PoolDataMode {
+    if (header.incompat_features & blob_filesystem_incompat_feature != 0) return .blob;
+    if (header.incompat_features & (catalog_intent_incompat_feature | catalog_data_incompat_feature) != 0)
+        return .catalog;
+    return .legacy_unsupported;
 }
 
 pub fn checkFeaturePolicy(header: Header, mode: OpenMode) !void {
@@ -237,14 +242,16 @@ pub fn validate(header: Header) !void {
     if (header.header_sequence == 0) return error.InvalidSequence;
     if (codec.isZero(&header.set_id) or codec.isZero(&header.member_id) or
         std.mem.eql(u8, &header.set_id, &header.member_id)) return error.InvalidIdentity;
-    if (poolFilesystem(header) == .blob) {
+    const blob_mode = header.incompat_features & blob_filesystem_incompat_feature != 0;
+    const catalog_mode = header.incompat_features &
+        (catalog_intent_incompat_feature | catalog_data_incompat_feature) != 0;
+    if (blob_mode and catalog_mode) return error.ConflictingPoolDataMode;
+    if (poolDataMode(header) == .blob) {
         if (!isDynamicPool(header)) return error.BlobFilesystemRequiresDynamicPool;
-        if (hasCatalogData(header)) return error.BlobFilesystemCatalogDataConflict;
     }
     if (hasScheduledBlobData(header)) {
         if (!isDynamicPool(header)) return error.ScheduledBlobDataRequiresDynamicPool;
-        if (poolFilesystem(header) != .blob) return error.ScheduledBlobDataRequiresBlobFilesystem;
-        if (hasCatalogData(header)) return error.ScheduledBlobDataCatalogDataConflict;
+        if (poolDataMode(header) != .blob) return error.ScheduledBlobDataRequiresBlobFilesystem;
     }
     if (isDynamicPool(header)) {
         if (header.member_count == 0 or header.member_count > max_dynamic_member_count)
@@ -252,7 +259,7 @@ pub fn validate(header: Header) !void {
         if (header.role_flags & ~known_role_flags != 0 or header.role_flags & data_role == 0)
             return error.InvalidRoleFlags;
     } else {
-        if (hasCatalogData(header)) return error.CatalogDataRequiresDynamicPool;
+        if (catalog_mode) return error.CatalogDataRequiresDynamicPool;
         if (header.member_count != initial_member_count or header.member_slot >= initial_member_count)
             return error.InvalidMemberPlacement;
         if (header.role_flags != known_role_flags) return error.InvalidRoleFlags;
@@ -616,7 +623,7 @@ test "feature policy matrix" {
             dynamic_pool_incompat_feature | catalog_data_incompat_feature,
         ),
     );
-    header.incompat_features = 1 << 4;
+    header.incompat_features = 1 << 5;
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .read_only));
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .writable));
     const bytes = try encode(header);
@@ -645,26 +652,35 @@ test "scheduled blob feature requires dynamic blob v3 and permits aggregate capa
     try std.testing.expectError(error.UnsupportedLayoutFormat, checkFormatPolicy(header));
 
     header.incompat_features |= scheduled_blob_data_incompat_feature | catalog_data_incompat_feature;
-    try std.testing.expectError(error.BlobFilesystemCatalogDataConflict, validate(header));
+    try std.testing.expectError(error.ConflictingPoolDataMode, validate(header));
 }
 
-test "pool filesystem marker round trips and conflicts with catalog data" {
-    const littlefs = testHeader();
-    try std.testing.expectEqual(PoolFilesystem.littlefs, poolFilesystem(littlefs));
-    const littlefs_bytes = try encode(littlefs);
-    try std.testing.expectEqual(PoolFilesystem.littlefs, poolFilesystem(try decode(&littlefs_bytes)));
+test "pool data mode markers round trip and reject conflicts" {
+    const legacy = testHeader();
+    try std.testing.expectEqual(PoolDataMode.legacy_unsupported, poolDataMode(legacy));
+    const legacy_bytes = try encode(legacy);
+    try std.testing.expectEqual(PoolDataMode.legacy_unsupported, poolDataMode(try decode(&legacy_bytes)));
 
-    var blob = littlefs;
+    var catalog = legacy;
+    catalog.incompat_features |= dynamic_pool_incompat_feature | catalog_intent_incompat_feature;
+    catalog.layout_format_version = dynamic_layout_format_version;
+    try std.testing.expectEqual(PoolDataMode.catalog, poolDataMode(try decode(&(try encode(catalog)))));
+
+    var active_catalog = catalog;
+    active_catalog.incompat_features |= catalog_data_incompat_feature;
+    try std.testing.expectEqual(PoolDataMode.catalog, poolDataMode(try decode(&(try encode(active_catalog)))));
+
+    var blob = legacy;
     blob.incompat_features |= dynamic_pool_incompat_feature | blob_filesystem_incompat_feature;
     blob.layout_format_version = dynamic_layout_format_version;
     const blob_bytes = try encode(blob);
     const decoded_blob = try decode(&blob_bytes);
-    try std.testing.expectEqual(PoolFilesystem.blob, poolFilesystem(decoded_blob));
+    try std.testing.expectEqual(PoolDataMode.blob, poolDataMode(decoded_blob));
 
     blob.incompat_features |= catalog_data_incompat_feature;
-    try std.testing.expectError(error.BlobFilesystemCatalogDataConflict, encode(blob));
+    try std.testing.expectError(error.ConflictingPoolDataMode, encode(blob));
 
-    var static_blob = littlefs;
+    var static_blob = legacy;
     static_blob.incompat_features = blob_filesystem_incompat_feature;
     try std.testing.expectError(error.BlobFilesystemRequiresDynamicPool, encode(static_blob));
 }
@@ -760,7 +776,7 @@ test "A/B selection preserves structural conflicts" {
 
 test "A/B selection accepts only interrupted catalog mode activation" {
     var disabled = testHeader();
-    disabled.incompat_features = dynamic_pool_incompat_feature;
+    disabled.incompat_features = dynamic_pool_incompat_feature | catalog_intent_incompat_feature;
     const disabled_bytes = try encode(disabled);
     var enabled = disabled;
     enabled.header_sequence += 1;

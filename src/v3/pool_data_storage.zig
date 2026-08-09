@@ -4,7 +4,7 @@ const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
 const pool_authority = @import("pool_authority.zig");
 const pool_blob_schedule = @import("pool_blob_schedule.zig");
-const pool_block_device = @import("pool_block_device.zig");
+const pool_data_device = @import("pool_data_device.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
@@ -19,7 +19,7 @@ const max_member_count = pool_blob_schedule.max_member_count;
 const io_alignment = 4096;
 
 const Device = union(enum) {
-    mirrored: pool_block_device.PoolBlockDevice,
+    mirrored: pool_data_device.Device,
     scheduled: pool_scheduled_data_device.Device,
 
     fn readAt(self: *Device, buffer: []u8, offset: u64) !usize {
@@ -127,7 +127,7 @@ pub fn create(
             plan,
         ) };
     } else {
-        context.device = .{ .mirrored = try .initBytes(
+        context.device = .{ .mirrored = try .init(
             io,
             replicas[0..validated.member_count],
             validated.layout,
@@ -212,9 +212,8 @@ fn validateSet(set: *pool_member_set.PoolMemberSet, writable: bool) !ValidatedSe
         if ((member.mode() == .writable) != writable)
             return error.PoolAccessModeMismatch;
         const header = member.header();
-        if (member_format.poolFilesystem(header) != .blob)
+        if (member_format.poolDataMode(header) != .blob)
             return error.PoolDataRequiresBlobFilesystem;
-        if (member_format.hasCatalogData(header)) return error.CatalogPoolUnsupported;
         if (!std.mem.eql(u8, &header.set_id, &authority.topology.set_id) or
             !std.mem.eql(u8, &header.member_id, &descriptor.member_id) or
             header.member_slot != descriptor.slot or
@@ -268,9 +267,8 @@ fn validateScheduledSet(
         const member = data_member.member;
         if ((member.mode() == .writable) != writable) return error.PoolAccessModeMismatch;
         const header = member.header();
-        if (member_format.poolFilesystem(header) != .blob)
+        if (member_format.poolDataMode(header) != .blob)
             return error.PoolDataRequiresBlobFilesystem;
-        if (member_format.hasCatalogData(header)) return error.CatalogPoolUnsupported;
         if (!member_format.hasScheduledBlobData(header) or
             header.layout_format_version != member_format.scheduled_layout_format_version)
             return error.InvalidScheduledBlobHeader;
@@ -322,7 +320,7 @@ fn validateScheduledSet(
 }
 
 fn sameLogicalGeometry(a: member_format.Header, b: member_format.Header) bool {
-    return member_format.poolFilesystem(a) == member_format.poolFilesystem(b) and
+    return member_format.poolDataMode(a) == member_format.poolDataMode(b) and
         a.logical_capacity == b.logical_capacity and
         a.control.offset == b.control.offset and a.control.length == b.control.length and
         a.metadata.offset == b.metadata.offset and a.metadata.length == b.metadata.length and
@@ -529,7 +527,7 @@ const scheduled_test_member_names = [_][]const u8{
 fn provisionTestPool(
     dir: Io.Dir,
     protection: pool_policy.Protection,
-    filesystem: member_format.PoolFilesystem,
+    data_mode: member_format.PoolDataMode,
 ) !usize {
     const pool_provision = @import("pool_provision.zig");
     const member_count = try protection.fullWidth();
@@ -540,7 +538,7 @@ fn provisionTestPool(
         std.testing.io,
         std.testing.allocator,
         storages[0..member_count],
-        .{ .protection = protection, .filesystem = filesystem },
+        .{ .protection = protection, .data_mode = data_mode },
     );
     var provisioned = switch (outcome) {
         .complete => |value| value,
@@ -571,7 +569,7 @@ fn provisionScheduledTestPool(dir: Io.Dir) !u64 {
         std.testing.io,
         std.testing.allocator,
         &storages,
-        .{ .filesystem = .blob, .scheduled_blob = true },
+        .{ .data_mode = .blob, .scheduled_blob = true },
     );
     var provisioned = switch (outcome) {
         .complete => |value| value,
@@ -900,16 +898,16 @@ test "Pool data write and sync failures freeze writes" {
 }
 
 test "Pool data construction ownership and read-only access are explicit" {
-    var littlefs_tmp = std.testing.tmpDir(.{});
-    defer littlefs_tmp.cleanup();
-    const littlefs_count = try provisionTestPool(littlefs_tmp.dir, .unprotected, .littlefs);
-    var littlefs_set = try openTestSet(littlefs_tmp.dir, littlefs_count, .writable);
-    defer littlefs_set.deinit();
+    var catalog_tmp = std.testing.tmpDir(.{});
+    defer catalog_tmp.cleanup();
+    const catalog_count = try provisionTestPool(catalog_tmp.dir, .unprotected, .catalog);
+    var catalog_set = try openTestSet(catalog_tmp.dir, catalog_count, .writable);
+    defer catalog_set.deinit();
     try std.testing.expectError(
         error.PoolDataRequiresBlobFilesystem,
-        create(std.testing.allocator, std.testing.io, &littlefs_set, true),
+        create(std.testing.allocator, std.testing.io, &catalog_set, true),
     );
-    try std.testing.expect((try littlefs_set.memberAt(0)) != null);
+    try std.testing.expect((try catalog_set.memberAt(0)) != null);
 
     var blob_tmp = std.testing.tmpDir(.{});
     defer blob_tmp.cleanup();
@@ -1080,7 +1078,7 @@ fn initOrderedTestContext(context: *Context, replicas: *[max_replica_count]Order
     context.* = .{
         .allocator = std.testing.allocator,
         .set = .{},
-        .device = .{ .mirrored = try .initBytes(
+        .device = .{ .mirrored = try .init(
             std.testing.io,
             &endpoints,
             layout,

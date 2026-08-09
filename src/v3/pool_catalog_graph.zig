@@ -1,5 +1,5 @@
 const std = @import("std");
-const container = @import("../container.zig");
+const catalog_volume_header = @import("catalog_volume_header.zig");
 const codec = @import("codec.zig");
 const member_format = @import("member_format.zig");
 const pool_catalog = @import("pool_catalog.zig");
@@ -252,10 +252,10 @@ fn validateVolumeHeader(
     descriptor: pool_catalog.VolumeDescriptor,
     bytes: *const [pool_catalog.page_size]u8,
 ) !void {
-    const header = try container.Header.decode(bytes);
+    const header = try catalog_volume_header.Header.decode(bytes);
     if (!std.mem.eql(u8, &header.uuid, &descriptor.volume_id) or
         header.created_ns != descriptor.created_ns or header.logical_size != descriptor.logical_size or
-        header.chunk_size != descriptor.extent_size or
+        header.extent_size != descriptor.extent_size or
         !std.mem.eql(u8, header.labelSlice(), descriptor.name.slice()))
         return error.VolumeHeaderMismatch;
     switch (descriptor.state) {
@@ -818,7 +818,7 @@ test "catalog graph resolves authority-bound pages" {
 test "nonempty catalog graph binds volume header and extent owner" {
     const topology = try testTopology();
     const layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024);
-    var volume_header: container.Header = .{
+    var volume_header: catalog_volume_header.Header = .{
         .sequence = 1,
         .state = .ready,
         .uuid = @splat(9),
@@ -827,7 +827,7 @@ test "nonempty catalog graph binds volume header and extent owner" {
         .block_count = 256,
     };
     @memcpy(volume_header.label[0..5], "alpha");
-    volume_header.label_len = 5;
+    volume_header.label_length = 5;
     const volume_header_bytes = volume_header.encode();
     const volume_header_reference = try pool_catalog_page.pageReference(6 * pool_catalog.page_size, &volume_header_bytes);
     const extent_bytes = try pool_catalog_page.encodeExtentMap(1, @splat(9), &.{.{

@@ -438,6 +438,9 @@ pub const Member = struct {
         if (self.isClosed()) return error.MemberClosed;
         if (self.open_mode != .writable) return error.ReadOnlyMember;
         if (self.isFrozen()) return error.WriteFrozen;
+        if (member_format.isDynamicPool(self.selected_header) and
+            member_format.poolDataMode(self.selected_header) != .catalog)
+            return error.PoolDataRequiresCatalogMode;
         var id = self.catalog_claim_sequence.load(.acquire);
         while (true) {
             if (id == 0 or id == std.math.maxInt(u64)) return error.CatalogClaimSequenceExhausted;
@@ -680,8 +683,9 @@ pub const Member = struct {
     }
 
     fn activateCatalogDataLocked(self: *Member) !void {
-        if (member_format.poolFilesystem(self.selected_header) == .blob)
-            return error.BlobFilesystemCatalogDataConflict;
+        if (member_format.isDynamicPool(self.selected_header) and
+            member_format.poolDataMode(self.selected_header) != .catalog)
+            return error.PoolDataRequiresCatalogMode;
         self.catalog_mode_active.store(true, .release);
         if (member_format.hasCatalogData(self.selected_header)) {
             if (!self.degraded) return;
@@ -1048,6 +1052,8 @@ pub fn validateCreatePoolStorage(
     genesis_payload: pool_genesis_payload.GenesisPayload,
 ) !void {
     try validateInitialCreate(header);
+    if (member_format.poolDataMode(header) == .legacy_unsupported)
+        return error.LegacyPoolDataModeUnsupported;
     try pool_genesis_payload.validateMemberHeader(genesis_payload, header);
     const record = try pool_genesis_payload.makeRecord(header.member_id, genesis_payload);
     _ = try pool_genesis_payload.validateRecord(record);
@@ -1188,7 +1194,8 @@ fn testPoolCreate() !struct { member_format.Header, pool_genesis_payload.Genesis
         .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
     };
     var header = testHeader();
-    header.incompat_features = member_format.dynamic_pool_incompat_feature;
+    header.incompat_features = member_format.dynamic_pool_incompat_feature |
+        member_format.catalog_intent_incompat_feature;
     header.set_id = payload.topology.set_id;
     header.member_id = members[0].member_id;
     header.member_slot = members[0].slot;
@@ -1215,7 +1222,8 @@ fn testJoiningCreate() !struct { member_format.Header, control_record.Record } {
         .layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024),
     };
     var header = testHeader();
-    header.incompat_features = member_format.dynamic_pool_incompat_feature;
+    header.incompat_features = member_format.dynamic_pool_incompat_feature |
+        member_format.catalog_intent_incompat_feature;
     header.set_id = evidence.topology.set_id;
     header.member_id = evidence.target_member_id;
     header.member_slot = evidence.target_slot;
@@ -1526,7 +1534,7 @@ test "open selects independent headers and enforces policy and exact length" {
     try createRawMember(tmp.dir, "member", unsupported, unsupported, unsupported.member_bytes);
     try std.testing.expectError(error.UnsupportedMetadataFormat, openAt(std.testing.io, tmp.dir, "member", .read_only));
     unsupported = header;
-    unsupported.incompat_features = 1 << 4;
+    unsupported.incompat_features = 1 << 5;
     try createRawMember(tmp.dir, "member", unsupported, unsupported, unsupported.member_bytes);
     try std.testing.expectError(error.UnsupportedIncompatFeature, openAt(std.testing.io, tmp.dir, "member", .read_only));
     unsupported = header;
@@ -1834,6 +1842,7 @@ test "Blob member catalog activation fails without changing writable state" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var input = try testPoolCreate();
+    input[0].incompat_features &= ~member_format.catalog_intent_incompat_feature;
     input[0].incompat_features |= member_format.blob_filesystem_incompat_feature;
     var member = try createPoolAt(std.testing.io, tmp.dir, "member", input[0], input[1], .{});
     defer member.deinit();
@@ -1846,9 +1855,7 @@ test "Blob member catalog activation fails without changing writable state" {
     _ = try member.storage.readAt(std.testing.io, &header_a_before, 0);
     _ = try member.storage.readAt(std.testing.io, &header_b_before, member_format.encoded_size);
 
-    var claim = try member.claimCatalog();
-    try std.testing.expectError(error.BlobFilesystemCatalogDataConflict, claim.activateCatalogData());
-    try claim.release();
+    try std.testing.expectError(error.PoolDataRequiresCatalogMode, member.claimCatalog());
 
     try std.testing.expect(!member.catalog_mode_active.load(.acquire));
     try std.testing.expectEqual(member_format.OpenMode.writable, member.mode());

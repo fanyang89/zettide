@@ -1,5 +1,5 @@
 const std = @import("std");
-const container = @import("../container.zig");
+const catalog_volume_header = @import("catalog_volume_header.zig");
 const codec = @import("codec.zig");
 const pool_catalog = @import("pool_catalog.zig");
 const pool_catalog_graph = @import("pool_catalog_graph.zig");
@@ -558,7 +558,7 @@ const TestCatalog = struct {
             .role_flags = 3,
         }});
         const layout = try pool_layout.Layout.init(.unprotected, 1, 1, 1024 * 1024);
-        var header: container.Header = .{
+        var header: catalog_volume_header.Header = .{
             .sequence = 1,
             .state = .ready,
             .uuid = @splat(9),
@@ -567,7 +567,7 @@ const TestCatalog = struct {
             .block_count = 1024,
         };
         @memcpy(header.label[0..5], "alpha");
-        header.label_len = 5;
+        header.label_length = 5;
         const header_bytes = header.encode();
         const header_reference = try pool_catalog_page.pageReference(6 * pool_catalog.page_size, &header_bytes);
 

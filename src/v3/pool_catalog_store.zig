@@ -415,7 +415,8 @@ test "catalog store stages pages before root and preserves authority mirror" {
     const payload: pool_genesis_payload.GenesisPayload = .{ .topology = topology, .layout = layout };
     const header: member_format.Header = .{
         .header_sequence = 1,
-        .incompat_features = member_format.dynamic_pool_incompat_feature,
+        .incompat_features = member_format.dynamic_pool_incompat_feature |
+            member_format.catalog_intent_incompat_feature,
         .set_id = topology.set_id,
         .member_id = topology.members[0].member_id,
         .member_slot = topology.members[0].slot,

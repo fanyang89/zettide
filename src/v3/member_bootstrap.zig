@@ -180,7 +180,8 @@ fn testRecord(evidence: Evidence) !control_record.Record {
 fn testHeader(evidence: Evidence) !member_format.Header {
     return .{
         .header_sequence = 1,
-        .incompat_features = member_format.dynamic_pool_incompat_feature,
+        .incompat_features = member_format.dynamic_pool_incompat_feature |
+            member_format.catalog_intent_incompat_feature,
         .set_id = evidence.topology.set_id,
         .member_id = evidence.target_member_id,
         .member_slot = evidence.target_slot,

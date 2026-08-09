@@ -206,7 +206,7 @@ pub fn formatBlobPoolSet(
     profile: name_profile.Profile,
     options: blob_filesystem.Filesystem.FormatOptions,
 ) !blob_filesystem.Filesystem {
-    if (try set.filesystem() != .blob) return error.PoolDataRequiresBlobFilesystem;
+    if (try set.dataMode() != .blob) return error.PoolDataRequiresBlobFilesystem;
     const storage = try pool_data_storage.create(allocator, io, set, true);
     const device = blob_device.Device.init(
         storage,
@@ -230,7 +230,7 @@ pub fn openBlobPoolFilesystem(
     set: *pool_member_set.PoolMemberSet,
     writable: bool,
 ) !blob_filesystem.Filesystem {
-    if (try set.filesystem() != .blob) return error.PoolDataRequiresBlobFilesystem;
+    if (try set.dataMode() != .blob) return error.PoolDataRequiresBlobFilesystem;
     const storage = try pool_data_storage.create(allocator, io, set, writable);
     const device = blob_device.Device.init(
         storage,
@@ -315,7 +315,7 @@ fn provisionBlobTestPool(
         std.testing.io,
         std.testing.allocator,
         storages[0..member_count],
-        .{ .protection = protection, .filesystem = .blob },
+        .{ .protection = protection, .data_mode = .blob },
     );
     return switch (outcome) {
         .complete => |value| value,
@@ -415,7 +415,7 @@ test "Blob Pool format and writable and read-only reopen round trip" {
     }
 }
 
-test "LittleFS Pool marker rejects Blob formatting without data changes" {
+test "Catalog Pool marker rejects Blob formatting without data changes" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storages = [_]storage_api.Storage{
@@ -425,7 +425,7 @@ test "LittleFS Pool marker rejects Blob formatting without data changes" {
         std.testing.io,
         std.testing.allocator,
         &storages,
-        .{ .protection = .unprotected, .filesystem = .littlefs },
+        .{ .protection = .unprotected, .data_mode = .catalog },
     );
     var provisioned = switch (outcome) {
         .complete => |value| value,
