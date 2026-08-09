@@ -242,13 +242,12 @@ fn validateScheduledSet(
     writable: bool,
 ) !ValidatedSet {
     const scheduled = authority.layout.scheduled_blob.?;
-    if (authority.topology.member_count != scheduled.member_count or
-        set.suppliedCount() != scheduled.member_count)
-        return error.UnsupportedDegradedScheduledPool;
+    if (authority.topology.member_count != scheduled.member_count)
+        return error.InconsistentPlacementPlan;
     if (writable) {
         if (set.dataAccess() != .read_write) return error.DataWriteUnavailable;
-    } else if (set.dataAccess() != .read_write) {
-        return error.UnsupportedDegradedScheduledPool;
+    } else if (set.dataAccess() == .unavailable) {
+        return error.DataReadUnavailable;
     }
 
     var result: ValidatedSet = .{
@@ -257,12 +256,15 @@ fn validateScheduledSet(
         .layout = authority.layout,
         .plan = null,
         .slots = undefined,
-        .member_count = scheduled.member_count,
+        .member_count = 0,
     };
     var canonical_page: ?pool_blob_schedule.PlacementPage = null;
     for (authority.topology.memberSlice()) |descriptor| {
         if (descriptor.state != .active) return error.TransitionalPoolTopology;
-        const data_member = try set.dataMemberForRead(descriptor.slot);
+        const data_member = set.dataMemberForRead(descriptor.slot) catch |err| switch (err) {
+            error.DataMemberUnavailable => continue,
+            else => return err,
+        };
         const member = data_member.member;
         if ((member.mode() == .writable) != writable) return error.PoolAccessModeMismatch;
         const header = member.header();
@@ -299,15 +301,23 @@ fn validateScheduledSet(
         std.math.mul(u64, plan.logical_stripe_count, plan.stripe_size) catch null != scheduled.logical_capacity or
         !std.mem.eql(u8, &(try pool_blob_schedule.digest(plan)), &scheduled.placement_digest))
         return error.InconsistentPlacementPlan;
-    for (plan.memberSlice(), 0..) |entry, index| {
+    for (plan.memberSlice()) |entry| {
         const descriptor = pool_topology.findSlot(&authority.topology, entry.slot) orelse
             return error.PlacementMemberNotInTopology;
-        const member = (try set.dataMemberForRead(descriptor.slot)).member;
+        const data_member = set.dataMemberForRead(descriptor.slot) catch |err| switch (err) {
+            error.DataMemberUnavailable => continue,
+            else => return err,
+        };
         const required = std.math.mul(u64, entry.assigned_stripes, plan.stripe_size) catch
             return error.InvalidPoolDataGeometry;
-        if (member.header().data.length < required) return error.TruncatedMemberData;
-        result.slots[index] = entry.slot;
+        if (data_member.member.header().data.length < required) return error.TruncatedMemberData;
+        result.slots[result.member_count] = entry.slot;
+        result.member_count += 1;
     }
+    if (result.member_count != set.suppliedCount()) return error.UnexpectedScheduledMemberSet;
+    if (result.member_count != scheduled.member_count and
+        (writable or result.member_count + 1 != scheduled.member_count))
+        return error.UnsupportedDegradedScheduledPool;
     return result;
 }
 
@@ -581,6 +591,23 @@ fn openScheduledTestSet(dir: Io.Dir, intent: pool_member_set.OpenIntent, reverse
     return pool_member_set.open(std.testing.io, std.testing.allocator, &locations, intent);
 }
 
+fn openScheduledTestSetMissing(
+    dir: Io.Dir,
+    intent: pool_member_set.OpenIntent,
+    missing_index: usize,
+    reversed: bool,
+) !pool_member_set.PoolMemberSet {
+    var locations: [max_member_count - 1]pool_member_set.Location = undefined;
+    var location_count: usize = 0;
+    for (0..scheduled_test_member_names.len) |order_index| {
+        const name_index = if (reversed) scheduled_test_member_names.len - 1 - order_index else order_index;
+        if (name_index == missing_index) continue;
+        locations[location_count] = .{ .parent = dir, .basename = scheduled_test_member_names[name_index] };
+        location_count += 1;
+    }
+    return pool_member_set.open(std.testing.io, std.testing.allocator, &locations, intent);
+}
+
 test "scheduled Pool data storage supports heterogeneous members and reordered reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -627,7 +654,7 @@ test "scheduled Pool data storage supports heterogeneous members and reordered r
     try std.testing.expectEqualSlices(u8, bytes, output);
 }
 
-test "scheduled Pool data rejects degraded and invalid placement without taking ownership" {
+test "scheduled Pool data opens one missing member read only and rejects wider degradation" {
     var degraded_tmp = std.testing.tmpDir(.{});
     defer degraded_tmp.cleanup();
     _ = try provisionScheduledTestPool(degraded_tmp.dir);
@@ -635,17 +662,27 @@ test "scheduled Pool data rejects degraded and invalid placement without taking 
     try std.testing.expectEqual(pool_policy.DataAccess.read_write, full.dataAccess());
     try full.close();
 
+    const block = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(io_alignment), io_alignment);
+    defer std.testing.allocator.free(block);
+    for (0..scheduled_test_member_names.len) |missing_index| {
+        var degraded = try openScheduledTestSetMissing(degraded_tmp.dir, .read_only, missing_index, true);
+        try std.testing.expectEqual(pool_policy.DataAccess.read_only, degraded.dataAccess());
+        var degraded_storage = try create(std.testing.allocator, std.testing.io, &degraded, false);
+        try std.testing.expectEqual(block.len, try degraded_storage.readAt(std.testing.io, block, 0));
+        try std.testing.expectError(error.ReadOnlyPoolData, degraded_storage.writeAllAt(std.testing.io, block, 0));
+        try degraded_storage.close(std.testing.io);
+    }
+
     var locations: [max_member_count - 1]pool_member_set.Location = undefined;
     for (&locations, 0..) |*location, index|
         location.* = .{ .parent = degraded_tmp.dir, .basename = scheduled_test_member_names[index] };
-    var degraded = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .read_only);
-    try std.testing.expectEqual(pool_policy.DataAccess.read_only, degraded.dataAccess());
+    var degraded_writable = try pool_member_set.open(std.testing.io, std.testing.allocator, &locations, .writable);
     try std.testing.expectError(
-        error.UnsupportedDegradedScheduledPool,
-        create(std.testing.allocator, std.testing.io, &degraded, false),
+        error.DataWriteUnavailable,
+        create(std.testing.allocator, std.testing.io, &degraded_writable, true),
     );
-    try std.testing.expect((try degraded.memberAt(0)) != null);
-    try degraded.close();
+    try std.testing.expect((try degraded_writable.memberAt(0)) != null);
+    try degraded_writable.close();
 
     var unavailable = try pool_member_set.open(
         std.testing.io,
@@ -654,6 +691,11 @@ test "scheduled Pool data rejects degraded and invalid placement without taking 
         .read_only,
     );
     try std.testing.expectEqual(pool_policy.DataAccess.unavailable, unavailable.dataAccess());
+    try std.testing.expectError(
+        error.DataReadUnavailable,
+        create(std.testing.allocator, std.testing.io, &unavailable, false),
+    );
+    try std.testing.expect((try unavailable.memberAt(0)) != null);
     try unavailable.close();
 
     var corrupt_tmp = std.testing.tmpDir(.{});
@@ -1298,7 +1340,7 @@ test "Blob Store and Filesystem reopen over scheduled Pool data storage" {
     try store.commit(std.testing.io);
     try store.close(std.testing.io);
 
-    set = try openScheduledTestSet(store_tmp.dir, .read_only, false);
+    set = try openScheduledTestSetMissing(store_tmp.dir, .read_only, 11, false);
     storage = try create(std.testing.allocator, std.testing.io, &set, false);
     device = try blob_device.Device.init(storage, 0, storage.capacity(), blob_format.allocation_unit);
     store = try blob_store.Store.open(std.testing.allocator, std.testing.io, device);
@@ -1325,13 +1367,17 @@ test "Blob Store and Filesystem reopen over scheduled Pool data storage" {
     _ = try filesystem.write(std.testing.io, inode, "scheduled data", 0);
     try filesystem.close(std.testing.io);
 
-    set = try openScheduledTestSet(filesystem_tmp.dir, .read_only, true);
+    set = try openScheduledTestSetMissing(filesystem_tmp.dir, .read_only, 11, true);
     storage = try create(std.testing.allocator, std.testing.io, &set, false);
     device = try blob_device.Device.init(storage, 0, storage.capacity(), blob_format.allocation_unit);
     store = try blob_store.Store.open(std.testing.allocator, std.testing.io, device);
     filesystem = try blob_filesystem.Filesystem.open(std.testing.allocator, std.testing.io, store, false);
     defer filesystem.close(std.testing.io) catch {};
     try std.testing.expectEqual(inode, try filesystem.resolvePath(std.testing.io, "/scheduled"));
+    try std.testing.expectError(
+        error.ReadOnlyFilesystem,
+        filesystem.createFile(std.testing.io, 1, "denied", 0o644, 0, 0),
+    );
     var contents: [32]u8 = undefined;
     try std.testing.expectEqual(
         @as(usize, "scheduled data".len),

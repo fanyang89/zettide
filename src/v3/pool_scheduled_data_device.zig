@@ -42,36 +42,30 @@ pub const Device = struct {
         plan: pool_blob_schedule.PlacementPlan,
     ) !Device {
         try pool_blob_schedule.validate(plan);
-        if (endpoints.len != plan.member_count) return error.EndpointSetMismatch;
+        if (endpoints.len > plan.member_count or endpoints.len + 1 < plan.member_count)
+            return error.EndpointSetMismatch;
 
         var device: Device = .{
             .allocator = allocator,
             .io = io,
             .plan = plan,
             .members = undefined,
-            .member_count = plan.member_count,
+            .member_count = endpoints.len,
             .logical_capacity = std.math.mul(u64, plan.logical_stripe_count, plan.stripe_size) catch
                 return error.CapacityOverflow,
         };
-        for (plan.memberSlice(), 0..) |entry, member_index| {
-            var matching: ?ReplicaEndpoint = null;
-            for (endpoints, 0..) |candidate, candidate_index| {
-                if (candidate.slot != entry.slot) continue;
-                if (matching != null) return error.DuplicateEndpointSlot;
-                matching = candidate.endpoint;
-                for (endpoints[0..candidate_index]) |previous|
-                    if (previous.slot == candidate.slot) return error.DuplicateEndpointSlot;
+        for (endpoints, 0..) |candidate, member_index| {
+            for (endpoints[0..member_index]) |previous|
+                if (previous.slot == candidate.slot) return error.DuplicateEndpointSlot;
+            var matching: ?pool_blob_schedule.Entry = null;
+            for (plan.memberSlice()) |entry| {
+                if (candidate.slot == entry.slot) matching = entry;
             }
-            const endpoint = matching orelse return error.MissingEndpointSlot;
+            const entry = matching orelse return error.ExtraEndpointSlot;
             const required = std.math.mul(u64, entry.assigned_stripes, plan.stripe_size) catch
                 return error.MemberCapacityOverflow;
-            if (endpoint.geometry.data_length < required) return error.TruncatedMemberData;
-            device.members[member_index] = .{ .slot = entry.slot, .endpoint = endpoint };
-        }
-        for (endpoints) |candidate| {
-            var found = false;
-            for (plan.memberSlice()) |entry| found = found or candidate.slot == entry.slot;
-            if (!found) return error.ExtraEndpointSlot;
+            if (candidate.endpoint.geometry.data_length < required) return error.TruncatedMemberData;
+            device.members[member_index] = .{ .slot = candidate.slot, .endpoint = candidate.endpoint };
         }
         return device;
     }
@@ -119,6 +113,7 @@ pub const Device = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         if (self.isWriteFrozen()) return error.WriteFrozen;
+        if (self.member_count != self.plan.member_count) return error.DegradedDeviceReadOnly;
         if (writes.len > max_write_count) return error.BatchTooLarge;
 
         var member_writes: [pool_blob_schedule.max_member_count][max_span_count]storage_api.Write = undefined;
@@ -219,18 +214,25 @@ pub const Device = struct {
         var operations: [pool_blob_schedule.replica_count]Operation = undefined;
         var operation_members: [pool_blob_schedule.replica_count]usize = undefined;
         var errors: [pool_blob_schedule.replica_count]?anyerror = @splat(null);
-        for (locations, 0..) |location, index| {
-            operation_members[index] = self.memberIndex(location.slot) orelse unreachable;
-            operations[index] = .{ .read = .{
+        var operation_count: usize = 0;
+        for (locations) |location| {
+            const member_index = self.memberIndex(location.slot) orelse continue;
+            operation_members[operation_count] = member_index;
+            operations[operation_count] = .{ .read = .{
                 .offset = try self.physicalOffset(location, logical_offset % self.plan.stripe_size),
-                .buffer = copies[index * output.len ..][0..output.len],
+                .buffer = copies[operation_count * output.len ..][0..output.len],
             } };
+            operation_count += 1;
         }
-        self.runOperations(&operations, &operation_members, &errors) catch
+        self.runOperations(
+            operations[0..operation_count],
+            operation_members[0..operation_count],
+            errors[0..operation_count],
+        ) catch
             return error.ReplicaQuorumUnavailable;
-        for (0..pool_blob_schedule.replica_count) |left| {
+        for (0..operation_count) |left| {
             if (errors[left] != null) continue;
-            for (left + 1..pool_blob_schedule.replica_count) |right| {
+            for (left + 1..operation_count) |right| {
                 if (errors[right] == null and std.mem.eql(
                     u8,
                     copies[left * output.len ..][0..output.len],
@@ -241,7 +243,7 @@ pub const Device = struct {
                 }
             }
         }
-        return if (firstError(&errors) == null)
+        return if (operation_count == pool_blob_schedule.replica_count and firstError(&errors) == null)
             error.ReplicaDivergence
         else
             error.ReplicaQuorumUnavailable;
@@ -544,6 +546,80 @@ test "scheduled reads select a matching pair and classify quorum failures" {
     try std.testing.expectError(error.ReplicaDivergence, device.readAt(&output, 0));
     contexts[device.memberIndex((try pool_blob_schedule.map(plan, 0))[0].slot).?].fail_read = true;
     try std.testing.expectError(error.ReplicaQuorumUnavailable, device.readAt(&output, 0));
+}
+
+test "scheduled degraded reads require both remaining replicas and reject writes" {
+    const plan = try testPlan(3, 4096, 4);
+    var contexts: [3]TestEndpoint = undefined;
+    var endpoints: [3]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    var full = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    const locations = try pool_blob_schedule.map(plan, 0);
+    var output: [4096]u8 = undefined;
+    var input: [4096]u8 = @splat(7);
+
+    for (locations) |missing| {
+        for (0..pool_blob_schedule.replica_count) |lane| @memset(mappedBytes(&full, &contexts, 0, lane), 7);
+        var available: [pool_blob_schedule.replica_count - 1]MemberEndpoint = undefined;
+        var available_count: usize = 0;
+        for (endpoints) |endpoint| {
+            if (endpoint.slot == missing.slot) continue;
+            available[available_count] = endpoint;
+            available_count += 1;
+        }
+        var degraded = try Device.init(std.testing.allocator, std.testing.io, &available, plan);
+        _ = try degraded.readAt(&output, 0);
+        try std.testing.expectEqual(@as(u8, 7), output[0]);
+        try std.testing.expectError(error.DegradedDeviceReadOnly, degraded.writeAllAt(&input, 0));
+
+        var value: u8 = 1;
+        for (locations, 0..) |location, lane| {
+            if (location.slot == missing.slot) continue;
+            @memset(mappedBytes(&full, &contexts, 0, lane), value);
+            value += 1;
+        }
+        try std.testing.expectError(error.ReplicaQuorumUnavailable, degraded.readAt(&output, 0));
+    }
+
+    try std.testing.expectError(
+        error.EndpointSetMismatch,
+        Device.init(std.testing.allocator, std.testing.io, endpoints[0..1], plan),
+    );
+}
+
+test "scheduled degraded reads preserve wide-plan slot mapping" {
+    const plan = try testPlan(12, 4096, 3);
+    var contexts: [12]TestEndpoint = undefined;
+    var endpoints: [12]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    var full = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    var output: [4096]u8 = undefined;
+
+    for (endpoints) |missing| {
+        var logical_stripe: u64 = 0;
+        while (logical_stripe < plan.logical_stripe_count) : (logical_stripe += 1) {
+            const locations = try pool_blob_schedule.map(plan, logical_stripe);
+            var found = false;
+            for (locations) |location| found = found or location.slot == missing.slot;
+            if (found) break;
+        }
+        try std.testing.expect(logical_stripe < plan.logical_stripe_count);
+        for (0..pool_blob_schedule.replica_count) |lane|
+            @memset(mappedBytes(&full, &contexts, logical_stripe, lane), 0x5a);
+
+        var available: [11]MemberEndpoint = undefined;
+        var available_count: usize = 0;
+        for (endpoints) |endpoint| {
+            if (endpoint.slot == missing.slot) continue;
+            available[available_count] = endpoint;
+            available_count += 1;
+        }
+        var degraded = try Device.init(std.testing.allocator, std.testing.io, &available, plan);
+        _ = try degraded.readAt(&output, logical_stripe * plan.stripe_size);
+        try std.testing.expect(std.mem.allEqual(u8, &output, 0x5a));
+    }
 }
 
 test "scheduled validation performs no IO and enforces batch span limit" {

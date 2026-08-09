@@ -312,11 +312,12 @@ first requires complete logical data equality, then durably publishes ready B/A 
 creating members without formatting or changing data. Member-local sequence differences left by an
 interrupted A/B publication are accepted.
 
-`pool mount` also requires the complete profile width. Writable mount exclusively acquires writable
-devices and verifies static ready-header identity plus complete replica data equality.
-`pool mount --read-only` exclusively acquires readable devices, passes `ro` to FUSE, permits read-only
-block devices, and performs majority reads without modifying access times or syncing the backing
-members.
+Writable `pool mount` requires the complete profile width, exclusively acquires writable devices, and
+verifies static ready-header identity plus complete replica data equality. `pool mount --read-only`
+exclusively acquires readable devices, passes `ro` to FUSE, permits read-only block devices, and
+performs majority reads without modifying access times or syncing the backing members. Fixed-width
+profiles still require every member. A scheduled Blob Pool may omit exactly one member; each read then
+requires its two remaining replicas to agree. Two missing scheduled members make data unavailable.
 
 Dynamic pool provisioning accepts one owned storage per initial member. It rejects erasure coding and
 profiles wider than the supplied storage set, derives a common logical capacity from the smallest
