@@ -66,12 +66,15 @@ const MountState = struct {
     io: Io,
     read_only: bool,
     update_access_time: bool,
+    async_read_size: ?usize,
     nodes: ?*Inode = null,
     node_index: std.AutoHashMapUnmanaged(c.fuse_ino_t, *Inode) = .empty,
     dentries: ?*Dentry = null,
     open_files: ?*FuseFileHandle = null,
     open_directories: ?*FuseDirectoryHandle = null,
     reply_buffer: std.ArrayList(u8) = .empty,
+    read_group: Io.Group = .init,
+    metrics_mutex: Io.Mutex = .init,
     writeback_cache: bool = false,
     metrics: ?*Metrics,
 
@@ -80,6 +83,7 @@ const MountState = struct {
         io: Io,
         read_only: bool,
         update_access_time: bool,
+        async_read_size: ?usize,
         metrics: ?*Metrics,
     ) !MountState {
         var state = MountState{
@@ -87,6 +91,7 @@ const MountState = struct {
             .io = io,
             .read_only = read_only,
             .update_access_time = update_access_time,
+            .async_read_size = async_read_size,
             .metrics = metrics,
         };
         errdefer state.node_index.deinit(std.heap.c_allocator);
@@ -113,6 +118,7 @@ const MountState = struct {
     }
 
     fn deinit(self: *MountState) void {
+        self.drainReads();
         while (self.open_files) |handle| {
             self.open_files = handle.next;
             handle.file.close() catch {};
@@ -143,6 +149,10 @@ const MountState = struct {
         self.nodes = null;
         self.node_index.deinit(std.heap.c_allocator);
         self.reply_buffer.deinit(std.heap.c_allocator);
+    }
+
+    fn drainReads(self: *MountState) void {
+        self.read_group.await(self.io) catch {};
     }
 
     fn find(self: *MountState, id: c.fuse_ino_t) ?*Inode {
@@ -394,6 +404,8 @@ const MountState = struct {
         failed: bool,
     ) void {
         const elapsed: u64 = @intCast(Io.Clock.awake.now(self.io).nanoseconds - start_ns);
+        self.metrics_mutex.lockUncancelable(self.io);
+        defer self.metrics_mutex.unlock(self.io);
         operation.calls += 1;
         operation.bytes += bytes;
         operation.errors += @intFromBool(failed);
@@ -430,6 +442,7 @@ pub const Session = struct {
         allow_other: bool = false,
         read_only: bool = false,
         update_access_time: bool = true,
+        async_read_size: ?usize = null,
         metrics: ?*Metrics = null,
         on_exit: ?*const fn (?*anyopaque) void = null,
         on_exit_context: ?*anyopaque = null,
@@ -451,6 +464,7 @@ pub const Session = struct {
             io,
             options.read_only,
             options.update_access_time and !options.read_only,
+            options.async_read_size,
             options.metrics,
         );
         errdefer state.deinit();
@@ -501,6 +515,7 @@ pub const Session = struct {
         if (!self.hasExited()) c.zettide_fuse_session_exit(self.handle);
         self.thread.join();
         const result = self.result.load(.acquire);
+        self.state.drainReads();
         c.zettide_fuse_session_destroy(self.handle);
         self.state.deinit();
         self.allocator.destroy(self.state);
@@ -537,6 +552,7 @@ pub fn mount(filesystem: Filesystem, io: Io, mountpoint: []const u8, options: Se
         io,
         options.read_only,
         options.update_access_time and !options.read_only,
+        options.async_read_size,
         options.metrics,
     );
     defer state.deinit();
@@ -550,8 +566,13 @@ pub fn mount(filesystem: Filesystem, io: Io, mountpoint: []const u8, options: Se
     };
     var operations = fuseOperations();
 
-    const result = c.zettide_fuse_main(argv.len, &argv, &operations, &state);
+    const result = c.zettide_fuse_main(argv.len, &argv, &operations, &state, drainAsyncReads);
     if (result != 0) return error.FuseMountFailed;
+}
+
+fn drainAsyncReads(context: ?*anyopaque) callconv(.c) void {
+    const state: *MountState = @ptrCast(@alignCast(context.?));
+    state.drainReads();
 }
 
 fn mountOptions(allow_other: bool, read_only: bool) []const u8 {
@@ -1069,6 +1090,24 @@ fn read(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off_t, fi: ?
     if (offset < 0) return replyError(req, c.EINVAL);
     const state = stateFor(req);
     const start = Io.Clock.awake.now(state.io).nanoseconds;
+    if (state.async_read_size == size and !state.update_access_time) {
+        const request = std.heap.c_allocator.create(AsyncRead) catch {
+            if (state.metrics) |metrics| state.recordOperation(&metrics.read, start, 0, true);
+            return replyError(req, c.ENOMEM);
+        };
+        request.* = .{
+            .state = state,
+            .req = req,
+            .handle = fuseFileHandle(fi.?),
+            .size = size,
+            .offset = @intCast(offset),
+            .start = start,
+        };
+        state.read_group.concurrent(state.io, completeAsyncRead, .{request}) catch {
+            completeAsyncRead(request) catch {};
+        };
+        return;
+    }
     state.reply_buffer.resize(std.heap.c_allocator, size) catch {
         if (state.metrics) |metrics| state.recordOperation(&metrics.read, start, 0, true);
         return replyError(req, c.ENOMEM);
@@ -1082,6 +1121,31 @@ fn read(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off_t, fi: ?
     updateFileAccessTime(state, handle);
     if (state.metrics) |metrics| state.recordOperation(&metrics.read, start, amount, false);
     _ = c.fuse_reply_buf(req, buffer.ptr, amount);
+}
+
+const AsyncRead = struct {
+    state: *MountState,
+    req: c.fuse_req_t,
+    handle: *FuseFileHandle,
+    size: usize,
+    offset: u64,
+    start: i96,
+};
+
+fn completeAsyncRead(request: *AsyncRead) Io.Cancelable!void {
+    defer std.heap.c_allocator.destroy(request);
+    const state = request.state;
+    const buffer = std.heap.c_allocator.alloc(u8, request.size) catch {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.read, request.start, 0, true);
+        return replyError(request.req, c.ENOMEM);
+    };
+    defer std.heap.c_allocator.free(buffer);
+    const amount = request.handle.file.read(buffer, request.offset) catch |err| {
+        if (state.metrics) |metrics| state.recordOperation(&metrics.read, request.start, 0, true);
+        return replyError(request.req, errnoValue(err));
+    };
+    if (state.metrics) |metrics| state.recordOperation(&metrics.read, request.start, amount, false);
+    _ = c.fuse_reply_buf(request.req, buffer.ptr, amount);
 }
 
 fn write(req: c.fuse_req_t, id: c.fuse_ino_t, data_raw: ?[*]const u8, size: usize, offset: c.off_t, fi: ?*c.struct_fuse_file_info) callconv(.c) void {

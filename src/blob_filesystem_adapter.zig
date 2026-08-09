@@ -499,8 +499,13 @@ fn fileId(raw: *anyopaque) backend.FileId {
 
 fn readFile(raw: *anyopaque, output: []u8, offset: u64) !usize {
     const context = fileContext(raw);
-    _ = try validateFileIdentity(context);
-    return context.native.read(context.io, context.identity.inode, output, offset);
+    return context.native.readAtGeneration(
+        context.io,
+        context.identity.inode,
+        context.identity.generation,
+        output,
+        offset,
+    );
 }
 
 fn writeFile(raw: *anyopaque, data: []const u8, offset: u64) !usize {

@@ -476,7 +476,8 @@ fn poolMountCommand(
     if (path_count == 0) return error.InvalidMemberCount;
 
     const intent: zettide.v3.pool_member_set.OpenIntent = if (writable) .writable else .read_only;
-    var set = try openRawPoolSet(allocator, io, paths[0..path_count], writable, true, intent);
+    const pool_allocator = std.heap.c_allocator;
+    var set = try openRawPoolSet(pool_allocator, io, paths[0..path_count], writable, true, intent);
     defer set.deinit();
     const detected_filesystem = try set.filesystem();
     if (filesystem) |selected| {
@@ -484,7 +485,7 @@ fn poolMountCommand(
     }
     if (detected_filesystem == .blob) {
         var native = try zettide.filesystem_target.openBlobPoolFilesystem(
-            allocator,
+            pool_allocator,
             io,
             &set,
             writable,
@@ -504,6 +505,10 @@ fn poolMountCommand(
                 .allow_other = allow_other,
                 .read_only = !writable,
                 .update_access_time = access_time == .relatime,
+                .async_read_size = if (access_time == .noatime)
+                    zettide.blob_format.allocation_unit
+                else
+                    null,
                 .metrics = if (metrics) &fuse_metrics else null,
             },
         );

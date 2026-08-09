@@ -10,7 +10,9 @@ uint64_t zettide_fuse_get_handle(const struct fuse_file_info *file_info);
 void zettide_fuse_set_handle(struct fuse_file_info *file_info, uint64_t handle);
 void zettide_fuse_set_direct_io(struct fuse_file_info *file_info);
 int zettide_fuse_configure_connection(struct fuse_conn_info *connection);
-int zettide_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations, void *user_data);
+typedef void (*zettide_fuse_drain_fn)(void *user_data);
+int zettide_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations,
+                      void *user_data, zettide_fuse_drain_fn drain);
 
 struct zettide_fuse_session;
 struct zettide_fuse_session *zettide_fuse_session_create(

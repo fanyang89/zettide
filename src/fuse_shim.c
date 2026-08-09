@@ -37,7 +37,8 @@ int zettide_fuse_configure_connection(struct fuse_conn_info *connection) {
     return 1;
 }
 
-int zettide_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations, void *user_data) {
+int zettide_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *operations,
+                      void *user_data, zettide_fuse_drain_fn drain) {
     struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
     struct fuse_cmdline_opts options = {0};
     struct fuse_session *session = NULL;
@@ -60,6 +61,8 @@ int zettide_fuse_main(int argc, char *argv[], const struct fuse_lowlevel_ops *op
         goto cleanup;
 
     result = fuse_session_loop(session);
+    if (drain != NULL)
+        drain(user_data);
     if (result != 0)
         result = 1;
 
