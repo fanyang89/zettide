@@ -120,26 +120,7 @@ fn serveReformatted(
     signals: *const c.sigset_t,
 ) !void {
     const expected_pool_id = try parsePoolId(expected_pool_id_text);
-    {
-        const opened = try zettide.v3.linux_block_device.openStorageOptions(
-            io,
-            allocator,
-            member_path,
-            false,
-            true,
-        );
-        var storages = [_]zettide.v3.storage.Storage{opened.storage};
-        var existing = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
-            io,
-            allocator,
-            &storages,
-            .read_only,
-        );
-        defer existing.deinit();
-        const authority = existing.authority() orelse return error.MissingAuthority;
-        if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
-            return error.UnexpectedPoolId;
-    }
+    try verifyPoolId(io, allocator, member_path, expected_pool_id);
 
     const opened = try zettide.v3.linux_block_device.openStorageOptions(
         io,
@@ -168,6 +149,25 @@ fn serveReformatted(
     std.debug.print("\n", .{});
     const volume_id = try publishCatalog(io, &set, true);
     try serve(io, allocator, ready_path, reactor_mask, signals, &set, volume_id);
+}
+
+noinline fn verifyPoolId(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    member_path: []const u8,
+    expected_pool_id: [16]u8,
+) !void {
+    const opened = try zettide.v3.linux_block_device.openStorageOptions(
+        io,
+        allocator,
+        member_path,
+        false,
+        true,
+    );
+    var member = try zettide.v3.member.openStorage(io, opened.storage, .read_only);
+    defer member.close() catch {};
+    if (!std.mem.eql(u8, &member.header().set_id, &expected_pool_id))
+        return error.UnexpectedPoolId;
 }
 
 fn serveExisting(
