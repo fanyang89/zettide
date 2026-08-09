@@ -19,6 +19,7 @@ const c = @cImport({
 const path_capacity = 4096;
 const name_capacity = 256;
 const cache_timeout = 1.0;
+const async_read_probe_interval = 32;
 
 pub const OperationMetrics = struct {
     calls: u64 = 0,
@@ -74,6 +75,8 @@ const MountState = struct {
     open_directories: ?*FuseDirectoryHandle = null,
     reply_buffer: std.ArrayList(u8) = .empty,
     read_group: Io.Group = .init,
+    async_read_sequence: std.atomic.Value(u32) = .init(0),
+    async_reads_inflight: std.atomic.Value(u32) = .init(0),
     metrics_mutex: Io.Mutex = .init,
     writeback_cache: bool = false,
     metrics: ?*Metrics,
@@ -153,6 +156,13 @@ const MountState = struct {
 
     fn drainReads(self: *MountState) void {
         self.read_group.await(self.io) catch {};
+    }
+
+    fn shouldRunReadAsync(self: *MountState, size: usize) bool {
+        if (self.async_read_size != size or self.update_access_time) return false;
+        if (self.async_reads_inflight.load(.acquire) != 0) return true;
+        const sequence = self.async_read_sequence.fetchAdd(1, .monotonic);
+        return sequence % async_read_probe_interval == 0;
     }
 
     fn find(self: *MountState, id: c.fuse_ino_t) ?*Inode {
@@ -1090,7 +1100,7 @@ fn read(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off_t, fi: ?
     if (offset < 0) return replyError(req, c.EINVAL);
     const state = stateFor(req);
     const start = Io.Clock.awake.now(state.io).nanoseconds;
-    if (state.async_read_size == size and !state.update_access_time) {
+    if (state.shouldRunReadAsync(size)) {
         const request = std.heap.c_allocator.create(AsyncRead) catch {
             if (state.metrics) |metrics| state.recordOperation(&metrics.read, start, 0, true);
             return replyError(req, c.ENOMEM);
@@ -1103,6 +1113,7 @@ fn read(req: c.fuse_req_t, id: c.fuse_ino_t, size: usize, offset: c.off_t, fi: ?
             .offset = @intCast(offset),
             .start = start,
         };
+        _ = state.async_reads_inflight.fetchAdd(1, .release);
         state.read_group.concurrent(state.io, completeAsyncRead, .{request}) catch {
             completeAsyncRead(request) catch {};
         };
@@ -1135,6 +1146,7 @@ const AsyncRead = struct {
 fn completeAsyncRead(request: *AsyncRead) Io.Cancelable!void {
     defer std.heap.c_allocator.destroy(request);
     const state = request.state;
+    defer _ = state.async_reads_inflight.fetchSub(1, .release);
     const buffer = std.heap.c_allocator.alloc(u8, request.size) catch {
         if (state.metrics) |metrics| state.recordOperation(&metrics.read, request.start, 0, true);
         return replyError(request.req, c.ENOMEM);
