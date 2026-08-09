@@ -32,7 +32,6 @@ pub const Filesystem = struct {
     open_references: std.AutoHashMap(u64, u64),
     inode_pins: std.AutoHashMap(u64, u64),
     dirty_files: std.AutoHashMap(u64, DirtyFile),
-    reserved_bytes: u64,
     transaction_mutex: Io.RwLock = .init,
     inode_cache_mutex: Io.RwLock = .init,
     inode_cache: ?[]InodeCacheEntry = null,
@@ -107,7 +106,6 @@ pub const Filesystem = struct {
             .open_references = std.AutoHashMap(u64, u64).init(allocator),
             .inode_pins = std.AutoHashMap(u64, u64).init(allocator),
             .dirty_files = std.AutoHashMap(u64, DirtyFile).init(allocator),
-            .reserved_bytes = root.reserved_bytes,
         };
     }
 
@@ -234,7 +232,7 @@ pub const Filesystem = struct {
 
     pub fn availableUnits(self: *const Filesystem) u64 {
         const free = self.blobs.header.unit_count - self.blobs.stagedUnits();
-        const reservations = reservationCapacityUnits(self.reserved_bytes) catch return 0;
+        const reservations = reservationCapacityUnits(self.root.reserved_bytes) catch return 0;
         const protected = std.math.add(u64, reservations, self.mutationReserveUnits()) catch return 0;
         return free -| protected;
     }
@@ -468,7 +466,6 @@ pub const Filesystem = struct {
             return error.InvalidBlobFilesystemGraph;
         next_root.reserved_bytes = std.math.sub(u64, next_root.reserved_bytes, record.reserved_bytes) catch
             return error.InvalidBlobFilesystemGraph;
-        self.reserved_bytes = next_root.reserved_bytes;
         try self.publish(io, next_root, &mutations, null);
     }
 
@@ -643,7 +640,7 @@ pub const Filesystem = struct {
             if (!try dirty_file.state.blockAllocated(io, block)) newly_reserved += 1;
         }
         const released_bytes = try std.math.mul(u64, newly_reserved, blob_file.block_size);
-        const remaining_reserved = std.math.sub(u64, self.reserved_bytes, released_bytes) catch
+        const remaining_reserved = std.math.sub(u64, self.root.reserved_bytes, released_bytes) catch
             return error.InvalidBlobFilesystemGraph;
         try self.ensureCapacity(touched_blocks, remaining_reserved);
         const checkpoint = self.blobs.stagedUnits();
@@ -665,7 +662,6 @@ pub const Filesystem = struct {
             dirty_file.record.reserved_bytes,
             released_bytes,
         ) catch return error.InvalidBlobFilesystemGraph;
-        self.reserved_bytes = remaining_reserved;
         self.root.reserved_bytes = remaining_reserved;
         self.dirty = true;
         return amount;
@@ -700,7 +696,7 @@ pub const Filesystem = struct {
             var clipped_owned = true;
             errdefer if (clipped_owned) self.allocator.free(clipped);
             const outstanding = try reservationOutstandingBytes(&dirty_file.state, io, clipped);
-            const other_reserved = std.math.sub(u64, self.reserved_bytes, dirty_file.record.reserved_bytes) catch
+            const other_reserved = std.math.sub(u64, self.root.reserved_bytes, dirty_file.record.reserved_bytes) catch
                 return error.InvalidBlobFilesystemGraph;
             const total_reserved = try std.math.add(u64, other_reserved, outstanding);
             var mutations: MutationAccumulator = .init(self.allocator);
@@ -713,7 +709,6 @@ pub const Filesystem = struct {
             dirty_file.reservations = clipped;
             clipped_owned = false;
             dirty_file.record.reserved_bytes = outstanding;
-            self.reserved_bytes = total_reserved;
             self.root.reserved_bytes = total_reserved;
             self.allocator.free(old_reservations);
             try self.publish(io, next_root, &mutations, checkpoint);
@@ -739,7 +734,7 @@ pub const Filesystem = struct {
         var merged_owned = true;
         errdefer if (merged_owned) self.allocator.free(merged);
         const outstanding = try reservationOutstandingBytes(&dirty_file.state, io, merged);
-        const next_reserved = std.math.sub(u64, self.reserved_bytes, dirty_file.record.reserved_bytes) catch
+        const next_reserved = std.math.sub(u64, self.root.reserved_bytes, dirty_file.record.reserved_bytes) catch
             return error.InvalidBlobFilesystemGraph;
         const total_reserved = try std.math.add(u64, next_reserved, outstanding);
         const changed_intervals = try std.math.add(u64, old_reservations.len, merged.len);
@@ -769,7 +764,6 @@ pub const Filesystem = struct {
         const now = timestamp(io);
         dirty_file.record.metadata.mtime_ns = now;
         dirty_file.record.metadata.ctime_ns = now;
-        self.reserved_bytes = total_reserved;
         self.root.reserved_bytes = total_reserved;
         self.allocator.free(old_reservations);
         try self.publish(io, next_root, &mutations, checkpoint);
@@ -1073,7 +1067,6 @@ pub const Filesystem = struct {
             return error.FilesystemRecordCountOverflow;
         next_root.reserved_bytes = std.math.sub(u64, next_root.reserved_bytes, released_reserved_bytes) catch
             return error.InvalidBlobFilesystemGraph;
-        self.reserved_bytes = next_root.reserved_bytes;
         try self.publish(io, next_root, &mutations, null);
         return .renamed;
     }
@@ -1184,7 +1177,6 @@ pub const Filesystem = struct {
             return error.FilesystemRecordCountOverflow;
         next_root.reserved_bytes = std.math.sub(u64, next_root.reserved_bytes, retired.released_reserved_bytes) catch
             return error.InvalidBlobFilesystemGraph;
-        self.reserved_bytes = next_root.reserved_bytes;
         try self.publish(io, next_root, &mutations, null);
     }
 
@@ -1662,7 +1654,6 @@ pub const Filesystem = struct {
         next_root.orphan_count = 0;
         next_root.reserved_bytes = std.math.sub(u64, next_root.reserved_bytes, released_reserved_bytes) catch
             return error.InvalidBlobFilesystemGraph;
-        self.reserved_bytes = next_root.reserved_bytes;
         try self.publish(io, next_root, &mutations, null);
     }
 

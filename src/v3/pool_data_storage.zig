@@ -392,13 +392,6 @@ fn writeAllManyAt(context_ptr: *anyopaque, io: Io, writes: []const storage_api.W
     try context.device.writeAllManyAt(writes);
 }
 
-fn syncData(context_ptr: *anyopaque, io: Io) !void {
-    const context = contextFromOpaque(context_ptr);
-    try context.mutex.lock(io);
-    defer context.mutex.unlock(io);
-    try context.device.sync();
-}
-
 fn sync(context_ptr: *anyopaque, io: Io) !void {
     const context = contextFromOpaque(context_ptr);
     try context.mutex.lock(io);
@@ -525,7 +518,7 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .read_many_at = readManyAt,
     .write_all_at = writeAllAt,
     .write_all_many_at = writeAllManyAt,
-    .sync_data = syncData,
+    .sync_data = sync,
     .sync = sync,
     .close = close,
     .transport_kind = transportKind,

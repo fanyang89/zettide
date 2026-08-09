@@ -156,10 +156,6 @@ pub fn acquire(plan: *const Plan, io: std.Io, allocator: std.mem.Allocator) ![]s
     return storages;
 }
 
-pub fn deviceReady(device: linux_block.DeviceInfo) bool {
-    return deviceReadyForDataMode(device, .blob);
-}
-
 pub fn deviceReadyForDataMode(device: linux_block.DeviceInfo, data_mode: member_format.PoolDataMode) bool {
     const minimum_capacity = pool_provision.minimumMemberBytes(.{ .data_mode = data_mode }) catch return false;
     return device.preflightEligible() and
@@ -373,12 +369,12 @@ test "device readiness rejects unsupported geometry" {
         .eligibility = .{},
     };
     try std.testing.expect(deviceReadyForDataMode(device, .catalog));
-    try std.testing.expect(!deviceReady(device));
+    try std.testing.expect(!deviceReadyForDataMode(device, .blob));
     device.capacity_bytes -= 1;
     try std.testing.expect(!deviceReadyForDataMode(device, .catalog));
     device.capacity_bytes += 1;
     device.logical_sector_size = 8192;
-    try std.testing.expect(!deviceReady(device));
+    try std.testing.expect(!deviceReadyForDataMode(device, .blob));
 }
 
 test "Blob device readiness enforces Blob logical capacity" {
