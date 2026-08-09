@@ -13,15 +13,18 @@ pub const supported_metadata_format_version: u16 = 1;
 pub const supported_object_format_version: u16 = 1;
 pub const supported_layout_format_version: u16 = 1;
 pub const dynamic_layout_format_version: u16 = 2;
+pub const scheduled_layout_format_version: u16 = 3;
 pub const supported_control_record_format_version: u16 = 1;
 pub const supported_compat_features: u64 = 0;
 pub const supported_ro_compat_features: u64 = 0;
 pub const dynamic_pool_incompat_feature: u64 = 1 << 0;
 pub const catalog_data_incompat_feature: u64 = 1 << 1;
 pub const blob_filesystem_incompat_feature: u64 = 1 << 2;
+pub const scheduled_blob_data_incompat_feature: u64 = 1 << 3;
 pub const supported_incompat_features: u64 = dynamic_pool_incompat_feature |
     catalog_data_incompat_feature |
-    blob_filesystem_incompat_feature;
+    blob_filesystem_incompat_feature |
+    scheduled_blob_data_incompat_feature;
 pub const max_dynamic_member_count: u16 = 96;
 
 const magic = [8]u8{ 'D', 'D', 'V', 'M', 'E', 'M', '3', 0 };
@@ -96,6 +99,16 @@ pub fn hasCatalogData(header: Header) bool {
     return header.incompat_features & catalog_data_incompat_feature != 0;
 }
 
+pub fn hasScheduledBlobData(header: Header) bool {
+    return header.incompat_features & scheduled_blob_data_incompat_feature != 0;
+}
+
+pub fn expectedLayoutFormatVersion(header: Header) u16 {
+    if (hasScheduledBlobData(header)) return scheduled_layout_format_version;
+    if (isDynamicPool(header)) return dynamic_layout_format_version;
+    return supported_layout_format_version;
+}
+
 pub fn poolFilesystem(header: Header) PoolFilesystem {
     return if (header.incompat_features & blob_filesystem_incompat_feature != 0) .blob else .littlefs;
 }
@@ -116,11 +129,7 @@ pub fn checkFormatPolicy(header: Header) !void {
         return error.UnsupportedMetadataFormat;
     if (header.object_format_version != supported_object_format_version)
         return error.UnsupportedObjectFormat;
-    const expected_layout_version: u16 = if (isDynamicPool(header))
-        dynamic_layout_format_version
-    else
-        supported_layout_format_version;
-    if (header.layout_format_version != expected_layout_version)
+    if (header.layout_format_version != expectedLayoutFormatVersion(header))
         return error.UnsupportedLayoutFormat;
     if (header.control_record_format_version != supported_control_record_format_version)
         return error.UnsupportedControlRecordFormat;
@@ -232,6 +241,11 @@ pub fn validate(header: Header) !void {
         if (!isDynamicPool(header)) return error.BlobFilesystemRequiresDynamicPool;
         if (hasCatalogData(header)) return error.BlobFilesystemCatalogDataConflict;
     }
+    if (hasScheduledBlobData(header)) {
+        if (!isDynamicPool(header)) return error.ScheduledBlobDataRequiresDynamicPool;
+        if (poolFilesystem(header) != .blob) return error.ScheduledBlobDataRequiresBlobFilesystem;
+        if (hasCatalogData(header)) return error.ScheduledBlobDataCatalogDataConflict;
+    }
     if (isDynamicPool(header)) {
         if (header.member_count == 0 or header.member_count > max_dynamic_member_count)
             return error.InvalidMemberPlacement;
@@ -269,7 +283,10 @@ pub fn validate(header: Header) !void {
         return error.InvalidGeometry;
     const data_end = try header.data.end();
     if (header.member_bytes != data_end or header.logical_capacity == 0 or
-        header.logical_capacity > header.data.length) return error.InvalidGeometry;
+        (!hasScheduledBlobData(header) and header.logical_capacity > header.data.length))
+        return error.InvalidGeometry;
+    if (hasScheduledBlobData(header) and header.logical_capacity % header.chunk_size != 0)
+        return error.InvalidGeometry;
     try codec.validateOrdered(header.control, header.metadata);
     try codec.validateOrdered(header.metadata, header.data);
 
@@ -413,7 +430,7 @@ test "exact offsets and canonical round trip" {
     var header = testHeader();
     header.compat_features = 0x0102030405060708;
     header.ro_compat_features = 0x1112131415161718;
-    header.incompat_features = 0x2122232425262728;
+    header.incompat_features = 0x2122232425262720;
     header.metadata_format_version = 0x3132;
     header.object_format_version = 0x3334;
     header.layout_format_version = 0x3536;
@@ -599,11 +616,36 @@ test "feature policy matrix" {
             dynamic_pool_incompat_feature | catalog_data_incompat_feature,
         ),
     );
-    header.incompat_features = 1 << 3;
+    header.incompat_features = 1 << 4;
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .read_only));
     try std.testing.expectError(error.UnsupportedIncompatFeature, checkFeaturePolicy(header, .writable));
     const bytes = try encode(header);
     _ = try decode(&bytes);
+}
+
+test "scheduled blob feature requires dynamic blob v3 and permits aggregate capacity" {
+    var header = testHeader();
+    header.incompat_features = scheduled_blob_data_incompat_feature;
+    try std.testing.expectError(error.ScheduledBlobDataRequiresDynamicPool, validate(header));
+
+    header.incompat_features |= dynamic_pool_incompat_feature;
+    try std.testing.expectError(error.ScheduledBlobDataRequiresBlobFilesystem, validate(header));
+
+    header.incompat_features |= blob_filesystem_incompat_feature;
+    header.layout_format_version = scheduled_layout_format_version;
+    header.logical_capacity = header.data.length + header.chunk_size;
+    try validate(header);
+    try checkOpenPolicy(header, .writable);
+    try std.testing.expect(hasScheduledBlobData(header));
+
+    header.layout_format_version = dynamic_layout_format_version;
+    try std.testing.expectError(error.UnsupportedLayoutFormat, checkFormatPolicy(header));
+    header.layout_format_version = scheduled_layout_format_version;
+    header.incompat_features &= ~scheduled_blob_data_incompat_feature;
+    try std.testing.expectError(error.UnsupportedLayoutFormat, checkFormatPolicy(header));
+
+    header.incompat_features |= scheduled_blob_data_incompat_feature | catalog_data_incompat_feature;
+    try std.testing.expectError(error.BlobFilesystemCatalogDataConflict, validate(header));
 }
 
 test "pool filesystem marker round trips and conflicts with catalog data" {

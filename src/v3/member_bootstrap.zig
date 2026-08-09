@@ -106,6 +106,8 @@ pub fn validateTargetHeader(evidence: Evidence, header: member_format.Header) !v
     try validate(evidence);
     try member_format.validate(header);
     if (!member_format.isDynamicPool(header)) return error.DynamicPoolFeatureRequired;
+    if (member_format.hasScheduledBlobData(header) != (evidence.layout.scheduled_blob != null))
+        return error.ScheduledBlobFeatureMismatch;
     if (!std.mem.eql(u8, &header.set_id, &evidence.topology.set_id)) return error.ForeignSet;
     if (!std.mem.eql(u8, &header.member_id, &evidence.target_member_id) or
         header.member_slot != evidence.target_slot) return error.BootstrapTargetMismatch;
@@ -116,8 +118,13 @@ pub fn validateTargetHeader(evidence: Evidence, header: member_format.Header) !v
     if (!std.mem.eql(u8, &header.genesis_topology_digest, &(try pool_topology.digest(evidence.topology))))
         return error.BirthTopologyDigestMismatch;
     if (header.chunk_size != evidence.layout.chunk_size) return error.ChunkSizeMismatch;
-    if (header.layout_format_version != member_format.dynamic_layout_format_version)
+    if (header.layout_format_version != member_format.expectedLayoutFormatVersion(header))
         return error.UnsupportedLayoutFormat;
+    if (evidence.layout.scheduled_blob) |scheduled| {
+        if (header.logical_capacity != scheduled.logical_capacity) return error.LogicalCapacityMismatch;
+        if (evidence.topology.member_count != scheduled.member_count)
+            return error.ScheduledMemberCountMismatch;
+    }
 }
 
 fn validate(evidence: Evidence) !void {

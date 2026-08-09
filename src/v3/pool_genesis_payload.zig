@@ -112,6 +112,9 @@ pub fn validateMemberHeader(payload: GenesisPayload, header: member_format.Heade
     try validate(payload);
     try member_format.validate(header);
     if (!member_format.isDynamicPool(header)) return error.DynamicPoolFeatureRequired;
+    const scheduled = payload.layout.scheduled_blob;
+    if (member_format.hasScheduledBlobData(header) != (scheduled != null))
+        return error.ScheduledBlobFeatureMismatch;
     if (!std.mem.eql(u8, &header.set_id, &payload.topology.set_id)) return error.ForeignSet;
     const member = try findGenesisMember(payload, header.member_id);
     if (header.member_slot != member.slot or header.member_count != payload.topology.member_count or
@@ -119,8 +122,12 @@ pub fn validateMemberHeader(payload: GenesisPayload, header: member_format.Heade
     if (!std.mem.eql(u8, &header.genesis_topology_digest, &(try pool_topology.digest(payload.topology))))
         return error.GenesisTopologyDigestMismatch;
     if (header.chunk_size != payload.layout.chunk_size) return error.ChunkSizeMismatch;
-    if (header.layout_format_version != member_format.dynamic_layout_format_version)
+    if (header.layout_format_version != member_format.expectedLayoutFormatVersion(header))
         return error.UnsupportedLayoutFormat;
+    if (scheduled) |value| {
+        if (header.logical_capacity != value.logical_capacity) return error.LogicalCapacityMismatch;
+        if (payload.topology.member_count != value.member_count) return error.ScheduledMemberCountMismatch;
+    }
 }
 
 fn validate(payload: GenesisPayload) !void {
@@ -130,6 +137,10 @@ fn validate(payload: GenesisPayload) !void {
         return error.InvalidGenesisTopology;
     if (payload.layout.layout_epoch != 1 or payload.layout.topology_epoch != 1)
         return error.InvalidGenesisLayout;
+    if (payload.layout.scheduled_blob) |scheduled| {
+        if (scheduled.member_count != payload.topology.member_count)
+            return error.ScheduledMemberCountMismatch;
+    }
     for (payload.topology.memberSlice()) |member| {
         if (member.state != .active) return error.InvalidGenesisMemberState;
     }
@@ -161,9 +172,14 @@ fn testPayload(member_count: usize, protection: @import("pool_policy.zig").Prote
 }
 
 fn testHeader(payload: GenesisPayload, member: pool_topology.Member) !member_format.Header {
+    const scheduled = payload.layout.scheduled_blob;
     return .{
         .header_sequence = 1,
-        .incompat_features = member_format.dynamic_pool_incompat_feature,
+        .incompat_features = member_format.dynamic_pool_incompat_feature |
+            (if (scheduled != null)
+                member_format.blob_filesystem_incompat_feature | member_format.scheduled_blob_data_incompat_feature
+            else
+                0),
         .set_id = payload.topology.set_id,
         .member_id = member.member_id,
         .member_slot = member.slot,
@@ -171,7 +187,7 @@ fn testHeader(payload: GenesisPayload, member: pool_topology.Member) !member_for
         .role_flags = member.role_flags,
         .created_ns = 1,
         .member_bytes = 3 * 1024 * 1024,
-        .logical_capacity = 1024 * 1024,
+        .logical_capacity = if (scheduled) |value| value.logical_capacity else 1024 * 1024,
         .control = .{ .offset = 64 * 1024, .length = 64 * 1024 },
         .metadata = .{ .offset = 1024 * 1024, .length = 256 * 1024 },
         .data = .{ .offset = 2 * 1024 * 1024, .length = 1024 * 1024 },
@@ -181,11 +197,53 @@ fn testHeader(payload: GenesisPayload, member: pool_topology.Member) !member_for
         .chunk_size = payload.layout.chunk_size,
         .metadata_format_version = 1,
         .object_format_version = 1,
-        .layout_format_version = member_format.dynamic_layout_format_version,
+        .layout_format_version = if (scheduled != null)
+            member_format.scheduled_layout_format_version
+        else
+            member_format.dynamic_layout_format_version,
         .control_record_format_version = 1,
         .label = try member_format.Label.init("pool-genesis-test"),
         .genesis_topology_digest = try pool_topology.digest(payload.topology),
     };
+}
+
+fn testScheduledPayload(member_count: usize) !GenesisPayload {
+    var members: [12]pool_topology.Member = undefined;
+    var geometries: [12]@import("pool_blob_schedule.zig").Geometry = undefined;
+    for (members[0..member_count], geometries[0..member_count], 0..) |*member, *geometry, index| {
+        const slot: u16 = @intCast(index * 5 + 3);
+        member.* = .{ .member_id = id(@intCast(index + 2)), .slot = slot };
+        geometry.* = .{ .slot = slot, .available_stripes = 8 };
+        if (index < 3) {
+            member.control_role = pool_topology.voter_role;
+            member.role_flags = member_format.known_role_flags;
+        }
+    }
+    const schedule = @import("pool_blob_schedule.zig");
+    const plan = try schedule.build(1024 * 1024, geometries[0..member_count], 7);
+    return .{
+        .topology = try pool_topology.Topology.init(id(1), 1, @splat(0), members[0..member_count]),
+        .layout = try pool_layout.Layout.initScheduledBlob(plan, 1, 1),
+    };
+}
+
+test "scheduled genesis binds feature capacity member count and layout version" {
+    const payload = try testScheduledPayload(6);
+    var header = try testHeader(payload, payload.topology.members[0]);
+    try validateMemberHeader(payload, header);
+
+    header.incompat_features &= ~member_format.scheduled_blob_data_incompat_feature;
+    header.layout_format_version = member_format.dynamic_layout_format_version;
+    header.logical_capacity = header.data.length;
+    try std.testing.expectError(error.ScheduledBlobFeatureMismatch, validateMemberHeader(payload, header));
+
+    header = try testHeader(payload, payload.topology.members[0]);
+    header.logical_capacity += header.chunk_size;
+    try std.testing.expectError(error.LogicalCapacityMismatch, validateMemberHeader(payload, header));
+
+    var mismatched = payload;
+    mismatched.layout.scheduled_blob.?.member_count -= 1;
+    try std.testing.expectError(error.ScheduledMemberCountMismatch, validateMemberHeader(mismatched, try testHeader(mismatched, mismatched.topology.members[0])));
 }
 
 test "one-member dynamic genesis round trips and creates a shared record" {

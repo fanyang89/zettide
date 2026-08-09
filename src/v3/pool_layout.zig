@@ -1,19 +1,30 @@
 const std = @import("std");
 const codec = @import("codec.zig");
 const pool_policy = @import("pool_policy.zig");
+const pool_blob_schedule = @import("pool_blob_schedule.zig");
 const pool_topology = @import("pool_topology.zig");
 
 pub const encoded_size: usize = 256;
 pub const checksum_offset: usize = encoded_size - @sizeOf(u32);
 
-const magic = [8]u8{ 'D', 'D', 'V', 'L', 'A', 'Y', '2', 0 };
-const format_version: u16 = 2;
-const reserved_offset: usize = 0x030;
+const legacy_magic = [8]u8{ 'D', 'D', 'V', 'L', 'A', 'Y', '2', 0 };
+const scheduled_magic = [8]u8{ 'D', 'D', 'V', 'L', 'A', 'Y', '3', 0 };
+const legacy_format_version: u16 = 2;
+const scheduled_format_version: u16 = 3;
+const placement_format_version: u16 = 1;
+const legacy_reserved_offset: usize = 0x030;
+const scheduled_reserved_offset: usize = 0x060;
 
 pub const Kind = enum(u16) {
     unprotected = 1,
     replicated = 2,
     erasure_coded = 3,
+};
+
+pub const ScheduledBlob = struct {
+    member_count: u16,
+    logical_capacity: u64,
+    placement_digest: codec.Digest,
 };
 
 pub const Layout = struct {
@@ -26,6 +37,7 @@ pub const Layout = struct {
     durable_write_threshold: u16,
     read_threshold: u16,
     flags: u32 = 0,
+    scheduled_blob: ?ScheduledBlob = null,
 
     pub fn init(
         protection_mode: pool_policy.Protection,
@@ -70,6 +82,33 @@ pub const Layout = struct {
         return layout;
     }
 
+    pub fn initScheduledBlob(
+        plan: pool_blob_schedule.PlacementPlan,
+        layout_epoch: u64,
+        topology_epoch: u64,
+    ) !Layout {
+        try pool_blob_schedule.validate(plan);
+        const logical_capacity = std.math.mul(u64, plan.logical_stripe_count, plan.stripe_size) catch
+            return error.LogicalCapacityOverflow;
+        const layout: Layout = .{
+            .kind = .replicated,
+            .layout_epoch = layout_epoch,
+            .topology_epoch = topology_epoch,
+            .chunk_size = plan.stripe_size,
+            .data_fragments = pool_blob_schedule.replica_count,
+            .parity_fragments = 0,
+            .durable_write_threshold = pool_blob_schedule.replica_count,
+            .read_threshold = pool_blob_schedule.replica_count - 1,
+            .scheduled_blob = .{
+                .member_count = plan.member_count,
+                .logical_capacity = logical_capacity,
+                .placement_digest = try pool_blob_schedule.digest(plan),
+            },
+        };
+        try validate(layout);
+        return layout;
+    }
+
     pub fn protection(self: Layout) !pool_policy.Protection {
         try validate(self);
         return switch (self.kind) {
@@ -86,8 +125,18 @@ pub const Layout = struct {
 pub fn encode(layout: Layout) ![encoded_size]u8 {
     try validate(layout);
     var bytes: [encoded_size]u8 = @splat(0);
-    @memcpy(bytes[0x000..0x008], &magic);
-    codec.putInt(u16, &bytes, 0x008, format_version);
+    if (layout.scheduled_blob) |scheduled| {
+        @memcpy(bytes[0x000..0x008], &scheduled_magic);
+        codec.putInt(u16, &bytes, 0x008, scheduled_format_version);
+        codec.putInt(u16, &bytes, 0x030, scheduled.member_count);
+        codec.putInt(u16, &bytes, 0x032, placement_format_version);
+        codec.putInt(u32, &bytes, 0x034, pool_blob_schedule.encoded_size);
+        codec.putInt(u64, &bytes, 0x038, scheduled.logical_capacity);
+        @memcpy(bytes[0x040..0x060], &scheduled.placement_digest);
+    } else {
+        @memcpy(bytes[0x000..0x008], &legacy_magic);
+        codec.putInt(u16, &bytes, 0x008, legacy_format_version);
+    }
     codec.putInt(u16, &bytes, 0x00a, @intFromEnum(layout.kind));
     codec.putInt(u32, &bytes, 0x00c, encoded_size);
     codec.putInt(u64, &bytes, 0x010, layout.layout_epoch);
@@ -105,10 +154,24 @@ pub fn encode(layout: Layout) ![encoded_size]u8 {
 pub fn decode(bytes: *const [encoded_size]u8) !Layout {
     if (codec.getInt(u32, bytes, checksum_offset) != codec.crc32c(bytes[0..checksum_offset]))
         return error.ChecksumMismatch;
-    if (!std.mem.eql(u8, bytes[0x000..0x008], &magic)) return error.InvalidMagic;
-    if (codec.getInt(u16, bytes, 0x008) != format_version) return error.UnsupportedFormatVersion;
+    const is_scheduled = if (std.mem.eql(u8, bytes[0x000..0x008], &legacy_magic))
+        false
+    else if (std.mem.eql(u8, bytes[0x000..0x008], &scheduled_magic))
+        true
+    else
+        return error.InvalidMagic;
+    const expected_version: u16 = if (is_scheduled) scheduled_format_version else legacy_format_version;
+    if (codec.getInt(u16, bytes, 0x008) != expected_version) return error.UnsupportedFormatVersion;
     if (codec.getInt(u32, bytes, 0x00c) != encoded_size) return error.InvalidEncodedSize;
-    if (!codec.isZero(bytes[reserved_offset..checksum_offset])) return error.NonZeroReserved;
+    if (is_scheduled) {
+        if (codec.getInt(u16, bytes, 0x032) != placement_format_version)
+            return error.UnsupportedPlacementFormatVersion;
+        if (codec.getInt(u32, bytes, 0x034) != pool_blob_schedule.encoded_size)
+            return error.InvalidPlacementEncodedSize;
+        if (!codec.isZero(bytes[scheduled_reserved_offset..checksum_offset])) return error.NonZeroReserved;
+    } else if (!codec.isZero(bytes[legacy_reserved_offset..checksum_offset])) {
+        return error.NonZeroReserved;
+    }
     const kind = std.enums.fromInt(Kind, codec.getInt(u16, bytes, 0x00a)) orelse
         return error.UnsupportedLayoutKind;
     const layout: Layout = .{
@@ -121,6 +184,11 @@ pub fn decode(bytes: *const [encoded_size]u8) !Layout {
         .durable_write_threshold = codec.getInt(u16, bytes, 0x028),
         .read_threshold = codec.getInt(u16, bytes, 0x02a),
         .flags = codec.getInt(u32, bytes, 0x02c),
+        .scheduled_blob = if (is_scheduled) .{
+            .member_count = codec.getInt(u16, bytes, 0x030),
+            .logical_capacity = codec.getInt(u64, bytes, 0x038),
+            .placement_digest = bytes[0x040..0x060].*,
+        } else null,
     };
     try validate(layout);
     return layout;
@@ -137,6 +205,22 @@ pub fn validate(layout: Layout) !void {
     if (layout.chunk_size == 0 or !std.math.isPowerOfTwo(layout.chunk_size))
         return error.InvalidChunkSize;
     if (layout.flags != 0) return error.InvalidLayoutFlags;
+    if (layout.scheduled_blob) |scheduled| {
+        if (layout.kind != .replicated or
+            layout.data_fragments != pool_blob_schedule.replica_count or
+            layout.parity_fragments != 0 or
+            layout.durable_write_threshold != pool_blob_schedule.replica_count or
+            layout.read_threshold != pool_blob_schedule.replica_count - 1)
+            return error.InvalidScheduledBlobProfile;
+        if (scheduled.member_count < pool_blob_schedule.replica_count or
+            scheduled.member_count > pool_blob_schedule.max_member_count)
+            return error.InvalidScheduledBlobMemberCount;
+        if (layout.chunk_size < 4096 or scheduled.logical_capacity < layout.chunk_size or
+            scheduled.logical_capacity % layout.chunk_size != 0)
+            return error.InvalidScheduledBlobCapacity;
+        if (codec.isZero(&scheduled.placement_digest)) return error.InvalidPlacementDigest;
+        return;
+    }
     switch (layout.kind) {
         .unprotected => {
             if (layout.data_fragments != 1 or layout.parity_fragments != 0 or
@@ -163,6 +247,12 @@ pub fn dataAccess(layout: Layout, topology: pool_topology.Topology) !pool_policy
     try validate(layout);
     try pool_topology.validate(topology);
     if (layout.topology_epoch > topology.epoch) return error.FutureTopologyEpoch;
+    if (layout.scheduled_blob) |scheduled| {
+        const active_count = activeDataMemberCount(topology);
+        if (active_count == scheduled.member_count) return .read_write;
+        if (active_count + 1 == scheduled.member_count) return .read_only;
+        return .unavailable;
+    }
     return pool_policy.dataAccess(try layout.protection(), activeDataMemberCount(topology));
 }
 
@@ -179,7 +269,7 @@ fn id(value: u8) [16]u8 {
 }
 
 fn testTopology(member_count: usize) !pool_topology.Topology {
-    var members: [6]pool_topology.Member = undefined;
+    var members: [pool_blob_schedule.max_member_count]pool_topology.Member = undefined;
     for (members[0..member_count], 0..) |*member, index| {
         member.* = .{ .member_id = id(@intCast(index + 2)), .slot = @intCast(index * 3 + 1) };
         if (index < @min(member_count, 3)) {
@@ -242,11 +332,79 @@ test "unknown kind reserved bytes and checksum corruption are rejected" {
     try std.testing.expectError(error.UnsupportedLayoutKind, decode(&bytes));
 
     bytes = canonical;
-    bytes[reserved_offset] = 1;
+    bytes[legacy_reserved_offset] = 1;
     fixChecksum(&bytes);
     try std.testing.expectError(error.NonZeroReserved, decode(&bytes));
 
     bytes = canonical;
     bytes[100] = 1;
     try std.testing.expectError(error.ChecksumMismatch, decode(&bytes));
+}
+
+fn testPlan(member_count: usize, stripes: u64) !pool_blob_schedule.PlacementPlan {
+    var geometries: [pool_blob_schedule.max_member_count]pool_blob_schedule.Geometry = undefined;
+    for (geometries[0..member_count], 0..) |*geometry, index|
+        geometry.* = .{ .slot = @intCast(index * 3 + 1), .available_stripes = stripes };
+    return pool_blob_schedule.build(1024 * 1024, geometries[0..member_count], 41);
+}
+
+test "scheduled blob layout round trips and binds placement fields" {
+    const plan = try testPlan(6, 17);
+    const layout = try Layout.initScheduledBlob(plan, 3, 2);
+    const bytes = try encode(layout);
+    try std.testing.expectEqualSlices(u8, &scheduled_magic, bytes[0x000..0x008]);
+    try std.testing.expectEqual(@as(u16, 3), codec.getInt(u16, &bytes, 0x008));
+    try std.testing.expectEqual(plan.member_count, codec.getInt(u16, &bytes, 0x030));
+    try std.testing.expectEqual(@as(u16, 1), codec.getInt(u16, &bytes, 0x032));
+    try std.testing.expectEqual(@as(u32, 256), codec.getInt(u32, &bytes, 0x034));
+    try std.testing.expectEqualSlices(u8, &(try pool_blob_schedule.digest(plan)), &layout.scheduled_blob.?.placement_digest);
+    try std.testing.expectEqualSlices(u8, &bytes, &(try encode(try decode(&bytes))));
+    try std.testing.expectEqual(codec.blake3(bytes[0..checksum_offset]), try digest(layout));
+    try std.testing.expectEqual(pool_policy.Protection.replicated, try layout.protection());
+
+    var corrupted = bytes;
+    corrupted[0x040] ^= 1;
+    fixChecksum(&corrupted);
+    const changed = try decode(&corrupted);
+    try std.testing.expect(!std.mem.eql(u8, &(try digest(layout)), &(try digest(changed))));
+
+    corrupted = bytes;
+    codec.putInt(u16, &corrupted, 0x032, 2);
+    fixChecksum(&corrupted);
+    try std.testing.expectError(error.UnsupportedPlacementFormatVersion, decode(&corrupted));
+    corrupted = bytes;
+    codec.putInt(u32, &corrupted, 0x034, 128);
+    fixChecksum(&corrupted);
+    try std.testing.expectError(error.InvalidPlacementEncodedSize, decode(&corrupted));
+    corrupted = bytes;
+    corrupted[scheduled_reserved_offset] = 1;
+    fixChecksum(&corrupted);
+    try std.testing.expectError(error.NonZeroReserved, decode(&corrupted));
+    corrupted = bytes;
+    corrupted[100] ^= 1;
+    try std.testing.expectError(error.ChecksumMismatch, decode(&corrupted));
+}
+
+test "scheduled blob supports capacities above 16 TiB and exact access thresholds" {
+    const stripes = (@as(u64, 16) * 1024 * 1024 * 1024 * 1024) / (1024 * 1024) + 1;
+    const layout = try Layout.initScheduledBlob(try testPlan(6, stripes), 1, 1);
+    try std.testing.expect(layout.scheduled_blob.?.logical_capacity > @as(u64, 16) * 1024 * 1024 * 1024 * 1024);
+    try std.testing.expectEqual(@as(u16, 3), layout.durable_write_threshold);
+    try std.testing.expectEqual(@as(u16, 2), layout.read_threshold);
+    try std.testing.expectEqual(.read_write, try dataAccess(layout, try testTopology(6)));
+    try std.testing.expectEqual(.read_only, try dataAccess(layout, try testTopology(5)));
+    try std.testing.expectEqual(.unavailable, try dataAccess(layout, try testTopology(4)));
+}
+
+test "layout magic and version pairs cannot be crossed" {
+    const legacy = try encode(try Layout.init(.replicated, 1, 1, 1024 * 1024));
+    var bytes = legacy;
+    @memcpy(bytes[0x000..0x008], &scheduled_magic);
+    fixChecksum(&bytes);
+    try std.testing.expectError(error.UnsupportedFormatVersion, decode(&bytes));
+
+    bytes = try encode(try Layout.initScheduledBlob(try testPlan(3, 4), 1, 1));
+    @memcpy(bytes[0x000..0x008], &legacy_magic);
+    fixChecksum(&bytes);
+    try std.testing.expectError(error.UnsupportedFormatVersion, decode(&bytes));
 }
