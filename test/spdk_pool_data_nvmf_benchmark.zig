@@ -357,6 +357,7 @@ fn run(
         .disable_cpumask_locks = true,
     });
     defer runtime.deinit();
+    const runtime_handle: *anyopaque = @ptrCast(runtime.handle orelse return error.RuntimeStopped);
     std.debug.print("target-stage runtime ready\n", .{});
     std.debug.print("target-stage worker start\n", .{});
     const worker = try Worker.create(io, &pool_storage);
@@ -365,7 +366,7 @@ fn run(
     std.debug.print("target-stage provider start\n", .{});
     var provider = try zettide.spdk_provider_bdev.ProviderBdev.create(
         allocator,
-        &runtime,
+        runtime_handle,
         .{
             .context = worker,
             .submit = submit_callback,
@@ -379,7 +380,7 @@ fn run(
     std.debug.print("target-stage export start transport={s} traddr={s} trsvcid={s}\n", .{ transport_text, traddr, trsvcid });
     var export_handle = try zettide.spdk_nvmf_tcp_export.NvmfTcpExport.create(
         allocator,
-        &runtime,
+        runtime_handle,
         .{
             .bdev_name = "ZettideScheduledPoolData0",
             .nqn = "nqn.2026-08.io.zettide:benchmark",
