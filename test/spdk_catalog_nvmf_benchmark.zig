@@ -55,8 +55,17 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    if (mode == 2 or mode == 3) {
+    if (mode == 2 or mode == 3 or mode == 4) {
         const expected_pool_id = expected_pool_id_z orelse return error.ExpectedPoolIdRequired;
+        if (mode == 4) return serveReformatted(
+            io,
+            allocator,
+            ready_path,
+            member_path,
+            std.mem.span(expected_pool_id),
+            reactor_mask,
+            &signals,
+        );
         return serveExisting(
             io,
             allocator,
@@ -101,6 +110,66 @@ fn run(
     try serve(io, allocator, ready_path, reactor_mask, &signals, &set, volume_id);
 }
 
+fn serveReformatted(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    ready_path: []const u8,
+    member_path: []const u8,
+    expected_pool_id_text: []const u8,
+    reactor_mask: []const u8,
+    signals: *const c.sigset_t,
+) !void {
+    const expected_pool_id = try parsePoolId(expected_pool_id_text);
+    {
+        const opened = try zettide.v3.linux_block_device.openStorageOptions(
+            io,
+            allocator,
+            member_path,
+            false,
+            true,
+        );
+        var storages = [_]zettide.v3.storage.Storage{opened.storage};
+        var existing = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
+            io,
+            allocator,
+            &storages,
+            .read_only,
+        );
+        defer existing.deinit();
+        const authority = existing.authority() orelse return error.MissingAuthority;
+        if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
+            return error.UnexpectedPoolId;
+    }
+
+    const opened = try zettide.v3.linux_block_device.openStorageOptions(
+        io,
+        allocator,
+        member_path,
+        true,
+        true,
+    );
+    var storages = [_]zettide.v3.storage.Storage{opened.storage};
+    const outcome = try zettide.v3.pool_provision.create(
+        io,
+        allocator,
+        &storages,
+        .{ .protection = .unprotected, .filesystem = .littlefs, .label = "NVMe benchmark" },
+    );
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    var set = try provisioned.intoMemberSet();
+    defer set.deinit();
+    const authority = set.authority() orelse return error.MissingAuthority;
+    std.debug.print("New Catalog Pool ID: ", .{});
+    for (authority.topology.set_id) |byte| std.debug.print("{x:0>2}", .{byte});
+    std.debug.print("\n", .{});
+    const volume_id = try publishCatalog(io, &set, true);
+    try serve(io, allocator, ready_path, reactor_mask, signals, &set, volume_id);
+}
+
 fn serveExisting(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -111,10 +180,7 @@ fn serveExisting(
     signals: *const c.sigset_t,
     provision: bool,
 ) !void {
-    if (expected_pool_id_text.len != 32) return error.InvalidExpectedPoolId;
-    var expected_pool_id: [16]u8 = undefined;
-    _ = std.fmt.hexToBytes(&expected_pool_id, expected_pool_id_text) catch
-        return error.InvalidExpectedPoolId;
+    const expected_pool_id = try parsePoolId(expected_pool_id_text);
     const opened = try zettide.v3.linux_block_device.openStorageOptions(
         io,
         allocator,
@@ -168,6 +234,13 @@ fn serveExisting(
         &set,
         volume_id,
     );
+}
+
+fn parsePoolId(text: []const u8) ![16]u8 {
+    if (text.len != 32) return error.InvalidExpectedPoolId;
+    var result: [16]u8 = undefined;
+    _ = std.fmt.hexToBytes(&result, text) catch return error.InvalidExpectedPoolId;
+    return result;
 }
 
 fn serve(

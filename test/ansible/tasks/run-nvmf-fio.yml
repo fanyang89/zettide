@@ -166,7 +166,7 @@
                if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio'] else '') }}
     ZETTIDE_NVMF_TARGET_MODE: >-
       {{ 'mapped' if zettide_test_profile == 'nvmf-catalog-mapped-fio'
-         else ('provision' if zettide_test_profile == 'nvmf-catalog-optane-fio' else '') }}
+         else ('reformat' if zettide_test_profile == 'nvmf-catalog-optane-fio' else '') }}
     ZETTIDE_NVMF_TARGET_EXPECTED_POOL_ID: >-
       {{ zettide_nvmf_pool_config.pool_id
          if zettide_test_profile == 'nvmf-catalog-optane-fio' else '' }}

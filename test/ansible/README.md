@@ -266,9 +266,10 @@ block device:
 uv run ansible-playbook test/ansible/nvmf-catalog-mapped-fio.yml --limit zettide-tier1
 ```
 
-The Optane profile verifies the configured retained Pool ID and device serial.
-On a genesis Pool it creates a `benchmark` thin Volume, initializes and maps a
-1 GiB window, and keeps the Volume for repeat runs. fio remains read-only:
+The Optane profile is destructive. It verifies the configured old Pool ID and
+device serial, reformats the device as a Catalog-capable Pool, creates a
+`benchmark` thin Volume, and initializes and maps a 1 GiB window. fio remains
+read-only, but the old Pool cannot be recovered without its backup:
 
 ```sh
 uv run ansible-playbook test/ansible/nvmf-catalog-optane-fio.yml --limit zettide-tier1
