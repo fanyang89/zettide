@@ -677,6 +677,10 @@ pub const Device = struct {
         errors: []?anyerror,
     ) !void {
         std.debug.assert(operations.len == member_indexes.len and operations.len == errors.len);
+        if (operations.len == 1) {
+            runOperation(self.members[member_indexes[0]].endpoint, operations[0], &errors[0]);
+            return;
+        }
         var group: std.Io.Group = .init;
         defer group.cancel(self.io);
         var first_spawn_error: ?anyerror = null;
