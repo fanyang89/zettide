@@ -3,7 +3,7 @@ const linux_io_uring = @import("../linux_io_uring.zig");
 const storage_api = @import("storage.zig");
 
 const File = std.Io.File;
-const max_engine_lanes = 4;
+const max_engine_lanes = 2;
 
 pub const Mode = enum {
     auto,
@@ -310,16 +310,10 @@ test "raw io_uring read lanes round robin across counter overflow" {
     try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 1));
 
     sequence.store(std.math.maxInt(u64) - 1, .monotonic);
-    try std.testing.expectEqual(@as(usize, 2), nextReadLane(&sequence, 4));
-    try std.testing.expectEqual(@as(usize, 3), nextReadLane(&sequence, 4));
-    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 4));
-    try std.testing.expectEqual(@as(usize, 1), nextReadLane(&sequence, 4));
-
-    sequence.store(std.math.maxInt(u64) - 1, .monotonic);
-    try std.testing.expectEqual(@as(usize, 2), nextReadLane(&sequence, 3));
-    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 3));
-    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 3));
-    try std.testing.expectEqual(@as(usize, 1), nextReadLane(&sequence, 3));
+    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 2));
+    try std.testing.expectEqual(@as(usize, 1), nextReadLane(&sequence, 2));
+    try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 2));
+    try std.testing.expectEqual(@as(usize, 1), nextReadLane(&sequence, 2));
 }
 
 test "raw io_uring transport stats aggregate with saturation" {
