@@ -13,6 +13,11 @@ extern "C" {
 
 struct zettide_spdk_nvmf_tcp_export;
 
+enum zettide_spdk_nvmf_transport {
+	ZETTIDE_SPDK_NVMF_TRANSPORT_TCP = 0,
+	ZETTIDE_SPDK_NVMF_TRANSPORT_RDMA = 1,
+};
+
 struct zettide_spdk_nvmf_tcp_export_opts {
 	size_t opts_size;
 	const char *target_name;
@@ -26,6 +31,7 @@ struct zettide_spdk_nvmf_tcp_export_opts {
 	const char *trsvcid;
 	uint32_t nsid;
 	bool allow_any_host;
+	enum zettide_spdk_nvmf_transport transport;
 };
 
 void zettide_spdk_nvmf_tcp_export_opts_init(

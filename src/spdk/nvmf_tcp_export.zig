@@ -5,6 +5,11 @@ pub const c = @cImport({
     @cInclude("spdk/nvmf_tcp_export.h");
 });
 
+pub const Transport = enum {
+    tcp,
+    rdma,
+};
+
 pub const Options = struct {
     target_name: ?[]const u8 = null,
     nqn: []const u8,
@@ -16,17 +21,18 @@ pub const Options = struct {
     trsvcid: []const u8 = "4420",
     nsid: u32 = 1,
     allow_any_host: bool = false,
+    transport: Transport = .tcp,
 };
 
-/// Owns one active NVMe-oF/TCP subsystem and listener for an existing SPDK bdev.
-pub const NvmfTcpExport = struct {
+/// Owns one active NVMe-oF subsystem and listener for an existing SPDK bdev.
+pub const NvmfExport = struct {
     handle: ?*c.struct_zettide_spdk_nvmf_tcp_export,
 
     pub fn create(
         allocator: std.mem.Allocator,
         runtime: *anyopaque,
         options: Options,
-    ) !NvmfTcpExport {
+    ) !NvmfExport {
         const target_name = if (options.target_name) |value| try allocator.dupeZ(u8, value) else null;
         defer if (target_name) |value| allocator.free(value);
         const nqn = try allocator.dupeZ(u8, options.nqn);
@@ -56,6 +62,10 @@ pub const NvmfTcpExport = struct {
         c_options.trsvcid = trsvcid.ptr;
         c_options.nsid = options.nsid;
         c_options.allow_any_host = options.allow_any_host;
+        c_options.transport = switch (options.transport) {
+            .tcp => c.ZETTIDE_SPDK_NVMF_TRANSPORT_TCP,
+            .rdma => c.ZETTIDE_SPDK_NVMF_TRANSPORT_RDMA,
+        };
 
         var handle: ?*c.struct_zettide_spdk_nvmf_tcp_export = null;
         try statusError(c.zettide_spdk_nvmf_tcp_export_create(
@@ -67,12 +77,14 @@ pub const NvmfTcpExport = struct {
     }
 
     /// Keeps ownership when teardown fails, so close can be retried.
-    pub fn close(self: *NvmfTcpExport) !void {
+    pub fn close(self: *NvmfExport) !void {
         const handle = self.handle orelse return;
         try statusError(c.zettide_spdk_nvmf_tcp_export_close(handle));
         self.handle = null;
     }
 };
+
+pub const NvmfTcpExport = NvmfExport;
 
 fn statusError(status: c_int) !void {
     if (status == 0) return;

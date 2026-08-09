@@ -34,6 +34,12 @@ run_export_lifecycle(struct zettide_spdk_runtime *runtime)
 	options.traddr = "127.0.0.1";
 	options.trsvcid = "44229";
 	options.allow_any_host = true;
+	options.transport = (enum zettide_spdk_nvmf_transport)99;
+	status = zettide_spdk_nvmf_tcp_export_create(runtime, &options, &export_handle);
+	if (status != -EINVAL || export_handle != NULL) {
+		return 1;
+	}
+	options.transport = ZETTIDE_SPDK_NVMF_TRANSPORT_TCP;
 	status = zettide_spdk_nvmf_tcp_export_create(runtime, &options, &export_handle);
 	if (status != 0 || export_handle == NULL) {
 		return 1;
