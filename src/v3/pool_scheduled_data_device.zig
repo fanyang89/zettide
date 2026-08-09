@@ -364,11 +364,13 @@ pub const Device = struct {
         const preferred_lane = self.read_sequence.fetchAdd(1, .monotonic) % pool_blob_schedule.replica_count;
         var available_counts: [max_read_count]u8 = @splat(0);
         var available_lanes: [max_read_count][pool_blob_schedule.replica_count]u8 = undefined;
+        var request_locations: [max_read_count][pool_blob_schedule.replica_count]pool_blob_schedule.Location = undefined;
         var attempts: [max_read_count]u8 = @splat(0);
         var resolved: [max_read_count]bool = @splat(false);
         var last_errors: [max_read_count]anyerror = @splat(error.ReplicaUnavailable);
         for (reads, 0..) |read, request_index| {
             const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
+            request_locations[request_index] = locations;
             for (0..pool_blob_schedule.replica_count) |attempt| {
                 const lane = (preferred_lane + attempt) % pool_blob_schedule.replica_count;
                 const location = locations[lane];
@@ -386,10 +388,9 @@ pub const Device = struct {
             var pending_count: usize = 0;
             for (reads, 0..) |read, request_index| {
                 if (resolved[request_index] or attempts[request_index] >= available_counts[request_index]) continue;
-                const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
                 const lane: usize = available_lanes[request_index][attempts[request_index]];
                 attempts[request_index] += 1;
-                const location = locations[lane];
+                const location = request_locations[request_index][lane];
                 const member_index = self.memberIndex(location.slot).?;
                 const member_read_index = member_read_counts[member_index];
                 member_reads[member_index][member_read_index] = .{
