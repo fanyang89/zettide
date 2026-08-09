@@ -22,9 +22,11 @@ mkdir "$socket_dir"
 packages=(
 	spdk_event
 	spdk_event_bdev
+	spdk_event_nvmf
 	spdk_event_vhost_blk
 	spdk_bdev_modules
 	spdk_env_dpdk
+	spdk_nvmf
 	spdk_sock_modules
 	spdk_syslibs
 )
@@ -49,9 +51,10 @@ LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 
 # shellcheck disable=SC2046
 "${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
-	src/spdk/runtime.c src/spdk/bdev_provider.c src/spdk/vhost_blk_controller.c \
+	src/spdk/runtime.c src/spdk/bdev_provider.c src/spdk/nvmf_tcp_export.c \
+	src/spdk/vhost_blk_controller.c \
 	test/spdk_vhost_export_main.c "$1" \
-	-o "$build_dir/zettide-spdk-vhost-export-test" -pthread -lubsan \
+	-o "$build_dir/zettide-spdk-vhost-export-test" -pthread -lubsan -lstdc++ \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \
 	-Wl,--as-needed
