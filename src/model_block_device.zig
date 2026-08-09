@@ -350,7 +350,7 @@ test "conditional and ordinary transports share visibility and durability" {
     try caw.readBlock(1, &observed);
     try std.testing.expectEqualSlices(u8, &written, &observed);
 
-    try caw.stabilize();
+    try ordinary.stabilize();
     model.crash();
     @memset(&observed, 0);
     try ordinary.readBlocks(1, &observed);
@@ -378,4 +378,56 @@ test "one shared crash rolls back both transport views" {
     try caw.readBlock(1, zero);
     try std.testing.expect(std.mem.allEqual(u8, first, 0));
     try std.testing.expect(std.mem.allEqual(u8, zero, 0));
+}
+
+test "delayed ordinary write can overwrite a successor" {
+    var model = try ModelBlockDevice.init(std.testing.allocator, .{
+        .logical_block_size = 512,
+        .block_count = 1,
+    });
+    defer model.deinit();
+    const transport = model.dataTransport();
+    const delayed: [512]u8 = @splat(1);
+    const successor: [512]u8 = @splat(2);
+    model.injectNextDataFault(.indeterminate_pending);
+    try std.testing.expectEqual(
+        data.WriteResult.indeterminate,
+        try transport.writeBlocks(0, &delayed),
+    );
+    try std.testing.expectEqual(
+        data.WriteResult.written,
+        try transport.writeBlocks(0, &successor),
+    );
+    try std.testing.expect(model.completePendingWrite());
+
+    var output: [512]u8 = undefined;
+    try transport.readBlocks(0, &output);
+    try std.testing.expectEqualSlices(u8, &delayed, &output);
+}
+
+test "ordinary writes report pre and post-write indeterminate outcomes" {
+    var model = try ModelBlockDevice.init(std.testing.allocator, .{
+        .logical_block_size = 512,
+        .block_count = 1,
+    });
+    defer model.deinit();
+    const transport = model.dataTransport();
+    const input: [512]u8 = @splat(3);
+
+    model.injectNextDataFault(.indeterminate_no_write);
+    try std.testing.expectEqual(
+        data.WriteResult.indeterminate,
+        try transport.writeBlocks(0, &input),
+    );
+    var output: [512]u8 = undefined;
+    try transport.readBlocks(0, &output);
+    try std.testing.expectEqual(@as(u8, 0), output[0]);
+
+    model.injectNextDataFault(.indeterminate_after_write);
+    try std.testing.expectEqual(
+        data.WriteResult.indeterminate,
+        try transport.writeBlocks(0, &input),
+    );
+    try transport.readBlocks(0, &output);
+    try std.testing.expectEqual(@as(u8, 3), output[0]);
 }

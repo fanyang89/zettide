@@ -18,7 +18,6 @@ pub const linux_sg_io = if (builtin.os.tag == .linux) @import("linux_sg_io.zig")
 pub const maintenance = @import("maintenance.zig");
 pub const model_conditional_block = @import("model_conditional_block.zig");
 pub const model_block_device = @import("model_block_device.zig");
-pub const model_data_block = @import("model_data_block.zig");
 pub const model_store = @import("model_store.zig");
 pub const model_voting_disk = @import("model_voting_disk.zig");
 pub const page = @import("page.zig");
@@ -49,7 +48,6 @@ test {
     _ = maintenance;
     _ = model_conditional_block;
     _ = model_block_device;
-    _ = model_data_block;
     _ = model_store;
     _ = model_voting_disk;
     _ = page;
