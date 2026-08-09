@@ -2,7 +2,6 @@ const std = @import("std");
 
 pub const ReadPolicy = enum { first_available, quorum };
 pub const max_reactor_count = 16;
-pub const max_batch_wait_us = 100;
 
 pub fn parseReadPolicy(raw: c_int) !ReadPolicy {
     return switch (raw) {
@@ -32,19 +31,6 @@ pub fn parseReactorCount(text: ?[]const u8) !usize {
     return count;
 }
 
-pub fn parseBatchWaitUs(text: ?[]const u8) !usize {
-    const value = text orelse return 0;
-    if (value.len == 0) return error.InvalidBatchWaitUs;
-    var wait_us: usize = 0;
-    for (value) |digit| {
-        if (digit < '0' or digit > '9') return error.InvalidBatchWaitUs;
-        wait_us = std.math.mul(usize, wait_us, 10) catch return error.InvalidBatchWaitUs;
-        wait_us = std.math.add(usize, wait_us, digit - '0') catch return error.InvalidBatchWaitUs;
-    }
-    if (wait_us > max_batch_wait_us) return error.InvalidBatchWaitUs;
-    return wait_us;
-}
-
 test "read policy accepts only supported values" {
     try std.testing.expectEqual(ReadPolicy.first_available, try parseReadPolicy(0));
     try std.testing.expectEqual(ReadPolicy.quorum, try parseReadPolicy(1));
@@ -66,20 +52,5 @@ test "reactor count defaults to one and accepts strict decimal values" {
 test "reactor count rejects invalid values" {
     for ([_][]const u8{ "", "0", "17", "+1", " 1", "1 ", "1x" }) |value| {
         try std.testing.expectError(error.InvalidReactorCount, parseReactorCount(value));
-    }
-}
-
-test "batch wait defaults to zero and accepts strict decimal microseconds" {
-    try std.testing.expectEqual(@as(usize, 0), try parseBatchWaitUs(null));
-    for ([_]usize{ 0, 10, 25, 50, 100 }) |wait_us| {
-        var buffer: [3]u8 = undefined;
-        const text = try std.fmt.bufPrint(&buffer, "{d}", .{wait_us});
-        try std.testing.expectEqual(wait_us, try parseBatchWaitUs(text));
-    }
-}
-
-test "batch wait rejects invalid values" {
-    for ([_][]const u8{ "", "101", "+1", " 1", "1 ", "1x" }) |value| {
-        try std.testing.expectError(error.InvalidBatchWaitUs, parseBatchWaitUs(value));
     }
 }

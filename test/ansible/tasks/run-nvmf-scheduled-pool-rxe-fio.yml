@@ -19,9 +19,6 @@
       - zettide_nvmf_scheduled_pool_reactor_count | string is match('^[0-9]+$')
       - zettide_nvmf_scheduled_pool_reactor_count | int >= 1
       - zettide_nvmf_scheduled_pool_reactor_count | int <= 16
-      - zettide_nvmf_scheduled_pool_batch_wait_us | string is match('^[0-9]+$')
-      - zettide_nvmf_scheduled_pool_batch_wait_us | int >= 0
-      - zettide_nvmf_scheduled_pool_batch_wait_us | int <= 100
       - >-
         zettide_nvmf_scheduled_pool_fio_case in
         ['', 'seq-read-1m-qd32-j1', 'seq-read-128k-qd1-j1',
@@ -141,7 +138,6 @@
     ZETTIDE_NVMF_TARGET_ADDR: 192.0.2.2
     ZETTIDE_NVMF_TARGET_PORT: "44220"
     ZETTIDE_NVMF_REACTOR_COUNT: "{{ zettide_nvmf_scheduled_pool_reactor_count }}"
-    ZETTIDE_NVMF_BATCH_WAIT_US: "{{ zettide_nvmf_scheduled_pool_batch_wait_us }}"
     ZETTIDE_NVMF_EXPECTED_SIZE: ""
     ZETTIDE_NVMF_FIO_SIZE: "{{ zettide_nvmf_scheduled_pool_fio_size }}"
     ZETTIDE_NVMF_FIO_CASE: "{{ zettide_nvmf_scheduled_pool_fio_case }}"
