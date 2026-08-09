@@ -14,7 +14,7 @@ const c = @cImport({
 const block_size = 4096;
 const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
-const max_concurrent_groups = 4;
+const max_concurrent_groups = 8;
 const queue_capacity = 1024;
 const runtime_config =
     \\{"subsystems":[
