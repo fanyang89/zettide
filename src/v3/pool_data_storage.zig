@@ -18,6 +18,10 @@ const max_replica_count = 3;
 const max_member_count = pool_blob_schedule.max_member_count;
 const io_alignment = 4096;
 
+pub const CreateOptions = struct {
+    read_policy: pool_scheduled_data_device.ReadPolicy = .first_available,
+};
+
 const Device = union(enum) {
     mirrored: pool_data_device.Device,
     scheduled: pool_scheduled_data_device.Device,
@@ -78,6 +82,17 @@ pub fn create(
     set_source: *pool_member_set.PoolMemberSet,
     writable: bool,
 ) !storage_api.Storage {
+    return createOptions(allocator, io, set_source, writable, .{});
+}
+
+/// Takes set_source only on success. On failure, the caller still owns it.
+pub fn createOptions(
+    allocator: std.mem.Allocator,
+    io: Io,
+    set_source: *pool_member_set.PoolMemberSet,
+    writable: bool,
+    options: CreateOptions,
+) !storage_api.Storage {
     const validated = try validateSet(set_source, writable);
     try rejectActiveCoordinator(set_source);
     const context = try allocator.create(Context);
@@ -120,11 +135,12 @@ pub fn create(
             replica,
             *endpoint,
         | endpoint.* = .{ .slot = slot, .endpoint = replica };
-        context.device = .{ .scheduled = try .init(
+        context.device = .{ .scheduled = try .initOptions(
             allocator,
             io,
             endpoints[0..validated.member_count],
             plan,
+            .{ .read_policy = options.read_policy },
         ) };
     } else {
         context.device = .{ .mirrored = try .init(
@@ -633,7 +649,13 @@ test "scheduled Pool data storage supports heterogeneous members and reordered r
     try storage.close(std.testing.io);
 
     set = try openScheduledTestSet(tmp.dir, .read_only, true);
-    storage = try create(std.testing.allocator, std.testing.io, &set, false);
+    storage = try createOptions(
+        std.testing.allocator,
+        std.testing.io,
+        &set,
+        false,
+        .{ .read_policy = .quorum },
+    );
     defer storage.close(std.testing.io) catch {};
     const output = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(io_alignment), bytes.len);
     defer std.testing.allocator.free(output);

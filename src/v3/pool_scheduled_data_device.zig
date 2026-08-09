@@ -10,6 +10,15 @@ pub const max_write_count: usize = 32;
 pub const max_write_size: usize = 1024 * 1024;
 pub const max_span_count: usize = 64;
 
+pub const ReadPolicy = enum {
+    first_available,
+    quorum,
+};
+
+pub const Options = struct {
+    read_policy: ReadPolicy = .first_available,
+};
+
 pub const MemberEndpoint = struct {
     slot: u16,
     endpoint: ReplicaEndpoint,
@@ -34,6 +43,7 @@ pub const Device = struct {
     members: [pool_blob_schedule.max_member_count]Member,
     member_count: usize,
     logical_capacity: u64,
+    read_policy: ReadPolicy,
     mutex: std.Io.Mutex = .init,
     dirty_member_mask: u16 = 0,
     write_frozen: std.atomic.Value(bool) = .init(false),
@@ -43,6 +53,16 @@ pub const Device = struct {
         io: std.Io,
         endpoints: []const MemberEndpoint,
         plan: pool_blob_schedule.PlacementPlan,
+    ) !Device {
+        return initOptions(allocator, io, endpoints, plan, .{});
+    }
+
+    pub fn initOptions(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        endpoints: []const MemberEndpoint,
+        plan: pool_blob_schedule.PlacementPlan,
+        options: Options,
     ) !Device {
         try pool_blob_schedule.validate(plan);
         if (endpoints.len > plan.member_count or endpoints.len + 1 < plan.member_count)
@@ -56,6 +76,7 @@ pub const Device = struct {
             .member_count = endpoints.len,
             .logical_capacity = std.math.mul(u64, plan.logical_stripe_count, plan.stripe_size) catch
                 return error.CapacityOverflow,
+            .read_policy = options.read_policy,
         };
         for (endpoints, 0..) |candidate, member_index| {
             for (endpoints[0..member_index]) |previous|
@@ -228,6 +249,30 @@ pub const Device = struct {
     }
 
     fn readSpan(self: *Device, output: []u8, logical_offset: u64) !void {
+        return switch (self.read_policy) {
+            .first_available => self.readSpanFirstAvailable(output, logical_offset),
+            .quorum => self.readSpanQuorum(output, logical_offset),
+        };
+    }
+
+    fn readSpanFirstAvailable(self: *Device, output: []u8, logical_offset: u64) !void {
+        const locations = try pool_blob_schedule.map(self.plan, logical_offset / self.plan.stripe_size);
+        var last_error: anyerror = error.ReplicaUnavailable;
+        for (locations) |location| {
+            const member_index = self.memberIndex(location.slot) orelse continue;
+            self.members[member_index].endpoint.readData(
+                try self.physicalOffset(location, logical_offset % self.plan.stripe_size),
+                output,
+            ) catch |err| {
+                last_error = err;
+                continue;
+            };
+            return;
+        }
+        return last_error;
+    }
+
+    fn readSpanQuorum(self: *Device, output: []u8, logical_offset: u64) !void {
         const locations = try pool_blob_schedule.map(self.plan, logical_offset / self.plan.stripe_size);
         const allocation_len = std.math.mul(usize, output.len, pool_blob_schedule.replica_count) catch
             return error.OutOfMemory;
@@ -295,6 +340,112 @@ pub const Device = struct {
     }
 
     fn readBatch(
+        self: *Device,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+    ) !void {
+        return switch (self.read_policy) {
+            .first_available => self.readBatchFirstAvailable(reads, results),
+            .quorum => self.readBatchQuorum(reads, results),
+        };
+    }
+
+    fn readBatchFirstAvailable(
+        self: *Device,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+    ) !void {
+        std.debug.assert(reads.len == results.len and reads.len <= max_read_count);
+        const Target = struct { request: u8 };
+        var available_counts: [max_read_count]u8 = @splat(0);
+        var available_lanes: [max_read_count][pool_blob_schedule.replica_count]u8 = undefined;
+        var attempts: [max_read_count]u8 = @splat(0);
+        var resolved: [max_read_count]bool = @splat(false);
+        var last_errors: [max_read_count]anyerror = @splat(error.ReplicaUnavailable);
+        for (reads, 0..) |read, request_index| {
+            const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
+            for (locations, 0..) |location, lane| {
+                if (self.memberIndex(location.slot) == null) continue;
+                available_lanes[request_index][available_counts[request_index]] = @intCast(lane);
+                available_counts[request_index] += 1;
+            }
+        }
+
+        while (true) {
+            var member_reads: [pool_blob_schedule.max_member_count][max_read_count]storage_api.Read = undefined;
+            var member_results: [pool_blob_schedule.max_member_count][max_read_count]storage_api.ReadResult = undefined;
+            var member_targets: [pool_blob_schedule.max_member_count][max_read_count]Target = undefined;
+            var member_read_counts: [pool_blob_schedule.max_member_count]usize = @splat(0);
+            var pending_count: usize = 0;
+            for (reads, 0..) |read, request_index| {
+                if (resolved[request_index] or attempts[request_index] >= available_counts[request_index]) continue;
+                const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
+                const lane: usize = available_lanes[request_index][attempts[request_index]];
+                attempts[request_index] += 1;
+                const location = locations[lane];
+                const member_index = self.memberIndex(location.slot).?;
+                const member_read_index = member_read_counts[member_index];
+                member_reads[member_index][member_read_index] = .{
+                    .buffer = read.buffer,
+                    .offset = try self.physicalOffset(location, read.offset % self.plan.stripe_size),
+                };
+                member_results[member_index][member_read_index] = .{};
+                member_targets[member_index][member_read_index] = .{ .request = @intCast(request_index) };
+                member_read_counts[member_index] += 1;
+                pending_count += 1;
+            }
+            if (pending_count == 0) break;
+
+            var operations: [pool_blob_schedule.max_member_count]Operation = undefined;
+            var operation_members: [pool_blob_schedule.max_member_count]usize = undefined;
+            var errors: [pool_blob_schedule.max_member_count]?anyerror = @splat(null);
+            var operation_count: usize = 0;
+            for (member_read_counts, 0..) |count, member_index| {
+                if (count == 0) continue;
+                operations[operation_count] = .{ .read_many = .{
+                    .reads = member_reads[member_index][0..count],
+                    .results = member_results[member_index][0..count],
+                } };
+                operation_members[operation_count] = member_index;
+                operation_count += 1;
+            }
+            self.runOperations(
+                operations[0..operation_count],
+                operation_members[0..operation_count],
+                errors[0..operation_count],
+            ) catch |err| {
+                for (operation_members[0..operation_count]) |member_index| {
+                    for (member_targets[member_index][0..member_read_counts[member_index]]) |target|
+                        last_errors[target.request] = err;
+                }
+                continue;
+            };
+
+            for (operation_members[0..operation_count], errors[0..operation_count]) |member_index, operation_error| {
+                for (
+                    member_results[member_index][0..member_read_counts[member_index]],
+                    member_targets[member_index][0..member_read_counts[member_index]],
+                ) |endpoint_result, target| {
+                    const request_index: usize = target.request;
+                    if (operation_error) |err| {
+                        last_errors[request_index] = err;
+                    } else if (endpoint_result.failure) |err| {
+                        last_errors[request_index] = err;
+                    } else if (endpoint_result.amount != reads[request_index].buffer.len) {
+                        last_errors[request_index] = error.ShortRead;
+                    } else {
+                        resolved[request_index] = true;
+                        results[request_index].amount = endpoint_result.amount;
+                    }
+                }
+            }
+        }
+        for (results, resolved[0..reads.len], last_errors[0..reads.len]) |*result, success, err| {
+            if (!success) result.failure = err;
+        }
+    }
+
+    fn readBatchQuorum(
         self: *Device,
         reads: []const storage_api.Read,
         results: []storage_api.ReadResult,
@@ -566,7 +717,10 @@ const TestEndpoint = struct {
     write_batch_calls: std.atomic.Value(usize) = .init(0),
     sync_calls: std.atomic.Value(usize) = .init(0),
     fail_read: bool = false,
+    fail_read_batch: bool = false,
+    fail_read_offset: ?u64 = null,
     short_read: bool = false,
+    short_read_offset: ?u64 = null,
     fail_write: bool = false,
     fail_sync: bool = false,
 
@@ -590,9 +744,10 @@ const TestEndpoint = struct {
         const self: *@This() = @ptrCast(@alignCast(context));
         _ = self.read_batch_calls.fetchAdd(1, .monotonic);
         _ = self.read_batch_items.fetchAdd(reads.len, .monotonic);
+        if (self.fail_read_batch) return error.InjectedBatchReadFault;
         for (results) |*result| result.* = .{};
         for (reads, results) |read, *result| {
-            if (self.fail_read) {
+            if (self.fail_read or self.fail_read_offset == read.offset) {
                 result.failure = error.InjectedReadFault;
                 continue;
             }
@@ -605,7 +760,10 @@ const TestEndpoint = struct {
                 continue;
             }
             @memcpy(read.buffer, self.bytes[start..][0..read.buffer.len]);
-            result.amount = if (self.short_read) read.buffer.len - minimum_io_size else read.buffer.len;
+            result.amount = if (self.short_read or self.short_read_offset == read.offset)
+                read.buffer.len - minimum_io_size
+            else
+                read.buffer.len;
         }
     }
 
@@ -673,6 +831,25 @@ fn initTestEndpoints(
 
 fn deinitTestEndpoints(allocator: std.mem.Allocator, contexts: []TestEndpoint) void {
     for (contexts) |context| allocator.free(context.bytes);
+}
+
+fn resetTestReads(contexts: []TestEndpoint) void {
+    for (contexts) |*context| {
+        context.read_calls.store(0, .monotonic);
+        context.read_batch_calls.store(0, .monotonic);
+        context.read_batch_items.store(0, .monotonic);
+        context.fail_read = false;
+        context.fail_read_batch = false;
+        context.fail_read_offset = null;
+        context.short_read = false;
+        context.short_read_offset = null;
+    }
+}
+
+fn totalBatchItems(contexts: []TestEndpoint) usize {
+    var total: usize = 0;
+    for (contexts) |*context| total += context.read_batch_items.load(.monotonic);
+    return total;
 }
 
 fn mappedBytes(
@@ -824,11 +1001,122 @@ test "scheduled readMany batches requests by physical member" {
         try std.testing.expectEqual(@as(usize, 0), context.read_calls.load(.monotonic));
         try std.testing.expectEqual(@intFromBool(items != 0), context.read_batch_calls.load(.monotonic));
     }
-    try std.testing.expectEqual(max_read_count * 2, total_batch_items);
+    try std.testing.expectEqual(max_read_count, total_batch_items);
     for (&input, &output, results) |*source, *destination, result| {
         try std.testing.expectEqual(@as(?anyerror, null), result.failure);
         try std.testing.expectEqual(@as(usize, 4096), result.amount);
         try std.testing.expectEqualSlices(u8, source, destination);
+    }
+}
+
+test "scheduled first-available scalar reads one replica and falls back sequentially" {
+    const plan = try testPlan(3, 4096, 4);
+    var contexts: [3]TestEndpoint = undefined;
+    var endpoints: [3]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    for (0..pool_blob_schedule.replica_count) |lane| @memset(mappedBytes(&device, &contexts, 0, lane), 0x5a);
+
+    const locations = try pool_blob_schedule.map(plan, 0);
+    var output: [4096]u8 = undefined;
+    _ = try device.readAt(&output, 0);
+    try std.testing.expect(std.mem.allEqual(u8, &output, 0x5a));
+    try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[0].slot).?].read_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), contexts[device.memberIndex(locations[1].slot).?].read_calls.load(.monotonic));
+
+    resetTestReads(&contexts);
+    contexts[device.memberIndex(locations[0].slot).?].fail_read = true;
+    _ = try device.readAt(&output, 0);
+    try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[0].slot).?].read_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[1].slot).?].read_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), contexts[device.memberIndex(locations[2].slot).?].read_calls.load(.monotonic));
+
+    contexts[device.memberIndex(locations[1].slot).?].fail_read = true;
+    contexts[device.memberIndex(locations[2].slot).?].fail_read = true;
+    try std.testing.expectError(error.InjectedReadFault, device.readAt(&output, 0));
+}
+
+test "scheduled first-available batch retries only failed and short reads" {
+    const plan = try testPlan(3, 4096, 4);
+    var contexts: [3]TestEndpoint = undefined;
+    var endpoints: [3]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    for (0..2) |stripe| for (0..pool_blob_schedule.replica_count) |lane|
+        @memset(mappedBytes(&device, &contexts, stripe, lane), @intCast(stripe + 1));
+
+    var output: [2][4096]u8 = undefined;
+    var results: [2]storage_api.ReadResult = undefined;
+    const first_locations = try pool_blob_schedule.map(plan, 0);
+    const first_member = device.memberIndex(first_locations[0].slot).?;
+    contexts[first_member].fail_read_batch = true;
+    try device.readManyAt(&.{.{ .buffer = &output[0], .offset = 0 }}, results[0..1]);
+    try std.testing.expectEqual(@as(?anyerror, null), results[0].failure);
+    try std.testing.expectEqual(@as(usize, 2), totalBatchItems(&contexts));
+
+    resetTestReads(&contexts);
+    const second_locations = try pool_blob_schedule.map(plan, 4096 / plan.stripe_size);
+    const failed_location = first_locations[0];
+    contexts[device.memberIndex(failed_location.slot).?].fail_read_offset =
+        try device.physicalOffset(failed_location, 0);
+    try device.readManyAt(&.{
+        .{ .buffer = &output[0], .offset = 0 },
+        .{ .buffer = &output[1], .offset = 4096 },
+    }, &results);
+    for (results) |result| try std.testing.expectEqual(@as(?anyerror, null), result.failure);
+    try std.testing.expectEqual(@as(usize, 3), totalBatchItems(&contexts));
+    try std.testing.expectEqual(@as(u8, 1), output[0][0]);
+    try std.testing.expectEqual(@as(u8, 2), output[1][0]);
+
+    resetTestReads(&contexts);
+    contexts[device.memberIndex(second_locations[0].slot).?].short_read_offset =
+        try device.physicalOffset(second_locations[0], 0);
+    try device.readManyAt(&.{.{ .buffer = &output[1], .offset = 4096 }}, results[0..1]);
+    try std.testing.expectEqual(@as(?anyerror, null), results[0].failure);
+    try std.testing.expectEqual(@as(usize, 2), totalBatchItems(&contexts));
+
+    resetTestReads(&contexts);
+    for (&contexts) |*context| context.fail_read_batch = true;
+    try device.readManyAt(&.{.{ .buffer = &output[0], .offset = 0 }}, results[0..1]);
+    try std.testing.expectEqual(error.InjectedBatchReadFault, results[0].failure.?);
+    try std.testing.expectEqual(@as(usize, pool_blob_schedule.replica_count), totalBatchItems(&contexts));
+}
+
+test "scheduled first-available degraded reads skip every missing lane" {
+    const plan = try testPlan(3, 4096, 4);
+    var contexts: [3]TestEndpoint = undefined;
+    var endpoints: [3]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    var full = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    for (0..pool_blob_schedule.replica_count) |lane| @memset(mappedBytes(&full, &contexts, 0, lane), 0x33);
+    const locations = try pool_blob_schedule.map(plan, 0);
+    var output: [4096]u8 = undefined;
+
+    for (locations) |missing| {
+        resetTestReads(&contexts);
+        var available: [pool_blob_schedule.replica_count - 1]MemberEndpoint = undefined;
+        var available_count: usize = 0;
+        for (endpoints) |endpoint| {
+            if (endpoint.slot == missing.slot) continue;
+            available[available_count] = endpoint;
+            available_count += 1;
+        }
+        var degraded = try Device.init(std.testing.allocator, std.testing.io, &available, plan);
+        _ = try degraded.readAt(&output, 0);
+        try std.testing.expect(std.mem.allEqual(u8, &output, 0x33));
+        var total_calls: usize = 0;
+        for (&contexts) |*context| total_calls += context.read_calls.load(.monotonic);
+        try std.testing.expectEqual(@as(usize, 1), total_calls);
+
+        resetTestReads(&contexts);
+        var result: [1]storage_api.ReadResult = undefined;
+        try degraded.readManyAt(&.{.{ .buffer = &output, .offset = 0 }}, &result);
+        try std.testing.expectEqual(@as(?anyerror, null), result[0].failure);
+        try std.testing.expectEqual(@as(usize, output.len), result[0].amount);
+        try std.testing.expectEqual(@as(usize, 1), totalBatchItems(&contexts));
     }
 }
 
@@ -838,7 +1126,13 @@ test "scheduled reads select a matching pair and classify quorum failures" {
     var endpoints: [3]MemberEndpoint = undefined;
     try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
     defer deinitTestEndpoints(std.testing.allocator, &contexts);
-    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    var device = try Device.initOptions(
+        std.testing.allocator,
+        std.testing.io,
+        &endpoints,
+        plan,
+        .{ .read_policy = .quorum },
+    );
     @memset(mappedBytes(&device, &contexts, 0, 0), 7);
     @memset(mappedBytes(&device, &contexts, 0, 1), 7);
     @memset(mappedBytes(&device, &contexts, 0, 2), 9);
@@ -896,7 +1190,13 @@ test "scheduled readMany falls back for cross-stripe requests" {
     var endpoints: [3]MemberEndpoint = undefined;
     try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
     defer deinitTestEndpoints(std.testing.allocator, &contexts);
-    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    var device = try Device.initOptions(
+        std.testing.allocator,
+        std.testing.io,
+        &endpoints,
+        plan,
+        .{ .read_policy = .quorum },
+    );
     var input: [8192]u8 = undefined;
     for (&input, 0..) |*byte, index| byte.* = @truncate(index *% 19);
     try device.writeAllAt(&input, 4096);
@@ -920,7 +1220,13 @@ test "scheduled readMany submits fallback only for unresolved requests" {
     var endpoints: [3]MemberEndpoint = undefined;
     try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
     defer deinitTestEndpoints(std.testing.allocator, &contexts);
-    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    var device = try Device.initOptions(
+        std.testing.allocator,
+        std.testing.io,
+        &endpoints,
+        plan,
+        .{ .read_policy = .quorum },
+    );
 
     @memset(mappedBytes(&device, &contexts, 0, 0), 7);
     @memset(mappedBytes(&device, &contexts, 0, 1), 7);
@@ -977,7 +1283,13 @@ test "scheduled degraded reads require both remaining replicas and reject writes
             available[available_count] = endpoint;
             available_count += 1;
         }
-        var degraded = try Device.init(std.testing.allocator, std.testing.io, &available, plan);
+        var degraded = try Device.initOptions(
+            std.testing.allocator,
+            std.testing.io,
+            &available,
+            plan,
+            .{ .read_policy = .quorum },
+        );
         var read_results: [1]storage_api.ReadResult = undefined;
         try degraded.readManyAt(&.{.{ .buffer = &output, .offset = 0 }}, &read_results);
         try std.testing.expectEqual(@as(?anyerror, null), read_results[0].failure);
