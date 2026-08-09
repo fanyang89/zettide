@@ -14,8 +14,8 @@ const c = @cImport({
 const block_size = 4096;
 const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
-const max_concurrent_groups = 8;
-const queue_capacity = 256;
+const max_concurrent_groups = 4;
+const queue_capacity = 1024;
 const runtime_config =
     \\{"subsystems":[
     \\{"subsystem":"bdev","config":[
@@ -26,11 +26,11 @@ const runtime_config =
 const rdma_runtime_config =
     \\{"subsystems":[
     \\{"subsystem":"iobuf","config":[
-    \\{"method":"iobuf_set_options","params":{"small_pool_count":1024,"large_pool_count":256}}]},
+    \\{"method":"iobuf_set_options","params":{"small_pool_count":4096,"large_pool_count":1024}}]},
     \\{"subsystem":"bdev","config":[
-    \\{"method":"bdev_set_options","params":{"bdev_io_pool_size":1024,"bdev_io_cache_size":32}}]},
+    \\{"method":"bdev_set_options","params":{"bdev_io_pool_size":4096,"bdev_io_cache_size":128}}]},
     \\{"subsystem":"nvmf","config":[
-    \\{"method":"nvmf_create_transport","params":{"trtype":"RDMA","max_queue_depth":32,"max_io_size":131072,"max_srq_depth":128,"iobuf_small_cache_size":64,"iobuf_large_cache_size":8}}]}]}
+    \\{"method":"nvmf_create_transport","params":{"trtype":"RDMA","max_queue_depth":128,"max_io_size":131072,"max_srq_depth":1024,"iobuf_small_cache_size":128,"iobuf_large_cache_size":32}}]}]}
 ;
 
 const Worker = struct {
@@ -65,6 +65,15 @@ const Worker = struct {
     dequeue_position: usize = 0,
     wake: std.Io.Event = .unset,
     stopping: std.atomic.Value(bool) = .init(false),
+    submit_attempts: std.atomic.Value(u64) = .init(0),
+    accepted: std.atomic.Value(u64) = .init(0),
+    queue_full_rejects: std.atomic.Value(u64) = .init(0),
+    current_occupancy: std.atomic.Value(usize) = .init(0),
+    high_water: std.atomic.Value(usize) = .init(0),
+    read_group_count: std.atomic.Value(u64) = .init(0),
+    grouped_request_count: std.atomic.Value(u64) = .init(0),
+    grouped_bytes: std.atomic.Value(u64) = .init(0),
+    completed_requests: std.atomic.Value(u64) = .init(0),
     thread: std.Thread,
 
     fn create(io: std.Io, storage: *zettide.v3.storage.Storage) !*Worker {
@@ -78,6 +87,15 @@ const Worker = struct {
         self.dequeue_position = 0;
         self.wake = .unset;
         self.stopping = .init(false);
+        self.submit_attempts = .init(0);
+        self.accepted = .init(0);
+        self.queue_full_rejects = .init(0);
+        self.current_occupancy = .init(0);
+        self.high_water = .init(0);
+        self.read_group_count = .init(0);
+        self.grouped_request_count = .init(0);
+        self.grouped_bytes = .init(0);
+        self.completed_requests = .init(0);
         self.thread = try std.Thread.spawn(.{}, Worker.run, .{self});
         return self;
     }
@@ -87,6 +105,20 @@ const Worker = struct {
         self.stopping.store(true, .release);
         self.wake.set(self.io);
         self.thread.join();
+        std.debug.print(
+            "provider_worker_metrics submit_attempts={d} accepted={d} queue_full_rejects={d} current_occupancy={d} high_water={d} read_group_count={d} grouped_request_count={d} grouped_bytes={d} completed_requests={d}\n",
+            .{
+                self.submit_attempts.load(.monotonic),
+                self.accepted.load(.monotonic),
+                self.queue_full_rejects.load(.monotonic),
+                self.current_occupancy.load(.monotonic),
+                self.high_water.load(.monotonic),
+                self.read_group_count.load(.monotonic),
+                self.grouped_request_count.load(.monotonic),
+                self.grouped_bytes.load(.monotonic),
+                self.completed_requests.load(.monotonic),
+            },
+        );
         std.heap.c_allocator.destroy(self);
     }
 
@@ -101,6 +133,7 @@ const Worker = struct {
     ) callconv(.c) c_int {
         const context = context_raw orelse return -c.EINVAL;
         const self: *Worker = @ptrCast(@alignCast(context));
+        _ = self.submit_attempts.fetchAdd(1, .monotonic);
         if (complete == null) return -c.EINVAL;
         if (operation == c.ZETTIDE_SPDK_BDEV_PROVIDER_WRITE) return -c.EROFS;
         if (operation != c.ZETTIDE_SPDK_BDEV_PROVIDER_READ and
@@ -135,12 +168,32 @@ const Worker = struct {
                     .complete = complete,
                     .complete_context = complete_context,
                 };
+                self.recordAccepted();
                 slot.sequence.store(position + 1, .release);
                 self.wake.set(self.io);
                 return 0;
             }
-            if (sequence < position) return -c.EAGAIN;
+            if (sequence < position) {
+                _ = self.queue_full_rejects.fetchAdd(1, .monotonic);
+                return -c.EAGAIN;
+            }
             position = self.enqueue_position.load(.monotonic);
+        }
+    }
+
+    fn recordAccepted(self: *Worker) void {
+        _ = self.accepted.fetchAdd(1, .monotonic);
+        const occupancy = self.current_occupancy.fetchAdd(1, .monotonic) + 1;
+        var high_water = self.high_water.load(.monotonic);
+        while (occupancy > high_water) {
+            if (self.high_water.cmpxchgWeak(
+                high_water,
+                occupancy,
+                .monotonic,
+                .monotonic,
+            )) |observed| {
+                high_water = observed;
+            } else break;
         }
     }
 
@@ -174,7 +227,7 @@ const Worker = struct {
             pending = null;
             if (queued.slot.request.operation != c.ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
                 groups.await(self.io) catch unreachable;
-                completeQueued(queued, 0);
+                self.completeQueued(queued, 0);
                 continue;
             }
 
@@ -195,6 +248,9 @@ const Worker = struct {
                 batch.count += 1;
                 total_bytes += request.length;
             }
+            _ = self.read_group_count.fetchAdd(1, .monotonic);
+            _ = self.grouped_request_count.fetchAdd(batch.count, .monotonic);
+            _ = self.grouped_bytes.fetchAdd(total_bytes, .monotonic);
             permits.waitUncancelable(self.io);
             groups.concurrent(self.io, executeReadGroup, .{ self, &permits, batch }) catch {
                 executeReadGroup(self, &permits, batch) catch {};
@@ -223,7 +279,7 @@ const Worker = struct {
         }
         self.storage.readManyAt(self.io, reads[0..batch.count], results[0..batch.count]) catch |err| {
             const status = errorStatus(err);
-            for (batch.queued[0..batch.count]) |queued| completeQueued(queued, status);
+            for (batch.queued[0..batch.count]) |queued| self.completeQueued(queued, status);
             return;
         };
         for (batch.queued[0..batch.count], results[0..batch.count]) |queued, result| {
@@ -233,13 +289,15 @@ const Worker = struct {
                 -c.EIO
             else
                 0;
-            completeQueued(queued, status);
+            self.completeQueued(queued, status);
         }
     }
 
-    fn completeQueued(queued: Queued, status: c_int) void {
+    fn completeQueued(self: *Worker, queued: Queued, status: c_int) void {
         const request = queued.slot.request;
         request.complete.?(request.complete_context, status);
+        _ = self.current_occupancy.fetchSub(1, .monotonic);
+        _ = self.completed_requests.fetchAdd(1, .monotonic);
         release(queued);
     }
 };
@@ -351,7 +409,7 @@ fn run(
         .name = "zettide_spdk_pool_data_nvmf_benchmark",
         .reactor_mask = reactor_mask,
         .json_data = if (transport == .rdma) rdma_runtime_config else runtime_config,
-        .mem_size_mb = if (transport == .rdma) 128 else 512,
+        .mem_size_mb = 512,
         .no_pci = true,
         .no_huge = true,
         .disable_cpumask_locks = true,
