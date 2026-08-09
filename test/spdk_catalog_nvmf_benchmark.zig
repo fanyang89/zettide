@@ -197,6 +197,9 @@ fn serveExisting(
     );
     defer set.deinit();
     const authority = set.authority() orelse return error.MissingAuthority;
+    std.debug.print("Existing Catalog Pool ID: ", .{});
+    for (authority.topology.set_id) |byte| std.debug.print("{x:0>2}", .{byte});
+    std.debug.print("\n", .{});
     if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
         return error.UnexpectedPoolId;
     const volume_id = if (provision) provisioned: {
