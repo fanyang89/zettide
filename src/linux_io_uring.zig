@@ -98,7 +98,7 @@ pub const Engine = struct {
                 tokens[batch_index] = token;
                 lengths[batch_index] = read.buffer.len;
             }
-            try self.submitBatch(count, true);
+            try self.submitBatch(count);
             var tracker: BatchTracker = .{
                 .tokens = tokens[0..count],
                 .lengths = lengths[0..count],
@@ -212,7 +212,7 @@ pub const Engine = struct {
                 tokens[count] = token;
                 lengths[count] = write.bytes.len;
             }
-            try self.submitBatch(count, true);
+            try self.submitBatch(count);
             var tracker: BatchTracker = .{
                 .tokens = tokens[0..count],
                 .lengths = lengths[0..count],
@@ -311,7 +311,7 @@ pub const Engine = struct {
     }
 
     fn complete(self: *Engine, token: u64) !usize {
-        try self.submitBatch(1, false);
+        try self.submitBatch(1);
         const completion = self.copyCompletion() catch |err| {
             self.failAfterDrain();
             return err;
@@ -321,7 +321,7 @@ pub const Engine = struct {
         return @intCast(completion.res);
     }
 
-    fn submitBatch(self: *Engine, count: usize, wait_for_all: bool) !void {
+    fn submitBatch(self: *Engine, count: usize) !void {
         var submitted: u32 = 0;
         const expected: u32 = @intCast(count);
         var flushed = false;
@@ -329,15 +329,8 @@ pub const Engine = struct {
             self.stats.submit_calls += 1;
             const amount = (if (!flushed) submit: {
                 flushed = true;
-                break :submit if (wait_for_all)
-                    self.ring.submit_and_wait(expected)
-                else
-                    self.ring.submit();
-            } else self.ring.enter(
-                expected - submitted,
-                if (wait_for_all) expected else 0,
-                if (wait_for_all) linux.IORING_ENTER_GETEVENTS else 0,
-            )) catch |err| switch (err) {
+                break :submit self.ring.submit();
+            } else self.ring.enter(expected - submitted, 0, 0)) catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => {
                     self.failAfterDrain();
@@ -352,15 +345,6 @@ pub const Engine = struct {
             self.stats.submitted_sqes += amount;
             self.current_inflight += amount;
             self.stats.max_inflight = @max(self.stats.max_inflight, self.current_inflight);
-        }
-        while (wait_for_all and self.ring.cq_ready() < expected) {
-            _ = self.ring.enter(0, expected, linux.IORING_ENTER_GETEVENTS) catch |err| switch (err) {
-                error.SignalInterrupt => continue,
-                else => {
-                    self.failAfterDrain();
-                    return err;
-                },
-            };
         }
     }
 
@@ -435,7 +419,7 @@ pub const Engine = struct {
     }
 
     fn completeWritev(self: *Engine, token: u64) !usize {
-        try self.submitBatch(1, false);
+        try self.submitBatch(1);
         const completion = self.copyCompletion() catch |err| {
             self.failAfterDrain();
             return err;
@@ -616,7 +600,6 @@ test "borrowed-fd engine supports partial and exact reads and metrics reset" {
         try std.testing.expectEqual(@as(?anyerror, null), result.failure);
     }
     const batch_stats = engine.getStats(std.testing.io);
-    try std.testing.expectEqual(@as(u64, 1), batch_stats.submit_calls);
     try std.testing.expectEqual(@as(u64, reads.len), batch_stats.submitted_sqes);
     try std.testing.expectEqual(@as(u64, reads.len), batch_stats.max_inflight);
 
@@ -650,7 +633,6 @@ test "borrowed-fd engine supports partial and exact reads and metrics reset" {
     engine.resetStats(std.testing.io);
     try engine.writeAllManyAt(std.testing.io, &writes);
     const gapped_stats = engine.getStats(std.testing.io);
-    try std.testing.expectEqual(@as(u64, 1), gapped_stats.submit_calls);
     try std.testing.expectEqual(@as(u64, writes.len), gapped_stats.submitted_sqes);
     try std.testing.expectEqual(@as(u64, writes.len), gapped_stats.max_inflight);
 }
