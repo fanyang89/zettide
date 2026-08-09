@@ -93,7 +93,6 @@
       blob-fuse-fio: tasks/run-blob-fuse-fio.yml
       blob-pool-fio: tasks/run-blob-pool-fio.yml
       blob-pool-nfs-fio: tasks/run-blob-pool-fio.yml
-      scheduled-blob-pool-fio: tasks/run-scheduled-blob-pool-fio.yml
       nvmf-fio: tasks/run-nvmf-fio.yml
       nvmf-catalog-fio: tasks/run-nvmf-fio.yml
       nvmf-catalog-mapped-fio: tasks/run-nvmf-fio.yml
@@ -474,10 +473,7 @@
                    else ('nvmf'
                          if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
                          else 'fuse') }}
-              pool_fio_source_profile: >-
-                {{ 'synthetic-single-physical-device'
-                   if zettide_test_profile == 'scheduled-blob-pool-fio'
-                   else 'native' }}
+              pool_fio_source_profile: native
               blob_fuse_fio:
                 backing_size: "{{ zettide_blob_fuse_fio_backing_size_effective }}"
                 file_size: "{{ zettide_blob_fuse_fio_file_size_effective }}"

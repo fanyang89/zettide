@@ -160,7 +160,7 @@ require_fuse_metrics() {
         return 1
     fi
     if grep -Eq '^(pipeline_metrics|member_transport_metrics) ' "$log"; then
-        echo "Blob FUSE mount unexpectedly printed LittleFS metrics: $log" >&2
+        echo "Blob FUSE mount unexpectedly printed obsolete pipeline metrics: $log" >&2
         return 1
     fi
 }

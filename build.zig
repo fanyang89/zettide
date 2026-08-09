@@ -19,11 +19,10 @@ pub fn build(b: *std.Build) void {
     const block_test_mode = b.option(BlockTestMode, "block-tests", "Linux block device tests: off, auto, or required") orelse .off;
     const enable_spdk = b.option(bool, "spdk", "Link the Linux endpoint daemon with SPDK") orelse false;
     const crc32c_dependency = b.dependency("crc32c", .{});
-    const libdeflate_dependency = b.dependency("libdeflate", .{});
     if (enable_spdk and target.result.os.tag != .linux) @panic("SPDK support requires Linux");
 
-    const portable_core = createCoreModule(b, target, optimize, false, crc32c_dependency, libdeflate_dependency);
-    const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux, crc32c_dependency, libdeflate_dependency);
+    const portable_core = createCoreModule(b, target, optimize, false, crc32c_dependency);
+    const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux, crc32c_dependency);
     if (enable_spdk) configureSpdk(app_core);
     const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
@@ -253,39 +252,8 @@ pub fn build(b: *std.Build) void {
     const run_blob_object_benchmark_tests = b.addRunArtifact(blob_object_benchmark_tests);
     unit_step.dependOn(&run_blob_object_benchmark_tests.step);
 
-    const image_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/image.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "zettide", .module = portable_core }},
-        }),
-    });
-    const run_image_tests = b.addRunArtifact(image_tests);
-    const image_step = b.step("test-image", "Run littlefs image integration tests");
-    image_step.dependOn(&run_image_tests.step);
-
-    const fault_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/fault.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{.{ .name = "zettide", .module = portable_core }},
-        }),
-    });
-    const run_fault_tests = b.addRunArtifact(fault_tests);
-    const fault_step = b.step("test-fault", "Run deterministic block fault tests");
-    fault_step.dependOn(&run_fault_tests.step);
-
     const cli_test_cmd = b.addSystemCommand(&.{ "bash", "test/cli.sh" });
     cli_test_cmd.addArtifactArg(exe);
-    const pty_passphrase_exec = if (target.result.os.tag == .linux)
-        createPtyPassphraseExec(b, target, optimize)
-    else
-        null;
-    if (pty_passphrase_exec) |artifact| cli_test_cmd.addArtifactArg(artifact);
     const cli_step = b.step("test-cli", "Run CLI process integration tests");
     cli_step.dependOn(&cli_test_cmd.step);
 
@@ -351,7 +319,6 @@ pub fn build(b: *std.Build) void {
     dufs_test_cmd.addArg(@tagName(fuse_test_mode));
     dufs_test_cmd.addArtifactArg(exe);
     if (target.result.os.tag == .linux) dufs_test_cmd.addArtifactArg(createSignalMaskExec(b, target, optimize));
-    if (pty_passphrase_exec) |artifact| dufs_test_cmd.addArtifactArg(artifact);
     const dufs_step = b.step("test-dufs", "Run the managed dufs integration test");
     dufs_step.dependOn(&dufs_test_cmd.step);
 
@@ -462,7 +429,6 @@ pub fn build(b: *std.Build) void {
     posix_nightly_step.dependOn(posix_privileged_step);
     posix_nightly_step.dependOn(xfstests_step);
     posix_nightly_step.dependOn(ltp_step);
-    posix_nightly_step.dependOn(fault_step);
     posix_nightly_step.dependOn(fio_step);
 
     const cross_step = b.step("test-cross", "Compile portable boundaries for Windows and macOS");
@@ -471,24 +437,22 @@ pub fn build(b: *std.Build) void {
         .os_tag = .windows,
         .abi = .gnu,
     });
-    const windows_core = createCoreModule(b, windows_target, optimize, false, crc32c_dependency, libdeflate_dependency);
+    const windows_core = createCoreModule(b, windows_target, optimize, false, crc32c_dependency);
     const windows_exe = createExecutable(b, "zettide-windows-check", windows_target, optimize, windows_core, false);
     const windows_name_tests = createNameProfileCrossTest(b, windows_target, optimize, windows_core);
     const macos_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
-    const macos_core = createCoreModule(b, macos_target, optimize, false, crc32c_dependency, libdeflate_dependency);
+    const macos_core = createCoreModule(b, macos_target, optimize, false, crc32c_dependency);
     const macos_name_tests = createNameProfileCrossTest(b, macos_target, optimize, macos_core);
     cross_step.dependOn(&windows_exe.step);
     cross_step.dependOn(&windows_name_tests.step);
     cross_step.dependOn(&macos_name_tests.step);
 
-    const test_step = b.step("test", "Run unit, image, and CLI tests");
+    const test_step = b.step("test", "Run unit and CLI tests");
     test_step.dependOn(unit_step);
-    test_step.dependOn(image_step);
     test_step.dependOn(cli_step);
 
     const ci_step = b.step("ci", "Run default tests and cross-compilation checks");
     ci_step.dependOn(test_step);
-    ci_step.dependOn(fault_step);
     ci_step.dependOn(cross_step);
     ci_step.dependOn(&fs_ops_benchmark.step);
 }
@@ -516,7 +480,6 @@ fn createCoreModule(
     optimize: std.builtin.OptimizeMode,
     with_fuse: bool,
     crc32c_dependency: *std.Build.Dependency,
-    libdeflate_dependency: *std.Build.Dependency,
 ) *std.Build.Module {
     const core = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -524,20 +487,13 @@ fn createCoreModule(
         .optimize = optimize,
         .link_libc = true,
     });
-    core.addIncludePath(b.path("vendor/littlefs"));
     core.addIncludePath(b.path("vendor/utf8proc"));
     core.addIncludePath(b.path("src"));
-    core.addCMacro("LFS_THREADSAFE", "1");
-    core.addCMacro("LFS_CRC_BUFFER_SIZE", "256");
     core.addCMacro("UTF8PROC_STATIC", "1");
     core.addCSourceFiles(.{
-        .files = &.{
-            "vendor/littlefs/lfs.c",
-            "vendor/utf8proc/utf8proc.c",
-        },
-        .flags = &.{ "-std=c99", "-DLFS_THREADSAFE", "-DUTF8PROC_STATIC" },
+        .files = &.{"vendor/utf8proc/utf8proc.c"},
+        .flags = &.{ "-std=c99", "-DUTF8PROC_STATIC" },
     });
-    addLibdeflateCrc(core, libdeflate_dependency, target);
     const crc32c = b.createModule(.{
         .root_source_file = b.path("src/crc32c.zig"),
         .target = target,
@@ -556,28 +512,6 @@ fn createCoreModule(
         });
     }
     return core;
-}
-
-fn addLibdeflateCrc(
-    module: *std.Build.Module,
-    dependency: *std.Build.Dependency,
-    target: std.Build.ResolvedTarget,
-) void {
-    module.addIncludePath(dependency.path(""));
-    module.addIncludePath(dependency.path("lib"));
-    module.addCSourceFile(.{
-        .file = dependency.path("lib/crc32.c"),
-        .flags = &.{ "-std=c11", "-DLIBDEFLATE_ASSEMBLER_DOES_NOT_SUPPORT_VPCLMULQDQ" },
-    });
-    const cpu_features_source = switch (target.result.cpu.arch) {
-        .x86, .x86_64 => "lib/x86/cpu_features.c",
-        .arm, .aarch64, .aarch64_be => "lib/arm/cpu_features.c",
-        else => return,
-    };
-    module.addCSourceFile(.{
-        .file = dependency.path(cpu_features_source),
-        .flags = &.{"-std=c11"},
-    });
 }
 
 fn addCrc32c(
@@ -667,12 +601,6 @@ fn createExecutable(
         .imports = &.{.{ .name = "zettide", .module = core }},
     });
     module.addOptions("build_options", options);
-    if (target.result.os.tag != .windows and target.result.os.tag != .wasi) {
-        module.addCSourceFile(.{
-            .file = b.path("src/terminal_echo.c"),
-            .flags = &.{ "-std=c11", "-D_POSIX_C_SOURCE=200809L" },
-        });
-    }
     return b.addExecutable(.{
         .name = name,
         .root_module = module,
@@ -858,27 +786,6 @@ fn createSignalMaskExec(
         .file = b.path("test/signal_mask_exec.c"),
         .flags = &.{"-std=c11"},
     });
-    return executable;
-}
-
-fn createPtyPassphraseExec(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const executable = b.addExecutable(.{
-        .name = "pty-passphrase-exec",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    executable.root_module.addCSourceFile(.{
-        .file = b.path("test/pty_passphrase_exec.c"),
-        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
-    });
-    executable.root_module.linkSystemLibrary("util", .{});
     return executable;
 }
 

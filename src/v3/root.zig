@@ -21,7 +21,6 @@ pub const pool_evidence = @import("pool_evidence.zig");
 pub const pool_certificate = @import("pool_certificate.zig");
 pub const pool_authority = @import("pool_authority.zig");
 pub const pool_authority_checkpoint = @import("pool_authority_checkpoint.zig");
-pub const pool_block_device = @import("pool_block_device.zig");
 pub const pool_blob_schedule = @import("pool_blob_schedule.zig");
 pub const pool_data_storage = @import("pool_data_storage.zig");
 pub const pool_data_device = @import("pool_data_device.zig");
@@ -62,7 +61,6 @@ test {
     _ = pool_certificate;
     _ = pool_authority;
     _ = pool_authority_checkpoint;
-    _ = pool_block_device;
     _ = pool_blob_schedule;
     _ = pool_data_storage;
     _ = pool_data_device;
@@ -78,30 +76,4 @@ test {
     _ = replicated_journal;
     _ = storage;
     _ = topology;
-}
-
-test "catalog volume header remains byte-compatible with base LFSDRV2" {
-    const std = @import("std");
-    const container = @import("../container.zig");
-    const catalog_header: catalog_volume_header.Header = .{
-        .sequence = 7,
-        .state = .ready,
-        .uuid = @splat(3),
-        .created_ns = 123,
-        .logical_size = 1024 * 1024,
-        .block_count = 256,
-        .label = .{ 'p', 'o', 'o', 'l' } ++ @as([123]u8, @splat(0)),
-        .label_length = 4,
-    };
-    const container_header: container.Header = .{
-        .sequence = catalog_header.sequence,
-        .state = .ready,
-        .uuid = catalog_header.uuid,
-        .created_ns = catalog_header.created_ns,
-        .logical_size = catalog_header.logical_size,
-        .block_count = catalog_header.block_count,
-        .label = catalog_header.label,
-        .label_len = catalog_header.label_length,
-    };
-    try std.testing.expectEqualSlices(u8, &container_header.encode(), &catalog_header.encode());
 }

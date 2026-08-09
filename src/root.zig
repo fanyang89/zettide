@@ -1,4 +1,3 @@
-pub const block_device = @import("block_device.zig");
 pub const blob_device = @import("blob_device.zig");
 pub const blob_file = @import("blob_file.zig");
 pub const blob_filesystem_format = @import("blob_filesystem_format.zig");
@@ -12,28 +11,18 @@ pub const blob_metadata_map_store = @import("blob_metadata_map_store.zig");
 pub const blob_object_format = @import("blob_object_format.zig");
 pub const blob_object = @import("blob_object.zig");
 pub const blob_store = @import("blob_store.zig");
-pub const container = @import("container.zig");
 pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("endpoint_control.zig") else struct {};
 pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("endpoint_daemon.zig") else struct {};
 pub const endpoint_registry = @import("endpoint_registry.zig");
-pub const file_io = @import("file_io.zig");
 pub const filesystem_backend = @import("filesystem_backend.zig");
 pub const filesystem_target = @import("filesystem_target.zig");
-pub const littlefs_volume_adapter = @import("littlefs_volume_adapter.zig");
 pub const dufs_server = if (@import("builtin").os.tag == .linux) @import("dufs_server.zig") else struct {};
 pub const metadata = @import("metadata.zig");
 pub const name_profile = @import("name_profile.zig");
 pub const nfs_filesystem = @import("nfs_filesystem.zig");
 pub const nfs_handle = @import("nfs_handle.zig");
 pub const nfs_blob_adapter = @import("nfs_blob_adapter.zig");
-pub const nfs_littlefs_adapter = @import("nfs_littlefs_adapter.zig");
-pub const object_format = @import("object_format.zig");
-pub const object_store = @import("object_store.zig");
-pub const redo_journal = @import("redo_journal.zig");
-pub const redo_runtime = @import("redo_runtime.zig");
 pub const size = @import("size.zig");
-pub const target = @import("target.zig");
-pub const volume_crypto = @import("volume_crypto.zig");
 pub const spdk_catalog_endpoint_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_endpoint_backend.zig") else struct {};
 pub const spdk_catalog_nvmf_export = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_nvmf_export.zig") else struct {};
 pub const spdk_catalog_volume_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_volume_backend.zig") else struct {};
@@ -44,17 +33,10 @@ pub const spdk_provider_bdev = if (@import("builtin").os.tag == .linux) @import(
 pub const spdk_runtime = if (@import("builtin").os.tag == .linux) @import("spdk/runtime.zig") else struct {};
 pub const spdk_storage = if (@import("builtin").os.tag == .linux) @import("spdk/storage.zig") else struct {};
 pub const spdk_vhost_block_export = if (@import("builtin").os.tag == .linux) @import("spdk/vhost_block_export.zig") else struct {};
-pub const volume = @import("volume.zig");
 pub const v3 = @import("v3/root.zig");
 pub const linux_fuse = if (@import("builtin").os.tag == .linux) @import("linux_fuse.zig") else struct {};
-pub const windows_winfsp = if (@import("builtin").os.tag == .windows) @import("windows_winfsp.zig") else struct {};
-
-comptime {
-    _ = block_device.lfs_crc;
-}
 
 test {
-    _ = block_device;
     _ = blob_device;
     _ = blob_file;
     _ = blob_filesystem_format;
@@ -68,28 +50,18 @@ test {
     _ = blob_object_format;
     _ = blob_object;
     _ = blob_store;
-    _ = container;
     _ = endpoint_control;
     _ = endpoint_daemon;
     _ = endpoint_registry;
-    _ = file_io;
     _ = filesystem_backend;
     _ = filesystem_target;
-    _ = littlefs_volume_adapter;
     _ = dufs_server;
     _ = metadata;
     _ = name_profile;
     _ = nfs_filesystem;
     _ = nfs_handle;
     _ = nfs_blob_adapter;
-    _ = nfs_littlefs_adapter;
-    _ = object_format;
-    _ = object_store;
-    _ = redo_journal;
-    _ = redo_runtime;
     _ = size;
-    _ = target;
-    _ = volume_crypto;
     _ = spdk_catalog_endpoint_backend;
     _ = spdk_catalog_nvmf_export;
     _ = spdk_catalog_volume_backend;
@@ -100,6 +72,5 @@ test {
     _ = spdk_runtime;
     _ = spdk_storage;
     _ = spdk_vhost_block_export;
-    _ = volume;
     _ = v3;
 }

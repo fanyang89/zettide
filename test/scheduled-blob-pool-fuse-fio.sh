@@ -176,7 +176,7 @@ require_metrics() {
         return 1
     }
     ! grep -Eq '^(pipeline_metrics|member_transport_metrics) ' "$log" || {
-        echo "scheduled Blob Pool emitted unexpected LittleFS or member metrics: $log" >&2
+        echo "scheduled Blob Pool emitted obsolete pipeline metrics: $log" >&2
         return 1
     }
     if grep -Eq '(^| )[a-z_]+_errors=[1-9][0-9]*($| )' <<<"${fuse_lines[0]}"; then

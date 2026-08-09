@@ -4,7 +4,6 @@ const blob_filesystem = @import("blob_filesystem.zig");
 const blob_filesystem_format = @import("blob_filesystem_format.zig");
 const blob_format = @import("blob_format.zig");
 const blob_store = @import("blob_store.zig");
-const container = @import("container.zig");
 const google_crc32c = @import("crc32c");
 const member_format = @import("v3/member_format.zig");
 const name_profile = @import("name_profile.zig");
@@ -12,9 +11,12 @@ const pool_data_storage = @import("v3/pool_data_storage.zig");
 const pool_member_set = @import("v3/pool_member_set.zig");
 const pool_provision = @import("v3/pool_provision.zig");
 const storage_api = @import("v3/storage.zig");
-const target = @import("target.zig");
 
 const Io = std.Io;
+const header_size: usize = 4096;
+const header_a_offset: u64 = 0;
+const header_b_offset: u64 = header_size;
+const legacy_magic = "LFSDRV2\x00";
 
 pub const FormatKind = enum {
     unknown,
@@ -23,8 +25,28 @@ pub const FormatKind = enum {
     blob,
 };
 
+pub const TargetKind = enum { regular_file };
+
+const RegularIdentity = struct {
+    inode: u64,
+    mtime_ns: i96,
+    ctime_ns: i96,
+};
+
+pub const FormatPlan = struct {
+    path: []const u8,
+    name_profile: name_profile.Profile,
+    canonical_path_digest: [32]u8,
+    kind: TargetKind = .regular_file,
+    capacity_bytes: u64,
+    contains_data: bool,
+    data_digest: [32]u8,
+    token: [32]u8,
+    identity: RegularIdentity,
+};
+
 pub const BlobFormatPlan = struct {
-    target_plan: target.FormatPlan,
+    target_plan: FormatPlan,
     format_options: blob_filesystem.Filesystem.FormatOptions,
     eligible: bool,
     token: [32]u8,
@@ -35,11 +57,14 @@ pub const BlobFormatPlan = struct {
 };
 
 pub const AcquiredBlobFormat = struct {
-    target_format: target.AcquiredFormat,
+    storage: storage_api.Storage,
+    io: Io,
+    storage_owned: bool = true,
     plan: BlobFormatPlan,
 
     pub fn deinit(self: *AcquiredBlobFormat) void {
-        self.target_format.deinit();
+        if (self.storage_owned) self.storage.close(self.io) catch {};
+        self.storage_owned = false;
     }
 
     pub fn apply(
@@ -61,23 +86,23 @@ pub const AcquiredBlobFormat = struct {
             return error.ConfirmationMismatch;
         if (!self.plan.eligible) return error.TargetNotEligible;
 
-        const capacity = self.target_format.storage.capacity();
+        const capacity = self.storage.capacity();
         const device = try blob_device.Device.init(
-            self.target_format.storage,
+            self.storage,
             0,
             capacity,
             blob_format.allocation_unit,
         );
-        self.target_format.storage_owned = false;
-        const blobs = try blob_store.Store.create(allocator, self.target_format.io, device);
+        self.storage_owned = false;
+        const blobs = try blob_store.Store.create(allocator, self.io, device);
         var filesystem = try blob_filesystem.Filesystem.formatOptions(
             allocator,
-            self.target_format.io,
+            self.io,
             blobs,
             profile,
             options,
         );
-        try filesystem.close(self.target_format.io);
+        try filesystem.close(self.io);
     }
 };
 
@@ -95,10 +120,10 @@ pub fn classifyPath(io: Io, path: []const u8) !FormatKind {
         else => return err,
     };
     defer storage.close(io) catch {};
-    var first: [container.header_size]u8 = undefined;
-    var second: [container.header_size]u8 = undefined;
-    const first_len = try storage.readAt(io, &first, container.header_a_offset);
-    const second_len = try storage.readAt(io, &second, container.header_b_offset);
+    var first: [header_size]u8 = undefined;
+    var second: [header_size]u8 = undefined;
+    const first_len = try storage.readAt(io, &first, header_a_offset);
+    const second_len = try storage.readAt(io, &second, header_b_offset);
     return classifyHeaderSlots(first[0..first_len], second[0..second_len]);
 }
 
@@ -110,12 +135,17 @@ pub fn inspectBlobFormat(
     options: blob_filesystem.Filesystem.FormatOptions,
 ) !BlobFormatPlan {
     try requireRegularFile(io, path);
-    return blobPlan(
-        try target.inspectFormatOptions(io, allocator, path, "Zettide", .{
-            .name_profile = profile,
-        }),
-        options,
-    );
+    var opened = try openRegularFormatStorage(io, path, false);
+    defer opened.storage.close(io) catch {};
+    try rejectLegacyFormat(&opened.storage, io);
+    return blobPlan(try inspectStorage(
+        io,
+        allocator,
+        path,
+        profile,
+        &opened.storage,
+        opened.identity,
+    ), options);
 }
 
 pub fn acquireBlobFormat(
@@ -126,12 +156,21 @@ pub fn acquireBlobFormat(
     options: blob_filesystem.Filesystem.FormatOptions,
 ) !AcquiredBlobFormat {
     try requireRegularFile(io, path);
-    var acquired = try target.acquireFormatOptions(io, allocator, path, "Zettide", .{
-        .name_profile = profile,
-    });
-    errdefer acquired.deinit();
-    if (acquired.plan.kind != .regular_file) return error.BlobRequiresRegularFile;
-    return .{ .plan = blobPlan(acquired.plan, options), .target_format = acquired };
+    var opened = try openRegularFormatStorage(io, path, true);
+    errdefer opened.storage.close(io) catch {};
+    try rejectLegacyFormat(&opened.storage, io);
+    return .{
+        .plan = blobPlan(try inspectStorage(
+            io,
+            allocator,
+            path,
+            profile,
+            &opened.storage,
+            opened.identity,
+        ), options),
+        .storage = opened.storage,
+        .io = io,
+    };
 }
 
 pub fn formatNewBlobFile(
@@ -247,7 +286,7 @@ pub fn openBlobPoolFilesystem(
 }
 
 fn blobPlan(
-    target_plan: target.FormatPlan,
+    target_plan: FormatPlan,
     options: blob_filesystem.Filesystem.FormatOptions,
 ) BlobFormatPlan {
     var hasher = std.crypto.hash.Blake3.init(.{});
@@ -262,7 +301,7 @@ fn blobPlan(
     return .{
         .target_plan = target_plan,
         .format_options = options,
-        .eligible = target_plan.kind == .regular_file and validBlobSize(target_plan.capacity_bytes),
+        .eligible = validBlobSize(target_plan.capacity_bytes),
         .token = token,
     };
 }
@@ -290,13 +329,122 @@ fn openRegularStorage(io: Io, path: []const u8, writable: bool) !storage_api.Sto
     return storage_api.Storage.initOwned(file, try file.length(io), .regular_file, 1, true);
 }
 
+fn openRegularFormatStorage(io: Io, path: []const u8, writable: bool) !struct {
+    storage: storage_api.Storage,
+    identity: RegularIdentity,
+} {
+    const file = try Io.Dir.cwd().openFile(io, path, .{
+        .mode = if (writable) .read_write else .read_only,
+        .lock = if (writable) .exclusive else .shared,
+        .lock_nonblocking = true,
+    });
+    errdefer {
+        file.unlock(io);
+        file.close(io);
+    }
+    const stat = try file.stat(io);
+    try requireRegularKind(stat.kind);
+    return .{
+        .storage = storage_api.Storage.initOwned(file, try file.length(io), .regular_file, 1, true),
+        .identity = .{
+            .inode = @bitCast(stat.inode),
+            .mtime_ns = stat.mtime.nanoseconds,
+            .ctime_ns = stat.ctime.nanoseconds,
+        },
+    };
+}
+
+fn inspectStorage(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    profile: name_profile.Profile,
+    storage: *storage_api.Storage,
+    identity: RegularIdentity,
+) !FormatPlan {
+    const scan = try scanStorage(storage, io, allocator);
+    var plan: FormatPlan = .{
+        .path = path,
+        .name_profile = profile,
+        .canonical_path_digest = try canonicalPathDigest(io, path),
+        .capacity_bytes = storage.capacity(),
+        .contains_data = scan.contains_data,
+        .data_digest = scan.digest,
+        .token = undefined,
+        .identity = identity,
+    };
+    plan.token = computeToken(&plan);
+    return plan;
+}
+
+const StorageScan = struct {
+    contains_data: bool,
+    digest: [32]u8,
+};
+
+fn scanStorage(storage: *storage_api.Storage, io: Io, allocator: std.mem.Allocator) !StorageScan {
+    const chunk_size = 1024 * 1024;
+    const buffer = try allocator.alloc(u8, chunk_size);
+    defer allocator.free(buffer);
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    var contains_data = false;
+    var offset: u64 = 0;
+    while (offset < storage.capacity()) {
+        const amount: usize = @intCast(@min(@as(u64, buffer.len), storage.capacity() - offset));
+        if (try storage.readAt(io, buffer[0..amount], offset) != amount) return error.TruncatedTarget;
+        hasher.update(buffer[0..amount]);
+        contains_data = contains_data or !std.mem.allEqual(u8, buffer[0..amount], 0);
+        offset += amount;
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return .{ .contains_data = contains_data, .digest = digest };
+}
+
+fn computeToken(plan: *const FormatPlan) [32]u8 {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("zettide-blob-target-plan-v1\x00");
+    hasher.update(&plan.canonical_path_digest);
+    hasher.update(&plan.data_digest);
+    hasher.update(plan.name_profile.name());
+    var values: [41]u8 = undefined;
+    std.mem.writeInt(u64, values[0..8], plan.capacity_bytes, .little);
+    std.mem.writeInt(u64, values[8..16], plan.identity.inode, .little);
+    std.mem.writeInt(i96, values[16..28], plan.identity.mtime_ns, .little);
+    std.mem.writeInt(i96, values[28..40], plan.identity.ctime_ns, .little);
+    values[40] = @intFromBool(plan.contains_data);
+    hasher.update(&values);
+    var token: [32]u8 = undefined;
+    hasher.final(&token);
+    return token;
+}
+
+fn canonicalPathDigest(io: Io, path: []const u8) ![32]u8 {
+    var canonical: [Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try Io.Dir.cwd().realPathFile(io, path, &canonical);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.Blake3.hash(canonical[0..length], &digest, .{});
+    return digest;
+}
+
+fn rejectLegacyFormat(storage: *storage_api.Storage, io: Io) !void {
+    var first: [header_size]u8 = undefined;
+    var second: [header_size]u8 = undefined;
+    const first_len = try storage.readAt(io, &first, header_a_offset);
+    const second_len = try storage.readAt(io, &second, header_b_offset);
+    if (headerKind(first[0..first_len]) == .littlefs_container or
+        headerKind(second[0..second_len]) == .littlefs_container)
+        return error.UnsupportedLegacyFormat;
+}
+
 fn requireRegularKind(kind: Io.File.Kind) !void {
     if (kind != .file) return error.BlobRequiresRegularFile;
 }
 
 fn headerKind(bytes: []const u8) FormatKind {
     if (blob_format.hasHeaderMagic(bytes)) return .blob;
-    if (container.hasHeaderMagic(bytes)) return .littlefs_container;
+    if (bytes.len >= legacy_magic.len and std.mem.eql(u8, bytes[0..legacy_magic.len], legacy_magic))
+        return .littlefs_container;
     if (member_format.hasHeaderMagic(bytes)) return .pool_member;
     return .unknown;
 }
@@ -460,13 +608,13 @@ test "Catalog Pool marker rejects Blob formatting without data changes" {
 }
 
 test "format classifier uses both slots and rejects conflicts" {
-    var blob = [_]u8{0} ** container.header_size;
+    var blob = [_]u8{0} ** header_size;
     @memcpy(blob[0..8], "ZTBLOB01");
-    var littlefs = [_]u8{0} ** container.header_size;
+    var littlefs = [_]u8{0} ** header_size;
     @memcpy(littlefs[0..8], "LFSDRV2\x00");
-    var pool = [_]u8{0} ** container.header_size;
+    var pool = [_]u8{0} ** header_size;
     @memcpy(pool[0..8], "DDVMEM3\x00");
-    const empty = [_]u8{0} ** container.header_size;
+    const empty = [_]u8{0} ** header_size;
 
     try std.testing.expectEqual(FormatKind.blob, try classifyHeaderSlots(&blob, &empty));
     try std.testing.expectEqual(FormatKind.blob, try classifyHeaderSlots(&empty, &blob));

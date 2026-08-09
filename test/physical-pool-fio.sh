@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -eq 4 || $# -eq 5 ]] || {
-    echo "usage: physical-pool-fio.sh CLI DEVICE SERIAL POOL_ID [littlefs|blob]" >&2
+[[ $# -eq 4 ]] || {
+    echo "usage: physical-pool-fio.sh CLI DEVICE SERIAL POOL_ID" >&2
     exit 2
 }
 
@@ -10,7 +10,6 @@ cli=$1
 device=$2
 expected_serial=$3
 expected_pool_id=$4
-expected_filesystem=${5:-littlefs}
 log_dir=${ZETTIDE_TEST_LOG_DIR:?ZETTIDE_TEST_LOG_DIR is required}
 single_size=${ZETTIDE_POOL_FIO_SINGLE_SIZE:-2G}
 multi_size=${ZETTIDE_POOL_FIO_MULTI_SIZE:-512M}
@@ -31,10 +30,6 @@ nfs_perf_frequency=${ZETTIDE_NFS_PERF_FREQUENCY:-199}
 }
 [[ $runtime =~ ^[1-9][0-9]*$ && $ramp_time =~ ^[0-9]+$ ]] || {
     echo "fio runtime and ramp time must be integer seconds" >&2
-    exit 2
-}
-[[ $expected_filesystem == littlefs || $expected_filesystem == blob ]] || {
-    echo "unsupported Pool filesystem: $expected_filesystem" >&2
     exit 2
 }
 [[ $frontend == fuse || $frontend == nfs ]] || {
@@ -401,27 +396,22 @@ run_fio_case() {
         return
     fi
     grep -q '^fuse_metrics ' "$mount_log"
-    if [[ $expected_filesystem == blob ]]; then
-        grep -q '^pool_transport_metrics ' "$mount_log"
-        ! grep -q '^pipeline_metrics ' "$mount_log"
-        ! grep -q '^member_transport_metrics ' "$mount_log"
-        if [[ $name == seq-read-1m-qd32-j1 ]]; then
-            peak_inflight=$(grep -o 'max_inflight=[0-9]*' "$mount_log")
-            peak_inflight=${peak_inflight#max_inflight=}
-            ((peak_inflight > 1))
-        elif [[ $name == seq-write-1m-qd32-j1 ]]; then
-            peak_inflight=$(grep -o 'max_inflight=[0-9]*' "$mount_log")
-            peak_inflight=${peak_inflight#max_inflight=}
-            ((peak_inflight == 1))
-            submitted_sqes=$(grep -o 'submitted_sqes=[0-9]*' "$mount_log")
-            submitted_sqes=${submitted_sqes#submitted_sqes=}
-            write_calls=$(grep -o 'write_calls=[0-9]*' "$mount_log")
-            write_calls=${write_calls#write_calls=}
-            ((submitted_sqes < write_calls * 128))
-        fi
-    else
-        grep -q '^pipeline_metrics ' "$mount_log"
-        grep -q '^member_transport_metrics index=0 ' "$mount_log"
+    grep -q '^pool_transport_metrics ' "$mount_log"
+    ! grep -q '^pipeline_metrics ' "$mount_log"
+    ! grep -q '^member_transport_metrics ' "$mount_log"
+    if [[ $name == seq-read-1m-qd32-j1 ]]; then
+        peak_inflight=$(grep -o 'max_inflight=[0-9]*' "$mount_log")
+        peak_inflight=${peak_inflight#max_inflight=}
+        ((peak_inflight > 1))
+    elif [[ $name == seq-write-1m-qd32-j1 ]]; then
+        peak_inflight=$(grep -o 'max_inflight=[0-9]*' "$mount_log")
+        peak_inflight=${peak_inflight#max_inflight=}
+        ((peak_inflight == 1))
+        submitted_sqes=$(grep -o 'submitted_sqes=[0-9]*' "$mount_log")
+        submitted_sqes=${submitted_sqes#submitted_sqes=}
+        write_calls=$(grep -o 'write_calls=[0-9]*' "$mount_log")
+        write_calls=${write_calls#write_calls=}
+        ((submitted_sqes < write_calls * 128))
     fi
 }
 
@@ -467,7 +457,7 @@ check_identity
 grep -q '^Preflight: eligible$' "$log_dir/device-inspect.log"
 "$cli" pool inspect --device "$device" >"$log_dir/pool-inspect-before.log"
 grep -q "^Pool: $expected_pool_id$" "$log_dir/pool-inspect-before.log"
-grep -q "^Data mode: $([[ $expected_filesystem == littlefs ]] && echo catalog || echo "$expected_filesystem")$" "$log_dir/pool-inspect-before.log"
+grep -q '^Data mode: blob$' "$log_dir/pool-inspect-before.log"
 grep -q '^Profile: unprotected$' "$log_dir/pool-inspect-before.log"
 grep -q '^Data policy: read_write$' "$log_dir/pool-inspect-before.log"
 grep -q '^Mountable: yes$' "$log_dir/pool-inspect-before.log"
@@ -499,6 +489,6 @@ run_fio_case randread-4k-qd32-j4 randread 4k 32 4 "$multi_size" 'multi.$jobnum.b
 check_identity
 "$cli" pool inspect --device "$device" >"$log_dir/pool-inspect-after.log"
 grep -q "^Pool: $expected_pool_id$" "$log_dir/pool-inspect-after.log"
-grep -q "^Data mode: $([[ $expected_filesystem == littlefs ]] && echo catalog || echo "$expected_filesystem")$" "$log_dir/pool-inspect-after.log"
+grep -q '^Data mode: blob$' "$log_dir/pool-inspect-after.log"
 grep -q '^Mountable: yes$' "$log_dir/pool-inspect-after.log"
 echo "physical Pool fio passed"

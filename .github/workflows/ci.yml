@@ -20,8 +20,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
       - name: Run portable tests
         run: zig build test -Doptimize=${{ matrix.optimize }}
-      - name: Run deterministic fault tests
-        run: zig build test-fault -Doptimize=${{ matrix.optimize }}
       - name: Cross-compile Windows boundary
         run: zig build test-cross -Doptimize=${{ matrix.optimize }}
       - name: Build filesystem benchmark

@@ -211,15 +211,23 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
     // Provisioning consumes every supplied storage on both success and failure.
     opened_count = 0;
     const outcome = try zettide.v3.pool_provision.create(context.io, context.allocator, &storages, .{
-        .data_mode = .catalog,
+        .data_mode = .blob,
     });
     var provisioned = switch (outcome) {
         .complete => |value| value,
         .partial => |partial| return partial.cause,
     };
     defer provisioned.deinit();
-    try zettide.volume.Volume.initializePool(context.io, &provisioned, "SPDK Pool");
-    try provisioned.close();
+    var filesystem = try zettide.filesystem_target.formatProvisionedBlobPool(
+        context.allocator,
+        context.io,
+        &provisioned,
+        .legacy_raw,
+        .{},
+    );
+    const inode = try filesystem.createFile(context.io, 1, "payload", 0o644, 0, 0);
+    if (try filesystem.write(context.io, inode, "SPDK", 0) != 4) return error.ShortWrite;
+    try filesystem.close(context.io);
 
     for (names, 0..) |name, index| {
         storages[index] = try runtime.openStorage(context.allocator, name, true);
@@ -233,12 +241,18 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
         &storages,
         .writable,
     );
-    var volume = try zettide.volume.Volume.openPool(context.io, context.allocator, &set, true);
-    defer volume.deinit();
-    try volume.mount();
-    if (try volume.usedBlocks() == 0) return error.EmptyFilesystem;
-    try volume.sync();
-    try volume.close();
+    filesystem = try zettide.filesystem_target.openBlobPoolFilesystem(
+        context.allocator,
+        context.io,
+        &set,
+        true,
+    );
+    defer filesystem.close(context.io) catch {};
+    const reopened_inode = try filesystem.resolvePath(context.io, "/payload");
+    var payload: [4]u8 = undefined;
+    if (try filesystem.read(context.io, reopened_inode, &payload, 0) != payload.len)
+        return error.ShortRead;
+    if (!std.mem.eql(u8, &payload, "SPDK")) return error.DataMismatch;
 }
 
 fn runtimeStatus(status: c_int) !void {

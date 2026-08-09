@@ -246,7 +246,7 @@ grep -q "^Pool: $blob_pool_id$" "$log_dir/blob-inspect.log"
 grep -q '^Data mode: blob$' "$log_dir/blob-inspect.log"
 grep -q '^Mountable: yes$' "$log_dir/blob-inspect.log"
 
-bash test/physical-pool-fio.sh "$cli" "$device" "$expected_serial" "$blob_pool_id" blob
+bash test/physical-pool-fio.sh "$cli" "$device" "$expected_serial" "$blob_pool_id"
 test_succeeded=true
 if [[ $backup_original == 1 ]]; then
     echo "physical Blob Pool fio passed; restoring $original_pool_id"

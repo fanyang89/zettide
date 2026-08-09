@@ -75,7 +75,7 @@ legacy="$tmp/legacy.ddv"
 truncate -s 8MiB "$legacy"
 printf 'LFSDRV2\0' | dd of="$legacy" conv=notrunc status=none
 printf 'LFSDRV2\0' | dd of="$legacy" bs=1 seek=4096 conv=notrunc status=none
-for command in info check; do
+for command in info check format; do
     if "$exe" "$command" "$legacy" >"$tmp/legacy.out" 2>"$tmp/legacy.err"; then
         echo "$command accepted a legacy regular file" >&2
         exit 1

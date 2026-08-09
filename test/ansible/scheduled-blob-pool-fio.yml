@@ -1,7 +1,0 @@
----
-- name: Benchmark a synthetic scheduled Blob Pool and restore the physical Pool
-  ansible.builtin.import_playbook: playbook.yml
-  vars:
-    zettide_test_profile_override: scheduled-blob-pool-fio
-    zettide_optimize_modes_override:
-      - ReleaseSafe
