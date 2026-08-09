@@ -47,6 +47,7 @@ pub const Device = struct {
     mutex: std.Io.Mutex = .init,
     dirty_member_mask: u16 = 0,
     write_frozen: std.atomic.Value(bool) = .init(false),
+    read_sequence: std.atomic.Value(usize) = .init(0),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -257,8 +258,11 @@ pub const Device = struct {
 
     fn readSpanFirstAvailable(self: *Device, output: []u8, logical_offset: u64) !void {
         const locations = try pool_blob_schedule.map(self.plan, logical_offset / self.plan.stripe_size);
+        const preferred_lane = self.read_sequence.fetchAdd(1, .monotonic) % pool_blob_schedule.replica_count;
         var last_error: anyerror = error.ReplicaUnavailable;
-        for (locations) |location| {
+        for (0..pool_blob_schedule.replica_count) |attempt| {
+            const lane = (preferred_lane + attempt) % pool_blob_schedule.replica_count;
+            const location = locations[lane];
             const member_index = self.memberIndex(location.slot) orelse continue;
             self.members[member_index].endpoint.readData(
                 try self.physicalOffset(location, logical_offset % self.plan.stripe_size),
@@ -357,6 +361,7 @@ pub const Device = struct {
     ) !void {
         std.debug.assert(reads.len == results.len and reads.len <= max_read_count);
         const Target = struct { request: u8 };
+        const preferred_lane = self.read_sequence.fetchAdd(1, .monotonic) % pool_blob_schedule.replica_count;
         var available_counts: [max_read_count]u8 = @splat(0);
         var available_lanes: [max_read_count][pool_blob_schedule.replica_count]u8 = undefined;
         var attempts: [max_read_count]u8 = @splat(0);
@@ -364,7 +369,9 @@ pub const Device = struct {
         var last_errors: [max_read_count]anyerror = @splat(error.ReplicaUnavailable);
         for (reads, 0..) |read, request_index| {
             const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
-            for (locations, 0..) |location, lane| {
+            for (0..pool_blob_schedule.replica_count) |attempt| {
+                const lane = (preferred_lane + attempt) % pool_blob_schedule.replica_count;
+                const location = locations[lane];
                 if (self.memberIndex(location.slot) == null) continue;
                 available_lanes[request_index][available_counts[request_index]] = @intCast(lane);
                 available_counts[request_index] += 1;
@@ -1009,7 +1016,7 @@ test "scheduled readMany batches requests by physical member" {
     }
 }
 
-test "scheduled first-available scalar reads one replica and falls back sequentially" {
+test "scheduled first-available scalar reads rotate and fall back cyclically" {
     const plan = try testPlan(3, 4096, 4);
     var contexts: [3]TestEndpoint = undefined;
     var endpoints: [3]MemberEndpoint = undefined;
@@ -1020,21 +1027,60 @@ test "scheduled first-available scalar reads one replica and falls back sequenti
 
     const locations = try pool_blob_schedule.map(plan, 0);
     var output: [4096]u8 = undefined;
-    _ = try device.readAt(&output, 0);
+    for (0..3) |_| _ = try device.readAt(&output, 0);
     try std.testing.expect(std.mem.allEqual(u8, &output, 0x5a));
+    for (locations) |location| try std.testing.expectEqual(
+        @as(usize, 1),
+        contexts[device.memberIndex(location.slot).?].read_calls.load(.monotonic),
+    );
+
+    _ = try device.readAt(&output, 0);
+    try std.testing.expectEqual(@as(usize, 2), contexts[device.memberIndex(locations[0].slot).?].read_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[1].slot).?].read_calls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[2].slot).?].read_calls.load(.monotonic));
+
+    resetTestReads(&contexts);
+    device.read_sequence.store(2, .monotonic);
+    contexts[device.memberIndex(locations[2].slot).?].fail_read = true;
+    _ = try device.readAt(&output, 0);
+    try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[2].slot).?].read_calls.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[0].slot).?].read_calls.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 0), contexts[device.memberIndex(locations[1].slot).?].read_calls.load(.monotonic));
 
-    resetTestReads(&contexts);
-    contexts[device.memberIndex(locations[0].slot).?].fail_read = true;
-    _ = try device.readAt(&output, 0);
-    try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[0].slot).?].read_calls.load(.monotonic));
-    try std.testing.expectEqual(@as(usize, 1), contexts[device.memberIndex(locations[1].slot).?].read_calls.load(.monotonic));
-    try std.testing.expectEqual(@as(usize, 0), contexts[device.memberIndex(locations[2].slot).?].read_calls.load(.monotonic));
-
-    contexts[device.memberIndex(locations[1].slot).?].fail_read = true;
-    contexts[device.memberIndex(locations[2].slot).?].fail_read = true;
+    for (&contexts) |*context| context.fail_read = true;
     try std.testing.expectError(error.InjectedReadFault, device.readAt(&output, 0));
+}
+
+test "scheduled first-available batches rotate while preserving member batch depth" {
+    const plan = try testPlan(3, 4096, 4);
+    var contexts: [3]TestEndpoint = undefined;
+    var endpoints: [3]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    for (0..pool_blob_schedule.replica_count) |lane| @memset(mappedBytes(&device, &contexts, 0, lane), 0x6b);
+
+    const locations = try pool_blob_schedule.map(plan, 0);
+    var output: [2][4096]u8 = undefined;
+    var results: [2]storage_api.ReadResult = undefined;
+    const reads = [_]storage_api.Read{
+        .{ .buffer = &output[0], .offset = 0 },
+        .{ .buffer = &output[1], .offset = 0 },
+    };
+    for (1..5) |completed| {
+        try device.readManyAt(&reads, &results);
+        for (results) |result| {
+            try std.testing.expectEqual(@as(?anyerror, null), result.failure);
+            try std.testing.expectEqual(@as(usize, 4096), result.amount);
+        }
+        for (locations, 0..) |location, lane| {
+            const expected_calls = (completed + 2 - lane) / pool_blob_schedule.replica_count;
+            const context = &contexts[device.memberIndex(location.slot).?];
+            try std.testing.expectEqual(expected_calls, context.read_batch_calls.load(.monotonic));
+            try std.testing.expectEqual(expected_calls * reads.len, context.read_batch_items.load(.monotonic));
+        }
+    }
+    for (&output) |*block| try std.testing.expect(std.mem.allEqual(u8, block, 0x6b));
 }
 
 test "scheduled first-available batch retries only failed and short reads" {
@@ -1057,6 +1103,7 @@ test "scheduled first-available batch retries only failed and short reads" {
     try std.testing.expectEqual(@as(usize, 2), totalBatchItems(&contexts));
 
     resetTestReads(&contexts);
+    device.read_sequence.store(0, .monotonic);
     const second_locations = try pool_blob_schedule.map(plan, 4096 / plan.stripe_size);
     const failed_location = first_locations[0];
     contexts[device.memberIndex(failed_location.slot).?].fail_read_offset =
@@ -1071,6 +1118,7 @@ test "scheduled first-available batch retries only failed and short reads" {
     try std.testing.expectEqual(@as(u8, 2), output[1][0]);
 
     resetTestReads(&contexts);
+    device.read_sequence.store(0, .monotonic);
     contexts[device.memberIndex(second_locations[0].slot).?].short_read_offset =
         try device.physicalOffset(second_locations[0], 0);
     try device.readManyAt(&.{.{ .buffer = &output[1], .offset = 4096 }}, results[0..1]);
@@ -1078,6 +1126,7 @@ test "scheduled first-available batch retries only failed and short reads" {
     try std.testing.expectEqual(@as(usize, 2), totalBatchItems(&contexts));
 
     resetTestReads(&contexts);
+    device.read_sequence.store(0, .monotonic);
     for (&contexts) |*context| context.fail_read_batch = true;
     try device.readManyAt(&.{.{ .buffer = &output[0], .offset = 0 }}, results[0..1]);
     try std.testing.expectEqual(error.InjectedBatchReadFault, results[0].failure.?);
@@ -1095,7 +1144,7 @@ test "scheduled first-available degraded reads skip every missing lane" {
     const locations = try pool_blob_schedule.map(plan, 0);
     var output: [4096]u8 = undefined;
 
-    for (locations) |missing| {
+    for (locations, 0..) |missing, missing_lane| {
         resetTestReads(&contexts);
         var available: [pool_blob_schedule.replica_count - 1]MemberEndpoint = undefined;
         var available_count: usize = 0;
@@ -1110,6 +1159,11 @@ test "scheduled first-available degraded reads skip every missing lane" {
         var total_calls: usize = 0;
         for (&contexts) |*context| total_calls += context.read_calls.load(.monotonic);
         try std.testing.expectEqual(@as(usize, 1), total_calls);
+        const expected_scalar_lane: usize = if (missing_lane == 0) 1 else 0;
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            contexts[full.memberIndex(locations[expected_scalar_lane].slot).?].read_calls.load(.monotonic),
+        );
 
         resetTestReads(&contexts);
         var result: [1]storage_api.ReadResult = undefined;
@@ -1117,6 +1171,11 @@ test "scheduled first-available degraded reads skip every missing lane" {
         try std.testing.expectEqual(@as(?anyerror, null), result[0].failure);
         try std.testing.expectEqual(@as(usize, output.len), result[0].amount);
         try std.testing.expectEqual(@as(usize, 1), totalBatchItems(&contexts));
+        const expected_batch_lane: usize = if (missing_lane == 1) 2 else 1;
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            contexts[full.memberIndex(locations[expected_batch_lane].slot).?].read_batch_items.load(.monotonic),
+        );
     }
 }
 
@@ -1139,6 +1198,7 @@ test "scheduled reads select a matching pair and classify quorum failures" {
     var output: [4096]u8 = undefined;
     _ = try device.readAt(&output, 0);
     try std.testing.expectEqual(@as(u8, 7), output[0]);
+    try std.testing.expectEqual(@as(usize, 0), device.read_sequence.load(.monotonic));
     var total_read_calls: usize = 0;
     for (&contexts) |*context| total_read_calls += context.read_calls.load(.monotonic);
     try std.testing.expectEqual(@as(usize, 2), total_read_calls);
@@ -1182,6 +1242,7 @@ test "scheduled reads select a matching pair and classify quorum failures" {
     contexts[device.memberIndex((try pool_blob_schedule.map(plan, 0))[2].slot).?].short_read = true;
     try device.readManyAt(&.{.{ .buffer = &output, .offset = 0 }}, batch_results[0..1]);
     try std.testing.expectEqual(error.ReplicaQuorumUnavailable, batch_results[0].failure.?);
+    try std.testing.expectEqual(@as(usize, 0), device.read_sequence.load(.monotonic));
 }
 
 test "scheduled readMany falls back for cross-stripe requests" {
