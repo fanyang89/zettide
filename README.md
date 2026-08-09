@@ -1,36 +1,67 @@
 # Zettide
 
-Zettide is an experimental storage engine. Its current filesystem product is
-BlobFilesystem, backed by either a regular Blob file or an explicitly selected
-Linux raw-disk Blob Pool. Catalog Pools provide block data for managed SPDK
-exports; they are not mounted as filesystems.
+Zettide is an experimental storage engine for single-node, multi-physical-disk
+storage ownership. Tier 1 covers both a same-host virtualization deployment and
+a dedicated single storage node. BlobFilesystem provides filesystem data, while
+Catalog Volumes provide block data; both are designed to use Pools assembled
+from independent physical disks.
 
-The project currently implements the portable container core and a foreground
-Linux FUSE3 mount adapter. The core cross-compiles for Windows; the native
+The current multi-disk filesystem path is BlobFilesystem on a Linux raw-disk
+Blob Pool through the foreground FUSE3 adapter. A standalone regular Blob file
+is also supported. Catalog Pools feed the partial managed SPDK endpoint path and
+are not mounted as filesystems. The core cross-compiles for Windows; the native
 WinFsp dispatcher remains an explicit, conditionally compiled integration
 boundary.
 
 ## Capability Stages
 
-Zettide is being developed as three cumulative storage tiers:
+Tier 1 is the single-node storage takeover milestone. It requires all four
+baseline frontends against the appropriate Pool-backed data model, without
+requiring storage-node replication:
 
-| Tier | Product capability | Status |
-| --- | --- | --- |
-| Tier 1 | Mount a local filesystem backed by a container file or raw devices | Current Linux path; full POSIX-profile completion remains in progress |
-| Tier 2 | Serve local catalog Volumes as blocks to qtr, with iSCSI as the first managed protocol | Local daemon, control API, and optional vhost-user-blk backend exist; iSCSI and qtr integration remain targets |
-| Tier 3 | Replicate Volumes across storage nodes and republish them after a storage failure | Target; control metadata exists in `zettide-control`, but the distributed data path does not |
+| Frontend | Data model | Tier 1 role | Current status |
+| --- | --- | --- | --- |
+| NVMf over TCP or RDMA | Catalog Volume | Preferred block publication | Partial: endpoint daemon and exports exist, but there is no qtr-managed end-to-end path |
+| iSCSI | Catalog Volume | Block fallback | Target |
+| NFS | BlobFilesystem | Network filesystem publication | Partial: NFSv3 FSAL opens a standalone target or one Pool member; it cannot assemble a multi-member Pool |
+| FUSE | BlobFilesystem | Local and same-host filesystem mount | Current multi-disk path |
 
-The current raw Pool product commands accept exactly one unprotected device or
-three replicated devices. The format and libraries can represent dynamic
-membership, a multi-Volume catalog, catalog extent mappings, and protection
-metadata, but online capacity expansion and protection-policy migration are not
-connected to a product lifecycle yet.
+Virtualization is a first-class Tier 1 consumer. A native qtr backend is required
+for Tier 1; Proxmox VE is a first-class follow-up target but does not block the
+Tier 1 milestone. CSI is a secondary, non-blocking target: block volumes use
+NVMf or iSCSI, and filesystem volumes use NFS or FUSE.
+
+The later tiers remain cumulative:
+
+| Tier | Additional capability |
+| --- | --- |
+| Tier 2 | Dynamic Pool membership, recoverable online capacity/protection migration, multi-Volume service governance, attachment governance, and fuller platform lifecycle |
+| Tier 3 | Cross-node replication, fencing, storage failover, repair, and caller-directed republication |
+
+Tier 3 control metadata foundations exist in `zettide-control`, but the
+distributed data path does not.
+
+The current raw Pool product commands accept one unprotected device, three
+replicated devices, or 3 through 12 `scheduled-replicated` devices. The format
+and libraries can represent dynamic membership, a multi-Volume catalog, catalog
+extent mappings, and protection metadata, but online capacity expansion and
+protection-policy migration are not connected to a product lifecycle yet.
+
+A regular file, a synthetic or loop-backed member, or one physical disk remains
+useful for development and qualification, but none satisfies Tier 1 completion.
+The raw Pool completion gate requires multiple Pool members on independent
+physical disks, with Catalog Volumes qualified through NVMf and iSCSI and
+BlobFilesystem qualified through NFS and FUSE.
 
 Linux SPDK support includes an optional foreground endpoint daemon with a
 versioned owner-only Unix control API and persistent desired state. It composes
 the managed SPDK runtime, catalog Volume backend, custom bdev provider, and
-vhost-user-blk export lifecycle. The iSCSI export lifecycle and qtr attachment
-reconciliation are not implemented yet.
+standard NVMf TCP/RDMA and vhost-user-blk export lifecycles. These are endpoint
+and export primitives, not a complete consumer-bound Publication API: consumer
+identity, access-generation fencing, a protocol-neutral expected-identity
+result, qtr-side identity validation, managed attachment, and restart
+reconciliation are not implemented. The existing endpoint does derive stable
+NQN and NVMe serial values. The iSCSI target lifecycle is also not implemented.
 
 ## Requirements
 
@@ -133,6 +164,15 @@ perform real Linux syscalls and require writable `/dev/fuse`, `fusermount3`,
 and `mountpoint`. Use `-Dfuse-tests=auto` to skip them when those capabilities
 are unavailable.
 
+These commands are component and frontend gates, not proof that the Tier 1
+frontend contract is complete. The FUSE tests cover the current frontend, while
+separate raw Pool profiles exercise Pool-backed paths with physical, loop, or
+synthetic members. The local NFS-Ganesha gate uses a standalone regular-file
+target, while the remote physical-Pool profile uses one Pool member; neither
+assembles a multi-member Pool. The SPDK and NVMf gates cover endpoint and export
+pieces without a qtr-managed end-to-end workflow. There is no iSCSI product gate
+yet.
+
 The optional Linux SPDK link check consumes a separately built SPDK tree through
 its generated pkg-config metadata. For a sibling SPDK checkout built with shared
 libraries, run:
@@ -168,9 +208,11 @@ configuration. Its current scope and exclusions are documented in
 
 `test-nfs-ganesha` rebuilds `FSAL_ZETTIDE` in a separately configured pinned
 NFS-Ganesha V13 tree, starts an isolated loopback NFSv3 export on temporary
-ports, and mounts it through the Linux NFS client. The gate verifies stable
-file IDs, hard links, symlinks, rename, truncate, persistence across a server
-restart, and read-only reopening. It requires mount tools, rpcbind,
+ports, and mounts it through the Linux NFS client. This is a partial frontend
+gate over a standalone regular-file target, not multi-disk NFS qualification.
+The remote physical-Pool profile separately exercises one Pool member. It verifies
+stable file IDs, hard links, symlinks, rename, truncate, persistence across a
+server restart, and read-only reopening. It requires mount tools, rpcbind,
 passwordless sudo, and `-Dganesha-build-dir` pointing to the build described in
 `fsal/zettide/README.md`.
 

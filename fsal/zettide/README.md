@@ -4,6 +4,11 @@
 Zettide NFS backend directly. It does not use FUSE, `FSAL_VFS`, Linux VFS, or
 an IPC transport.
 
+This is a partial NFS frontend, not a complete Tier 1 NFS implementation. It
+supports NFSv3 only and currently opens either a standalone regular-file target
+or one BlobFilesystem Pool member. It does not assemble or export a Pool
+spanning multiple independent physical disks.
+
 The module ABI is pinned to NFS-Ganesha `V13.0`, commit
 `429463bc77a4654a4f00e0109b8c1496c272abb4`. Build it only in that source tree.
 
@@ -58,8 +63,8 @@ not used.
 
 ## Export
 
-Use NFSv3 only. NFSv4 state, NLM locks, ACLs, xattrs, and quotas are not
-implemented.
+Use NFSv3 only. NFSv4 state, NLM locks, ACLs, xattrs, quotas, and multi-member
+Pool export are not implemented.
 
 ```text
 NFS_Core_Param {

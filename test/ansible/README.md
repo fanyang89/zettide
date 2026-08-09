@@ -1,9 +1,19 @@
-# Remote Tier 1 Tests
+# Remote FUSE and Protocol Tests
 
 The Ansible suite packages the controller's current Zettide working tree and
-runs the complete Tier 1 gate on remote Fedora or Ubuntu hosts. Each host runs
-Debug and ReleaseSafe tests, including raw loop devices and privileged POSIX
-conformance suites.
+runs the current FUSE/POSIX gate on remote Fedora or Ubuntu hosts. Each host
+runs Debug and ReleaseSafe tests, including raw loop devices and privileged
+POSIX conformance suites.
+
+This is not the complete Tier 1 admission gate. Tier 1 requires NVMf and iSCSI
+for Catalog Volumes plus NFS and FUSE for BlobFilesystem, with both data models
+backed by Pools spanning multiple independent physical disks. The standalone
+NFSv3 RPC gate uses a regular-file target, while the remote physical profile
+uses one Pool member; neither assembles a multi-member Pool.
+The NVMf profiles exercise specific endpoint, transport, Catalog, or synthetic
+Pool paths without qtr-managed end-to-end attachment. No NFS or NVMf profile can
+independently establish the real multi-disk, four-frontend Tier 1 contract;
+iSCSI remains a target.
 
 ## Target prerequisites
 
@@ -137,7 +147,7 @@ loss or `SIGKILL` can prevent automatic restoration; use the retained image for
 manual recovery. The default async limit is 24 hours; increase
 `zettide_raw_timeout` when the backup, test, and restoration passes may exceed
 that time. This profile does not run fio by default and is not part of the
-default Tier 1 gate.
+default FUSE/POSIX gate.
 
 Set `-e zettide_raw_fio=true` to run a direct `io_uring` fio matrix against the
 empty raw disk before pool creation. The matrix covers 1 MiB sequential I/O and

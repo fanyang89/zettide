@@ -4,6 +4,8 @@
 
 The Linux FUSE-to-Samba path is a feasibility gate, not a current product
 frontend. Windows WinFsp and macOS macFUSE adapters are not implemented.
+SMB3 is not a Tier 1 baseline frontend and does not replace or satisfy the NVMf,
+iSCSI, NFS, or FUSE admission requirements.
 
 The gate exports one privately mounted Zettide target through an isolated Samba
 instance. It proves that the existing filesystem can sustain authenticated,
@@ -40,8 +42,8 @@ The feasibility gate does not claim support for:
 - case-insensitive portable names or Unicode normalization
 - cross-platform container-image interoperability
 
-These capabilities require the portable namespace profile and platform mount
-adapters described by the Tier 1 roadmap.
+These capabilities require additional portable namespace and platform mount
+adapter work outside the Tier 1 baseline frontend contract.
 
 ## Test Gate
 
