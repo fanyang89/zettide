@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux_block = @import("linux_block_device.zig");
 const member_format = @import("member_format.zig");
+const pool_blob_schedule = @import("pool_blob_schedule.zig");
 const pool_policy = @import("pool_policy.zig");
 const pool_provision = @import("pool_provision.zig");
 const storage_api = @import("storage.zig");
@@ -11,6 +12,7 @@ pub const Options = struct {
     label: []const u8,
     name_profile: name_profile.Profile = .legacy_raw,
     filesystem: member_format.PoolFilesystem = .littlefs,
+    scheduled_blob: bool = false,
 };
 
 pub const Plan = struct {
@@ -170,14 +172,27 @@ pub fn deviceReadyForFilesystem(device: linux_block.DeviceInfo, filesystem: memb
 fn validateRequest(paths: []const []const u8, options: Options) !void {
     if (paths.len == 0 or paths.len > @import("pool_topology.zig").max_member_count)
         return error.InvalidMemberCount;
+    if (options.scheduled_blob) {
+        if (options.filesystem != .blob or
+            options.protection != .replicated or
+            paths.len < pool_blob_schedule.replica_count or
+            paths.len > pool_blob_schedule.max_member_count)
+            return error.InvalidScheduledBlobOptions;
+    }
     if (options.protection == .erasure_coded) return error.ErasureCodingNotImplemented;
-    if (paths.len != try options.protection.fullWidth()) return error.UnsupportedPoolWidth;
+    if (!options.scheduled_blob and paths.len != try options.protection.fullWidth())
+        return error.UnsupportedPoolWidth;
     _ = try @import("member_format.zig").Label.init(options.label);
 }
 
 fn computeToken(devices: []const linux_block.DeviceInfo, contains_data: []const bool, options: Options) [32]u8 {
     var hasher = std.crypto.hash.Blake3.init(.{});
-    if (options.filesystem == .littlefs) {
+    if (options.scheduled_blob) {
+        hasher.update("zettide-linux-pool-plan-v3\x00");
+        hasher.update(@tagName(options.filesystem));
+        hasher.update("\x00");
+        hasher.update(&.{@intFromBool(options.scheduled_blob)});
+    } else if (options.filesystem == .littlefs) {
         hasher.update("zettide-linux-pool-plan-v1\x00");
     } else {
         hasher.update("zettide-linux-pool-plan-v2\x00");
@@ -288,6 +303,17 @@ test "plan token binds device order geometry and options" {
             .name_profile = .portable_v1,
         }),
     ));
+    const scheduled_options: Options = .{
+        .protection = .replicated,
+        .label = "pool",
+        .filesystem = .blob,
+        .scheduled_blob = true,
+    };
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &computeToken(&devices, &contains_data, blob_options),
+        &computeToken(&devices, &contains_data, scheduled_options),
+    ));
     var changed = devices;
     changed[0].disk_sequence += 1;
     try std.testing.expect(!std.mem.eql(
@@ -308,6 +334,45 @@ test "plan token binds device order geometry and options" {
         &computeToken(&devices, &contains_data, options),
         &computeToken(&devices, &found_data, options),
     ));
+}
+
+test "scheduled Blob request validates profile and member count" {
+    const scheduled: Options = .{
+        .protection = .replicated,
+        .label = "pool",
+        .filesystem = .blob,
+        .scheduled_blob = true,
+    };
+    const paths: [pool_blob_schedule.max_member_count][]const u8 = @splat("device");
+    const too_many_paths: [pool_blob_schedule.max_member_count + 1][]const u8 = @splat("device");
+
+    try validateRequest(paths[0..pool_blob_schedule.replica_count], scheduled);
+    try validateRequest(&paths, scheduled);
+    try std.testing.expectError(
+        error.InvalidScheduledBlobOptions,
+        validateRequest(paths[0 .. pool_blob_schedule.replica_count - 1], scheduled),
+    );
+    try std.testing.expectError(
+        error.InvalidScheduledBlobOptions,
+        validateRequest(&too_many_paths, scheduled),
+    );
+    try std.testing.expectError(error.InvalidMemberCount, validateRequest(&.{}, scheduled));
+    try std.testing.expectError(error.InvalidScheduledBlobOptions, validateRequest(paths[0..3], .{
+        .protection = .unprotected,
+        .label = "pool",
+        .filesystem = .blob,
+        .scheduled_blob = true,
+    }));
+    try std.testing.expectError(error.InvalidScheduledBlobOptions, validateRequest(paths[0..3], .{
+        .protection = .replicated,
+        .label = "pool",
+        .scheduled_blob = true,
+    }));
+    try std.testing.expectError(error.UnsupportedPoolWidth, validateRequest(paths[0..4], .{
+        .protection = .replicated,
+        .label = "pool",
+        .filesystem = .blob,
+    }));
 }
 
 test "device readiness rejects unsupported geometry" {

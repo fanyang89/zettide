@@ -9,6 +9,19 @@ const FilesystemKind = enum {
     blob,
 };
 
+const PoolProfile = enum {
+    replicated,
+    unprotected,
+    scheduled_replicated,
+
+    fn parse(value: []const u8) !PoolProfile {
+        if (std.mem.eql(u8, value, "replicated")) return .replicated;
+        if (std.mem.eql(u8, value, "unprotected")) return .unprotected;
+        if (std.mem.eql(u8, value, "scheduled-replicated")) return .scheduled_replicated;
+        return error.InvalidProfile;
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
@@ -148,7 +161,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
 
     var paths: [zettide.v3.pool_topology.max_member_count][]const u8 = undefined;
     var path_count: usize = 0;
-    var protection: zettide.v3.pool_policy.Protection = .replicated;
+    var profile: PoolProfile = .replicated;
     var label: []const u8 = "Zettide";
     var name_profile: zettide.name_profile.Profile = .legacy_raw;
     var filesystem: zettide.v3.member_format.PoolFilesystem = .littlefs;
@@ -166,12 +179,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         } else if (std.mem.eql(u8, option, "--profile")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
-            protection = if (std.mem.eql(u8, args[index], "replicated"))
-                .replicated
-            else if (std.mem.eql(u8, args[index], "unprotected"))
-                .unprotected
-            else
-                return error.InvalidProfile;
+            profile = try .parse(args[index]);
         } else if (std.mem.eql(u8, option, "--label")) {
             index += 1;
             if (index == args.len) return error.MissingOptionValue;
@@ -195,6 +203,16 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
             return error.UnknownOption;
         }
     }
+    const scheduled_blob = profile == .scheduled_replicated;
+    const protection: zettide.v3.pool_policy.Protection = switch (profile) {
+        .replicated, .scheduled_replicated => .replicated,
+        .unprotected => .unprotected,
+    };
+    if (scheduled_blob) {
+        if (filesystem_explicit and filesystem != .blob)
+            return error.InvalidScheduledBlobOptions;
+        filesystem = .blob;
+    }
     if (planning and confirmation != null) return error.UnknownOption;
     if (creating and confirmation == null) return error.MissingConfirmation;
 
@@ -203,6 +221,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         .label = label,
         .name_profile = name_profile,
         .filesystem = filesystem,
+        .scheduled_blob = scheduled_blob,
     };
     if (planning) {
         var plan = try zettide.v3.linux_pool_plan.inspect(io, allocator, paths[0..path_count], options);
@@ -229,6 +248,7 @@ fn poolCommand(allocator: std.mem.Allocator, io: Io, args: []const []const u8, s
         .protection = protection,
         .filesystem = filesystem,
         .label = label,
+        .scheduled_blob = scheduled_blob,
     });
     switch (outcome) {
         .complete => |value| {
@@ -327,7 +347,10 @@ fn poolInspectCommand(
     try stdout.print("Generation: {d}\n", .{authority.generation});
     try stdout.print("Topology epoch: {d}\n", .{authority.topology.epoch});
     try stdout.print("Layout epoch: {d}\n", .{authority.layout.layout_epoch});
-    try stdout.print("Profile: {s}\n", .{@tagName(authority.layout.kind)});
+    try stdout.print("Profile: {s}\n", .{if (authority.layout.scheduled_blob != null)
+        "scheduled-replicated"
+    else
+        @tagName(authority.layout.kind)});
     try stdout.print("Members: {d}/{d}\n", .{ path_count, authority.topology.member_count });
     try stdout.print("Data policy: {s}\n", .{@tagName(set.dataAccess())});
     const mountable = switch (filesystem) {
@@ -607,6 +630,12 @@ fn printPoolPlan(plan: *const zettide.v3.linux_pool_plan.Plan, stdout: *Io.Write
                 "ready",
         });
     }
+    try stdout.print("Profile: {s}\n", .{if (plan.options.scheduled_blob)
+        "scheduled-replicated"
+    else
+        @tagName(std.meta.activeTag(plan.options.protection))});
+    if (plan.options.scheduled_blob)
+        try stdout.print("Devices: {d}\n", .{plan.paths.len});
     try stdout.print("Filesystem: {s}\n", .{@tagName(plan.options.filesystem)});
     try stdout.print("Name profile: {s}\n", .{plan.options.name_profile.name()});
     try stdout.print("Plan: {s}\n", .{if (plan.ready()) "ready" else "rejected"});
@@ -1187,13 +1216,14 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide pool inspect --device <device>... [--name-profile <profile>]
         \\  zettide pool initialize --device <device>... [--label <label>] [--name-profile <profile>] --confirm <token>
         \\  zettide pool mount <mountpoint> --device <device>... [--filesystem littlefs|blob] [--read-only] [--allow-other] [--metrics] [--noatime]
-        \\  zettide pool plan-create --device <device>... [--filesystem littlefs|blob] [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>]
-        \\  zettide pool create --device <device>... [--filesystem littlefs|blob] [--profile replicated|unprotected] [--label <label>] [--name-profile <profile>] --confirm <token>
+        \\  zettide pool plan-create --device <device>... [--filesystem littlefs|blob] [--profile replicated|unprotected|scheduled-replicated] [--label <label>] [--name-profile <profile>]
+        \\  zettide pool create --device <device>... [--filesystem littlefs|blob] [--profile replicated|unprotected|scheduled-replicated] [--label <label>] [--name-profile <profile>] --confirm <token>
         \\  zettide serve dufs <file|device> [--read-only] [--noatime] [--key-file <path>|--passphrase] [-- <dufs-options>...]
         \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]... [--nvmf-traddr <address> [--nvmf-trsvcid <port>] (--nvmf-host-nqn <nqn>|--nvmf-allow-any-host)]
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
         \\Blob file targets do not support labels, encryption, or transport metrics.
+        \\scheduled-replicated requires Blob and 3..12 devices.
         \\Name profiles are legacy-raw and portable-v1; legacy-raw is the default.
         \\
     );
