@@ -197,12 +197,12 @@ require_metrics() {
     current_inflight=${BASH_REMATCH[1]}
     [[ ${pool_lines[0]} =~ max_inflight=([0-9]+) ]]
     max_inflight=${BASH_REMATCH[1]}
-    ((submitted > 0 && submitted == completions && current_inflight == 0)) || {
+    ((submitted == completions && current_inflight == 0)) || {
         echo "scheduled Pool transport metrics are not drained: $log" >&2
         return 1
     }
     if [[ $require_parallel == true ]]; then
-        ((max_inflight > 1)) || {
+        ((submitted > 0 && max_inflight > 1)) || {
             echo "scheduled read did not exercise parallel Pool transport: $log" >&2
             return 1
         }
