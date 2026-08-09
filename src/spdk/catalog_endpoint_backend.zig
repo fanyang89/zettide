@@ -2,6 +2,7 @@ const std = @import("std");
 const catalog_nvmf_export = @import("catalog_nvmf_export.zig");
 const catalog_vhost_export = @import("catalog_vhost_export.zig");
 const endpoint_registry = @import("../endpoint_registry.zig");
+const nvmf_export = @import("nvmf_tcp_export.zig");
 const pool_member_set = @import("../v3/pool_member_set.zig");
 const runtime_api = @import("runtime.zig");
 
@@ -150,10 +151,11 @@ pub const Options = struct {
     block_size: u32 = 4096,
     write_unit_blocks: u32 = 1,
     max_io_blocks: u32 = 256,
-    nvme_of_tcp: NvmeOfTcpOptions = .{},
+    nvme_of_tcp: NvmeOfOptions = .{},
+    nvme_of_rdma: NvmeOfOptions = .{},
 };
 
-pub const NvmeOfTcpOptions = struct {
+pub const NvmeOfOptions = struct {
     target_name: ?[]const u8 = null,
     traddr: ?[]const u8 = null,
     trsvcid: []const u8 = "4420",
@@ -254,12 +256,16 @@ pub const CatalogEndpointBackend = struct {
         spec: endpoint_registry.Spec,
     ) !endpoint_registry.Backend.Instance {
         const self: *CatalogEndpointBackend = @ptrCast(@alignCast(context));
-        const traddr = switch (spec.frontend) {
+        const nvmf_options: ?NvmeOfOptions = switch (spec.frontend) {
             .vhost_user_blk => null,
-            .nvme_of_tcp => self.options.nvme_of_tcp.traddr orelse
-                return error.UnsupportedFrontend,
+            .nvme_of_tcp => self.options.nvme_of_tcp,
+            .nvme_of_rdma => self.options.nvme_of_rdma,
             .iscsi => return error.UnsupportedFrontend,
         };
+        const traddr = if (nvmf_options) |options|
+            options.traddr orelse return error.UnsupportedFrontend
+        else
+            null;
         const names = namesFor(spec.endpoint_id);
         const instance = try self.allocator.create(Instance);
         errdefer self.allocator.destroy(instance);
@@ -304,7 +310,8 @@ pub const CatalogEndpointBackend = struct {
                     } },
                 };
             },
-            .nvme_of_tcp => {
+            .nvme_of_tcp, .nvme_of_rdma => {
+                const options = nvmf_options.?;
                 writeNqn(&instance.nqn, spec.endpoint_id);
                 var serial_number: [serial_number_length]u8 = undefined;
                 writeHex(&serial_number, spec.endpoint_id[0 .. serial_number_length / 2]);
@@ -319,12 +326,13 @@ pub const CatalogEndpointBackend = struct {
                         .nqn = &instance.nqn,
                         .serial_number = &serial_number,
                         .model_number = model_number,
-                        .host_nqn = self.options.nvme_of_tcp.host_nqn,
+                        .host_nqn = options.host_nqn,
                         .traddr = traddr.?,
-                        .trsvcid = self.options.nvme_of_tcp.trsvcid,
+                        .trsvcid = options.trsvcid,
                         .nsid = 1,
-                        .allow_any_host = self.options.nvme_of_tcp.allow_any_host,
-                        .target_name = self.options.nvme_of_tcp.target_name,
+                        .allow_any_host = options.allow_any_host,
+                        .transport = if (spec.frontend == .nvme_of_rdma) .rdma else .tcp,
+                        .target_name = options.target_name,
                         .block_size = self.options.block_size,
                         .write_unit_blocks = self.options.write_unit_blocks,
                         .max_io_blocks = self.options.max_io_blocks,
@@ -332,12 +340,21 @@ pub const CatalogEndpointBackend = struct {
                 );
                 return .{
                     .handle = instance,
-                    .locator = .{ .nvme_of_tcp = .{
-                        .traddr = traddr.?,
-                        .trsvcid = self.options.nvme_of_tcp.trsvcid,
-                        .nqn = &instance.nqn,
-                        .nsid = 1,
-                    } },
+                    .locator = switch (spec.frontend) {
+                        .nvme_of_tcp => .{ .nvme_of_tcp = .{
+                            .traddr = traddr.?,
+                            .trsvcid = options.trsvcid,
+                            .nqn = &instance.nqn,
+                            .nsid = 1,
+                        } },
+                        .nvme_of_rdma => .{ .nvme_of_rdma = .{
+                            .traddr = traddr.?,
+                            .trsvcid = options.trsvcid,
+                            .nqn = &instance.nqn,
+                            .nsid = 1,
+                        } },
+                        else => unreachable,
+                    },
                 };
             },
             .iscsi => unreachable,
@@ -350,7 +367,7 @@ pub const CatalogEndpointBackend = struct {
         if (instance.export_handle) |export_handle| {
             switch (instance.frontend) {
                 .vhost_user_blk => try self.vhost_driver.close(self.allocator, export_handle),
-                .nvme_of_tcp => try self.nvmf_driver.close(self.allocator, export_handle),
+                .nvme_of_tcp, .nvme_of_rdma => try self.nvmf_driver.close(self.allocator, export_handle),
                 .iscsi => unreachable,
             }
             instance.export_handle = null;
@@ -654,6 +671,8 @@ const FakeNvmfExportDriver = struct {
     bdev_name: [name_length]u8 = @splat(0),
     nqn: [CatalogEndpointBackend.nqn_length]u8 = @splat(0),
     serial_number: [CatalogEndpointBackend.serial_number_length]u8 = @splat(0),
+    expected_transport: nvmf_export.Transport = .tcp,
+    expected_traddr: []const u8 = "192.0.2.1",
     expected_trsvcid: []const u8 = "4420",
 
     fn exportDriver(self: *FakeNvmfExportDriver) NvmfExportDriver {
@@ -675,7 +694,8 @@ const FakeNvmfExportDriver = struct {
         self.events.add(6);
         if (self.fail_create) return error.ExportCreateFailed;
         try std.testing.expectEqualStrings("nvmf0", options.target_name.?);
-        try std.testing.expectEqualStrings("192.0.2.1", options.traddr);
+        try std.testing.expectEqual(self.expected_transport, options.transport);
+        try std.testing.expectEqualStrings(self.expected_traddr, options.traddr);
         try std.testing.expectEqualStrings(self.expected_trsvcid, options.trsvcid);
         try std.testing.expectEqualStrings("nqn.2014-08.org.nvmexpress:host", options.host_nqn.?);
         try std.testing.expectEqualStrings(CatalogEndpointBackend.model_number, options.model_number.?);
@@ -844,6 +864,9 @@ test "catalog endpoint backend composes pool and export lifetimes" {
     spec.frontend = .nvme_of_tcp;
     try std.testing.expectError(error.UnsupportedFrontend, backend.start(spec));
     try std.testing.expectEqual(@as(usize, 0), source.opens);
+    spec.frontend = .nvme_of_rdma;
+    try std.testing.expectError(error.UnsupportedFrontend, backend.start(spec));
+    try std.testing.expectEqual(@as(usize, 0), source.opens);
     spec.frontend = .vhost_user_blk;
     const instance = try backend.start(spec);
     try std.testing.expectEqualStrings(
@@ -978,12 +1001,18 @@ test "catalog endpoint backend creates an NVMe-oF locator with global options" {
                 .host_nqn = "nqn.2014-08.org.nvmexpress:host",
                 .allow_any_host = true,
             },
+            .nvme_of_rdma = .{
+                .target_name = "nvmf0",
+                .traddr = "192.0.2.2",
+                .host_nqn = "nqn.2014-08.org.nvmexpress:host",
+                .allow_any_host = true,
+            },
         },
         vhost_driver.exportDriver(),
         nvmf_driver.exportDriver(),
     );
     const backend = adapter.endpointBackend();
-    const spec: endpoint_registry.Spec = .{
+    var spec: endpoint_registry.Spec = .{
         .endpoint_id = testId(0xab),
         .pool_id = testId(2),
         .volume_id = testId(3),
@@ -1004,7 +1033,17 @@ test "catalog endpoint backend creates an NVMe-oF locator with global options" {
     try std.testing.expectEqualStrings(&nvmf_driver.nqn, instance.locator.nvme_of_tcp.nqn);
     try std.testing.expectEqual(@as(u32, 1), instance.locator.nvme_of_tcp.nsid);
     try backend.stop(instance.handle);
-    try std.testing.expectEqualSlices(u8, &.{ 1, 6, 7, 4 }, events.values[0..events.len]);
+
+    nvmf_driver.expected_transport = .rdma;
+    nvmf_driver.expected_traddr = "192.0.2.2";
+    spec.frontend = .nvme_of_rdma;
+    const rdma_instance = try backend.start(spec);
+    try std.testing.expectEqualStrings("192.0.2.2", rdma_instance.locator.nvme_of_rdma.traddr);
+    try std.testing.expectEqualStrings("4420", rdma_instance.locator.nvme_of_rdma.trsvcid);
+    try std.testing.expectEqualStrings(&nvmf_driver.nqn, rdma_instance.locator.nvme_of_rdma.nqn);
+    try std.testing.expectEqual(@as(u32, 1), rdma_instance.locator.nvme_of_rdma.nsid);
+    try backend.stop(rdma_instance.handle);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 6, 7, 4, 1, 6, 7, 4 }, events.values[0..events.len]);
 }
 
 test "catalog endpoint backend retries NVMe export before pool teardown" {

@@ -11,6 +11,7 @@ pub const Frontend = enum(u8) {
     vhost_user_blk = 1,
     iscsi = 2,
     nvme_of_tcp = 3,
+    nvme_of_rdma = 4,
 };
 
 pub const Spec = struct {
@@ -18,6 +19,13 @@ pub const Spec = struct {
     pool_id: PoolId,
     volume_id: VolumeId,
     frontend: Frontend,
+};
+
+pub const NvmeOfLocator = struct {
+    traddr: []const u8,
+    trsvcid: []const u8,
+    nqn: []const u8,
+    nsid: u32,
 };
 
 pub const Locator = union(Frontend) {
@@ -29,12 +37,8 @@ pub const Locator = union(Frontend) {
         target_name: []const u8,
         lun: u64,
     },
-    nvme_of_tcp: struct {
-        traddr: []const u8,
-        trsvcid: []const u8,
-        nqn: []const u8,
-        nsid: u32,
-    },
+    nvme_of_tcp: NvmeOfLocator,
+    nvme_of_rdma: NvmeOfLocator,
 };
 
 pub const DesiredStore = struct {
@@ -453,7 +457,7 @@ fn validateLocator(locator: Locator) !void {
             try validateLocatorString(iscsi.portal);
             try validateLocatorString(iscsi.target_name);
         },
-        .nvme_of_tcp => |nvme| {
+        .nvme_of_tcp, .nvme_of_rdma => |nvme| {
             try validateLocatorString(nvme.traddr);
             try validateLocatorString(nvme.trsvcid);
             try validateLocatorString(nvme.nqn);
@@ -537,6 +541,7 @@ const FakeBackend = struct {
                 .vhost_user_blk => .iscsi,
                 .iscsi => .vhost_user_blk,
                 .nvme_of_tcp => .vhost_user_blk,
+                .nvme_of_rdma => .vhost_user_blk,
             } else spec.frontend;
             const locator: Locator = switch (locator_frontend) {
                 .vhost_user_blk => .{ .vhost_user_blk = .{
@@ -549,6 +554,12 @@ const FakeBackend = struct {
                 } },
                 .nvme_of_tcp => .{ .nvme_of_tcp = .{
                     .traddr = "127.0.0.1",
+                    .trsvcid = "4420",
+                    .nqn = "nqn.2026-08.io.zettide:test",
+                    .nsid = 1,
+                } },
+                .nvme_of_rdma => .{ .nvme_of_rdma = .{
+                    .traddr = "192.0.2.2",
                     .trsvcid = "4420",
                     .nqn = "nqn.2026-08.io.zettide:test",
                     .nsid = 1,
@@ -671,6 +682,26 @@ test "registry returns a typed NVMe over TCP locator" {
     try std.testing.expectEqualStrings("4420", view.locator.?.nvme_of_tcp.trsvcid);
     try std.testing.expectEqualStrings("nqn.2026-08.io.zettide:test", view.locator.?.nvme_of_tcp.nqn);
     try std.testing.expectEqual(@as(u32, 1), view.locator.?.nvme_of_tcp.nsid);
+}
+
+test "registry returns a typed NVMe over RDMA locator" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var registry = try Registry.init(std.testing.allocator, store.desiredStore(), backend.backend());
+    defer {
+        registry.shutdown() catch unreachable;
+        registry.deinit();
+    }
+
+    var spec = testSpec(1, 2, 3);
+    spec.frontend = .nvme_of_rdma;
+    const view = try registry.ensure(spec);
+    try std.testing.expectEqual(Frontend.nvme_of_rdma, std.meta.activeTag(view.locator.?));
+    try std.testing.expectEqualStrings("192.0.2.2", view.locator.?.nvme_of_rdma.traddr);
+    try std.testing.expectEqualStrings("4420", view.locator.?.nvme_of_rdma.trsvcid);
+    try std.testing.expectEqualStrings("nqn.2026-08.io.zettide:test", view.locator.?.nvme_of_rdma.nqn);
+    try std.testing.expectEqual(@as(u32, 1), view.locator.?.nvme_of_rdma.nsid);
 }
 
 test "registry rolls back a mismatched backend locator" {
@@ -839,12 +870,16 @@ test "file store atomically replaces and validates desired state" {
     iscsi_spec.frontend = .iscsi;
     var nvme_spec = testSpec(7, 8, 9);
     nvme_spec.frontend = .nvme_of_tcp;
-    const specs = [_]Spec{ testSpec(1, 2, 3), iscsi_spec, nvme_spec };
+    var rdma_spec = testSpec(10, 11, 12);
+    rdma_spec.frontend = .nvme_of_rdma;
+    const specs = [_]Spec{ testSpec(1, 2, 3), iscsi_spec, nvme_spec, rdma_spec };
 
     try desired_store.replace(&specs);
     const loaded = try desired_store.load(std.testing.allocator);
     defer std.testing.allocator.free(loaded);
     try std.testing.expectEqualSlices(Spec, &specs, loaded);
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(Frontend.nvme_of_tcp));
+    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(Frontend.nvme_of_rdma));
 
     const file = try tmp.dir.openFile(std.testing.io, "endpoints.state", .{ .mode = .read_write });
     defer file.close(std.testing.io);

@@ -11,6 +11,14 @@ const runtime_config =
     "{\"subsystem\":\"nvmf\",\"config\":[" ++
     "{\"method\":\"nvmf_create_transport\",\"params\":{\"trtype\":\"TCP\"}}]}]}";
 
+const runtime_config_with_rdma =
+    "{\"subsystems\":[{\"subsystem\":\"bdev\",\"config\":[" ++
+    "{\"method\":\"bdev_set_options\",\"params\":{\"bdev_io_pool_size\":1024," ++
+    "\"bdev_io_cache_size\":32}}]}," ++
+    "{\"subsystem\":\"nvmf\",\"config\":[" ++
+    "{\"method\":\"nvmf_create_transport\",\"params\":{\"trtype\":\"TCP\"}}," ++
+    "{\"method\":\"nvmf_create_transport\",\"params\":{\"trtype\":\"RDMA\"}}]}]}";
+
 const PoolMember = struct {
     pool_id: endpoint_registry.PoolId,
     path: []const u8,
@@ -25,6 +33,10 @@ const Options = struct {
     nvmf_trsvcid: []const u8 = "4420",
     nvmf_host_nqn: ?[]const u8 = null,
     nvmf_allow_any_host: bool = false,
+    nvmf_rdma_traddr: ?[]const u8 = null,
+    nvmf_rdma_trsvcid: []const u8 = "4420",
+    nvmf_rdma_host_nqn: ?[]const u8 = null,
+    nvmf_rdma_allow_any_host: bool = false,
 
     fn parse(allocator: std.mem.Allocator, args: []const []const u8) !Options {
         var runtime_dir: ?[]const u8 = null;
@@ -33,6 +45,10 @@ const Options = struct {
         var nvmf_trsvcid: ?[]const u8 = null;
         var nvmf_host_nqn: ?[]const u8 = null;
         var nvmf_allow_any_host = false;
+        var nvmf_rdma_traddr: ?[]const u8 = null;
+        var nvmf_rdma_trsvcid: ?[]const u8 = null;
+        var nvmf_rdma_host_nqn: ?[]const u8 = null;
+        var nvmf_rdma_allow_any_host = false;
         var pool_members: std.ArrayList(PoolMember) = .empty;
         errdefer pool_members.deinit(allocator);
 
@@ -74,6 +90,24 @@ const Options = struct {
             } else if (std.mem.eql(u8, option, "--nvmf-allow-any-host")) {
                 if (nvmf_allow_any_host) return error.DuplicateOption;
                 nvmf_allow_any_host = true;
+            } else if (std.mem.eql(u8, option, "--nvmf-rdma-traddr")) {
+                if (nvmf_rdma_traddr != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                nvmf_rdma_traddr = args[index];
+            } else if (std.mem.eql(u8, option, "--nvmf-rdma-trsvcid")) {
+                if (nvmf_rdma_trsvcid != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                nvmf_rdma_trsvcid = args[index];
+            } else if (std.mem.eql(u8, option, "--nvmf-rdma-host-nqn")) {
+                if (nvmf_rdma_host_nqn != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                nvmf_rdma_host_nqn = args[index];
+            } else if (std.mem.eql(u8, option, "--nvmf-rdma-allow-any-host")) {
+                if (nvmf_rdma_allow_any_host) return error.DuplicateOption;
+                nvmf_rdma_allow_any_host = true;
             } else {
                 return error.UnknownOption;
             }
@@ -85,17 +119,21 @@ const Options = struct {
         const mask = reactor_mask orelse "0x1";
         if (mask.len == 0) return error.InvalidReactorMask;
         const nvmf_service_id: []const u8 = nvmf_trsvcid orelse "4420";
-        if (nvmf_traddr) |traddr| {
-            if (traddr.len == 0 or nvmf_service_id.len == 0)
-                return error.InvalidNvmfListenAddress;
-            if (nvmf_allow_any_host == (nvmf_host_nqn != null))
-                return error.InvalidNvmfAccessPolicy;
-            if (nvmf_host_nqn) |host_nqn| {
-                if (host_nqn.len == 0) return error.InvalidNvmfAccessPolicy;
-            }
-        } else if (nvmf_trsvcid != null or nvmf_host_nqn != null or nvmf_allow_any_host) {
-            return error.MissingNvmfTransportAddress;
-        }
+        try validateNvmfOptions(
+            nvmf_traddr,
+            nvmf_service_id,
+            nvmf_trsvcid != null,
+            nvmf_host_nqn,
+            nvmf_allow_any_host,
+        );
+        const nvmf_rdma_service_id: []const u8 = nvmf_rdma_trsvcid orelse "4420";
+        try validateNvmfOptions(
+            nvmf_rdma_traddr,
+            nvmf_rdma_service_id,
+            nvmf_rdma_trsvcid != null,
+            nvmf_rdma_host_nqn,
+            nvmf_rdma_allow_any_host,
+        );
         return .{
             .allocator = allocator,
             .runtime_dir = directory,
@@ -105,6 +143,10 @@ const Options = struct {
             .nvmf_trsvcid = nvmf_service_id,
             .nvmf_host_nqn = nvmf_host_nqn,
             .nvmf_allow_any_host = nvmf_allow_any_host,
+            .nvmf_rdma_traddr = nvmf_rdma_traddr,
+            .nvmf_rdma_trsvcid = nvmf_rdma_service_id,
+            .nvmf_rdma_host_nqn = nvmf_rdma_host_nqn,
+            .nvmf_rdma_allow_any_host = nvmf_rdma_allow_any_host,
         };
     }
 
@@ -113,6 +155,22 @@ const Options = struct {
         self.* = undefined;
     }
 };
+
+fn validateNvmfOptions(
+    traddr: ?[]const u8,
+    trsvcid: []const u8,
+    trsvcid_was_set: bool,
+    host_nqn: ?[]const u8,
+    allow_any_host: bool,
+) !void {
+    if (traddr) |address| {
+        if (address.len == 0 or trsvcid.len == 0) return error.InvalidNvmfListenAddress;
+        if (allow_any_host == (host_nqn != null)) return error.InvalidNvmfAccessPolicy;
+        if (host_nqn) |nqn| if (nqn.len == 0) return error.InvalidNvmfAccessPolicy;
+    } else if (trsvcid_was_set or host_nqn != null or allow_any_host) {
+        return error.MissingNvmfTransportAddress;
+    }
+}
 
 const PoolTable = struct {
     allocator: std.mem.Allocator,
@@ -234,7 +292,7 @@ pub fn serve(
     var runtime = try runtime_api.Runtime.start(allocator, .{
         .name = "zettide-endpointd",
         .reactor_mask = options.reactor_mask,
-        .json_data = runtime_config,
+        .json_data = if (options.nvmf_rdma_traddr != null) runtime_config_with_rdma else runtime_config,
         .mem_size_mb = 320,
         .no_pci = true,
         .no_huge = true,
@@ -262,6 +320,12 @@ pub fn serve(
                 .trsvcid = options.nvmf_trsvcid,
                 .host_nqn = options.nvmf_host_nqn,
                 .allow_any_host = options.nvmf_allow_any_host,
+            },
+            .nvme_of_rdma = .{
+                .traddr = options.nvmf_rdma_traddr,
+                .trsvcid = options.nvmf_rdma_trsvcid,
+                .host_nqn = options.nvmf_rdma_host_nqn,
+                .allow_any_host = options.nvmf_rdma_allow_any_host,
             },
         },
     );
@@ -322,6 +386,11 @@ test "endpoint daemon parses runtime and grouped pool options" {
         "4421",
         "--nvmf-host-nqn",
         "nqn.2026-08.io.zettide:test-host",
+        "--nvmf-rdma-traddr",
+        "192.0.2.20",
+        "--nvmf-rdma-trsvcid",
+        "4422",
+        "--nvmf-rdma-allow-any-host",
     });
     defer options.deinit();
     try std.testing.expectEqualStrings("/run/zettide", options.runtime_dir);
@@ -333,6 +402,10 @@ test "endpoint daemon parses runtime and grouped pool options" {
         "nqn.2026-08.io.zettide:test-host",
         options.nvmf_host_nqn.?,
     );
+    try std.testing.expectEqualStrings("192.0.2.20", options.nvmf_rdma_traddr.?);
+    try std.testing.expectEqualStrings("4422", options.nvmf_rdma_trsvcid);
+    try std.testing.expect(options.nvmf_rdma_allow_any_host);
+    try std.testing.expect(std.mem.indexOf(u8, runtime_config_with_rdma, "\"trtype\":\"RDMA\"") != null);
 
     var pools = try PoolTable.init(std.testing.allocator, options.pool_members);
     defer pools.deinit();
@@ -382,6 +455,14 @@ test "endpoint daemon rejects incomplete options" {
             "--nvmf-host-nqn",
             "nqn.2026-08.io.zettide:test-host",
             "--nvmf-allow-any-host",
+        }),
+    );
+    try std.testing.expectError(
+        error.MissingNvmfTransportAddress,
+        Options.parse(std.testing.allocator, &.{
+            "--runtime-dir",
+            "/run/zettide",
+            "--nvmf-rdma-allow-any-host",
         }),
     );
 }

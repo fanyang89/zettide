@@ -359,6 +359,18 @@ fn writeView(stringify: *std.json.Stringify, view: endpoint_registry.View) !void
                 try stringify.objectField("nsid");
                 try stringify.write(nvme.nsid);
             },
+            .nvme_of_rdma => |nvme| {
+                try stringify.objectField("type");
+                try stringify.write("nvme_of_rdma");
+                try stringify.objectField("traddr");
+                try stringify.write(nvme.traddr);
+                try stringify.objectField("trsvcid");
+                try stringify.write(nvme.trsvcid);
+                try stringify.objectField("nqn");
+                try stringify.write(nvme.nqn);
+                try stringify.objectField("nsid");
+                try stringify.write(nvme.nsid);
+            },
         }
         try stringify.endObject();
     } else {
@@ -407,6 +419,7 @@ fn parseFrontend(text: []const u8) !endpoint_registry.Frontend {
     if (std.mem.eql(u8, text, "vhost_user_blk")) return .vhost_user_blk;
     if (std.mem.eql(u8, text, "iscsi")) return .iscsi;
     if (std.mem.eql(u8, text, "nvme_of_tcp")) return .nvme_of_tcp;
+    if (std.mem.eql(u8, text, "nvme_of_rdma")) return .nvme_of_rdma;
     return error.InvalidFrontend;
 }
 
@@ -594,6 +607,12 @@ const TestBackend = struct {
                 .nqn = "nqn.2026-08.io.zettide:test",
                 .nsid = 1,
             } },
+            .nvme_of_rdma => .{ .nvme_of_rdma = .{
+                .traddr = "192.0.2.2",
+                .trsvcid = "4420",
+                .nqn = "nqn.2026-08.io.zettide:test",
+                .nsid = 1,
+            } },
         };
         return .{ .handle = self, .locator = locator };
     }
@@ -641,6 +660,10 @@ test "endpoint control parses strict versioned requests" {
     );
     try std.testing.expectEqual(endpoint_registry.Frontend.nvme_of_tcp, request.ensure.frontend);
     try std.testing.expectEqualSlices(u8, &testId(3), &request.ensure.volume_id);
+    const rdma_request = try parseRequest(
+        "{\"v\":1,\"action\":\"ensure\",\"endpoint_id\":\"00000000000000000000000000000001\",\"pool_id\":\"00000000000000000000000000000002\",\"volume_id\":\"00000000000000000000000000000003\",\"frontend\":\"nvme_of_rdma\"}\n",
+    );
+    try std.testing.expectEqual(endpoint_registry.Frontend.nvme_of_rdma, rdma_request.ensure.frontend);
     try std.testing.expectError(error.InvalidRequestFields, parseRequest(
         "{\"v\":1,\"action\":\"list\",\"endpoint_id\":\"00000000000000000000000000000001\"}\n",
     ));
@@ -687,6 +710,16 @@ test "endpoint control dispatches typed locator responses and stable errors" {
         "{\"v\":1,\"ok\":true,\"released\":true,\"stopping\":false}\n",
         writer.buffered(),
     );
+
+    var rdma_spec = spec;
+    rdma_spec.frontend = .nvme_of_rdma;
+    writer = std.Io.Writer.fixed(&output);
+    try dispatch(&registry, std.testing.allocator, .{ .ensure = rdma_spec }, &writer);
+    try std.testing.expectEqualStrings(
+        "{\"v\":1,\"ok\":true,\"endpoint\":{\"endpoint_id\":\"00000000000000000000000000000001\",\"pool_id\":\"00000000000000000000000000000002\",\"volume_id\":\"00000000000000000000000000000003\",\"frontend\":\"nvme_of_rdma\",\"state\":\"active\",\"locator\":{\"type\":\"nvme_of_rdma\",\"traddr\":\"192.0.2.2\",\"trsvcid\":\"4420\",\"nqn\":\"nqn.2026-08.io.zettide:test\",\"nsid\":1}}}\n",
+        writer.buffered(),
+    );
+    try registry.release(rdma_spec.endpoint_id);
 
     backend.fail_start = true;
     writer = std.Io.Writer.fixed(&output);
