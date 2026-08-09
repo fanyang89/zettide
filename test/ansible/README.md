@@ -248,6 +248,17 @@ Override the measured and ramp durations with `zettide_nvmf_fio_runtime` and
 `zettide_nvmf_fio_ramp_time`. JSON fio output, target logs, and NVMe topology
 are stored in the fetched result archive.
 
+The RXE profile runs the sparse Catalog Volume target on a temporary Soft-RoCE
+device, connects with the kernel `nvme-rdma` initiator, and removes its dummy
+network interface and RXE device on exit:
+
+```sh
+uv run ansible-playbook test/ansible/nvmf-catalog-rxe-fio.yml --limit zettide-tier1
+```
+
+The remote kernel must provide `rdma_rxe` and `nvme-rdma`. This profile checks
+functionality only; RXE results do not represent hardware RDMA performance.
+
 The Catalog profile uses the same cases and export identity, but reads a real
 64 GiB thin Catalog Volume from an 8 MiB temporary file-backed Pool. Unmapped
 extents read as zero, so this isolates Catalog lookup, worker scheduling, and

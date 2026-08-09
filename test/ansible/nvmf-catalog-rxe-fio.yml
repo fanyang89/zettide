@@ -1,0 +1,7 @@
+---
+- name: Test the Catalog NVMe-oF/RDMA path through Soft-RoCE and the Linux kernel initiator
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: nvmf-catalog-rxe-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe

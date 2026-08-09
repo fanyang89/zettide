@@ -40,12 +40,12 @@
     src: "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
     dest: "{{ zettide_remote_workspace.path }}"
 
-- name: Configure SPDK for NVMe-oF/TCP | {{ zettide_optimize }}
+- name: Configure SPDK for NVMe-oF | {{ zettide_optimize }}
   ansible.builtin.command:
     argv:
       - ./configure
       - --with-shared
-      - --without-rdma
+      - "{{ '--with-rdma' if zettide_test_profile == 'nvmf-catalog-rxe-fio' else '--without-rdma' }}"
       - --without-uring
       - --disable-tests
       - --disable-unit-tests
@@ -57,7 +57,7 @@
     chdir: "{{ zettide_remote_workspace.path }}/spdk"
   changed_when: true
 
-- name: Build SPDK for NVMe-oF/TCP | {{ zettide_optimize }}
+- name: Build SPDK for NVMe-oF | {{ zettide_optimize }}
   ansible.builtin.command:
     argv:
       - make
@@ -94,7 +94,7 @@
   environment:
     PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
   changed_when: true
-  when: zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
+  when: zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
 
 - name: Link the Catalog NVMe-oF benchmark target | {{ zettide_optimize }}
   ansible.builtin.shell:
@@ -110,7 +110,7 @@
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
   changed_when: true
-  when: zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
+  when: zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
 
 - name: Discover SPDK shared library paths | {{ zettide_optimize }}
   ansible.builtin.command:
@@ -133,7 +133,7 @@
   changed_when: false
   register: zettide_spdk_library_flags
 
-- name: Run NVMe-oF/TCP fio | {{ zettide_optimize }}
+- name: Run NVMe-oF fio | {{ zettide_optimize }}
   ansible.builtin.command:
     argv:
       - bash
@@ -141,7 +141,7 @@
       - >-
         {{ zettide_remote_workspace.path ~
            ('/test/spdk-catalog-nvmf-benchmark'
-            if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
+            if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
             else '/test/spdk-nvmf-benchmark') }}
       - "{{ zettide_remote_workspace.path }}/nvmf-ready"
       - "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_test_profile }}"
@@ -153,6 +153,9 @@
          | map('regex_replace', '^-L', '') | join(':') }}
     ZETTIDE_NVMF_FIO_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
     ZETTIDE_NVMF_FIO_RAMP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
+    ZETTIDE_NVMF_TRANSPORT: "{{ 'rdma' if zettide_test_profile == 'nvmf-catalog-rxe-fio' else 'tcp' }}"
+    ZETTIDE_NVMF_TARGET_ADDR: "{{ '192.0.2.2' if zettide_test_profile == 'nvmf-catalog-rxe-fio' else '127.0.0.1' }}"
+    ZETTIDE_NVMF_TARGET_PORT: "44220"
     ZETTIDE_NVMF_FIO_SIZE: >-
       {{ '256M'
          if zettide_test_profile in ['nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
@@ -163,7 +166,7 @@
       {{ zettide_nvmf_pool_config.path
          if zettide_test_profile == 'nvmf-catalog-optane-fio'
          else (zettide_remote_workspace.path ~ '/catalog-member'
-               if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio'] else '') }}
+                if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio'] else '') }}
     ZETTIDE_NVMF_TARGET_MODE: >-
       {{ 'mapped' if zettide_test_profile == 'nvmf-catalog-mapped-fio'
          else ('existing' if zettide_test_profile == 'nvmf-catalog-optane-fio' else '') }}
@@ -174,7 +177,7 @@
   failed_when: false
   register: zettide_nvmf_fio_result
 
-- name: Record NVMe-oF/TCP fio lifecycle | {{ zettide_optimize }}
+- name: Record NVMe-oF fio lifecycle | {{ zettide_optimize }}
   ansible.builtin.copy:
     content: |-
       rc={{ zettide_nvmf_fio_result.rc | default(1) }}
@@ -183,8 +186,8 @@
     dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_test_profile }}/ansible.log"
     mode: "0644"
 
-- name: Require NVMe-oF/TCP fio lifecycle | {{ zettide_optimize }}
+- name: Require NVMe-oF fio lifecycle | {{ zettide_optimize }}
   ansible.builtin.assert:
     that:
       - zettide_nvmf_fio_result.rc | default(1) == 0
-    fail_msg: "NVMe-oF/TCP fio failed; inspect the fetched {{ zettide_test_profile }} logs."
+    fail_msg: "NVMe-oF fio failed; inspect the fetched {{ zettide_test_profile }} logs."

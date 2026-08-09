@@ -4,6 +4,7 @@ const zettide = @import("zettide");
 const c = @cImport({
     @cInclude("pthread.h");
     @cInclude("signal.h");
+    @cInclude("stdlib.h");
     @cInclude("spdk_runtime.h");
 });
 
@@ -16,6 +17,15 @@ const runtime_config =
     \\{"method":"bdev_set_options","params":{"bdev_io_pool_size":16384,"bdev_io_cache_size":256}}]},
     \\{"subsystem":"nvmf","config":[
     \\{"method":"nvmf_create_transport","params":{"trtype":"TCP","max_queue_depth":256,"max_io_size":1048576}}]}]}
+;
+const rdma_runtime_config =
+    \\{"subsystems":[
+    \\{"subsystem":"iobuf","config":[
+    \\{"method":"iobuf_set_options","params":{"small_pool_count":1024,"large_pool_count":256}}]},
+    \\{"subsystem":"bdev","config":[
+    \\{"method":"bdev_set_options","params":{"bdev_io_pool_size":1024,"bdev_io_cache_size":32}}]},
+    \\{"subsystem":"nvmf","config":[
+    \\{"method":"nvmf_create_transport","params":{"trtype":"RDMA","max_queue_depth":32,"max_io_size":131072,"max_srq_depth":128,"iobuf_small_cache_size":64,"iobuf_large_cache_size":8}}]}]}
 ;
 
 pub export fn zettide_spdk_catalog_nvmf_benchmark(
@@ -96,7 +106,7 @@ fn run(
         io,
         allocator,
         &storages,
-        .{ .protection = .unprotected },
+        .{ .protection = .unprotected, .data_mode = .catalog },
     );
     var provisioned = switch (outcome) {
         .complete => |value| value,
@@ -255,11 +265,20 @@ fn serve(
     set: *zettide.v3.pool_member_set.PoolMemberSet,
     volume_id: [16]u8,
 ) !void {
+    const transport_text = if (c.getenv("ZETTIDE_NVMF_TRANSPORT")) |value| std.mem.span(value) else "tcp";
+    const transport: zettide.spdk_nvmf_tcp_export.Transport = if (std.mem.eql(u8, transport_text, "tcp"))
+        .tcp
+    else if (std.mem.eql(u8, transport_text, "rdma"))
+        .rdma
+    else
+        return error.InvalidNvmfTransport;
+    const traddr = if (c.getenv("ZETTIDE_NVMF_TARGET_ADDR")) |value| std.mem.span(value) else "127.0.0.1";
+    const trsvcid = if (c.getenv("ZETTIDE_NVMF_TARGET_PORT")) |value| std.mem.span(value) else "44220";
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_catalog_nvmf_benchmark",
         .reactor_mask = reactor_mask,
-        .json_data = runtime_config,
-        .mem_size_mb = 512,
+        .json_data = if (transport == .rdma) rdma_runtime_config else runtime_config,
+        .mem_size_mb = if (transport == .rdma) 128 else 512,
         .no_pci = true,
         .no_huge = true,
         .disable_cpumask_locks = true,
@@ -276,9 +295,10 @@ fn serve(
             .nqn = "nqn.2026-08.io.zettide:benchmark",
             .serial_number = "ZETTIDEBENCH000001",
             .model_number = "Zettide Catalog Benchmark",
-            .traddr = "127.0.0.1",
-            .trsvcid = "44220",
+            .traddr = traddr,
+            .trsvcid = trsvcid,
             .allow_any_host = true,
+            .transport = transport,
         },
     );
     defer export_handle.close() catch @panic("failed to close Catalog NVMe-oF export");
