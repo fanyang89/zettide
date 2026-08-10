@@ -380,9 +380,9 @@ const test_node_ids = [3][]const u8{
     "0198f54d-5c2a-7000-8000-000000000112",
     "0198f54d-5c2a-7000-8000-000000000113",
 };
-const test_cluster_id = [_]u8{1} ** 16;
-const test_local_set_id = [_]u8{2} ** 16;
-const test_digest = [_]u8{3} ** 32;
+const test_cluster_id: [16]u8 = @splat(1);
+const test_local_set_id: [16]u8 = @splat(2);
+const test_digest: [32]u8 = @splat(3);
 const test_member_ids = [3][16]u8{
     .{ 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
     .{ 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 },

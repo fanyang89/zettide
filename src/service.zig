@@ -1996,7 +1996,7 @@ fn sendRpcResult(call: grpc.ServerCall, result: RpcResult) void {
 fn preflightCreatePoolRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 4;
+    var seen: [4]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 3) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2037,7 +2037,7 @@ fn preflightGetPoolRequest(payload: []const u8) wire.Error!void {
 fn preflightListPoolsRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 3;
+    var seen: [3]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 2) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2059,7 +2059,7 @@ fn preflightListPoolsRequest(payload: []const u8) wire.Error!void {
 fn preflightCreateVolumeRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 6;
+    var seen: [6]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 5) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2108,7 +2108,7 @@ fn preflightGetVolumeRequest(payload: []const u8) wire.Error!void {
 fn preflightUpdateVolumeRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 5;
+    var seen: [5]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 4) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2132,7 +2132,7 @@ fn preflightUpdateVolumeRequest(payload: []const u8) wire.Error!void {
 fn preflightListVolumesRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 4;
+    var seen: [4]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 3) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2152,7 +2152,7 @@ fn preflightListVolumesRequest(payload: []const u8) wire.Error!void {
 fn preflightDeleteVolumeRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 4;
+    var seen: [4]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 3) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2175,7 +2175,7 @@ fn preflightDeleteVolumeRequest(payload: []const u8) wire.Error!void {
 fn preflightRegisterNodeRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 9;
+    var seen: [9]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 8) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2224,7 +2224,7 @@ fn preflightGetNodeRequest(payload: []const u8) wire.Error!void {
 fn preflightListNodesRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 3;
+    var seen: [3]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 2) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2247,7 +2247,7 @@ fn preflightListNodesRequest(payload: []const u8) wire.Error!void {
 fn preflightRegisterMemberRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 12;
+    var seen: [12]bool = @splat(false);
     var member_id: []const u8 = &.{};
     var local_set_id: []const u8 = &.{};
     while (try cursor.next()) |field| {
@@ -2310,7 +2310,7 @@ fn preflightGetMemberRequest(payload: []const u8) wire.Error!void {
 fn preflightListMembersRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 3;
+    var seen: [3]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 2) {
             try cursor.skip(field, max_request_wire_bytes);
@@ -2331,7 +2331,7 @@ fn preflightListMembersRequest(payload: []const u8) wire.Error!void {
 fn preflightReportHeartbeatRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_heartbeat_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 5;
+    var seen: [5]bool = @splat(false);
     var member_ids: [heartbeat.max_members_per_report][]const u8 = undefined;
     var member_count: usize = 0;
     while (try cursor.next()) |field| {
@@ -2366,7 +2366,7 @@ fn preflightReportHeartbeatRequest(payload: []const u8) wire.Error!void {
 
 fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 6;
+    var seen: [6]bool = @splat(false);
     var member_id: []const u8 = &.{};
     var local_set_id: []const u8 = &.{};
     var state: u64 = 0;
@@ -2392,8 +2392,8 @@ fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
             4 => {
                 if (field.wire_type != 0) return error.InvalidWire;
                 state = try cursor.readVarint();
-                if (state != @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_PRESENT) and
-                    state != @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE))
+                if (state != @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_PRESENT) and
+                    state != @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE))
                 {
                     return error.InvalidWire;
                 }
@@ -2407,7 +2407,7 @@ fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
     }
     if (!seen[1] or !seen[2] or !seen[4] or
         std.mem.eql(u8, member_id, local_set_id) or
-        (state == @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE) and seen[5]))
+        (state == @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE) and seen[5]))
     {
         return error.InvalidWire;
     }
@@ -2416,7 +2416,7 @@ fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
 
 fn preflightMemberCapacity(payload: []const u8) wire.Error!void {
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen = [_]bool{false} ** 5;
+    var seen: [5]bool = @splat(false);
     var total: u64 = 0;
     while (try cursor.next()) |field| {
         if (field.number > 4) {
@@ -2547,7 +2547,7 @@ const test_member_id_a = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 
 const test_member_id_b = [_]u8{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f };
 const test_member_id_c = [_]u8{ 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f };
 const test_local_set_id = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf };
-const test_birth_topology_digest = [_]u8{0x5a} ** 32;
+const test_birth_topology_digest: [32]u8 = @splat(0x5a);
 
 fn testRegisterNodeRequest(request_id: []const u8, node_id: []const u8, cluster_id: []const u8, control_endpoint: []const u8) pb.RegisterNodeRequest {
     return .{
@@ -2691,7 +2691,7 @@ test "response command failures abort retained calls" {
         }
 
         fn id(_: *anyopaque) grpc.ServerCallId {
-            return @enumFromInt(1);
+            return @fromBackingInt(@intCast(@as(i32, 1)));
         }
 
         fn isCancelled(_: *anyopaque) bool {
@@ -2988,7 +2988,7 @@ test "Volume service validates requests before follower gates" {
     defer allocator.free(delete_with_unknown);
     try preflightDeleteVolumeRequest(delete_with_unknown);
 
-    const oversized = [_]u8{0} ** (max_request_wire_bytes + 1);
+    const oversized: [max_request_wire_bytes + 1]u8 = @splat(0);
     try std.testing.expectError(error.InvalidWire, preflightCreateVolumeRequest(&oversized));
     try std.testing.expectError(error.InvalidWire, preflightUpdateVolumeRequest(&oversized));
     try std.testing.expectError(error.InvalidWire, preflightListVolumesRequest(&oversized));
@@ -3282,7 +3282,7 @@ test "Volume service lists filtered and unfiltered pages after ReadIndex" {
     try raftor.campaign();
 
     var pool_ids: [2][]const u8 = undefined;
-    var pool_responses = [_]pb.CreatePoolResponse{.{}} ** 2;
+    var pool_responses: [2]pb.CreatePoolResponse = @splat(.{});
     defer for (&pool_responses) |*response| response.deinit(allocator);
     for (&pool_responses, 0..) |*response, index| {
         const payload = try encodeMessage(allocator, pb.CreatePoolRequest{
@@ -3417,7 +3417,7 @@ test "Node service validates registration and completes linearizable reads" {
     try std.testing.expectEqual(grpc.StatusCode.unavailable, follower_list.code);
 
     try raftor.campaign();
-    const other_cluster_id: raft.ClusterId = .{0x99} ++ .{0x88} ** 15;
+    const other_cluster_id: raft.ClusterId = .{0x99} ++ @as([15]u8, @splat(0x88));
     const mismatch_payload = try encodeMessage(allocator, testRegisterNodeRequest(
         "node-mismatch",
         first_id,
@@ -3442,7 +3442,7 @@ test "Node service validates registration and completes linearizable reads" {
     service.registerNode(short_cluster_payload, short_cluster_probe.completion());
     try std.testing.expectEqual(grpc.StatusCode.invalid_argument, short_cluster_probe.code);
 
-    const zero_cluster_id: raft.ClusterId = .{0} ** 16;
+    const zero_cluster_id: raft.ClusterId = @splat(0);
     const zero_cluster_payload = try encodeMessage(allocator, testRegisterNodeRequest(
         "node-zero-cluster",
         first_id,
@@ -3618,7 +3618,7 @@ test "Member service validates registration and completes linearizable reads" {
 
     var short_member = testRegisterMemberRequest("member-short", "short", missing_pool_id, node_id, 0);
     try expectRegisterMemberStatus(allocator, &service, raftor, short_member, .invalid_argument);
-    const zero_member_id = [_]u8{0} ** 16;
+    const zero_member_id: [16]u8 = @splat(0);
     short_member.member_id = &zero_member_id;
     try expectRegisterMemberStatus(allocator, &service, raftor, short_member, .invalid_argument);
     var same_local_set = testRegisterMemberRequest("member-same-local-set", &test_member_id_a, missing_pool_id, node_id, 0);
@@ -3627,7 +3627,7 @@ test "Member service validates registration and completes linearizable reads" {
     var short_digest = testRegisterMemberRequest("member-short-digest", &test_member_id_a, missing_pool_id, node_id, 0);
     short_digest.birth_topology_digest = "short";
     try expectRegisterMemberStatus(allocator, &service, raftor, short_digest, .invalid_argument);
-    const zero_digest = [_]u8{0} ** 32;
+    const zero_digest: [32]u8 = @splat(0);
     short_digest.birth_topology_digest = &zero_digest;
     try expectRegisterMemberStatus(allocator, &service, raftor, short_digest, .invalid_argument);
     var invalid_geometry = testRegisterMemberRequest("member-zero-metadata", &test_member_id_a, missing_pool_id, node_id, 0);
@@ -3704,7 +3704,7 @@ test "Member service validates registration and completes linearizable reads" {
     try std.testing.expectEqual(grpc.StatusCode.ok, register_node_probe.code);
 
     var wrong_cluster = testRegisterMemberRequest("member-request-a", &test_member_id_a, pool_id, node_id, 0);
-    const other_cluster_id: raft.ClusterId = .{0x99} ++ .{0x88} ** 15;
+    const other_cluster_id: raft.ClusterId = .{0x99} ++ @as([15]u8, @splat(0x88));
     wrong_cluster.cluster_id = &other_cluster_id;
     try expectRegisterMemberStatus(allocator, &service, raftor, wrong_cluster, .failed_precondition);
 
@@ -3767,7 +3767,7 @@ test "Member service validates registration and completes linearizable reads" {
     service.getMember(invalid_get_payload, invalid_get_probe.completion());
     try std.testing.expectEqual(grpc.StatusCode.invalid_argument, invalid_get_probe.code);
 
-    const missing_member_id = [_]u8{0x77} ** 16;
+    const missing_member_id: [16]u8 = @splat(0x77);
     const missing_get_payload = try encodeMessage(allocator, pb.GetMemberRequest{ .member_id = &missing_member_id });
     defer allocator.free(missing_get_payload);
     var missing_get_probe = CompletionProbe{ .allocator = allocator };
@@ -3991,7 +3991,7 @@ const RaftDriver = struct {
 
 const StreamProbe = struct {
     completed: std.atomic.Value(bool) = .init(false),
-    code: std.atomic.Value(u8) = .init(@intFromEnum(grpc.StatusCode.unknown)),
+    code: std.atomic.Value(u8) = .init(@backingInt(grpc.StatusCode.unknown)),
 
     fn onMessage(_: ?*anyopaque, _: grpc.ClientStream, _: []const u8, _: grpc.Compression) grpc.StreamReceiveAction {
         return .continue_receiving;
@@ -4004,7 +4004,7 @@ const StreamProbe = struct {
         _: *const grpc.Metadata,
     ) void {
         const self: *StreamProbe = @ptrCast(@alignCast(ctx.?));
-        self.code.store(@intFromEnum(status.code), .release);
+        self.code.store(@backingInt(status.code), .release);
         self.completed.store(true, .release);
     }
 };

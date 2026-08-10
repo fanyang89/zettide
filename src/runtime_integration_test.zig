@@ -20,7 +20,7 @@ const snapshot_member_id = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17
 const suffix_member_id = [_]u8{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f };
 const failover_member_id = [_]u8{ 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f };
 const member_local_set_id = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf };
-const member_birth_topology_digest = [_]u8{0x5a} ** 32;
+const member_birth_topology_digest: [32]u8 = @splat(0x5a);
 const member_metadata_capacity_bytes: u64 = 1024;
 const member_data_capacity_bytes: u64 = 8192;
 const member_extent_size_bytes: u32 = 4096;
@@ -219,7 +219,7 @@ test "runtime restores Pool, Volume, Node, and Member snapshot and WAL suffix th
     const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
     defer config_allocator.free(address);
     const addresses = [_][]const u8{address};
-    var config = try makeConfig(1, .{1} ++ .{0} ** 15, &addresses, data_dir);
+    var config = try makeConfig(1, .{1} ++ @as([15]u8, @splat(0)), &addresses, data_dir);
     defer config.deinit();
 
     var primary: CreatedPool = undefined;
@@ -411,7 +411,7 @@ test "three-voter runtime survives leader failover and restart" {
         data_dir_count += 1;
     }
 
-    const cluster_id: raft.ClusterId = .{2} ++ .{0} ** 15;
+    const cluster_id: raft.ClusterId = .{2} ++ @as([15]u8, @splat(0));
     var configs: [node_count]config_mod.Config = undefined;
     var config_count: usize = 0;
     defer for (configs[0..config_count]) |*config| config.deinit();
@@ -420,7 +420,7 @@ test "three-voter runtime survives leader failover and restart" {
         config_count += 1;
     }
 
-    var runtimes: [node_count]?*runtime_mod.Runtime = .{null} ** node_count;
+    var runtimes: [node_count]?*runtime_mod.Runtime = @splat(null);
     defer for (&runtimes) |*runtime| if (runtime.*) |value| destroyRuntime(value);
     for (&runtimes, 0..) |*runtime, index| {
         runtime.* = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &configs[index], test_options);
@@ -576,7 +576,7 @@ test "runtime reconciler recovers unknown ensure and completes create and delete
     const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
     defer config_allocator.free(address);
     const addresses = [_][]const u8{address};
-    var config = try makeConfig(1, .{3} ++ .{0} ** 15, &addresses, data_dir);
+    var config = try makeConfig(1, .{3} ++ @as([15]u8, @splat(0)), &addresses, data_dir);
     defer config.deinit();
 
     var store = data_service.MemoryStore.init(runtime_allocator);
@@ -648,7 +648,7 @@ test "runtime shutdown cancels a blocking reconciler data call" {
     const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
     defer config_allocator.free(address);
     const addresses = [_][]const u8{address};
-    var config = try makeConfig(1, .{4} ++ .{0} ** 15, &addresses, data_dir);
+    var config = try makeConfig(1, .{4} ++ @as([15]u8, @splat(0)), &addresses, data_dir);
     defer config.deinit();
 
     var data_client: BlockingDataClient = .{};

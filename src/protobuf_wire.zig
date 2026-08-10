@@ -63,7 +63,7 @@ pub const Cursor = struct {
 };
 
 test "cursor rejects overflowing lengths" {
-    const malformed = [_]u8{0x12} ++ [_]u8{0xff} ** 9 ++ [_]u8{0x01};
+    const malformed = [_]u8{0x12} ++ @as([9]u8, @splat(0xff)) ++ [_]u8{0x01};
     var cursor = Cursor{ .bytes = &malformed };
     const field = (try cursor.next()).?;
     try std.testing.expectEqual(@as(u32, 2), field.number);

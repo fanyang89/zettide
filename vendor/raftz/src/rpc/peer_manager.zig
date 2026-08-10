@@ -1,0 +1,922 @@
+//! Persistent outbound raw streams, one worker and one logical stream per peer.
+
+const std = @import("std");
+const linux = std.os.linux;
+const grpc = @import("grpc_lite");
+const build_options = @import("raftz_options");
+const Error = @import("../core/error.zig").Error;
+const transport = @import("../transport.zig");
+
+pub const stream_method_path = "/raft.Raft/StreamMessages";
+pub const protocol_version_key = "raft-protocol-version";
+pub const cluster_id_key = "raft-cluster-id-bin";
+pub const source_node_key = "raft-source-node-bin";
+pub const target_node_key = "raft-target-node-bin";
+
+pub const LifecycleState = enum {
+    disconnected,
+    connecting,
+    handshaking,
+    active,
+    backoff,
+    stopping,
+};
+
+pub const StreamIdentity = struct {
+    cluster_id: [16]u8,
+    source_node: u64,
+    target_node: u64,
+};
+
+pub const EventSink = struct {
+    ctx: *anyopaque,
+    function: *const fn (*anyopaque, transport.PeerEvent, u64) void,
+
+    fn emit(self: EventSink, event: transport.PeerEvent, generation: u64) void {
+        self.function(self.ctx, event, generation);
+    }
+};
+
+pub const Config = struct {
+    identity: transport.TransportIdentity,
+    stream_limits: grpc.StreamBufferLimits,
+    reconnect_initial_delay_ns: u64,
+    reconnect_max_delay_ns: u64,
+    runtime: ?*grpc.Runtime,
+    event_sink: EventSink,
+};
+
+const Peer = struct {
+    manager: *PeerManager,
+    id: u64,
+    addr: []u8,
+    mutex: std.atomic.Mutex = .unlocked,
+    state: LifecycleState = .disconnected,
+    generation: u64 = 0,
+    open_count: u64 = 0,
+    stopping: bool = false,
+    terminal: bool = false,
+    identity_rejected: bool = false,
+    snapshot_queued: bool = false,
+    generation_was_active: bool = false,
+    channel: ?*grpc.Channel = null,
+    stream: ?grpc.ClientStream = null,
+    thread: ?std.Thread = null,
+};
+
+const CallbackContext = struct {
+    peer: *Peer,
+    generation: u64,
+};
+
+// libxev's io_uring descriptors need an explicit cross-worker happens-before
+// edge so TSan does not report kernel-managed descriptor reuse as a race.
+var tsan_lifecycle_mutex: std.atomic.Mutex = .unlocked;
+
+pub fn lockTsanLifecycle() void {
+    if (build_options.sanitize_thread) lock(&tsan_lifecycle_mutex);
+}
+
+pub fn unlockTsanLifecycle() void {
+    if (build_options.sanitize_thread) tsan_lifecycle_mutex.unlock();
+}
+
+pub const PeerManager = struct {
+    allocator: std.mem.Allocator,
+    config: Config,
+    mutex: std.atomic.Mutex = .unlocked,
+    peers: std.AutoHashMap(u64, *Peer),
+    started: bool = false,
+    stopping: bool = false,
+    spawn_worker: *const fn (*anyopaque) anyerror!std.Thread = spawnWorker,
+
+    pub fn init(allocator: std.mem.Allocator, config: Config) PeerManager {
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .peers = std.AutoHashMap(u64, *Peer).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *PeerManager) void {
+        self.stopAll();
+        var iterator = self.peers.valueIterator();
+        while (iterator.next()) |peer| self.destroyPeer(peer.*);
+        self.peers.deinit();
+        self.* = undefined;
+    }
+
+    pub fn startAll(self: *PeerManager) Error!void {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        if (self.started or self.stopping) return error.AlreadyStarted;
+        self.started = true;
+        var iterator = self.peers.valueIterator();
+        while (iterator.next()) |peer| {
+            self.startPeer(peer.*) catch |err| {
+                iterator = self.peers.valueIterator();
+                while (iterator.next()) |started_peer| requestStop(started_peer.*);
+                iterator = self.peers.valueIterator();
+                while (iterator.next()) |started_peer| {
+                    joinPeer(started_peer.*);
+                    resetStoppedPeer(started_peer.*);
+                }
+                self.started = false;
+                return mapWorkerError(err);
+            };
+        }
+    }
+
+    pub fn stopAll(self: *PeerManager) void {
+        lock(&self.mutex);
+        if (self.stopping) {
+            self.mutex.unlock();
+            return;
+        }
+        self.stopping = true;
+        var iterator = self.peers.valueIterator();
+        while (iterator.next()) |peer| requestStop(peer.*);
+        self.mutex.unlock();
+
+        iterator = self.peers.valueIterator();
+        while (iterator.next()) |peer| joinPeer(peer.*);
+    }
+
+    pub fn addPeer(self: *PeerManager, id: u64, addr: []const u8) Error!bool {
+        if (id == 0) return error.InvalidNodeId;
+        if (id == self.config.identity.node_id or addr.len == 0) return error.InvalidConfig;
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        if (self.stopping) return error.ConnectionClosed;
+        if (self.peers.get(id)) |existing| {
+            if (!std.mem.eql(u8, existing.addr, addr)) return error.ConflictingPeerAddress;
+            return false;
+        }
+
+        const peer = try self.allocator.create(Peer);
+        errdefer self.allocator.destroy(peer);
+        const addr_copy = try self.allocator.dupe(u8, addr);
+        errdefer self.allocator.free(addr_copy);
+        peer.* = .{ .manager = self, .id = id, .addr = addr_copy };
+        try self.peers.put(id, peer);
+        errdefer _ = self.peers.remove(id);
+        if (self.started) self.startPeer(peer) catch |err| return mapWorkerError(err);
+        return true;
+    }
+
+    pub fn removePeer(self: *PeerManager, id: u64) Error!void {
+        lock(&self.mutex);
+        if (self.stopping) {
+            self.mutex.unlock();
+            return error.ConnectionClosed;
+        }
+        const removed = self.peers.fetchRemove(id);
+        self.mutex.unlock();
+        const peer = if (removed) |entry| entry.value else return;
+        requestStop(peer);
+        joinPeer(peer);
+        self.destroyPeer(peer);
+    }
+
+    pub fn hasPeer(self: *PeerManager, id: u64) bool {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return self.peers.contains(id);
+    }
+
+    pub fn send(self: *PeerManager, id: u64, payload: []const u8, snapshot: bool) Error!void {
+        lock(&self.mutex);
+        const peer = self.peers.get(id) orelse {
+            self.mutex.unlock();
+            return error.ConnectionClosed;
+        };
+        lock(&peer.mutex);
+        self.mutex.unlock();
+        defer peer.mutex.unlock();
+        if (peer.stopping or peer.state != .active) return error.ConnectionClosed;
+        const stream = peer.stream orelse return error.ConnectionClosed;
+        stream.send(payload, .{}) catch |err| return mapSendError(err);
+        if (snapshot) peer.snapshot_queued = true;
+    }
+
+    pub fn count(self: *PeerManager) usize {
+        lock(&self.mutex);
+        defer self.mutex.unlock();
+        return self.peers.count();
+    }
+
+    pub fn openCount(self: *PeerManager, id: u64) u64 {
+        lock(&self.mutex);
+        const peer = self.peers.get(id) orelse {
+            self.mutex.unlock();
+            return 0;
+        };
+        lock(&peer.mutex);
+        self.mutex.unlock();
+        defer peer.mutex.unlock();
+        return peer.open_count;
+    }
+
+    pub fn peerState(self: *PeerManager, id: u64) ?LifecycleState {
+        lock(&self.mutex);
+        const peer = self.peers.get(id) orelse {
+            self.mutex.unlock();
+            return null;
+        };
+        lock(&peer.mutex);
+        self.mutex.unlock();
+        defer peer.mutex.unlock();
+        return peer.state;
+    }
+
+    pub fn acknowledgeSnapshot(self: *PeerManager, id: u64) void {
+        lock(&self.mutex);
+        const peer = self.peers.get(id) orelse {
+            self.mutex.unlock();
+            return;
+        };
+        lock(&peer.mutex);
+        self.mutex.unlock();
+        peer.snapshot_queued = false;
+        peer.mutex.unlock();
+    }
+
+    fn startPeer(self: *PeerManager, peer: *Peer) !void {
+        peer.thread = try self.spawn_worker(peer);
+    }
+
+    fn destroyPeer(self: *PeerManager, peer: *Peer) void {
+        std.debug.assert(peer.thread == null);
+        self.allocator.free(peer.addr);
+        self.allocator.destroy(peer);
+    }
+};
+
+fn workerMain(peer: *Peer) void {
+    var delay = peer.manager.config.reconnect_initial_delay_ns;
+    while (!isStopping(peer)) {
+        const generation = beginGeneration(peer);
+        var channel = initChannel(peer.manager.allocator, peer.addr, peer.manager.config.runtime) catch {
+            emitTerminalEvents(peer, generation, false, false);
+            if (!enterBackoff(peer, delay)) break;
+            delay = nextDelay(delay, peer.manager.config.reconnect_max_delay_ns);
+            continue;
+        };
+
+        if (!attachChannel(peer, generation, &channel)) break;
+
+        var source_bytes: [8]u8 = undefined;
+        var target_bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &source_bytes, peer.manager.config.identity.node_id, .little);
+        std.mem.writeInt(u64, &target_bytes, peer.id, .little);
+        const metadata = [_]grpc.MetadataEntry{
+            .{ .key = protocol_version_key, .value = "1" },
+            .{ .key = cluster_id_key, .value = &peer.manager.config.identity.cluster_id },
+            .{ .key = source_node_key, .value = &source_bytes },
+            .{ .key = target_node_key, .value = &target_bytes },
+        };
+        var callback_context = CallbackContext{ .peer = peer, .generation = generation };
+        const opened = channel.openStream(stream_method_path, .{
+            .metadata = &metadata,
+            .limits = peer.manager.config.stream_limits,
+        }, .{
+            .context = &callback_context,
+            .on_headers = onHeaders,
+            .on_message = onResponseMessage,
+            .on_remote_end = onRemoteEnd,
+            .on_terminal = onTerminal,
+        }) catch null;
+
+        if (opened) |handle| {
+            if (attachStream(peer, generation, handle)) {
+                waitForTerminal(peer, generation);
+            }
+        }
+
+        const outcome = detachGeneration(peer, generation);
+        if (outcome.stream) |stream| {
+            var owned = stream;
+            owned.deinit();
+        }
+        clearChannel(peer, generation);
+        deinitChannel(&channel);
+
+        if (outcome.stopping) break;
+        emitTerminalEvents(peer, generation, outcome.identity_rejected, outcome.snapshot_queued);
+        if (!enterBackoff(peer, delay)) break;
+        delay = if (outcome.was_active) peer.manager.config.reconnect_initial_delay_ns else nextDelay(delay, peer.manager.config.reconnect_max_delay_ns);
+    }
+    lock(&peer.mutex);
+    peer.state = .stopping;
+    peer.mutex.unlock();
+}
+
+fn spawnWorker(context: *anyopaque) !std.Thread {
+    const peer: *Peer = @ptrCast(@alignCast(context));
+    return std.Thread.spawn(.{}, workerMain, .{peer});
+}
+
+fn attachChannel(peer: *Peer, generation: u64, channel: *grpc.Channel) bool {
+    lock(&peer.mutex);
+    if (peer.stopping or peer.generation != generation) {
+        peer.mutex.unlock();
+        deinitChannel(channel);
+        return false;
+    }
+    peer.channel = channel;
+    peer.state = .handshaking;
+    peer.mutex.unlock();
+    return true;
+}
+
+fn attachStream(peer: *Peer, generation: u64, handle: grpc.ClientStream) bool {
+    lock(&peer.mutex);
+    if (!peer.stopping and peer.generation == generation) {
+        peer.stream = handle;
+        peer.open_count += 1;
+        peer.mutex.unlock();
+        return true;
+    }
+    peer.mutex.unlock();
+    var owned = handle;
+    owned.cancel();
+    owned.deinit();
+    return false;
+}
+
+const GenerationOutcome = struct {
+    stream: ?grpc.ClientStream,
+    stopping: bool,
+    identity_rejected: bool,
+    snapshot_queued: bool,
+    was_active: bool,
+};
+
+fn beginGeneration(peer: *Peer) u64 {
+    lock(&peer.mutex);
+    defer peer.mutex.unlock();
+    peer.generation +%= 1;
+    if (peer.generation == 0) peer.generation = 1;
+    peer.state = .connecting;
+    peer.terminal = false;
+    peer.identity_rejected = false;
+    peer.snapshot_queued = false;
+    peer.generation_was_active = false;
+    return peer.generation;
+}
+
+fn detachGeneration(peer: *Peer, generation: u64) GenerationOutcome {
+    lock(&peer.mutex);
+    defer peer.mutex.unlock();
+    const outcome = GenerationOutcome{
+        .stream = peer.stream,
+        .stopping = peer.stopping or peer.generation != generation,
+        .identity_rejected = peer.identity_rejected,
+        .snapshot_queued = peer.snapshot_queued,
+        .was_active = peer.generation_was_active,
+    };
+    peer.stream = null;
+    if (!peer.stopping) peer.state = .disconnected;
+    return outcome;
+}
+
+fn clearChannel(peer: *Peer, generation: u64) void {
+    lock(&peer.mutex);
+    defer peer.mutex.unlock();
+    if (peer.generation == generation) peer.channel = null;
+}
+
+fn waitForTerminal(peer: *Peer, generation: u64) void {
+    while (true) {
+        lock(&peer.mutex);
+        const done = peer.stopping or peer.generation != generation or peer.terminal;
+        peer.mutex.unlock();
+        if (done) return;
+        sleepNanoseconds(2 * std.time.ns_per_ms);
+    }
+}
+
+fn enterBackoff(peer: *Peer, delay: u64) bool {
+    lock(&peer.mutex);
+    if (peer.stopping) {
+        peer.mutex.unlock();
+        return false;
+    }
+    peer.state = .backoff;
+    peer.mutex.unlock();
+    var remaining = delay;
+    while (remaining > 0) {
+        if (isStopping(peer)) return false;
+        const slice = @min(remaining, 5 * std.time.ns_per_ms);
+        sleepNanoseconds(slice);
+        remaining -= slice;
+    }
+    return !isStopping(peer);
+}
+
+fn nextDelay(current: u64, maximum: u64) u64 {
+    return @min(current *| 2, maximum);
+}
+
+fn requestStop(peer: *Peer) void {
+    lock(&peer.mutex);
+    peer.stopping = true;
+    peer.state = .stopping;
+    if (peer.stream) |stream| stream.cancel();
+    if (peer.channel) |channel| channel.shutdown();
+    peer.mutex.unlock();
+}
+
+fn joinPeer(peer: *Peer) void {
+    const thread = peer.thread orelse return;
+    peer.thread = null;
+    thread.join();
+}
+
+fn resetStoppedPeer(peer: *Peer) void {
+    lock(&peer.mutex);
+    defer peer.mutex.unlock();
+    peer.stopping = false;
+    peer.state = .disconnected;
+}
+
+fn isStopping(peer: *Peer) bool {
+    lock(&peer.mutex);
+    defer peer.mutex.unlock();
+    return peer.stopping;
+}
+
+fn emitTerminalEvents(peer: *Peer, generation: u64, identity_rejected: bool, snapshot_queued: bool) void {
+    if (isStopping(peer)) return;
+    const sink = peer.manager.config.event_sink;
+    if (identity_rejected) {
+        sink.emit(.{ .peer_id = peer.id, .kind = .identity_rejected }, generation);
+        return;
+    }
+    sink.emit(.{ .peer_id = peer.id, .kind = .@"unreachable" }, generation);
+    if (snapshot_queued) sink.emit(.{ .peer_id = peer.id, .kind = .snapshot_failure }, generation);
+}
+
+fn onHeaders(context: ?*anyopaque, stream: grpc.ClientStream, metadata: *const grpc.Metadata) void {
+    const callback: *CallbackContext = @ptrCast(@alignCast(context.?));
+    const expected = callback.peer.manager.config.identity;
+    const actual = parseStreamIdentity(metadata) catch {
+        rejectIdentity(callback, stream);
+        return;
+    };
+    if (!std.mem.eql(u8, &actual.cluster_id, &expected.cluster_id) or
+        actual.source_node != callback.peer.id or actual.target_node != expected.node_id)
+    {
+        rejectIdentity(callback, stream);
+        return;
+    }
+
+    lock(&callback.peer.mutex);
+    defer callback.peer.mutex.unlock();
+    if (callback.peer.generation != callback.generation or callback.peer.stopping or callback.peer.terminal) return;
+    callback.peer.state = .active;
+    callback.peer.generation_was_active = true;
+}
+
+fn rejectIdentity(callback: *CallbackContext, stream: grpc.ClientStream) void {
+    lock(&callback.peer.mutex);
+    if (callback.peer.generation == callback.generation and !callback.peer.stopping) {
+        callback.peer.identity_rejected = true;
+    }
+    callback.peer.mutex.unlock();
+    stream.cancel();
+}
+
+fn onResponseMessage(
+    context: ?*anyopaque,
+    stream: grpc.ClientStream,
+    _: []const u8,
+    _: grpc.Compression,
+) grpc.StreamReceiveAction {
+    const callback: *CallbackContext = @ptrCast(@alignCast(context.?));
+    lock(&callback.peer.mutex);
+    if (callback.peer.generation == callback.generation) callback.peer.terminal = true;
+    callback.peer.mutex.unlock();
+    stream.cancel();
+    return .continue_receiving;
+}
+
+fn onRemoteEnd(context: ?*anyopaque, stream: grpc.ClientStream) void {
+    const callback: *CallbackContext = @ptrCast(@alignCast(context.?));
+    lock(&callback.peer.mutex);
+    if (callback.peer.generation == callback.generation) callback.peer.terminal = true;
+    callback.peer.mutex.unlock();
+    stream.cancel();
+}
+
+fn onTerminal(
+    context: ?*anyopaque,
+    _: grpc.ClientStream,
+    _: grpc.Status,
+    _: *const grpc.Metadata,
+) void {
+    const callback: *CallbackContext = @ptrCast(@alignCast(context.?));
+    lock(&callback.peer.mutex);
+    defer callback.peer.mutex.unlock();
+    if (callback.peer.generation != callback.generation) return;
+    callback.peer.terminal = true;
+    if (!callback.peer.stopping) callback.peer.state = .disconnected;
+}
+
+pub fn parseStreamIdentity(metadata: *const grpc.Metadata) !StreamIdentity {
+    const version = try exactlyOne(metadata, protocol_version_key);
+    const cluster_id = try exactlyOne(metadata, cluster_id_key);
+    const source = try exactlyOne(metadata, source_node_key);
+    const target = try exactlyOne(metadata, target_node_key);
+    if (!std.mem.eql(u8, version, "1") or cluster_id.len != 16 or source.len != 8 or target.len != 8) {
+        return error.MalformedIdentityMetadata;
+    }
+    const identity: StreamIdentity = .{
+        .cluster_id = cluster_id[0..16].*,
+        .source_node = std.mem.readInt(u64, source[0..8], .little),
+        .target_node = std.mem.readInt(u64, target[0..8], .little),
+    };
+    if (std.mem.allEqual(u8, &identity.cluster_id, 0) or identity.source_node == 0 or identity.target_node == 0) {
+        return error.MalformedIdentityMetadata;
+    }
+    return identity;
+}
+
+fn exactlyOne(metadata: *const grpc.Metadata, key: []const u8) ![]const u8 {
+    var value: ?[]const u8 = null;
+    for (metadata.items()) |entry| {
+        if (!std.mem.eql(u8, entry.key, key)) continue;
+        if (value != null) return error.DuplicateIdentityMetadata;
+        value = entry.value;
+    }
+    return value orelse error.MissingIdentityMetadata;
+}
+
+fn mapSendError(err: anyerror) Error {
+    return switch (err) {
+        error.WouldBlock, error.OutboundBufferLimitExceeded => error.TransportBackpressure,
+        error.MessageTooLarge => error.MessageTooLarge,
+        error.OutOfMemory => error.OutOfMemory,
+        error.StreamClosed, error.SendClosed => error.ConnectionClosed,
+        else => error.ConnectionClosed,
+    };
+}
+
+fn mapWorkerError(err: anyerror) Error {
+    return if (err == error.OutOfMemory) error.OutOfMemory else error.ConnectionClosed;
+}
+
+fn initChannel(allocator: std.mem.Allocator, address: []const u8, runtime: ?*grpc.Runtime) !grpc.Channel {
+    lockTsanLifecycle();
+    defer unlockTsanLifecycle();
+    return grpc.Channel.init(allocator, address, .{ .runtime = runtime });
+}
+
+fn deinitChannel(channel: *grpc.Channel) void {
+    lockTsanLifecycle();
+    defer unlockTsanLifecycle();
+    channel.shutdown();
+    channel.wait();
+    channel.deinit();
+}
+
+fn lock(mutex: *std.atomic.Mutex) void {
+    while (!mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+fn sleepNanoseconds(nanoseconds: u64) void {
+    sleepNanosecondsUsing(nanoseconds, linux.nanosleep);
+}
+
+fn sleepNanosecondsUsing(nanoseconds: u64, comptime nanosleep: anytype) void {
+    var request = linux.timespec{
+        .sec = std.math.cast(isize, nanoseconds / std.time.ns_per_s) orelse std.math.maxInt(isize),
+        .nsec = @intCast(nanoseconds % std.time.ns_per_s),
+    };
+    var remaining: linux.timespec = undefined;
+    while (true) {
+        const rc = nanosleep(&request, &remaining);
+        switch (linux.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => request = remaining,
+            else => return, // KCOV_EXCL_LINE
+        }
+    }
+}
+
+// KCOV_EXCL_START
+test "sleep retries with the remaining duration after interruption" {
+    const Stub = struct {
+        var calls: usize = 0;
+
+        fn nanosleep(request: *const linux.timespec, remaining: ?*linux.timespec) usize {
+            calls += 1;
+            if (calls == 1) {
+                remaining.?.* = .{ .sec = 0, .nsec = 7 };
+                return @bitCast(-@as(isize, @intFromEnum(linux.E.INTR)));
+            }
+            std.debug.assert(request.sec == 0 and request.nsec == 7);
+            return 0;
+        }
+    };
+    Stub.calls = 0;
+    sleepNanosecondsUsing(1, Stub.nanosleep);
+    try std.testing.expectEqual(@as(usize, 2), Stub.calls);
+}
+
+const TestEventSink = struct {
+    fn emit(_: *anyopaque, _: transport.PeerEvent, _: u64) void {}
+};
+
+fn testConfig(node_id: u64) Config {
+    return .{
+        .identity = .{ .cluster_id = @splat(1), .node_id = node_id },
+        .stream_limits = .{},
+        .reconnect_initial_delay_ns = 1,
+        .reconnect_max_delay_ns = 2,
+        .runtime = null,
+        .event_sink = .{ .ctx = undefined, .function = TestEventSink.emit },
+    };
+}
+
+fn appendIdentityMetadata(
+    metadata: *grpc.Metadata,
+    version: []const u8,
+    cluster_id: []const u8,
+    source_node: []const u8,
+    target_node: []const u8,
+) !void {
+    try metadata.append(protocol_version_key, version);
+    try metadata.append(cluster_id_key, cluster_id);
+    try metadata.append(source_node_key, source_node);
+    try metadata.append(target_node_key, target_node);
+}
+
+const TestClientStream = struct {
+    cancels: usize = 0,
+    releases: usize = 0,
+
+    fn handle(self: *TestClientStream) grpc.ClientStream {
+        return .init(self, send, closeSend, cancel, resumeReceive, release);
+    }
+
+    fn send(_: *anyopaque, _: []const u8, _: grpc.StreamSendOptions) !void {}
+    fn closeSend(_: *anyopaque) !void {}
+    fn cancel(context: *anyopaque) void {
+        const self: *TestClientStream = @ptrCast(@alignCast(context));
+        self.cancels += 1;
+    }
+    fn resumeReceive(_: *anyopaque) !void {}
+    fn release(context: *anyopaque) void {
+        const self: *TestClientStream = @ptrCast(@alignCast(context));
+        self.releases += 1;
+    }
+};
+
+fn failWorkerSpawn(_: *anyopaque) !std.Thread {
+    return error.OutOfMemory;
+}
+
+fn noopWorker(_: *anyopaque) void {}
+
+const PartialSpawn = struct {
+    var calls: usize = 0;
+
+    fn spawn(context: *anyopaque) !std.Thread {
+        calls += 1;
+        if (calls == 2) return error.OutOfMemory;
+        return std.Thread.spawn(.{}, noopWorker, .{context});
+    }
+};
+
+fn checkPeerAllocationFailures(allocator: std.mem.Allocator) !void {
+    var manager = PeerManager.init(allocator, testConfig(1));
+    defer manager.deinit();
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+}
+
+test "peer manager cleans up peer allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        checkPeerAllocationFailures,
+        .{},
+    );
+}
+
+test "peer manager rolls back worker spawn failures" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+    manager.spawn_worker = failWorkerSpawn;
+
+    try std.testing.expectError(error.OutOfMemory, manager.startAll());
+    try std.testing.expect(!manager.started);
+    try std.testing.expectEqual(@as(?std.Thread, null), manager.peers.get(2).?.thread);
+
+    manager.started = true;
+    try std.testing.expectError(error.OutOfMemory, manager.addPeer(3, "127.0.0.1:9003"));
+    try std.testing.expect(!manager.hasPeer(3));
+}
+
+test "peer manager stops workers after a partial start failure" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+    try std.testing.expect(try manager.addPeer(3, "127.0.0.1:9003"));
+    PartialSpawn.calls = 0;
+    manager.spawn_worker = PartialSpawn.spawn;
+
+    try std.testing.expectError(error.OutOfMemory, manager.startAll());
+    try std.testing.expect(!manager.started);
+    var iterator = manager.peers.valueIterator();
+    while (iterator.next()) |peer| {
+        try std.testing.expect(peer.*.thread == null);
+        try std.testing.expect(!peer.*.stopping);
+    }
+    const peer = manager.peers.get(2).?;
+    requestStop(peer);
+    try std.testing.expect(!enterBackoff(peer, 1));
+    resetStoppedPeer(peer);
+}
+
+test "peer manager rejects removal while stopping" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+    manager.stopping = true;
+    try std.testing.expectError(error.ConnectionClosed, manager.removePeer(2));
+}
+
+test "peer generation fences stale channel and stream installation" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+    const peer = manager.peers.get(2).?;
+    const generation = beginGeneration(peer);
+
+    var server = try grpc.Server.init(std.testing.allocator, .{});
+    defer server.deinit();
+    try server.start();
+    defer {
+        server.shutdown();
+        server.wait();
+    }
+    var address_buffer: [64]u8 = undefined;
+    const address = try std.fmt.bufPrint(&address_buffer, "127.0.0.1:{}", .{try server.port()});
+    var channel = try initChannel(std.testing.allocator, address, null);
+    peer.generation = generation + 1;
+    try std.testing.expect(!attachChannel(peer, generation, &channel));
+
+    var stream_state = TestClientStream{};
+    try std.testing.expect(!attachStream(peer, generation, stream_state.handle()));
+    try std.testing.expectEqual(@as(usize, 1), stream_state.cancels);
+    try std.testing.expectEqual(@as(usize, 1), stream_state.releases);
+}
+
+test "peer callbacks validate identity and fence generations" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+    const peer = manager.peers.get(2).?;
+    const generation = beginGeneration(peer);
+    var callback = CallbackContext{ .peer = peer, .generation = generation };
+    var stream_state = TestClientStream{};
+    const stream = stream_state.handle();
+
+    var malformed = grpc.Metadata.init(std.testing.allocator);
+    defer malformed.deinit();
+    onHeaders(&callback, stream, &malformed);
+    try std.testing.expect(peer.identity_rejected);
+    try std.testing.expectEqual(@as(usize, 1), stream_state.cancels);
+
+    peer.identity_rejected = false;
+    var source: [8]u8 = undefined;
+    var target: [8]u8 = undefined;
+    std.mem.writeInt(u64, &source, 3, .little);
+    std.mem.writeInt(u64, &target, 1, .little);
+    var mismatched = grpc.Metadata.init(std.testing.allocator);
+    defer mismatched.deinit();
+    try appendIdentityMetadata(&mismatched, "1", &manager.config.identity.cluster_id, &source, &target);
+    onHeaders(&callback, stream, &mismatched);
+    try std.testing.expect(peer.identity_rejected);
+    try std.testing.expectEqual(@as(usize, 2), stream_state.cancels);
+
+    peer.terminal = false;
+    try std.testing.expectEqual(grpc.StreamReceiveAction.continue_receiving, onResponseMessage(
+        &callback,
+        stream,
+        "unexpected",
+        .identity,
+    ));
+    try std.testing.expect(peer.terminal);
+    try std.testing.expectEqual(@as(usize, 3), stream_state.cancels);
+}
+
+test "peer sleep accepts a zero interval" {
+    sleepNanoseconds(0);
+}
+
+test "peer manager rejects conflicting duplicate peer addresses" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+    try std.testing.expect(!(try manager.addPeer(2, "127.0.0.1:9002")));
+    try std.testing.expectError(
+        error.ConflictingPeerAddress,
+        manager.addPeer(2, "127.0.0.1:9003"),
+    );
+}
+
+test "peer manager handles missing peers and snapshot acknowledgement" {
+    var manager = PeerManager.init(std.testing.allocator, testConfig(1));
+    defer manager.deinit();
+
+    try std.testing.expectError(error.ConnectionClosed, manager.send(2, "payload", false));
+    try std.testing.expectEqual(@as(u64, 0), manager.openCount(2));
+    manager.acknowledgeSnapshot(2);
+
+    try std.testing.expect(try manager.addPeer(2, "127.0.0.1:9002"));
+    const peer = manager.peers.get(2).?;
+    peer.snapshot_queued = true;
+    manager.acknowledgeSnapshot(2);
+    try std.testing.expect(!peer.snapshot_queued);
+}
+
+test "stream identity parser rejects missing and duplicate metadata" {
+    const allocator = std.testing.allocator;
+    const cluster_id: [16]u8 = @splat(1);
+    var source: [8]u8 = undefined;
+    var target: [8]u8 = undefined;
+    std.mem.writeInt(u64, &source, 1, .little);
+    std.mem.writeInt(u64, &target, 2, .little);
+
+    for (0..4) |omitted| {
+        var metadata = grpc.Metadata.init(allocator);
+        defer metadata.deinit();
+        if (omitted != 0) try metadata.append(protocol_version_key, "1");
+        if (omitted != 1) try metadata.append(cluster_id_key, &cluster_id);
+        if (omitted != 2) try metadata.append(source_node_key, &source);
+        if (omitted != 3) try metadata.append(target_node_key, &target);
+        try std.testing.expectError(error.MissingIdentityMetadata, parseStreamIdentity(&metadata));
+    }
+
+    var duplicate = grpc.Metadata.init(allocator);
+    defer duplicate.deinit();
+    try appendIdentityMetadata(&duplicate, "1", &cluster_id, &source, &target);
+    try duplicate.append(protocol_version_key, "1");
+    try std.testing.expectError(error.DuplicateIdentityMetadata, parseStreamIdentity(&duplicate));
+}
+
+test "stream identity parser rejects malformed values" {
+    const allocator = std.testing.allocator;
+    const cluster_id: [16]u8 = @splat(1);
+    const zero_cluster: [16]u8 = @splat(0);
+    var source: [8]u8 = undefined;
+    var target: [8]u8 = undefined;
+    const zero_node: [8]u8 = @splat(0);
+    std.mem.writeInt(u64, &source, 1, .little);
+    std.mem.writeInt(u64, &target, 2, .little);
+    const cases = [_]struct {
+        version: []const u8,
+        cluster_id: []const u8,
+        source_node: []const u8,
+        target_node: []const u8,
+    }{
+        .{ .version = "2", .cluster_id = &cluster_id, .source_node = &source, .target_node = &target },
+        .{ .version = "1", .cluster_id = "short", .source_node = &source, .target_node = &target },
+        .{ .version = "1", .cluster_id = &cluster_id, .source_node = "short", .target_node = &target },
+        .{ .version = "1", .cluster_id = &cluster_id, .source_node = &source, .target_node = "short" },
+        .{ .version = "1", .cluster_id = &zero_cluster, .source_node = &source, .target_node = &target },
+        .{ .version = "1", .cluster_id = &cluster_id, .source_node = &zero_node, .target_node = &target },
+        .{ .version = "1", .cluster_id = &cluster_id, .source_node = &source, .target_node = &zero_node },
+    };
+
+    for (cases) |case| {
+        var metadata = grpc.Metadata.init(allocator);
+        defer metadata.deinit();
+        try appendIdentityMetadata(
+            &metadata,
+            case.version,
+            case.cluster_id,
+            case.source_node,
+            case.target_node,
+        );
+        try std.testing.expectError(error.MalformedIdentityMetadata, parseStreamIdentity(&metadata));
+    }
+}
+
+test "peer manager error mapping is stable" {
+    const send_cases = [_]struct { input: anyerror, expected: Error }{
+        .{ .input = error.WouldBlock, .expected = error.TransportBackpressure },
+        .{ .input = error.OutboundBufferLimitExceeded, .expected = error.TransportBackpressure },
+        .{ .input = error.MessageTooLarge, .expected = error.MessageTooLarge },
+        .{ .input = error.OutOfMemory, .expected = error.OutOfMemory },
+        .{ .input = error.StreamClosed, .expected = error.ConnectionClosed },
+        .{ .input = error.SendClosed, .expected = error.ConnectionClosed },
+        .{ .input = error.Unexpected, .expected = error.ConnectionClosed },
+    };
+    for (send_cases) |case| try std.testing.expectEqual(case.expected, mapSendError(case.input));
+    try std.testing.expectEqual(error.OutOfMemory, mapWorkerError(error.OutOfMemory));
+    try std.testing.expectEqual(error.ConnectionClosed, mapWorkerError(error.Unexpected));
+}
+// KCOV_EXCL_STOP

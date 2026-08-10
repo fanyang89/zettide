@@ -290,7 +290,7 @@ fn semanticFingerprint(request: pb.ReportHeartbeatRequest, indices: []const usiz
         hashField(&hasher, member.member_id);
         hashField(&hasher, member.local_set_id);
         hashInt(&hasher, u32, member.member_slot);
-        hashInt(&hasher, i32, @intFromEnum(member.state));
+        hashInt(&hasher, i32, @backingInt(member.state));
         if (member.capacity) |capacity| {
             hashInt(&hasher, u8, 1);
             hashInt(&hasher, u64, capacity.free_extent_count);

@@ -1,0 +1,435 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/transparent_logo_dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/transparent_logo.svg">
+  <img src="assets/transparent_logo.svg" alt="Marionette" width="126px" align="left">
+</picture>
+
+### Marionette
+
+Deterministic I/O and simulation testing for Zig.
+
+[![Docs](https://img.shields.io/badge/docs-0a7ea4?style=for-the-badge&logo=readthedocs&logoColor=white)](https://sb2bg.github.io/marionette/)
+[![CI](https://img.shields.io/github/actions/workflow/status/sb2bg/marionette/ci.yml?branch=main&style=for-the-badge&logo=github&logoColor=white&label=ci)](https://github.com/sb2bg/marionette/actions/workflows/ci.yml)
+[![Zig](https://img.shields.io/badge/zig-0.16-%23F7A41D?style=for-the-badge&logo=zig&logoColor=white)](https://ziglang.org/download)
+[![Status](https://img.shields.io/badge/status-alpha-ff7a00?style=for-the-badge)](#status)
+[![License](https://img.shields.io/badge/license-MIT-3fb950?style=for-the-badge)](#license)
+
+<hr>
+
+Long term, Marionette is aiming to be the deterministic `std.Io` for Zig:
+production libraries accept `std.Io`, and tests swap in Marionette's
+deterministic implementation. Today, Marionette ships the simulator, trace,
+fault, disk, and network primitives that make that direction concrete.
+
+Marionette already runs real, unmodified Zig code under deterministic
+simulation: a storage engine (`xit-vcs/xitdb`) and a cooperative-concurrency
+library (`g41797/mailbox`), both with seed-reproducible replay, and has
+surfaced reproducible recovery and correctness counterexamples in the process.
+
+Today the demonstrated tiers are:
+
+- deterministic `std.Io.File` storage simulation with crash/torn-write faults;
+- cooperative `std.Io` task scheduling for `Mutex` / `Condition` code;
+- scheduler-backed `std.Io.net` streams with deterministic latency,
+  partitions, timeouts, healing, and retry;
+- scheduler-aware disk operations that park tasks behind earlier deadlines;
+- experimental typed message modeling with deterministic loss, latency, and
+  partitions.
+
+Write production-shaped code against `std.Io` wherever possible, and add small
+Marionette handles only when the application actually needs them. In tests,
+drive `control` to inject faults. `Production.env()` supplies host I/O and the
+rooted real disk; application-owned protocol seams receive Marionette endpoints
+only in simulation.
+
+```zig
+const mar = @import("marionette");
+
+fn writeAndRecover(io: std.Io, root: std.Io.Dir) !KVStore {
+    var store = try KVStore.init(io, root);
+    try store.put(1, 41, .sync);
+    try store.put(2, 99, .no_sync);
+    try store.recover(.strict);
+    return store;
+}
+
+// In simulation: deterministic, fault-injectable, replayable from a seed.
+var world = try mar.World.init(std.testing.allocator, .{ .seed = 0xC0FFEE });
+defer world.deinit();
+
+const sim = try world.simulate(.{ .disk = .{ .sector_size = 16 } });
+var sim_store = try writeAndRecover(sim.env.io(), std.Io.Dir.cwd());
+
+// In production: real disk, same code path.
+var tmp = std.testing.tmpDir(.{});
+defer tmp.cleanup();
+
+var production = try mar.Production.init(.{
+    .allocator = std.testing.allocator,
+    .root_dir = tmp.dir,
+    .io = std.testing.io,
+});
+defer production.deinit();
+
+const prod_env = production.env();
+var prod_store = try writeAndRecover(prod_env.io(), tmp.dir);
+```
+
+For file-backed code like this, that parity is the point. You don't write a
+"simulator version" of your code. You write your code behind Marionette-owned
+authorities, and Marionette gives you a deterministic environment to run it in.
+
+## Why
+
+Distributed and storage systems fail in ways that are hard to reproduce: a torn write under crash, a network partition during quorum, a race between two timers. By the time you have a stack trace, the conditions that caused the bug are gone.
+
+Deterministic simulation testing turns those bugs into seeds. Every run is reproducible. Every failure is replayable. You compress weeks of fuzz-testing into seconds, and when something breaks in CI, the seed alone is enough to debug it.
+
+Marionette brings that approach to Zig. It's inspired by the techniques behind FoundationDB, TigerBeetle, and Antithesis, but designed to be a drop-in library, not a framework you build your system around.
+
+## A complete example
+
+Here's a WAL recovery test that crashes the disk mid-write, corrupts a sector, and asserts that committed records survive while unsynced ones don't.
+
+```zig
+const Case = mar.SimCase(WalStore);
+
+pub fn scenario(case: *Case) !void {
+    const store = &case.app;
+    const disk = case.control().disk;
+
+    try store.put(committed_key, committed_value, .sync);
+    try disk.setFaults(.{ .crash_lost_write_rate = .always() });
+    try store.put(volatile_key, volatile_value, .no_sync);
+    try disk.crash();
+    try disk.restart();
+    try disk.corruptSector(wal_path, record_size);
+    try store.reopen();
+    try store.recover(.strict);
+}
+
+pub const checks = [_]mar.StateCheck(Case){
+    .{ .name = "synced records recover, unsynced records are rejected", .check = recoveredStateIsSafe },
+};
+
+test "wal recovery" {
+    try mar.expectSimPass(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .simulate = .{},
+        .init = WalStore.init,
+        .scenario = scenario,
+        .checks = &checks,
+    });
+}
+
+test "wal recovery fuzz" {
+    try mar.expectSimFuzz(.{
+        .allocator = std.testing.allocator,
+        .seed = 0xC0FFEE,
+        .seeds = 16,
+        .simulate = .{},
+        .init = WalStore.init,
+        .scenario = scenario,
+        .checks = &checks,
+    });
+}
+```
+
+`mar.SimCase(App)` is the standard wrapper for simulation tests: `init`
+receives `mar.Sim`, `scenario` receives `*mar.SimCase(App)`, and app state
+lives at `case.app`. Harnesses that need lower-level `World` access or
+unusual ownership drive `mar.World` directly.
+
+Three pieces, either way:
+
+- **`init`** sets up app state from `mar.Sim`.
+- **`scenario`** drives the action through `case.app` and simulator authorities
+  such as `case.control()`.
+- **`checks`** assert invariants on the final state, usually through
+  `*const mar.SimCase(App)`.
+
+`expectSimPass` runs twice with one fixed seed and compares the traces.
+`expectSimFuzz` requires a nonzero `seeds` count and performs the same replay
+check for each derived seed. `expectSimFailure` asserts that a deliberately
+buggy scenario reaches a replayable failure, useful for proving your checker
+actually works. Custom harnesses that outgrow these helpers drive `mar.World`
+directly.
+
+## The two surfaces: `io` and `control`
+
+Every Marionette test has two halves.
+
+**`io`** is what production-shaped storage code should usually see. In
+simulation, `sim.env.io()` returns Marionette's deterministic `std.Io` backend.
+In production, `production.env().io()` returns the host `std.Io` supplied at
+setup. Application code that wants trace events should accept a narrow
+`mar.Recorder`, not all of `mar.Env`.
+
+```zig
+var store = try KVStore.init(io, root, recorder);
+try store.put(1, 41, .sync);
+```
+
+**`control`** is what your test code uses to inject faults. It's only available in simulation. It mirrors `env`'s structure: every resource has a control surface.
+
+```zig
+try control.disk.crash();
+try control.disk.corruptSector(path, offset);
+try control.network.partition(&side_a, &side_b);
+try control.network.setLossiness(.{ .drop_rate = .percent(20) });
+try control.network.heal();
+```
+
+`Env` is still the harness-owned bundle that supplies `io()`, `recorder()`,
+clock/random helpers, and remaining Marionette capabilities. Code that only
+needs file I/O should prefer `std.Io` so it stays ordinary Zig code.
+
+## Distributed simulation
+
+Network simulation works the same way. Here's a partition test against a toy replicated register:
+
+```zig
+fn partitionScenario(case: *Case) !void {
+    const isolated = [_]mar.NodeId{0};
+    const majority = [_]mar.NodeId{ 1, 2, client_node_id };
+
+    try case.control().network.partition(&isolated, &majority);
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 2 });
+
+    try case.control().network.heal();
+    try case.app.write(.{ .version = 1, .value = 41, .retry_limit = 1 });
+
+    try checkReplicaCommitted(&case.app, 0, 1, 41);
+}
+```
+
+Messages have configurable loss, latency, clogs, and partition dynamics through focused `control.network` calls such as `setLossiness(...)`, `setLatency(...)`, and `setPartitionDynamics(...)`. Application code sends through a node-scoped endpoint with `endpoint.send(to, message)` and receives with `while (try endpoint.receive()) |envelope|`.
+
+## std.Io.net client/server validation
+
+The external-style [`std_io_net_kv`](examples/std_io_net_kv.zig) example
+imports only `std` and implements a fixed-frame PUT/GET service over
+`std.Io.net`. In simulation, node-scoped `std.Io` handles come from
+`sim.envForNode(node).io()`, so reconnecting sockets keep the same process
+identity instead of consuming topology. Its Marionette harness partitions the
+client from a queued response, surfaces the dropped delivery as `error.Timeout`,
+heals the link, and retries the request. A correct server deduplicates the
+retry; a planted buggy mode applies it twice and violates an exact revision
+oracle.
+
+Simulation processes are first-class runtime owners. `sim.killProcess(node)`
+cancels that node's scheduler-backed `Io.async`/`Io.concurrent` work, closes
+process-local files/listeners/connections, and wakes surviving TCP peers with
+reset errors.
+`sim.registerProcess(node, lifecycle)` plus `sim.restartProcess(node)` reruns a
+registered initializer with that node's `Env` after volatile state has been
+discarded by the lifecycle's `on_kill` callback. Explicit process kill leaves
+the shared disk model intact; disk crash is the operation that first applies
+pending-write crash faults, then uses the same process-kill path.
+
+```sh
+zig build validate-std-io-net-kv
+zig build run-example -- std-io-net-kv --seed 12648430 --trace
+zig build run-example -- std-io-net-kv-bug \
+  --seed 12648430 --trace --expect-failure
+```
+
+See [Testing std.Io.net Code Deterministically](docs/std-io-net-example.md) for
+the trace and exact supported boundary. This is an external-style capability
+demonstration, not a third-party SUT finding.
+
+## Cooperative concurrency
+
+Marionette has scheduler-backed cooperative `std.Io` tasks and futex waits for
+`Mutex` / `Condition` code. `Io.async` and `Io.concurrent` run as deterministic
+simulator tasks, and awaiting from either a task or the scenario drives the
+same scheduler. The pinned `g41797/mailbox` validation target runs unmodified
+and exercises timed receive, send/wake, same-deadline timeout ordering, and
+byte-identical same-seed replay. The internal
+`validate-bounded-queue` target adds a canonical FIFO oracle and a planted
+lost-wakeup deadlock to demonstrate concurrency bug detection without counting
+it as an external SUT finding. This is cooperative `std.Io` concurrency, not
+preemptive OS thread or memory-model testing; see
+[Std.Io Direction](docs/std-io-direction.md) for the exact boundary.
+
+## Ochi storage validation
+
+The optional `validate-ochi` target composes the pinned, unmodified
+[`ochi-team/ochi`](https://github.com/ochi-team/ochi) storage implementation
+with `mar.SimCase`. It starts the store, ingests a line, flushes index and data
+tables, queries the inserted data, exercises atomic catalog replacement,
+crashes the simulated disk, reopens Ochi, and queries the data again through
+Marionette's deterministic `std.Io`. Ochi is a lazy dependency and this target
+is not part of the default test step. The validation runs one simulation per
+process because Ochi's private temporary-file counter intentionally persists
+across in-process runs.
+
+```sh
+zig build validate-ochi
+```
+
+## HTTP library validation
+
+The optional `validate-dusty` target runs the pinned, unmodified
+[`lalinsky/dusty`](https://github.com/lalinsky/dusty) HTTP client/server
+library through Marionette's deterministic `std.Io`. dusty's real
+`Server.listen` accept loop runs as a simulated task: its router, llhttp
+parser, and connection pool serve a keep-alive GET/POST pair plus a second
+connection over simulated `std.Io.net` streams with injected latency, and the
+harness then shuts the server down through cooperative cancellation. Two
+shutdown shapes are validated: a clean shutdown where `error.Canceled` lands
+in dusty's `accept` park and the drain finds no active connections, and a
+hung-connection shutdown where a keep-alive handler is still parked in a
+read, dusty's drain times out, and its deferred `Group.cancel` sweeps the
+parked handler on the way out. Fault scenarios partition the link before and
+during a response, pin dusty's observed `error.Timeout` contract, heal and
+retry against an exact body oracle, and sweep every chunk cut point while
+rejecting short-success partial responses. Everything replays
+byte-identically from the same seed. dusty is a lazy dependency and this
+target is not part of the default test step.
+
+```sh
+zig build validate-dusty
+```
+
+This is an external-style capability demonstration of the `std.Io.net`
+boundary, not a third-party SUT finding. The 0.6 slice chain is complete:
+pooled keep-alive reuse and large byte-exact transfers landed with the
+pool and transfer scenarios, which also found two confirmed dusty bugs
+(see FOUND_BUGS.md), and opt-in task start jitter lets seed sweeps
+explore start orderings such as connect-before-listen races.
+
+## Queue client validation
+
+The optional `validate-beanstalkz` target runs the pinned, unmodified
+[`g41797/beanstalkz`](https://github.com/g41797/beanstalkz) beanstalkd
+work-queue client against a harness-owned in-memory beanstalkd that speaks
+the text protocol over simulated `std.Io.net` streams. It covers a
+produce/consume round trip with bury/kick state transitions, sequential
+connection churn (fresh connect, put, quit, `shutdown(.both)`, close cycles
+drained in FIFO order), a blocking `reserve-with-timeout` parked across a
+five-second virtual publish delay, and a server-process crash under a
+parked reserve: the surviving client wakes with a reset that surfaces as
+the library's `CommunicationFailure` contract, then a registered process
+restart recovers on a fresh incarnation. Everything replays byte-identically
+from the same seed. beanstalkz is a lazy dependency and this target is not
+part of the default test step.
+
+```sh
+zig build validate-beanstalkz
+```
+
+## Traces
+
+Every run produces a structured trace. When a check fails, you get the full sequence of events that led to the violation, plus the seed to reproduce it.
+
+```
+register.write.start version=1 value=41 retry_limit=8
+register.message kind=propose to=0 version=1 value=41
+replica.accept replica=0 version=1 value=41 accepted=true
+register.message kind=propose to=1 version=1 value=41
+replica.accept replica=1 version=1 value=41 accepted=true
+register.write.quorum version=1 value=41 acks=2
+register.invariant_violation kind=committed_divergence replica=1 ...
+```
+
+You write trace records with `mar.Recorder` or, inside harness-shaped code,
+`env.record(...)`. Application code, scenario code, and checks can all record.
+Failed runs print the trace automatically. Passing runs hand it back to you so
+you can persist it, diff it, or feed it to whatever observability you already
+have.
+
+## Docs
+
+- [Overview](docs/overview.md)
+- [Architecture](docs/architecture.md)
+- [Trace Format](docs/trace-format.md)
+- [Run](docs/run.md)
+- [Findings](FOUND_BUGS.md)
+- [API Target Spec](docs/api-target.md)
+- [BUGGIFY](docs/buggify.md)
+- [Network Model](docs/network.md)
+- [Network API Direction](docs/network-api.md)
+- [std.Io.net Client/Server Example](docs/std-io-net-example.md)
+- [Disk Fault Model](docs/disk-fault-model.md)
+- [API](docs/api.md)
+- [Determinism](docs/determinism.md)
+- [Examples](docs/examples.md)
+- [Roadmap](ROADMAP.md)
+- [Prior art](docs/prior-art.md)
+- [TigerBeetle Lessons](docs/tigerbeetle-lessons.md)
+- [Releasing](docs/releasing.md)
+- [Blog](docs/blog/index.md)
+
+## Status
+
+Marionette is early. This is a `0.x` release: there is no API stability
+guarantee before 1.0. The intended-stable surface today is `World`, `Env`,
+`Control`, `SimCase`, `runSimCase` / `expectSim*`,
+`Disk`, `SimDisk`, `RealDisk`, `Production`, and `Recorder`. The public
+`Endpoint(Message)` message-modeling surface remains experimental while its
+ownership and transport contract are validated against a real SUT.
+
+The simulator currently models clock, deterministic randomness, disk, a
+directory-aware `std.Io.File`/`Dir` subset, experimental typed message modeling, a narrow scheduler-backed
+`std.Io.net` stream subset with accept/read suspension plus latency and
+send-time loss, delivery-time partitions, deterministic healing, and
+literal-only host lookup (an unmodified `std.http.Client` runs against
+simulated servers; real DNS stays unsupported), and
+cooperative `std.Io` tasks, groups, and futex waits for `Mutex` / `Condition` code,
+validated against the pinned `g41797/mailbox` and `g41797/beanstalkz`
+targets and the internal bounded-queue capability demo, plus the pinned
+Ochi storage target. It does not model
+arbitrary OS thread scheduling or memory-level concurrency; code that depends on
+those needs separate testing. The simulator also models
+deterministic allocation faults through `Env.allocator()` and cooperative
+cancellation: `Future.cancel` and `Group.cancel` deliver `error.Canceled` at
+futex, sleep, and net suspension points following `std.Io`'s one-shot
+protocol. A one-shot `sim.transitionToLiveness(core)` ends the fault regime
+so bounded runs can prove the core makes progress once faults stop.
+Networking has two sibling testing altitudes. Node-scoped `std.Io.net` is the
+canonical literal same-code path for codecs, framing, partial I/O, and stream
+lifecycle. Experimental `Endpoint(Message)` explores protocol/state-machine
+behavior above the wire; production uses an application-owned transport seam,
+and Marionette does not claim that the real transport runs through the endpoint
+model. The former Marionette-owned production adapters were removed in 0.6.
+Queue suspension and broader scheduler parity are planned.
+
+Scheduler-backed fibers are tested on Linux and macOS. The x86_64 Windows
+fiber path is deliberately disabled until its Win64 entry ABI has execution
+coverage. `RealDisk.syncDir` returns `error.DirectorySyncUnsupported` because
+Zig 0.16 does not expose a portable directory-sync operation; it never reports
+durability that it did not perform.
+
+If you're building something where determinism matters and you want to try it, the [`examples/`](examples/) directory is the best place to start. Open issues and PRs welcome.
+
+## Install
+
+```sh
+zig fetch --save https://github.com/sb2bg/marionette/archive/refs/tags/v0.6.0.tar.gz
+```
+
+Then wire the module into your test build in `build.zig` and import it:
+
+```zig
+const marionette = b.dependency("marionette", .{
+    .target = target,
+    .optimize = optimize,
+});
+tests_module.addImport("marionette", marionette.module("marionette"));
+```
+
+```zig
+const mar = @import("marionette");
+```
+
+Requires Zig 0.16.x.
+
+## Acknowledgments
+
+Marionette stands on the shoulders of [FoundationDB's simulation testing](https://apple.github.io/foundationdb/testing.html), [TigerBeetle's VOPR](https://tigerbeetle.com/blog/2023-03-28-random-fuzzy-thoughts), and the broader DST tradition. The bugs they catch are bugs everyone has; this library tries to make catching them easy in Zig.
+
+## License
+
+MIT

@@ -1,0 +1,54 @@
+site_name: Marionette
+site_description: Deterministic I/O and simulation testing for Zig.
+site_url: https://sb2bg.github.io/marionette/
+repo_url: https://github.com/sb2bg/marionette
+repo_name: sb2bg/marionette
+
+theme:
+  name: material
+  palette:
+    scheme: default
+    primary: black
+    accent: indigo
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+exclude_docs: |
+  requirements.txt
+
+nav:
+  - Home: index.md
+  - Blog:
+      - blog/index.md
+      - Why deterministic replay in Zig is harder than it sounds: blog/why-deterministic-replay-in-zig-is-harder-than-it-sounds.md
+      - Our tests only passed because of register allocation luck: blog/our-tests-only-passed-because-of-register-allocation-luck.md
+      - A graceful shutdown that only worked because of thread preemption: blog/a-graceful-shutdown-that-only-worked-because-of-thread-preemption.md
+  - Docs:
+      - Overview: overview.md
+      - Architecture: architecture.md
+      - Repository Layout: repository-layout.md
+      - Trace Format: trace-format.md
+      - Run: run.md
+      - Findings: findings.md
+      - API Target Spec: api-target.md
+      - BUGGIFY: buggify.md
+      - Network Model: network.md
+      - Network API Direction: network-api.md
+      - Production Network Transport: network-production.md
+      - std.Io Direction: std-io-direction.md
+      - std.Io.net Client/Server Example: std-io-net-example.md
+      - Disk Fault Model: disk-fault-model.md
+      - API: api.md
+      - Determinism: determinism.md
+      - Examples: examples.md
+      - Roadmap: roadmap.md
+      - Prior Art: prior-art.md
+      - TigerBeetle Lessons: tigerbeetle-lessons.md
+      - Releasing: releasing.md

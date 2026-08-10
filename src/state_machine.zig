@@ -3527,7 +3527,7 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
 
 fn preflightCreatePool(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 6;
+    var seen: [6]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 5 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3557,7 +3557,7 @@ fn preflightCreatePool(bytes: []const u8) WireError!void {
 
 fn preflightRegisterNode(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 10;
+    var seen: [10]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 9 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3589,7 +3589,7 @@ fn preflightRegisterNode(bytes: []const u8) WireError!void {
 
 fn preflightRegisterMember(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 13;
+    var seen: [13]bool = @splat(false);
     var member_id: ?[]const u8 = null;
     var local_set_id: ?[]const u8 = null;
     while (try cursor.next()) |field| {
@@ -3632,7 +3632,7 @@ fn preflightRegisterMember(bytes: []const u8) WireError!void {
 
 fn preflightCreateVolumeCommand(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 8;
+    var seen: [8]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 7 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3655,7 +3655,7 @@ fn preflightCreateVolumeCommand(bytes: []const u8) WireError!void {
 
 fn preflightDeleteVolumeCommand(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 5;
+    var seen: [5]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 4 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3676,7 +3676,7 @@ fn preflightDeleteVolumeCommand(bytes: []const u8) WireError!void {
 
 fn preflightUpdateVolumeCommand(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 5;
+    var seen: [5]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 4 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3693,7 +3693,7 @@ fn preflightUpdateVolumeCommand(bytes: []const u8) WireError!void {
 
 fn preflightReservation(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 3;
+    var seen: [3]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 2 or seen[field.number] or field.wire_type != 2) return error.InvalidWire;
         seen[field.number] = true;
@@ -3708,7 +3708,7 @@ fn preflightReservation(bytes: []const u8) WireError!void {
 
 fn preflightReservationPlacement(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 7;
+    var seen: [7]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 6 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3725,7 +3725,7 @@ fn preflightReservationPlacement(bytes: []const u8) WireError!void {
 
 fn preflightReservationAllocation(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 8;
+    var seen: [8]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 7 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3770,7 +3770,7 @@ fn preflightReserveVolumeResourcesCommand(bytes: []const u8) WireError!void {
 
 fn preflightActivateReplicaCommand(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 7;
+    var seen: [7]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 6 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3904,7 +3904,7 @@ fn preflightSnapshot(bytes: []const u8) WireError!void {
 
 fn preflightPool(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 6;
+    var seen: [6]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 5 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3934,7 +3934,7 @@ fn preflightPool(bytes: []const u8) WireError!void {
 
 fn preflightNode(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 10;
+    var seen: [10]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 9 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -3966,7 +3966,7 @@ fn preflightNode(bytes: []const u8) WireError!void {
 
 fn preflightMember(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 12;
+    var seen: [12]bool = @splat(false);
     var member_id: ?[]const u8 = null;
     var local_set_id: ?[]const u8 = null;
     while (try cursor.next()) |field| {
@@ -4008,7 +4008,7 @@ fn preflightMember(bytes: []const u8) WireError!void {
 
 fn preflightVolume(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 19;
+    var seen: [19]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 18 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -4051,7 +4051,7 @@ fn preflightVolume(bytes: []const u8) WireError!void {
 
 fn preflightVolumeTombstone(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 4;
+    var seen: [4]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 3 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -4074,7 +4074,7 @@ fn preflightVolumeTombstone(bytes: []const u8) WireError!void {
 
 fn preflightReplicaPlacement(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 9;
+    var seen: [9]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 8 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -4095,7 +4095,7 @@ fn preflightReplicaPlacement(bytes: []const u8) WireError!void {
 
 fn preflightReplicaAllocation(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 10;
+    var seen: [10]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 9 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -4120,7 +4120,7 @@ fn preflightReplicaAllocation(bytes: []const u8) WireError!void {
 
 fn preflightVolumeAttachment(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 10;
+    var seen: [10]bool = @splat(false);
     while (try cursor.next()) |field| {
         if (field.number > 9 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
@@ -4146,7 +4146,7 @@ fn preflightVolumeAttachment(bytes: []const u8) WireError!void {
 
 fn preflightRequest(bytes: []const u8, snapshot_version: u32) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 6;
+    var seen: [6]bool = @splat(false);
     var response_bytes: ?[]const u8 = null;
     var command_bytes: ?[]const u8 = null;
     while (try cursor.next()) |field| {
@@ -4298,7 +4298,7 @@ fn preflightCreateVolumeApplyResponse(bytes: []const u8) WireError!void {
 
 fn preflightDeleteVolumeApplyResponse(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen = [_]bool{false} ** 7;
+    var seen: [7]bool = @splat(false);
     var code: u64 = 0;
     while (try cursor.next()) |field| {
         if (field.number > 6 or seen[field.number]) return error.InvalidWire;
@@ -4430,7 +4430,7 @@ const test_member_id_a = [_]u8{ 0x10, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
 const test_member_id_b = [_]u8{ 0x20, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 const test_member_id_c = [_]u8{ 0x30, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 const test_local_set_id = [_]u8{ 0x40, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
-const test_birth_topology_digest = [_]u8{0x5a} ** 32;
+const test_birth_topology_digest: [32]u8 = @splat(0x5a);
 
 fn testNodeCommand(request_id: []const u8, node_id: []const u8, control_endpoint: []const u8, timestamp: i64) pb.RegisterNodeCommand {
     return .{
@@ -6300,7 +6300,7 @@ test "wire preflight rejects overflowing protobuf lengths" {
     var machine = PoolStateMachine.init(allocator);
     defer machine.deinit();
 
-    const malformed = [_]u8{0x12} ++ [_]u8{0xff} ** 9 ++ [_]u8{0x01};
+    const malformed = [_]u8{0x12} ++ @as([9]u8, @splat(0xff)) ++ [_]u8{0x01};
     var reader = TestSnapshotReader{ .data = &malformed };
     try std.testing.expectError(
         error.PayloadParseFailed,
@@ -6382,7 +6382,7 @@ test "volume create and delete are atomic across allocation failures" {
     defer allocator.free(create_command);
     const delete_command = try encodeDeleteVolumeCommand(allocator, testDeleteVolumeCommand("delete-request", test_volume_id, 2, 1_753_744_000_002));
     defer allocator.free(delete_command);
-    try std.testing.checkAllAllocationFailures(allocator, VolumeApplyAllocationCheck.run, .{ pool_command, create_command, delete_command });
+    try checkAllAllocationFailures(VolumeApplyAllocationCheck.run, .{ pool_command, create_command, delete_command });
 }
 
 const ActivateReplicaAllocationCheck = struct {
@@ -6441,7 +6441,7 @@ test "replica activation is atomic across allocation failures" {
         .expected_allocation_resource_version = 9,
     });
     defer std.testing.allocator.free(activation_command);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, ActivateReplicaAllocationCheck.run, .{activation_command});
+    try checkAllAllocationFailures(ActivateReplicaAllocationCheck.run, .{activation_command});
 }
 
 const ApplyAllocationCheck = struct {
@@ -6466,7 +6466,7 @@ test "create apply is atomic across allocation failures" {
         1_753_744_000_000,
     ));
     defer std.testing.allocator.free(encoded);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, ApplyAllocationCheck.run, .{encoded});
+    try checkAllAllocationFailures(ApplyAllocationCheck.run, .{encoded});
 }
 
 const MemberApplyAllocationCheck = struct {
@@ -6506,6 +6506,44 @@ const MemberApplyAllocationCheck = struct {
     }
 };
 
+const NoResizeAllocator = struct {
+    backing: std.mem.Allocator,
+
+    fn allocator(self: *NoResizeAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        const self: *NoResizeAllocator = @ptrCast(@alignCast(context));
+        return self.backing.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        const self: *NoResizeAllocator = @ptrCast(@alignCast(context));
+        self.backing.rawFree(memory, alignment, return_address);
+    }
+};
+
+fn checkAllAllocationFailures(comptime test_fn: anytype, extra_args: anytype) !void {
+    var no_resize_allocator: NoResizeAllocator = .{ .backing = std.testing.allocator };
+    return std.testing.checkAllAllocationFailures(no_resize_allocator.allocator(), test_fn, extra_args);
+}
+
 test "member registration is atomic across allocation failures" {
     const allocator = std.testing.allocator;
     const pool_command = try encodeCreatePoolCommand(allocator, testCommand(
@@ -6533,8 +6571,7 @@ test "member registration is atomic across allocation failures" {
         1_753_744_000_002,
     ));
     defer allocator.free(member_command);
-    try std.testing.checkAllAllocationFailures(
-        allocator,
+    try checkAllAllocationFailures(
         MemberApplyAllocationCheck.run,
         .{ pool_command, node_command, member_command },
     );
@@ -6579,8 +6616,7 @@ test "conflict response is atomic across allocation failures" {
         1_753_744_000_001,
     ));
     defer allocator.free(conflict_command);
-    try std.testing.checkAllAllocationFailures(
-        allocator,
+    try checkAllAllocationFailures(
         ConflictAllocationCheck.run,
         .{ created_command, conflict_command },
     );
@@ -6636,8 +6672,7 @@ test "snapshot restore is atomic across allocation failures" {
         1_753_744_000_002,
     ));
     defer allocator.free(existing_command);
-    try std.testing.checkAllAllocationFailures(
-        allocator,
+    try checkAllAllocationFailures(
         RestoreAllocationCheck.run,
         .{ existing_command, snapshot.data, snapshot.metadata },
     );
@@ -6702,8 +6737,7 @@ test "version 4 member snapshot restore is atomic across allocation failures" {
         1_753_744_000_003,
     ));
     defer allocator.free(existing_command);
-    try std.testing.checkAllAllocationFailures(
-        allocator,
+    try checkAllAllocationFailures(
         MemberRestoreAllocationCheck.run,
         .{ existing_command, snapshot.data, snapshot.metadata },
     );

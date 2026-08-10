@@ -1,0 +1,50 @@
+.{
+    .name = .marionette,
+    .version = "0.6.0",
+    .fingerprint = 0x8afb77b114c43a8d, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .xitdb = .{
+            .url = "git+https://github.com/xit-vcs/xitdb#f86134242e4d265cddfb0dbebd4d2d6dd4967274",
+            .hash = "xitdb-0.0.0-EEFkxpHJBABxnXvbX5oyeUufyiwNgOwkH03bayvWeYxw",
+            .lazy = true,
+        },
+        .mailbox = .{
+            .url = "git+https://github.com/g41797/mailbox#d30ff69f1fa0288e1a8cb96b24ae3b552739f490",
+            .hash = "mailbox-0.0.15-8ABL0kt8AADKxnp3BayHaNX3niZ0mR3lsHc1R4x6npnn",
+            .lazy = true,
+        },
+        .ochi = .{
+            .url = "git+https://github.com/ochi-team/ochi.git#f8b2e9c804571e4d2203658589123e974feac4c2",
+            .hash = "Ochi-0.0.0-rhYy0sGhDgBuFe6ZguYWa0XONU_rUHEQXWYTlTy6CACG",
+            .lazy = true,
+        },
+        .dusty = .{
+            .url = "git+https://github.com/lalinsky/dusty#e7a4f4b24c2d3c36244a48617e992a3056c62622",
+            .hash = "dusty-0.1.0-Qdw7RpKkGwBUOpWaRSxO0vfX9mJHn9eywcPvqd9P1bOq",
+            .lazy = true,
+        },
+        .beanstalkz = .{
+            .url = "git+https://github.com/g41797/beanstalkz#d8ac61183d80b4cf0e15c52ab4edaea69cb3a56c",
+            .hash = "beanstalkz-0.0.0-SOgqEYSpAADT0GjkD1w3My31q54ZsVrw-Jd-6M_3sStA",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "README.md",
+        "ROADMAP.md",
+        "CHANGELOG.md",
+        "FOUND_BUGS.md",
+        "LICENSE",
+        "build.zig",
+        "build.zig.zon",
+        "mkdocs.yml",
+        "assets",
+        "build_tests",
+        "docs",
+        "examples",
+        "src",
+        "tests",
+        "validation",
+    },
+}

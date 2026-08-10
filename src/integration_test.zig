@@ -111,7 +111,7 @@ test "single-node WAL restores Pool and Volume snapshot before replaying its suf
     var config: raft.RaftorConfig = .{};
     config.raft.id = 1;
     config.raft.election_timeout_seed = 42;
-    config.cluster_id = .{1} ++ .{0} ** 15;
+    config.cluster_id = .{1} ++ @as([15]u8, @splat(0));
     config.advertise_addr = "test://node-1";
     config.data_dir = data_dir;
     config.snapshot_entries_threshold = 0;
