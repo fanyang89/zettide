@@ -5,7 +5,9 @@ const grpc = @import("grpc_lite");
 const raft = @import("raftz");
 const config_mod = @import("config.zig");
 const data_service = @import("data_service.zig");
+const primary_lease = @import("primary_lease.zig");
 const reconciler = @import("reconciler.zig");
+const replica_fence = @import("replica_fence.zig");
 const runtime_mod = @import("runtime.zig");
 
 const config_allocator = std.testing.allocator;
@@ -25,6 +27,7 @@ const member_metadata_capacity_bytes: u64 = 1024;
 const member_data_capacity_bytes: u64 = 8192;
 const member_extent_size_bytes: u32 = 4096;
 const volume_size_bytes: u64 = 256 * 1024;
+const reconcile_holder_boot_id: reconciler.Id = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0x00, 0x80, 0x00, 0, 0, 0, 0, 5, 1 };
 
 const ReconcileBackend = struct {
     ensures: usize = 0,
@@ -52,7 +55,14 @@ const ReconcileBackend = struct {
 
 const ReconcileDataClient = struct {
     service: *data_service.Service,
+    holder: *primary_lease.Runtime,
     lose_first_ensure: bool = true,
+    staged: ?reconciler.StageRequest = null,
+    fences: [3]?replica_fence.Result = @splat(null),
+    stages: usize = 0,
+    fence_drains: usize = 0,
+    recoveries: usize = 0,
+    mark_ready: usize = 0,
 
     fn interface(self: *ReconcileDataClient) reconciler.DataServiceClient {
         return .{ .context = self, .vtable = &vtable };
@@ -73,11 +83,81 @@ const ReconcileDataClient = struct {
         return self.service.deleteReplica(request);
     }
 
+    fn identifyHolder(_: *anyopaque, _: []const u8) !reconciler.Id {
+        return reconcile_holder_boot_id;
+    }
+
+    fn stagePrimary(context: *anyopaque, _: []const u8, request: reconciler.StageRequest) !reconciler.StageAck {
+        const self: *ReconcileDataClient = @ptrCast(@alignCast(context));
+        if (self.staged) |existing| {
+            if (!std.meta.eql(existing, request)) return error.StageConflict;
+        } else {
+            _ = try self.holder.stage(.{
+                .lease_id = request.binding.lease_id,
+                .holder_boot_id = request.binding.holder_boot_id,
+                .authority_generation = request.binding.authority_generation,
+                .write_epoch = request.binding.write_epoch,
+            }, 1_000);
+            self.staged = request;
+            self.stages += 1;
+        }
+        return .{ .request = request };
+    }
+
+    fn fenceReplica(context: *anyopaque, _: []const u8, binding: replica_fence.Binding) !replica_fence.Result {
+        const self: *ReconcileDataClient = @ptrCast(@alignCast(context));
+        var empty: ?usize = null;
+        for (&self.fences, 0..) |*record, index| {
+            if (record.*) |existing| {
+                if (std.mem.eql(u8, &existing.binding.placement_id, &binding.placement_id)) {
+                    if (!std.meta.eql(existing.binding, binding)) return error.FenceConflict;
+                    return existing;
+                }
+            } else if (empty == null) empty = index;
+        }
+        const index = empty orelse return error.TooManyFences;
+        var digest = binding.authority_digest;
+        digest[0] ^= @truncate(index + 1);
+        const result: replica_fence.Result = .{ .binding = binding, .fence_digest = digest };
+        self.fences[index] = result;
+        self.fence_drains += 1;
+        return result;
+    }
+
+    fn recoverPrimary(context: *anyopaque, _: []const u8, request: reconciler.RecoveryRequest) !reconciler.RecoveryResult {
+        const self: *ReconcileDataClient = @ptrCast(@alignCast(context));
+        self.recoveries += 1;
+        return .{
+            .request = request,
+            .certified_sequence = 0,
+            .history_digest = request.binding.authority_digest,
+            .empty_frontier = true,
+        };
+    }
+
+    fn markPrimaryReady(context: *anyopaque, _: []const u8, request: reconciler.MarkReadyRequest) !void {
+        const self: *ReconcileDataClient = @ptrCast(@alignCast(context));
+        self.mark_ready += 1;
+        const token: primary_lease.Token = .{
+            .lease_id = request.binding.lease_id,
+            .holder_boot_id = request.binding.holder_boot_id,
+            .authority_generation = request.binding.authority_generation,
+            .write_epoch = request.binding.write_epoch,
+        };
+        if (self.holder.canAdmit(token, 2_000)) return;
+        try self.holder.markReady(request.binding.lease_id, 2_000);
+    }
+
     fn cancel(_: *anyopaque) void {}
 
     const vtable: reconciler.DataServiceClient.VTable = .{
         .ensure = ensure,
         .delete = delete,
+        .identify_holder = identifyHolder,
+        .stage_primary = stagePrimary,
+        .fence_replica = fenceReplica,
+        .recover_primary = recoverPrimary,
+        .mark_primary_ready = markPrimaryReady,
         .cancel = cancel,
     };
 };
@@ -112,6 +192,26 @@ const BlockingDataClient = struct {
         return ensure(context, endpoint, request);
     }
 
+    fn identifyHolder(_: *anyopaque, _: []const u8) !reconciler.Id {
+        return error.Unsupported;
+    }
+
+    fn stagePrimary(_: *anyopaque, _: []const u8, _: reconciler.StageRequest) !reconciler.StageAck {
+        return error.Unsupported;
+    }
+
+    fn fenceReplica(_: *anyopaque, _: []const u8, _: replica_fence.Binding) !replica_fence.Result {
+        return error.Unsupported;
+    }
+
+    fn recoverPrimary(_: *anyopaque, _: []const u8, _: reconciler.RecoveryRequest) !reconciler.RecoveryResult {
+        return error.Unsupported;
+    }
+
+    fn markPrimaryReady(_: *anyopaque, _: []const u8, _: reconciler.MarkReadyRequest) !void {
+        return error.Unsupported;
+    }
+
     fn cancel(context: *anyopaque) void {
         const self: *BlockingDataClient = @ptrCast(@alignCast(context));
         self.mutex.lockUncancelable(std.testing.io);
@@ -124,6 +224,11 @@ const BlockingDataClient = struct {
     const vtable: reconciler.DataServiceClient.VTable = .{
         .ensure = ensure,
         .delete = delete,
+        .identify_holder = identifyHolder,
+        .stage_primary = stagePrimary,
+        .fence_replica = fenceReplica,
+        .recover_primary = recoverPrimary,
+        .mark_primary_ready = markPrimaryReady,
         .cancel = cancel,
     };
 };
@@ -583,7 +688,8 @@ test "runtime reconciler recovers unknown ensure and completes create and delete
     defer store.deinit();
     var backend: ReconcileBackend = .{};
     var data_server = data_service.Service.init(store.store(), backend.interface());
-    var data_client = ReconcileDataClient{ .service = &data_server };
+    var holder = try primary_lease.Runtime.init(reconcile_holder_boot_id);
+    var data_client = ReconcileDataClient{ .service = &data_server, .holder = &holder };
     var options = test_options;
     options.data_service_client = data_client.interface();
     options.reconcile_interval_ms = 1;
@@ -620,18 +726,22 @@ test "runtime reconciler recovers unknown ensure and completes create and delete
 
     var created = try createVolume(runtime, "reconcile-volume", pool.id, "database");
     defer created.deinit();
-    var fenced = try waitForVolumeState(
+    var active = try waitForVolumeState(
         runtime,
         created.value.id,
-        .VOLUME_LIFECYCLE_STATE_PROVISIONING,
-        .VOLUME_OPERATION_PHASE_FENCING,
+        .VOLUME_LIFECYCLE_STATE_ACTIVE,
+        .VOLUME_OPERATION_PHASE_NONE,
     );
-    defer fenced.deinit();
+    defer active.deinit();
     try std.testing.expectEqual(@as(usize, 3), backend.ensures);
+    try std.testing.expectEqual(@as(usize, 1), data_client.stages);
+    try std.testing.expectEqual(@as(usize, 3), data_client.fence_drains);
+    try std.testing.expect(data_client.recoveries >= 1);
+    try std.testing.expect(data_client.mark_ready >= 1);
 
-    var deleted = try deleteVolume(runtime, "reconcile-delete", fenced.value.id, fenced.value.resource_version);
+    var deleted = try deleteVolume(runtime, "reconcile-delete", active.value.id, active.value.resource_version);
     defer deleted.deinit();
-    try waitForVolumeDeletion(runtime, fenced.value.id);
+    try waitForVolumeDeletion(runtime, active.value.id);
     try std.testing.expectEqual(@as(usize, 3), backend.deletes);
 
     try runtime.shutdown();

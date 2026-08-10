@@ -811,6 +811,7 @@ pub const PoolStateMachine = struct {
 
     pub const ReconcileVolume = struct {
         volume: pb.Volume,
+        primary_authority: ?pb.PrimaryAuthority,
         placements: []pb.ReplicaPlacement,
         allocations: []pb.ReplicaAllocation,
         nodes: []pb.Node,
@@ -818,6 +819,7 @@ pub const PoolStateMachine = struct {
 
         pub fn deinit(self: *ReconcileVolume, allocator: std.mem.Allocator) void {
             self.volume.deinit(allocator);
+            if (self.primary_authority) |*authority| authority.deinit(allocator);
             for (self.placements) |*value| value.deinit(allocator);
             allocator.free(self.placements);
             for (self.allocations) |*value| value.deinit(allocator);
@@ -836,7 +838,10 @@ pub const PoolStateMachine = struct {
         }
         for (self.state.volume_ids_by_revision.items) |volume_id| {
             const stored_volume = self.state.volumes_by_id.get(volume_id).?;
-            if (stored_volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE and stored_volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE) continue;
+            const stored_authority = self.state.primary_authorities_by_volume.get(volume_id);
+            if (stored_volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE and
+                stored_volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE and
+                (stored_authority == null or stored_authority.?.state != .PRIMARY_AUTHORITY_STATE_READY)) continue;
             var placements: std.ArrayList(pb.ReplicaPlacement) = .empty;
             var allocations: std.ArrayList(pb.ReplicaAllocation) = .empty;
             var nodes: std.ArrayList(pb.Node) = .empty;
@@ -864,6 +869,7 @@ pub const PoolStateMachine = struct {
             }
             try result.append(allocator, .{
                 .volume = try dupeVolume(allocator, stored_volume.proto()),
+                .primary_authority = if (stored_authority) |authority| try dupePrimaryAuthority(allocator, authority.proto()) else null,
                 .placements = try placements.toOwnedSlice(allocator),
                 .allocations = try allocations.toOwnedSlice(allocator),
                 .nodes = try nodes.toOwnedSlice(allocator),

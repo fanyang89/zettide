@@ -2,8 +2,50 @@ const std = @import("std");
 
 const data_service = @import("data_service.zig");
 const pb = @import("control_proto");
+const primary_lease = @import("primary_lease.zig");
+const replica_fence = @import("replica_fence.zig");
 const state_machine = @import("state_machine.zig");
 const uuid = @import("uuid");
+
+pub const Id = [16]u8;
+pub const Digest = [32]u8;
+
+pub const AuthorityBinding = struct {
+    volume_id: Id,
+    primary_placement_id: Id,
+    primary_node_id: Id,
+    lease_id: Id,
+    holder_boot_id: Id,
+    authority_generation: u64,
+    write_epoch: u64,
+    placement_revision: u64,
+    activation_nonce: Id,
+    authority_digest: Digest,
+};
+
+pub const StageRequest = struct {
+    binding: AuthorityBinding,
+    lease_duration_ms: u32,
+};
+
+pub const StageAck = struct {
+    request: StageRequest,
+};
+
+pub const RecoveryRequest = struct {
+    binding: AuthorityBinding,
+};
+
+pub const RecoveryResult = struct {
+    request: RecoveryRequest,
+    certified_sequence: u64,
+    history_digest: Digest,
+    empty_frontier: bool,
+};
+
+pub const MarkReadyRequest = struct {
+    binding: AuthorityBinding,
+};
 
 pub const DataServiceClient = struct {
     context: *anyopaque,
@@ -12,6 +54,11 @@ pub const DataServiceClient = struct {
     pub const VTable = struct {
         ensure: *const fn (*anyopaque, []const u8, data_service.Request) anyerror!data_service.Response,
         delete: *const fn (*anyopaque, []const u8, data_service.Request) anyerror!data_service.Response,
+        identify_holder: *const fn (*anyopaque, []const u8) anyerror!Id,
+        stage_primary: *const fn (*anyopaque, []const u8, StageRequest) anyerror!StageAck,
+        fence_replica: *const fn (*anyopaque, []const u8, replica_fence.Binding) anyerror!replica_fence.Result,
+        recover_primary: *const fn (*anyopaque, []const u8, RecoveryRequest) anyerror!RecoveryResult,
+        mark_primary_ready: *const fn (*anyopaque, []const u8, MarkReadyRequest) anyerror!void,
         /// Must be thread-safe, idempotent, and promptly unblock in-flight calls.
         cancel: *const fn (*anyopaque) void,
     };
@@ -22,6 +69,26 @@ pub const DataServiceClient = struct {
 
     fn delete(self: DataServiceClient, endpoint: []const u8, request: data_service.Request) !data_service.Response {
         return self.vtable.delete(self.context, endpoint, request);
+    }
+
+    fn identifyHolder(self: DataServiceClient, endpoint: []const u8) !Id {
+        return self.vtable.identify_holder(self.context, endpoint);
+    }
+
+    fn stagePrimary(self: DataServiceClient, endpoint: []const u8, request: StageRequest) !StageAck {
+        return self.vtable.stage_primary(self.context, endpoint, request);
+    }
+
+    fn fenceReplica(self: DataServiceClient, endpoint: []const u8, binding: replica_fence.Binding) !replica_fence.Result {
+        return self.vtable.fence_replica(self.context, endpoint, binding);
+    }
+
+    fn recoverPrimary(self: DataServiceClient, endpoint: []const u8, request: RecoveryRequest) !RecoveryResult {
+        return self.vtable.recover_primary(self.context, endpoint, request);
+    }
+
+    fn markPrimaryReady(self: DataServiceClient, endpoint: []const u8, request: MarkReadyRequest) !void {
+        return self.vtable.mark_primary_ready(self.context, endpoint, request);
     }
 
     pub fn cancel(self: DataServiceClient) void {
@@ -77,6 +144,9 @@ pub const Reconciler = struct {
         }
         for (volumes) |volume| {
             if (volume.placements.len != volume.allocations.len) return error.InconsistentSnapshot;
+            if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_DELETING) {
+                return try self.planDelete(volume);
+            }
             if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_PROVISIONING and
                 volume.volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE and
                 volume.placements.len == 0 and volume.allocations.len == 0)
@@ -90,8 +160,21 @@ pub const Reconciler = struct {
                     return try self.planEnsure(volume, placement);
                 }
             }
-            if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_DELETING) {
-                return try self.planDelete(volume);
+            if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_PROVISIONING and
+                volume.volume.operation_phase == .VOLUME_OPERATION_PHASE_FENCING)
+            {
+                if (volume.primary_authority) |authority| switch (authority.state) {
+                    .PRIMARY_AUTHORITY_STATE_PENDING => return try self.planActivateAuthority(volume, authority),
+                    .PRIMARY_AUTHORITY_STATE_ACTIVATED => return try self.planReadyAuthority(volume, authority),
+                    else => {},
+                } else return try self.planProposeAuthority(volume);
+            }
+            if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE and
+                volume.volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE and
+                volume.primary_authority != null and
+                volume.primary_authority.?.state == .PRIMARY_AUTHORITY_STATE_READY)
+            {
+                return try self.planMarkReady(volume, volume.primary_authority.?);
             }
         }
         return null;
@@ -179,6 +262,92 @@ pub const Reconciler = struct {
         action.kind = .{ .delete = .{ .replicas = replicas, .command = encoded } };
         return action;
     }
+
+    fn planProposeAuthority(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume) !*Action {
+        if (volume.placements.len != state_machine.volume_target_replica_count) return error.InconsistentSnapshot;
+        const primary = volume.placements[0];
+        if (primary.replica_index != 0 or primary.state != .REPLICA_PLACEMENT_STATE_ACTIVE) return error.InconsistentSnapshot;
+        const node = nodeById(volume.nodes, primary.node_id) orelse return error.InconsistentSnapshot;
+        const action = try Action.create(self.allocator);
+        errdefer action.deinit();
+        const allocator = action.arena.allocator();
+        action.kind = .{ .propose_authority = .{
+            .endpoint = try allocator.dupe(u8, node.control_endpoint),
+            .volume_id_text = try allocator.dupe(u8, volume.volume.id),
+            .primary_placement_id_text = try allocator.dupe(u8, primary.id),
+            .primary_node_id_text = try allocator.dupe(u8, primary.node_id),
+            .volume_id = try parseId(volume.volume.id),
+            .primary_placement_id = try parseId(primary.id),
+            .primary_node_id = try parseId(primary.node_id),
+            .lease_id = randomId(self.io),
+            .activation_nonce = randomId(self.io),
+            .write_epoch = volume.volume.write_epoch,
+            .placement_revision = volume.volume.placement_revision,
+            .expected_volume_resource_version = volume.volume.resource_version,
+        } };
+        return action;
+    }
+
+    fn planActivateAuthority(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, authority: pb.PrimaryAuthority) !*Action {
+        const action = try Action.create(self.allocator);
+        errdefer action.deinit();
+        const allocator = action.arena.allocator();
+        action.kind = .{ .activate_authority = .{
+            .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
+            .request = .{ .binding = try authorityBinding(authority), .lease_duration_ms = authority.lease_duration_ms },
+            .volume_id_text = try allocator.dupe(u8, authority.volume_id),
+            .expected_volume_resource_version = volume.volume.resource_version,
+            .expected_authority_resource_version = authority.resource_version,
+        } };
+        return action;
+    }
+
+    fn planReadyAuthority(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, authority: pb.PrimaryAuthority) !*Action {
+        if (volume.placements.len != state_machine.volume_target_replica_count) return error.InconsistentSnapshot;
+        const action = try Action.create(self.allocator);
+        errdefer action.deinit();
+        const allocator = action.arena.allocator();
+        const binding = try authorityBinding(authority);
+        const replicas = try allocator.alloc(Action.FenceReplica, volume.placements.len);
+        for (volume.placements, replicas) |placement, *replica| {
+            const node = nodeById(volume.nodes, placement.node_id) orelse return error.InconsistentSnapshot;
+            replica.* = .{
+                .endpoint = try allocator.dupe(u8, node.control_endpoint),
+                .binding = .{
+                    .operation_id = stableFenceOperationId(binding, try parseId(placement.id), placement.generation),
+                    .volume_id = binding.volume_id,
+                    .placement_id = try parseId(placement.id),
+                    .replica_generation = placement.generation,
+                    .write_epoch = binding.write_epoch,
+                    .primary_node_id = binding.primary_node_id,
+                    .lease_id = binding.lease_id,
+                    .authority_digest = binding.authority_digest,
+                },
+            };
+        }
+        const primary_node = nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot;
+        action.kind = .{ .ready_authority = .{
+            .primary_endpoint = try allocator.dupe(u8, primary_node.control_endpoint),
+            .volume_id_text = try allocator.dupe(u8, authority.volume_id),
+            .placement_id_texts = try dupePlacementIds(allocator, volume.placements),
+            .binding = binding,
+            .replicas = replicas,
+            .expected_volume_resource_version = volume.volume.resource_version,
+            .expected_authority_resource_version = authority.resource_version,
+        } };
+        return action;
+    }
+
+    fn planMarkReady(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, authority: pb.PrimaryAuthority) !*Action {
+        const action = try Action.create(self.allocator);
+        errdefer action.deinit();
+        const allocator = action.arena.allocator();
+        action.kind = .{ .mark_ready = .{
+            .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
+            .request = .{ .binding = try authorityBinding(authority) },
+        } };
+        return action;
+    }
 };
 
 pub const Action = struct {
@@ -204,10 +373,57 @@ pub const Action = struct {
         command: []const u8,
     };
 
+    const ProposeAuthority = struct {
+        endpoint: []const u8,
+        volume_id_text: []const u8,
+        primary_placement_id_text: []const u8,
+        primary_node_id_text: []const u8,
+        volume_id: Id,
+        primary_placement_id: Id,
+        primary_node_id: Id,
+        lease_id: Id,
+        activation_nonce: Id,
+        write_epoch: u64,
+        placement_revision: u64,
+        expected_volume_resource_version: u64,
+    };
+
+    const ActivateAuthority = struct {
+        endpoint: []const u8,
+        request: StageRequest,
+        volume_id_text: []const u8,
+        expected_volume_resource_version: u64,
+        expected_authority_resource_version: u64,
+    };
+
+    const FenceReplica = struct {
+        endpoint: []const u8,
+        binding: replica_fence.Binding,
+    };
+
+    const ReadyAuthority = struct {
+        primary_endpoint: []const u8,
+        volume_id_text: []const u8,
+        placement_id_texts: []const []const u8,
+        binding: AuthorityBinding,
+        replicas: []const FenceReplica,
+        expected_volume_resource_version: u64,
+        expected_authority_resource_version: u64,
+    };
+
+    const MarkReady = struct {
+        endpoint: []const u8,
+        request: MarkReadyRequest,
+    };
+
     const Kind = union(enum) {
         reserve: []const u8,
         ensure: Ensure,
         delete: Delete,
+        propose_authority: ProposeAuthority,
+        activate_authority: ActivateAuthority,
+        ready_authority: ReadyAuthority,
+        mark_ready: MarkReady,
     };
 
     fn create(allocator: std.mem.Allocator) !*Action {
@@ -255,11 +471,108 @@ pub const Action = struct {
                 }
                 try submitAndValidate(self.parent_allocator, submitter, delete.command, .finalize);
             },
+            .propose_authority => |propose| {
+                const holder_boot_id = try data_client.identifyHolder(propose.endpoint);
+                if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
+                const binding: AuthorityBinding = .{
+                    .volume_id = propose.volume_id,
+                    .primary_placement_id = propose.primary_placement_id,
+                    .primary_node_id = propose.primary_node_id,
+                    .lease_id = propose.lease_id,
+                    .holder_boot_id = holder_boot_id,
+                    .authority_generation = 1,
+                    .write_epoch = propose.write_epoch,
+                    .placement_revision = propose.placement_revision,
+                    .activation_nonce = propose.activation_nonce,
+                    .authority_digest = @splat(0),
+                };
+                var finalized = binding;
+                finalized.authority_digest = authorityDigest(binding);
+                const command = try state_machine.encodeProposePrimaryAuthorityCommand(self.parent_allocator, .{
+                    .authority = .{
+                        .volume_id = propose.volume_id_text,
+                        .primary_placement_id = propose.primary_placement_id_text,
+                        .primary_node_id = propose.primary_node_id_text,
+                        .lease_id = &finalized.lease_id,
+                        .holder_boot_id = &finalized.holder_boot_id,
+                        .authority_generation = finalized.authority_generation,
+                        .write_epoch = finalized.write_epoch,
+                        .placement_revision = finalized.placement_revision,
+                        .activation_nonce = &finalized.activation_nonce,
+                        .lease_duration_ms = primary_lease.duration_ms,
+                        .state = .PRIMARY_AUTHORITY_STATE_PENDING,
+                        .authority_digest = &finalized.authority_digest,
+                    },
+                    .expected_volume_resource_version = propose.expected_volume_resource_version,
+                });
+                defer self.parent_allocator.free(command);
+                try submitAndValidate(self.parent_allocator, submitter, command, .propose_authority);
+            },
+            .activate_authority => |activate| {
+                const ack = try data_client.stagePrimary(activate.endpoint, activate.request);
+                if (!std.meta.eql(ack.request, activate.request)) return error.InvalidStageAck;
+                const binding = activate.request.binding;
+                const command = try state_machine.encodeActivatePrimaryAuthorityCommand(self.parent_allocator, .{
+                    .volume_id = activate.volume_id_text,
+                    .lease_id = &binding.lease_id,
+                    .activation_nonce = &binding.activation_nonce,
+                    .authority_generation = binding.authority_generation,
+                    .write_epoch = binding.write_epoch,
+                    .placement_revision = binding.placement_revision,
+                    .expected_volume_resource_version = activate.expected_volume_resource_version,
+                    .expected_authority_resource_version = activate.expected_authority_resource_version,
+                });
+                defer self.parent_allocator.free(command);
+                try submitAndValidate(self.parent_allocator, submitter, command, .activate_authority);
+            },
+            .ready_authority => |ready| {
+                const evidence = try self.parent_allocator.alloc(pb.ReplicaFenceEvidence, ready.replicas.len);
+                defer self.parent_allocator.free(evidence);
+                for (ready.replicas, evidence, ready.placement_id_texts) |replica, *proof, placement_id| {
+                    const result = try data_client.fenceReplica(replica.endpoint, replica.binding);
+                    if (!std.meta.eql(result.binding, replica.binding) or isZero(&result.fence_digest)) return error.InvalidFenceProof;
+                    proof.* = .{
+                        .placement_id = placement_id,
+                        .replica_generation = result.binding.replica_generation,
+                        .write_epoch = result.binding.write_epoch,
+                        .lease_id = &result.binding.lease_id,
+                        .authority_digest = &result.binding.authority_digest,
+                        .fence_digest = &result.fence_digest,
+                    };
+                }
+                const recovery_request: RecoveryRequest = .{ .binding = ready.binding };
+                const recovery = try data_client.recoverPrimary(ready.primary_endpoint, recovery_request);
+                if (!std.meta.eql(recovery.request, recovery_request) or isZero(&recovery.history_digest) or
+                    (recovery.certified_sequence == 0) != recovery.empty_frontier) return error.InvalidRecoveryProof;
+                const command = try state_machine.encodeCommitPrimaryAuthorityReadyCommand(self.parent_allocator, .{
+                    .volume_id = ready.volume_id_text,
+                    .lease_id = &ready.binding.lease_id,
+                    .authority_digest = &ready.binding.authority_digest,
+                    .authority_generation = ready.binding.authority_generation,
+                    .write_epoch = ready.binding.write_epoch,
+                    .placement_revision = ready.binding.placement_revision,
+                    .expected_volume_resource_version = ready.expected_volume_resource_version,
+                    .expected_authority_resource_version = ready.expected_authority_resource_version,
+                    .fence_evidence = .{ .items = evidence, .capacity = evidence.len },
+                    .recovery_evidence = .{
+                        .volume_id = ready.volume_id_text,
+                        .write_epoch = ready.binding.write_epoch,
+                        .certified_sequence = recovery.certified_sequence,
+                        .history_digest = &recovery.history_digest,
+                        .empty_frontier = recovery.empty_frontier,
+                    },
+                });
+                defer self.parent_allocator.free(command);
+                if (try submitReadyAndValidate(self.parent_allocator, submitter, command, ready.binding)) {
+                    try data_client.markPrimaryReady(ready.primary_endpoint, .{ .binding = ready.binding });
+                }
+            },
+            .mark_ready => |mark| try data_client.markPrimaryReady(mark.endpoint, mark.request),
         }
     }
 };
 
-const ApplyKind = enum { reserve, activate, finalize };
+const ApplyKind = enum { reserve, activate, finalize, propose_authority, activate_authority };
 
 fn submitAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, command: []const u8, kind: ApplyKind) !void {
     const response_bytes = try submitter.submit(allocator, command);
@@ -299,6 +612,57 @@ fn submitAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, 
                 else => return error.FinalizeRejected,
             }
         },
+        .propose_authority => {
+            var response = try state_machine.decodePrimaryAuthorityApplyResponse(allocator, response_bytes);
+            defer response.deinit(allocator);
+            switch (response.code) {
+                .PRIMARY_AUTHORITY_APPLY_CODE_PROPOSED,
+                .PRIMARY_AUTHORITY_APPLY_CODE_VERSION_CONFLICT,
+                .PRIMARY_AUTHORITY_APPLY_CODE_INVALID_STATE,
+                => {},
+                else => return error.PrimaryAuthorityProposalRejected,
+            }
+        },
+        .activate_authority => {
+            var response = try state_machine.decodePrimaryAuthorityApplyResponse(allocator, response_bytes);
+            defer response.deinit(allocator);
+            switch (response.code) {
+                .PRIMARY_AUTHORITY_APPLY_CODE_ACTIVATED,
+                .PRIMARY_AUTHORITY_APPLY_CODE_VERSION_CONFLICT,
+                .PRIMARY_AUTHORITY_APPLY_CODE_INVALID_STATE,
+                => {},
+                else => return error.PrimaryAuthorityActivationRejected,
+            }
+        },
+    }
+}
+
+fn submitReadyAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, command: []const u8, binding: AuthorityBinding) !bool {
+    const response_bytes = try submitter.submit(allocator, command);
+    defer allocator.free(response_bytes);
+    var response = try state_machine.decodePrimaryAuthorityApplyResponse(allocator, response_bytes);
+    defer response.deinit(allocator);
+    switch (response.code) {
+        .PRIMARY_AUTHORITY_APPLY_CODE_READY => {
+            const authority = response.authority orelse return error.InvalidReadyApplyResponse;
+            if (authority.state != .PRIMARY_AUTHORITY_STATE_READY or
+                !uuidMatches(authority.volume_id, binding.volume_id) or
+                !uuidMatches(authority.primary_placement_id, binding.primary_placement_id) or
+                !uuidMatches(authority.primary_node_id, binding.primary_node_id) or
+                !std.mem.eql(u8, authority.lease_id, &binding.lease_id) or
+                !std.mem.eql(u8, authority.holder_boot_id, &binding.holder_boot_id) or
+                !std.mem.eql(u8, authority.activation_nonce, &binding.activation_nonce) or
+                !std.mem.eql(u8, authority.authority_digest, &binding.authority_digest) or
+                authority.authority_generation != binding.authority_generation or
+                authority.write_epoch != binding.write_epoch or
+                authority.placement_revision != binding.placement_revision or
+                authority.lease_duration_ms != primary_lease.duration_ms) return error.InvalidReadyApplyResponse;
+            return true;
+        },
+        .PRIMARY_AUTHORITY_APPLY_CODE_VERSION_CONFLICT,
+        .PRIMARY_AUTHORITY_APPLY_CODE_INVALID_STATE,
+        => return false,
+        else => return error.PrimaryAuthorityReadyRejected,
     }
 }
 
@@ -322,6 +686,102 @@ fn memberById(members: []const pb.Member, id: []const u8) ?pb.Member {
 fn nodeById(nodes: []const pb.Node, id: []const u8) ?pb.Node {
     for (nodes) |node| if (std.mem.eql(u8, node.id, id)) return node;
     return null;
+}
+
+fn authorityBinding(authority: pb.PrimaryAuthority) !AuthorityBinding {
+    if (authority.lease_id.len != 16 or authority.holder_boot_id.len != 16 or authority.activation_nonce.len != 16 or authority.authority_digest.len != 32)
+        return error.InconsistentSnapshot;
+    return .{
+        .volume_id = try parseId(authority.volume_id),
+        .primary_placement_id = try parseId(authority.primary_placement_id),
+        .primary_node_id = try parseId(authority.primary_node_id),
+        .lease_id = authority.lease_id[0..16].*,
+        .holder_boot_id = authority.holder_boot_id[0..16].*,
+        .authority_generation = authority.authority_generation,
+        .write_epoch = authority.write_epoch,
+        .placement_revision = authority.placement_revision,
+        .activation_nonce = authority.activation_nonce[0..16].*,
+        .authority_digest = authority.authority_digest[0..32].*,
+    };
+}
+
+fn parseId(value: []const u8) !Id {
+    const parsed = uuid.urn.deserialize(value) catch return error.InvalidId;
+    const canonical = uuid.urn.serialize(parsed);
+    if (canonical[14] != '7' or !std.mem.eql(u8, value, &canonical)) return error.InvalidId;
+    var result: Id = undefined;
+    std.mem.writeInt(u128, &result, parsed, .little);
+    return result;
+}
+
+fn randomId(io: std.Io) Id {
+    const text = uuid.urn.serialize(uuid.v7.new(io));
+    return parseId(&text) catch unreachable;
+}
+
+fn validUuidV7Bytes(value: Id) bool {
+    return value[6] & 0xf0 == 0x70 and value[8] & 0xc0 == 0x80;
+}
+
+fn authorityDigest(binding: AuthorityBinding) Digest {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hasher, "zettide.primary-authority.v1");
+    hashField(&hasher, &binding.volume_id);
+    hashField(&hasher, &binding.primary_placement_id);
+    hashField(&hasher, &binding.primary_node_id);
+    hashField(&hasher, &binding.lease_id);
+    hashField(&hasher, &binding.holder_boot_id);
+    hashU64(&hasher, binding.authority_generation);
+    hashU64(&hasher, binding.write_epoch);
+    hashU64(&hasher, binding.placement_revision);
+    hashField(&hasher, &binding.activation_nonce);
+    hashU64(&hasher, primary_lease.duration_ms);
+    var digest: Digest = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn stableFenceOperationId(binding: AuthorityBinding, placement_id: Id, replica_generation: u64) Id {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hasher, "zettide.replica-fence-operation.v1");
+    hashField(&hasher, &binding.volume_id);
+    hashField(&hasher, &placement_id);
+    hashField(&hasher, &binding.lease_id);
+    hashField(&hasher, &binding.holder_boot_id);
+    hashField(&hasher, &binding.authority_digest);
+    hashU64(&hasher, binding.authority_generation);
+    hashU64(&hasher, binding.write_epoch);
+    hashU64(&hasher, binding.placement_revision);
+    hashU64(&hasher, replica_generation);
+    var digest: Digest = undefined;
+    hasher.final(&digest);
+    digest[6] = (digest[6] & 0x0f) | 0x70;
+    digest[8] = (digest[8] & 0x3f) | 0x80;
+    return digest[0..16].*;
+}
+
+fn hashField(hasher: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
+    var length: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length, value.len, .big);
+    hasher.update(&length);
+    hasher.update(value);
+}
+
+fn hashU64(hasher: *std.crypto.hash.sha2.Sha256, value: u64) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .big);
+    hashField(hasher, &bytes);
+}
+
+fn dupePlacementIds(allocator: std.mem.Allocator, placements: []const pb.ReplicaPlacement) ![]const []const u8 {
+    const ids = try allocator.alloc([]const u8, placements.len);
+    for (placements, ids) |placement, *id| id.* = try allocator.dupe(u8, placement.id);
+    return ids;
+}
+
+fn isZero(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte != 0) return false;
+    return true;
 }
 
 fn dupeDataRequest(
@@ -398,6 +858,7 @@ const test_node_ids = [3][]const u8{
 const test_cluster_id: [16]u8 = @splat(1);
 const test_local_set_id: [16]u8 = @splat(2);
 const test_digest: [32]u8 = @splat(3);
+const test_holder_boot_id: Id = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0x00, 0x80, 0x00, 0, 0, 0, 0, 2, 1 };
 const test_member_ids = [3][16]u8{
     .{ 0x11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
     .{ 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 },
@@ -515,8 +976,20 @@ const TestBackend = struct {
 
 const TestDataClient = struct {
     service: *data_service.Service,
+    machine: *state_machine.PoolStateMachine,
+    holder: *primary_lease.Runtime,
     lose_ensure_response: bool = false,
     stale_attestation: bool = false,
+    lose_stage_response: bool = false,
+    lose_fence_response: bool = false,
+    invalid_fence_proof: bool = false,
+    invalid_recovery_proof: bool = false,
+    staged: ?StageRequest = null,
+    fences: [state_machine.volume_target_replica_count]?replica_fence.Result = @splat(null),
+    stage_grants: usize = 0,
+    fence_drains: usize = 0,
+    recoveries: usize = 0,
+    mark_ready_calls: usize = 0,
 
     fn interface(self: *TestDataClient) DataServiceClient {
         return .{ .context = self, .vtable = &vtable };
@@ -540,11 +1013,104 @@ const TestDataClient = struct {
         return self.service.deleteReplica(request);
     }
 
+    fn identifyHolderOpaque(_: *anyopaque, endpoint: []const u8) !Id {
+        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        return test_holder_boot_id;
+    }
+
+    fn stagePrimaryOpaque(context: *anyopaque, endpoint: []const u8, request: StageRequest) !StageAck {
+        const self: *TestDataClient = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!std.mem.eql(u8, &request.binding.authority_digest, &authorityDigest(request.binding))) return error.InvalidAuthorityDigest;
+        if (self.staged) |staged| {
+            if (!std.meta.eql(staged, request)) return error.StageConflict;
+        } else {
+            _ = try self.holder.stage(.{
+                .lease_id = request.binding.lease_id,
+                .holder_boot_id = request.binding.holder_boot_id,
+                .authority_generation = request.binding.authority_generation,
+                .write_epoch = request.binding.write_epoch,
+            }, 1_000);
+            self.staged = request;
+            self.stage_grants += 1;
+        }
+        if (self.lose_stage_response) {
+            self.lose_stage_response = false;
+            return error.TransportUnknown;
+        }
+        return .{ .request = request };
+    }
+
+    fn fenceReplicaOpaque(context: *anyopaque, endpoint: []const u8, binding: replica_fence.Binding) !replica_fence.Result {
+        const self: *TestDataClient = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        var slot: ?usize = null;
+        for (&self.fences, 0..) |*existing, index| {
+            if (existing.*) |result| {
+                if (std.mem.eql(u8, &result.binding.placement_id, &binding.placement_id)) {
+                    if (!std.meta.eql(result.binding, binding)) return error.FenceConflict;
+                    slot = index;
+                    break;
+                }
+            } else if (slot == null) slot = index;
+        }
+        const index = slot orelse return error.TooManyFences;
+        if (self.fences[index] == null) {
+            var digest = binding.authority_digest;
+            digest[0] ^= @truncate(index + 1);
+            self.fences[index] = .{ .binding = binding, .fence_digest = digest };
+            self.fence_drains += 1;
+        }
+        if (self.lose_fence_response) {
+            self.lose_fence_response = false;
+            return error.TransportUnknown;
+        }
+        var result = self.fences[index].?;
+        if (self.invalid_fence_proof) result.binding.write_epoch += 1;
+        return result;
+    }
+
+    fn recoverPrimaryOpaque(context: *anyopaque, endpoint: []const u8, request: RecoveryRequest) !RecoveryResult {
+        const self: *TestDataClient = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        self.recoveries += 1;
+        var result: RecoveryResult = .{
+            .request = request,
+            .certified_sequence = 0,
+            .history_digest = request.binding.authority_digest,
+            .empty_frontier = true,
+        };
+        if (self.invalid_recovery_proof) result.request.binding.write_epoch += 1;
+        return result;
+    }
+
+    fn markPrimaryReadyOpaque(context: *anyopaque, endpoint: []const u8, request: MarkReadyRequest) !void {
+        const self: *TestDataClient = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        var authority = (try self.machine.getPrimaryAuthority(std.testing.allocator, test_volume_id)) orelse return error.AuthorityNotCommitted;
+        defer authority.deinit(std.testing.allocator);
+        if (authority.state != .PRIMARY_AUTHORITY_STATE_READY or !std.mem.eql(u8, authority.lease_id, &request.binding.lease_id)) return error.AuthorityNotReady;
+        self.mark_ready_calls += 1;
+        const token: primary_lease.Token = .{
+            .lease_id = request.binding.lease_id,
+            .holder_boot_id = request.binding.holder_boot_id,
+            .authority_generation = request.binding.authority_generation,
+            .write_epoch = request.binding.write_epoch,
+        };
+        if (self.holder.canAdmit(token, 2_000)) return;
+        try self.holder.markReady(request.binding.lease_id, 2_000);
+    }
+
     fn cancelOpaque(_: *anyopaque) void {}
 
     const vtable: DataServiceClient.VTable = .{
         .ensure = ensureOpaque,
         .delete = deleteOpaque,
+        .identify_holder = identifyHolderOpaque,
+        .stage_primary = stagePrimaryOpaque,
+        .fence_replica = fenceReplicaOpaque,
+        .recover_primary = recoverPrimaryOpaque,
+        .mark_primary_ready = markPrimaryReadyOpaque,
         .cancel = cancelOpaque,
     };
 };
@@ -559,7 +1125,8 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     defer store.deinit();
     var backend: TestBackend = .{};
     var service = data_service.Service.init(store.store(), backend.interface());
-    var data_client = TestDataClient{ .service = &service, .lose_ensure_response = true };
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder, .lose_ensure_response = true };
     var reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
 
     try reconciler.runOnce();
@@ -579,10 +1146,39 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_PROVISIONING, fenced.lifecycle_state);
     try std.testing.expectEqual(pb.VolumeOperationPhase.VOLUME_OPERATION_PHASE_FENCING, fenced.operation_phase);
 
+    try rebuilt.runOnce();
+    try std.testing.expectEqual(@as(usize, 5), submitter.submissions);
+    data_client.lose_stage_response = true;
+    try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
+    try std.testing.expectEqual(@as(usize, 1), data_client.stage_grants);
+    try rebuilt.runOnce();
+    try std.testing.expectEqual(@as(usize, 1), data_client.stage_grants);
+    try std.testing.expectEqual(@as(usize, 6), submitter.submissions);
+    data_client.lose_fence_response = true;
+    try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
+    try std.testing.expectEqual(@as(usize, 1), data_client.fence_drains);
+    try rebuilt.runOnce();
+    try std.testing.expectEqual(@as(usize, 3), data_client.fence_drains);
+    try std.testing.expectEqual(@as(usize, 7), submitter.submissions);
+    try std.testing.expectEqual(@as(usize, 1), data_client.mark_ready_calls);
+    var active = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer active.deinit(allocator);
+    try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_ACTIVE, active.lifecycle_state);
+    try std.testing.expectEqual(pb.VolumeAvailabilityState.VOLUME_AVAILABILITY_STATE_HEALTHY, active.availability_state);
+    try std.testing.expectEqual(pb.VolumeOperationPhase.VOLUME_OPERATION_PHASE_NONE, active.operation_phase);
+    var authority = (try machine.getPrimaryAuthority(allocator, test_volume_id)).?;
+    defer authority.deinit(allocator);
+    try std.testing.expectEqual(pb.PrimaryAuthorityState.PRIMARY_AUTHORITY_STATE_READY, authority.state);
+    try std.testing.expect(validUuidV7Bytes(authority.lease_id[0..16].*));
+    try std.testing.expect(validUuidV7Bytes(authority.holder_boot_id[0..16].*));
+    try std.testing.expect(validUuidV7Bytes(authority.activation_nonce[0..16].*));
+    try rebuilt.runOnce();
+    try std.testing.expectEqual(@as(usize, 2), data_client.mark_ready_calls);
+
     const delete_command = try state_machine.encodeDeleteVolumeCommand(allocator, .{
         .request_id = "reconciler-delete",
         .volume_id = test_volume_id,
-        .expected_resource_version = fenced.resource_version,
+        .expected_resource_version = active.resource_version,
         .proposed_deleted_at_unix_ms = 1_753_744_000_020,
     });
     defer allocator.free(delete_command);
@@ -590,6 +1186,7 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     allocator.free(delete_response);
     try rebuilt.runOnce();
     try std.testing.expectEqual(@as(usize, 3), backend.deletes);
+    try std.testing.expectEqual(@as(usize, 2), data_client.mark_ready_calls);
     try std.testing.expectEqual(@as(usize, 1), machine.volumeTombstoneCount());
     try std.testing.expect((try machine.getVolumeById(allocator, test_volume_id)) == null);
 }
@@ -604,7 +1201,8 @@ test "reconciler rejects stale attestation without activation" {
     defer store.deinit();
     var backend: TestBackend = .{};
     var service = data_service.Service.init(store.store(), backend.interface());
-    var data_client = TestDataClient{ .service = &service, .stale_attestation = true };
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder, .stale_attestation = true };
     var reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
     try reconciler.runOnce();
     try std.testing.expectError(error.InvalidAttestation, reconciler.runOnce());
@@ -617,6 +1215,32 @@ test "reconciler rejects stale attestation without activation" {
     try std.testing.expectEqual(pb.ReplicaPlacementState.REPLICA_PLACEMENT_STATE_RESERVED, snapshot[0].placements[0].state);
 }
 
+test "reconciler rejects invalid authority proofs without READY submission" {
+    const allocator = std.testing.allocator;
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try setupMachine(&machine, .{ "rack-a", "rack-b", "rack-c" });
+    var submitter = TestSubmitter{ .machine = &machine };
+    var store = data_service.MemoryStore.init(allocator);
+    defer store.deinit();
+    var backend: TestBackend = .{};
+    var service = data_service.Service.init(store.store(), backend.interface());
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder };
+    var reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
+
+    for (0..6) |_| try reconciler.runOnce();
+    try std.testing.expectEqual(@as(usize, 6), submitter.submissions);
+    data_client.invalid_fence_proof = true;
+    try std.testing.expectError(error.InvalidFenceProof, reconciler.runOnce());
+    try std.testing.expectEqual(@as(usize, 6), submitter.submissions);
+    data_client.invalid_fence_proof = false;
+    data_client.invalid_recovery_proof = true;
+    try std.testing.expectError(error.InvalidRecoveryProof, reconciler.runOnce());
+    try std.testing.expectEqual(@as(usize, 6), submitter.submissions);
+    try std.testing.expectEqual(@as(usize, 0), data_client.mark_ready_calls);
+}
+
 test "reconciler emits no command when placement is insufficient" {
     const allocator = std.testing.allocator;
     var machine = state_machine.PoolStateMachine.init(allocator);
@@ -627,7 +1251,8 @@ test "reconciler emits no command when placement is insufficient" {
     defer store.deinit();
     var backend: TestBackend = .{};
     var service = data_service.Service.init(store.store(), backend.interface());
-    var data_client = TestDataClient{ .service = &service };
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder };
     var reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
     try std.testing.expectError(error.InsufficientPlacement, reconciler.runOnce());
     try std.testing.expectEqual(@as(usize, 0), submitter.submissions);
