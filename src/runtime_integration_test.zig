@@ -620,13 +620,18 @@ test "runtime reconciler recovers unknown ensure and completes create and delete
 
     var created = try createVolume(runtime, "reconcile-volume", pool.id, "database");
     defer created.deinit();
-    var active = try waitForVolumeState(runtime, created.value.id, .VOLUME_LIFECYCLE_STATE_ACTIVE);
-    defer active.deinit();
+    var fenced = try waitForVolumeState(
+        runtime,
+        created.value.id,
+        .VOLUME_LIFECYCLE_STATE_PROVISIONING,
+        .VOLUME_OPERATION_PHASE_FENCING,
+    );
+    defer fenced.deinit();
     try std.testing.expectEqual(@as(usize, 3), backend.ensures);
 
-    var deleted = try deleteVolume(runtime, "reconcile-delete", active.value.id, active.value.resource_version);
+    var deleted = try deleteVolume(runtime, "reconcile-delete", fenced.value.id, fenced.value.resource_version);
     defer deleted.deinit();
-    try waitForVolumeDeletion(runtime, active.value.id);
+    try waitForVolumeDeletion(runtime, fenced.value.id);
     try std.testing.expectEqual(@as(usize, 3), backend.deletes);
 
     try runtime.shutdown();
@@ -1040,10 +1045,11 @@ fn waitForVolumeState(
     runtime: *runtime_mod.Runtime,
     volume_id: []const u8,
     expected: pb.VolumeLifecycleState,
+    expected_operation: pb.VolumeOperationPhase,
 ) !OwnedVolume {
     for (0..500) |_| {
         if (try getVolume(runtime, volume_id)) |value| {
-            if (value.value.lifecycle_state == expected) return value;
+            if (value.value.lifecycle_state == expected and value.value.operation_phase == expected_operation) return value;
             var pending = value;
             pending.deinit();
         }

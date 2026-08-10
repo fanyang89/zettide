@@ -136,18 +136,12 @@ pub const Reconciler = struct {
         const allocator = action.arena.allocator();
         var operation_urn = stableOperationId("ensure", placement.id, allocation.id, placement.generation);
         const request = try dupeDataRequest(allocator, &operation_urn, volume.volume, placement, allocation);
-        const encoded = try state_machine.encodeActivateReplicaCommand(allocator, .{
-            .volume_id = volume.volume.id,
-            .placement_id = placement.id,
-            .allocation_id = allocation.id,
-            .expected_volume_resource_version = volume.volume.resource_version,
-            .expected_placement_resource_version = placement.resource_version,
-            .expected_allocation_resource_version = allocation.resource_version,
-        });
         action.kind = .{ .ensure = .{
             .endpoint = try allocator.dupe(u8, node.control_endpoint),
             .request = request,
-            .command = encoded,
+            .expected_volume_resource_version = volume.volume.resource_version,
+            .expected_placement_resource_version = placement.resource_version,
+            .expected_allocation_resource_version = allocation.resource_version,
         } };
         return action;
     }
@@ -195,7 +189,9 @@ pub const Action = struct {
     const Ensure = struct {
         endpoint: []const u8,
         request: data_service.Request,
-        command: []const u8,
+        expected_volume_resource_version: u64,
+        expected_placement_resource_version: u64,
+        expected_allocation_resource_version: u64,
     };
 
     const DeleteReplica = struct {
@@ -231,7 +227,26 @@ pub const Action = struct {
             .ensure => |ensure| {
                 const response = try data_client.ensure(ensure.endpoint, ensure.request);
                 try validateDataResponse(response, ensure.request.operation_id, ensure.request, .active);
-                try submitAndValidate(self.parent_allocator, submitter, ensure.command, .activate);
+                const command = try state_machine.encodeActivateReplicaCommand(self.parent_allocator, .{
+                    .volume_id = ensure.request.volume_id,
+                    .placement_id = ensure.request.placement_id,
+                    .allocation_id = ensure.request.allocation_id,
+                    .expected_volume_resource_version = ensure.expected_volume_resource_version,
+                    .expected_placement_resource_version = ensure.expected_placement_resource_version,
+                    .expected_allocation_resource_version = ensure.expected_allocation_resource_version,
+                    .attestation = .{
+                        .volume_id = ensure.request.volume_id,
+                        .placement_id = ensure.request.placement_id,
+                        .allocation_id = ensure.request.allocation_id,
+                        .generation = ensure.request.generation,
+                        .member_id = ensure.request.member_id,
+                        .offset_bytes = ensure.request.offset_bytes,
+                        .length_bytes = ensure.request.length_bytes,
+                        .backend_digest = &response.replica.attestation.backend_digest,
+                    },
+                });
+                defer self.parent_allocator.free(command);
+                try submitAndValidate(self.parent_allocator, submitter, command, .activate);
             },
             .delete => |delete| {
                 for (delete.replicas) |replica| {
@@ -559,14 +574,15 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     try rebuilt.runOnce();
     try rebuilt.runOnce();
     try std.testing.expectEqual(@as(usize, 3), backend.ensures);
-    var active = (try machine.getVolumeById(allocator, test_volume_id)).?;
-    defer active.deinit(allocator);
-    try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_ACTIVE, active.lifecycle_state);
+    var fenced = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer fenced.deinit(allocator);
+    try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_PROVISIONING, fenced.lifecycle_state);
+    try std.testing.expectEqual(pb.VolumeOperationPhase.VOLUME_OPERATION_PHASE_FENCING, fenced.operation_phase);
 
     const delete_command = try state_machine.encodeDeleteVolumeCommand(allocator, .{
         .request_id = "reconciler-delete",
         .volume_id = test_volume_id,
-        .expected_resource_version = active.resource_version,
+        .expected_resource_version = fenced.resource_version,
         .proposed_deleted_at_unix_ms = 1_753_744_000_020,
     });
     defer allocator.free(delete_command);

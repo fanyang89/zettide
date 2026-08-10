@@ -428,6 +428,8 @@ message ReplicaPlacement {
   ReplicaPlacementState state = 6;
   uint64 created_revision = 7;
   uint64 resource_version = 8;
+  bytes backend_digest = 9;
+  uint64 attested_revision = 10;
 }
 
 enum ReplicaAllocationState {
@@ -475,6 +477,52 @@ message VolumeAttachment {
   uint64 resource_version = 9;
 }
 
+enum PrimaryAuthorityState {
+  PRIMARY_AUTHORITY_STATE_UNSPECIFIED = 0;
+  PRIMARY_AUTHORITY_STATE_PENDING = 1;
+  PRIMARY_AUTHORITY_STATE_ACTIVATED = 2;
+  PRIMARY_AUTHORITY_STATE_READY = 3;
+}
+
+message PrimaryAuthority {
+  string volume_id = 1;
+  string primary_placement_id = 2;
+  string primary_node_id = 3;
+  bytes lease_id = 4;
+  bytes holder_boot_id = 5;
+  uint64 authority_generation = 6;
+  uint64 write_epoch = 7;
+  uint64 placement_revision = 8;
+  bytes activation_nonce = 9;
+  uint32 lease_duration_ms = 10;
+  PrimaryAuthorityState state = 11;
+  bytes authority_digest = 12;
+  uint64 created_revision = 13;
+  uint64 activated_revision = 14;
+  uint64 ready_revision = 15;
+  uint64 resource_version = 16;
+  uint64 recovery_sequence = 17;
+  bytes recovery_digest = 18;
+  bool recovery_empty_frontier = 19;
+}
+
+message ReplicaFenceEvidence {
+  string placement_id = 1;
+  uint64 replica_generation = 2;
+  uint64 write_epoch = 3;
+  bytes lease_id = 4;
+  bytes authority_digest = 5;
+  bytes fence_digest = 6;
+}
+
+message RecoveryEvidence {
+  string volume_id = 1;
+  uint64 write_epoch = 2;
+  uint64 certified_sequence = 3;
+  bytes history_digest = 4;
+  bool empty_frontier = 5;
+}
+
 message VolumeTombstone {
   Volume volume = 1;
   int64 deleted_at_unix_ms = 2;
@@ -493,6 +541,9 @@ message CommandEnvelope {
     ReserveVolumeResourcesCommand reserve_volume_resources = 8;
     ActivateReplicaCommand activate_replica = 9;
     FinalizeVolumeDeletionCommand finalize_volume_deletion = 10;
+    ProposePrimaryAuthorityCommand propose_primary_authority = 11;
+    ActivatePrimaryAuthorityCommand activate_primary_authority = 12;
+    CommitPrimaryAuthorityReadyCommand commit_primary_authority_ready = 13;
   }
 }
 
@@ -573,6 +624,7 @@ message ActivateReplicaCommand {
   uint64 expected_volume_resource_version = 4;
   uint64 expected_placement_resource_version = 5;
   uint64 expected_allocation_resource_version = 6;
+  ReplicaAttestation attestation = 7;
 }
 
 message FinalizeVolumeDeletionCommand {
@@ -581,6 +633,35 @@ message FinalizeVolumeDeletionCommand {
   repeated string placement_ids = 3;
   repeated string allocation_ids = 4;
   int64 proposed_deleted_at_unix_ms = 5;
+}
+
+message ProposePrimaryAuthorityCommand {
+  PrimaryAuthority authority = 1;
+  uint64 expected_volume_resource_version = 2;
+}
+
+message ActivatePrimaryAuthorityCommand {
+  string volume_id = 1;
+  bytes lease_id = 2;
+  bytes activation_nonce = 3;
+  uint64 authority_generation = 4;
+  uint64 write_epoch = 5;
+  uint64 placement_revision = 6;
+  uint64 expected_volume_resource_version = 7;
+  uint64 expected_authority_resource_version = 8;
+}
+
+message CommitPrimaryAuthorityReadyCommand {
+  string volume_id = 1;
+  bytes lease_id = 2;
+  bytes authority_digest = 3;
+  uint64 authority_generation = 4;
+  uint64 write_epoch = 5;
+  uint64 placement_revision = 6;
+  uint64 expected_volume_resource_version = 7;
+  uint64 expected_authority_resource_version = 8;
+  repeated ReplicaFenceEvidence fence_evidence = 9;
+  RecoveryEvidence recovery_evidence = 10;
 }
 
 enum ApplyCode {
@@ -732,6 +813,25 @@ message FinalizeVolumeDeletionApplyResponse {
   uint64 deleted_revision = 3;
 }
 
+enum PrimaryAuthorityApplyCode {
+  PRIMARY_AUTHORITY_APPLY_CODE_UNSPECIFIED = 0;
+  PRIMARY_AUTHORITY_APPLY_CODE_PROPOSED = 1;
+  PRIMARY_AUTHORITY_APPLY_CODE_ACTIVATED = 2;
+  PRIMARY_AUTHORITY_APPLY_CODE_READY = 3;
+  PRIMARY_AUTHORITY_APPLY_CODE_NOT_FOUND = 4;
+  PRIMARY_AUTHORITY_APPLY_CODE_VERSION_CONFLICT = 5;
+  PRIMARY_AUTHORITY_APPLY_CODE_INVALID_STATE = 6;
+  PRIMARY_AUTHORITY_APPLY_CODE_BINDING_MISMATCH = 7;
+  PRIMARY_AUTHORITY_APPLY_CODE_PROOF_INVALID = 8;
+  PRIMARY_AUTHORITY_APPLY_CODE_RESOURCE_LIMIT = 9;
+}
+
+message PrimaryAuthorityApplyResponse {
+  PrimaryAuthorityApplyCode code = 1;
+  PrimaryAuthority authority = 2;
+  Volume volume = 3;
+}
+
 message RequestRecord {
   string request_id = 1;
   bytes request_fingerprint = 2;
@@ -751,4 +851,5 @@ message StateSnapshot {
   repeated ReplicaPlacement replica_placements = 8;
   repeated ReplicaAllocation replica_allocations = 9;
   repeated VolumeAttachment volume_attachments = 10;
+  repeated PrimaryAuthority primary_authorities = 11;
 }
