@@ -48,7 +48,7 @@
 - name: Build the Catalog block benchmark | {{ zettide_optimize }}
   ansible.builtin.command:
     argv:
-      - zig
+      - "{{ zettide_zig }}"
       - build
       - -Dspdk=true
       - "-Doptimize={{ zettide_optimize }}"
