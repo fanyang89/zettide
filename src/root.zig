@@ -21,6 +21,7 @@ pub const reconciler = @import("reconciler.zig");
 pub const Reconciler = reconciler.Reconciler;
 pub const primary_lease = @import("primary_lease.zig");
 pub const replica_fence = @import("replica_fence.zig");
+pub const data_service_wire = @import("data_service_wire.zig");
 
 test "protobuf model round trips" {
     var pool: pb.Pool = .{
@@ -96,6 +97,7 @@ test {
     _ = reconciler;
     _ = primary_lease;
     _ = replica_fence;
+    _ = data_service_wire;
     _ = @import("integration_test.zig");
     _ = @import("runtime_integration_test.zig");
 }
