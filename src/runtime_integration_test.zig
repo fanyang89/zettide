@@ -90,7 +90,16 @@ const ReconcileDataClient = struct {
     fn stagePrimary(context: *anyopaque, _: []const u8, request: reconciler.StageRequest) !reconciler.StageAck {
         const self: *ReconcileDataClient = @ptrCast(@alignCast(context));
         if (self.staged) |existing| {
-            if (!std.meta.eql(existing, request)) return error.StageConflict;
+            if (std.meta.eql(existing, request)) return .{ .request = request };
+            if (request.binding.authority_generation < existing.binding.authority_generation) return error.StageConflict;
+            _ = try self.holder.stage(.{
+                .lease_id = request.binding.lease_id,
+                .holder_boot_id = request.binding.holder_boot_id,
+                .authority_generation = request.binding.authority_generation,
+                .write_epoch = request.binding.write_epoch,
+            }, 1_000);
+            self.staged = request;
+            self.stages += 1;
         } else {
             _ = try self.holder.stage(.{
                 .lease_id = request.binding.lease_id,
@@ -148,6 +157,23 @@ const ReconcileDataClient = struct {
         try self.holder.markReady(request.binding.lease_id, 2_000);
     }
 
+    fn inspectPrimary(context: *anyopaque, _: []const u8, request: reconciler.MarkReadyRequest) !reconciler.PrimaryLeaseStatus {
+        const self: *ReconcileDataClient = @ptrCast(@alignCast(context));
+        const token: primary_lease.Token = .{
+            .lease_id = request.binding.lease_id,
+            .holder_boot_id = request.binding.holder_boot_id,
+            .authority_generation = request.binding.authority_generation,
+            .write_epoch = request.binding.write_epoch,
+        };
+        return .{
+            .request = request,
+            .current_active = self.holder.canComplete(token, 2_000),
+            .current_admitting = self.holder.canAdmit(token, 2_000),
+            .candidate_fresh = self.holder.canMarkReadyToken(token, 2_000),
+            .should_renew = self.holder.shouldRenew(token, 2_000),
+        };
+    }
+
     fn cancel(_: *anyopaque) void {}
 
     const vtable: reconciler.DataServiceClient.VTable = .{
@@ -158,6 +184,7 @@ const ReconcileDataClient = struct {
         .fence_replica = fenceReplica,
         .recover_primary = recoverPrimary,
         .mark_primary_ready = markPrimaryReady,
+        .inspect_primary = inspectPrimary,
         .cancel = cancel,
     };
 };
@@ -212,6 +239,10 @@ const BlockingDataClient = struct {
         return error.Unsupported;
     }
 
+    fn inspectPrimary(_: *anyopaque, _: []const u8, _: reconciler.MarkReadyRequest) !reconciler.PrimaryLeaseStatus {
+        return error.Unsupported;
+    }
+
     fn cancel(context: *anyopaque) void {
         const self: *BlockingDataClient = @ptrCast(@alignCast(context));
         self.mutex.lockUncancelable(std.testing.io);
@@ -229,6 +260,7 @@ const BlockingDataClient = struct {
         .fence_replica = fenceReplica,
         .recover_primary = recoverPrimary,
         .mark_primary_ready = markPrimaryReady,
+        .inspect_primary = inspectPrimary,
         .cancel = cancel,
     };
 };

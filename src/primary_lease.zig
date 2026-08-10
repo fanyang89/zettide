@@ -89,11 +89,22 @@ pub const Runtime = struct {
     pub fn markReady(self: *Runtime, lease_id: Id, now_ms: u64) !void {
         var candidate = self.candidate orelse return error.NoCandidate;
         if (!std.mem.eql(u8, &candidate.token.lease_id, &lease_id)) return error.LeaseMismatch;
-        if (now_ms >= candidate.admission_deadline_ms or candidate.hard_deadline_ms - now_ms < minimum_ready_remaining_ms)
-            return error.InsufficientWindow;
+        if (!self.canMarkReady(lease_id, now_ms)) return error.InsufficientWindow;
         candidate.ready = true;
         self.current = candidate;
         self.candidate = null;
+    }
+
+    pub fn canMarkReady(self: Runtime, lease_id: Id, now_ms: u64) bool {
+        const candidate = self.candidate orelse return false;
+        return std.mem.eql(u8, &candidate.token.lease_id, &lease_id) and
+            now_ms < candidate.admission_deadline_ms and
+            candidate.hard_deadline_ms - now_ms >= minimum_ready_remaining_ms;
+    }
+
+    pub fn canMarkReadyToken(self: Runtime, token: Token, now_ms: u64) bool {
+        const candidate = self.candidate orelse return false;
+        return std.meta.eql(token, candidate.token) and self.canMarkReady(token.lease_id, now_ms);
     }
 
     pub fn discardCandidate(self: *Runtime, lease_id: Id) void {
@@ -109,6 +120,11 @@ pub const Runtime = struct {
     pub fn canComplete(self: Runtime, token: Token, now_ms: u64) bool {
         const current = self.current orelse return false;
         return std.meta.eql(token, current.token) and current.canComplete(now_ms);
+    }
+
+    pub fn shouldRenew(self: Runtime, token: Token, now_ms: u64) bool {
+        const current = self.current orelse return false;
+        return current.ready and std.meta.eql(token, current.token) and current.shouldRenew(now_ms);
     }
 
     pub fn stop(self: *Runtime) void {
@@ -181,4 +197,42 @@ test "older candidate cannot replace newer authority" {
     try std.testing.expectError(error.StaleAuthority, runtime.stage(testToken(lease_b, 8), 2_000));
     try runtime.markReady(lease_a, 3_000);
     try std.testing.expect(runtime.canAdmit(testToken(lease_a, 9), 3_000));
+}
+
+test "renewal requires exact ready token and observes boundaries" {
+    var runtime = try Runtime.init(boot_a);
+    const current = testToken(lease_a, 7);
+    _ = try runtime.stage(current, 1_000);
+    try runtime.markReady(lease_a, 2_000);
+
+    try std.testing.expect(!runtime.shouldRenew(current, 10_999));
+    try std.testing.expect(runtime.shouldRenew(current, 11_000));
+    try std.testing.expect(runtime.shouldRenew(current, 25_999));
+    try std.testing.expect(!runtime.shouldRenew(current, 26_000));
+    try std.testing.expect(!runtime.shouldRenew(testToken(lease_b, 7), 11_000));
+    var wrong_generation = current;
+    wrong_generation.authority_generation += 1;
+    try std.testing.expect(!runtime.shouldRenew(wrong_generation, 11_000));
+}
+
+test "candidate freshness uses mark ready boundaries and exact lease" {
+    var runtime = try Runtime.init(boot_a);
+    try std.testing.expect(!runtime.canMarkReady(lease_a, 1_000));
+    _ = try runtime.stage(testToken(lease_a, 7), 1_000);
+    try std.testing.expect(runtime.canMarkReady(lease_a, 21_000));
+    try std.testing.expect(!runtime.canMarkReady(lease_a, 21_001));
+    try std.testing.expect(!runtime.canMarkReady(lease_b, 2_000));
+    var wrong_token = testToken(lease_a, 8);
+    try std.testing.expect(!runtime.canMarkReadyToken(wrong_token, 2_000));
+    wrong_token = testToken(lease_a, 7);
+    try std.testing.expect(runtime.canMarkReadyToken(wrong_token, 2_000));
+    try std.testing.expectError(error.InsufficientWindow, runtime.markReady(lease_a, 21_001));
+}
+
+test "stale same generation candidate can be replaced" {
+    var runtime = try Runtime.init(boot_a);
+    _ = try runtime.stage(testToken(lease_a, 7), 1_000);
+    _ = try runtime.stage(testToken(lease_b, 7), 21_000);
+    try std.testing.expect(!runtime.canMarkReady(lease_a, 21_000));
+    try std.testing.expect(runtime.canMarkReady(lease_b, 21_000));
 }

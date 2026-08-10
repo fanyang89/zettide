@@ -47,6 +47,14 @@ pub const MarkReadyRequest = struct {
     binding: AuthorityBinding,
 };
 
+pub const PrimaryLeaseStatus = struct {
+    request: MarkReadyRequest,
+    current_active: bool,
+    current_admitting: bool,
+    candidate_fresh: bool,
+    should_renew: bool,
+};
+
 pub const DataServiceClient = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -59,6 +67,7 @@ pub const DataServiceClient = struct {
         fence_replica: *const fn (*anyopaque, []const u8, replica_fence.Binding) anyerror!replica_fence.Result,
         recover_primary: *const fn (*anyopaque, []const u8, RecoveryRequest) anyerror!RecoveryResult,
         mark_primary_ready: *const fn (*anyopaque, []const u8, MarkReadyRequest) anyerror!void,
+        inspect_primary: *const fn (*anyopaque, []const u8, MarkReadyRequest) anyerror!PrimaryLeaseStatus,
         /// Must be thread-safe, idempotent, and promptly unblock in-flight calls.
         cancel: *const fn (*anyopaque) void,
     };
@@ -89,6 +98,10 @@ pub const DataServiceClient = struct {
 
     fn markPrimaryReady(self: DataServiceClient, endpoint: []const u8, request: MarkReadyRequest) !void {
         return self.vtable.mark_primary_ready(self.context, endpoint, request);
+    }
+
+    fn inspectPrimary(self: DataServiceClient, endpoint: []const u8, request: MarkReadyRequest) !PrimaryLeaseStatus {
+        return self.vtable.inspect_primary(self.context, endpoint, request);
     }
 
     pub fn cancel(self: DataServiceClient) void {
@@ -163,7 +176,7 @@ pub const Reconciler = struct {
             if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_PROVISIONING and
                 volume.volume.operation_phase == .VOLUME_OPERATION_PHASE_FENCING)
             {
-                if (volume.primary_authority) |authority| switch (authority.state) {
+                if (volume.primary_authority_candidate) |authority| switch (authority.state) {
                     .PRIMARY_AUTHORITY_STATE_PENDING => return try self.planActivateAuthority(volume, authority),
                     .PRIMARY_AUTHORITY_STATE_ACTIVATED => return try self.planReadyAuthority(volume, authority),
                     else => {},
@@ -174,7 +187,11 @@ pub const Reconciler = struct {
                 volume.primary_authority != null and
                 volume.primary_authority.?.state == .PRIMARY_AUTHORITY_STATE_READY)
             {
-                return try self.planMarkReady(volume, volume.primary_authority.?);
+                if (volume.primary_authority_candidate) |candidate| switch (candidate.state) {
+                    .PRIMARY_AUTHORITY_STATE_PENDING => return try self.planActivateAuthority(volume, candidate),
+                    .PRIMARY_AUTHORITY_STATE_ACTIVATED => return try self.planRenewalReady(volume, volume.primary_authority.?, candidate),
+                    else => return error.InconsistentSnapshot,
+                } else return try self.planInspectRenewal(volume, volume.primary_authority.?);
             }
         }
         return null;
@@ -331,20 +348,85 @@ pub const Reconciler = struct {
             .volume_id_text = try allocator.dupe(u8, authority.volume_id),
             .placement_id_texts = try dupePlacementIds(allocator, volume.placements),
             .binding = binding,
+            .request = .{ .binding = binding },
             .replicas = replicas,
             .expected_volume_resource_version = volume.volume.resource_version,
             .expected_authority_resource_version = authority.resource_version,
+            .abort_command = try state_machine.encodeAbortPrimaryAuthorityCandidateCommand(allocator, .{
+                .volume_id = authority.volume_id,
+                .lease_id = authority.lease_id,
+                .authority_generation = authority.authority_generation,
+                .expected_volume_resource_version = volume.volume.resource_version,
+                .expected_candidate_resource_version = authority.resource_version,
+                .expected_current_resource_version = 0,
+            }),
         } };
         return action;
     }
 
-    fn planMarkReady(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, authority: pb.PrimaryAuthority) !*Action {
+    fn planInspectRenewal(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, authority: pb.PrimaryAuthority) !*Action {
         const action = try Action.create(self.allocator);
         errdefer action.deinit();
         const allocator = action.arena.allocator();
-        action.kind = .{ .mark_ready = .{
+        var binding = try authorityBinding(authority);
+        binding.lease_id = randomId(self.io);
+        binding.activation_nonce = randomId(self.io);
+        binding.authority_generation = std.math.add(u64, binding.authority_generation, 1) catch return error.InconsistentSnapshot;
+        binding.authority_digest = @splat(0);
+        binding.authority_digest = authorityDigest(binding);
+        const proposed: pb.PrimaryAuthority = .{
+            .volume_id = authority.volume_id,
+            .primary_placement_id = authority.primary_placement_id,
+            .primary_node_id = authority.primary_node_id,
+            .lease_id = &binding.lease_id,
+            .holder_boot_id = &binding.holder_boot_id,
+            .authority_generation = binding.authority_generation,
+            .write_epoch = binding.write_epoch,
+            .placement_revision = binding.placement_revision,
+            .activation_nonce = &binding.activation_nonce,
+            .lease_duration_ms = primary_lease.duration_ms,
+            .state = .PRIMARY_AUTHORITY_STATE_PENDING,
+            .authority_digest = &binding.authority_digest,
+        };
+        const command = try state_machine.encodeProposePrimaryAuthorityCommand(allocator, .{
+            .authority = proposed,
+            .expected_volume_resource_version = volume.volume.resource_version,
+        });
+        action.kind = .{ .inspect_renewal = .{
             .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
             .request = .{ .binding = try authorityBinding(authority) },
+            .command = command,
+        } };
+        return action;
+    }
+
+    fn planRenewalReady(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, current: pb.PrimaryAuthority, candidate: pb.PrimaryAuthority) !*Action {
+        const action = try Action.create(self.allocator);
+        errdefer action.deinit();
+        const allocator = action.arena.allocator();
+        const binding = try authorityBinding(candidate);
+        const command = try state_machine.encodeCommitPrimaryAuthorityRenewalReadyCommand(allocator, .{
+            .volume_id = candidate.volume_id,
+            .lease_id = candidate.lease_id,
+            .authority_generation = candidate.authority_generation,
+            .write_epoch = candidate.write_epoch,
+            .placement_revision = candidate.placement_revision,
+            .expected_volume_resource_version = volume.volume.resource_version,
+            .expected_candidate_resource_version = candidate.resource_version,
+            .expected_current_resource_version = current.resource_version,
+        });
+        action.kind = .{ .renewal_ready = .{
+            .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, candidate.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
+            .request = .{ .binding = binding },
+            .ready_command = command,
+            .abort_command = try state_machine.encodeAbortPrimaryAuthorityCandidateCommand(allocator, .{
+                .volume_id = candidate.volume_id,
+                .lease_id = candidate.lease_id,
+                .authority_generation = candidate.authority_generation,
+                .expected_volume_resource_version = volume.volume.resource_version,
+                .expected_candidate_resource_version = candidate.resource_version,
+                .expected_current_resource_version = current.resource_version,
+            }),
         } };
         return action;
     }
@@ -406,14 +488,24 @@ pub const Action = struct {
         volume_id_text: []const u8,
         placement_id_texts: []const []const u8,
         binding: AuthorityBinding,
+        request: MarkReadyRequest,
         replicas: []const FenceReplica,
         expected_volume_resource_version: u64,
         expected_authority_resource_version: u64,
+        abort_command: []const u8,
     };
 
-    const MarkReady = struct {
+    const InspectRenewal = struct {
         endpoint: []const u8,
         request: MarkReadyRequest,
+        command: []const u8,
+    };
+
+    const RenewalReady = struct {
+        endpoint: []const u8,
+        request: MarkReadyRequest,
+        ready_command: []const u8,
+        abort_command: []const u8,
     };
 
     const Kind = union(enum) {
@@ -423,7 +515,8 @@ pub const Action = struct {
         propose_authority: ProposeAuthority,
         activate_authority: ActivateAuthority,
         ready_authority: ReadyAuthority,
-        mark_ready: MarkReady,
+        inspect_renewal: InspectRenewal,
+        renewal_ready: RenewalReady,
     };
 
     fn create(allocator: std.mem.Allocator) !*Action {
@@ -526,6 +619,12 @@ pub const Action = struct {
                 try submitAndValidate(self.parent_allocator, submitter, command, .activate_authority);
             },
             .ready_authority => |ready| {
+                const status = try data_client.inspectPrimary(ready.primary_endpoint, ready.request);
+                try validatePrimaryLeaseStatus(status, ready.request);
+                if (!status.candidate_fresh) {
+                    try submitAndValidate(self.parent_allocator, submitter, ready.abort_command, .abort_authority);
+                    return;
+                }
                 const evidence = try self.parent_allocator.alloc(pb.ReplicaFenceEvidence, ready.replicas.len);
                 defer self.parent_allocator.free(evidence);
                 for (ready.replicas, evidence, ready.placement_id_texts) |replica, *proof, placement_id| {
@@ -567,12 +666,32 @@ pub const Action = struct {
                     try data_client.markPrimaryReady(ready.primary_endpoint, .{ .binding = ready.binding });
                 }
             },
-            .mark_ready => |mark| try data_client.markPrimaryReady(mark.endpoint, mark.request),
+            .inspect_renewal => |inspect| {
+                const status = try data_client.inspectPrimary(inspect.endpoint, inspect.request);
+                try validatePrimaryLeaseStatus(status, inspect.request);
+                if (status.candidate_fresh) {
+                    try data_client.markPrimaryReady(inspect.endpoint, inspect.request);
+                } else if (status.current_admitting) {
+                    if (status.should_renew) try submitAndValidate(self.parent_allocator, submitter, inspect.command, .propose_authority);
+                } else {
+                    try requireSameHolder(data_client, inspect.endpoint, inspect.request.binding.holder_boot_id);
+                    try submitAndValidate(self.parent_allocator, submitter, inspect.command, .propose_authority);
+                }
+            },
+            .renewal_ready => |renewal| {
+                const status = try data_client.inspectPrimary(renewal.endpoint, renewal.request);
+                try validatePrimaryLeaseStatus(status, renewal.request);
+                if (!status.candidate_fresh) {
+                    try submitAndValidate(self.parent_allocator, submitter, renewal.abort_command, .abort_authority);
+                } else if (try submitReadyAndValidate(self.parent_allocator, submitter, renewal.ready_command, renewal.request.binding)) {
+                    try data_client.markPrimaryReady(renewal.endpoint, renewal.request);
+                }
+            },
         }
     }
 };
 
-const ApplyKind = enum { reserve, activate, finalize, propose_authority, activate_authority };
+const ApplyKind = enum { reserve, activate, finalize, propose_authority, activate_authority, abort_authority };
 
 fn submitAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, command: []const u8, kind: ApplyKind) !void {
     const response_bytes = try submitter.submit(allocator, command);
@@ -634,7 +753,35 @@ fn submitAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, 
                 else => return error.PrimaryAuthorityActivationRejected,
             }
         },
+        .abort_authority => {
+            var response = try state_machine.decodePrimaryAuthorityApplyResponse(allocator, response_bytes);
+            defer response.deinit(allocator);
+            switch (response.code) {
+                .PRIMARY_AUTHORITY_APPLY_CODE_ABORTED,
+                .PRIMARY_AUTHORITY_APPLY_CODE_NOT_FOUND,
+                .PRIMARY_AUTHORITY_APPLY_CODE_VERSION_CONFLICT,
+                .PRIMARY_AUTHORITY_APPLY_CODE_INVALID_STATE,
+                => {},
+                else => return error.PrimaryAuthorityAbortRejected,
+            }
+        },
     }
+}
+
+fn validatePrimaryLeaseStatus(status: PrimaryLeaseStatus, request: MarkReadyRequest) !void {
+    if (!std.meta.eql(status.request, request) or
+        (status.current_admitting and !status.current_active) or
+        (status.should_renew and (!status.current_active or !status.current_admitting)) or
+        (status.candidate_fresh and (status.current_active or status.current_admitting or status.should_renew)))
+    {
+        return error.InvalidPrimaryLeaseStatus;
+    }
+}
+
+fn requireSameHolder(data_client: DataServiceClient, endpoint: []const u8, expected_boot_id: Id) !void {
+    const holder_boot_id = try data_client.identifyHolder(endpoint);
+    if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
+    if (!std.mem.eql(u8, &holder_boot_id, &expected_boot_id)) return error.HolderBootMismatch;
 }
 
 fn submitReadyAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, command: []const u8, binding: AuthorityBinding) !bool {
@@ -933,17 +1080,23 @@ const TestSubmitter = struct {
     machine: *state_machine.PoolStateMachine,
     next_index: u64 = 9,
     submissions: usize = 0,
+    lose_next_response: bool = false,
 
     fn interface(self: *TestSubmitter) CommandSubmitter {
         return .{ .context = self, .vtable = &vtable };
     }
 
-    fn submitOpaque(context: *anyopaque, _: std.mem.Allocator, command: []const u8) ![]u8 {
+    fn submitOpaque(context: *anyopaque, allocator: std.mem.Allocator, command: []const u8) ![]u8 {
         const self: *TestSubmitter = @ptrCast(@alignCast(context));
         const index = self.next_index;
         self.next_index += 1;
         self.submissions += 1;
         const result = try self.machine.stateMachine().apply(.{ .index = index, .term = 1, .data = command });
+        if (self.lose_next_response) {
+            self.lose_next_response = false;
+            if (result.response) |response| allocator.free(response);
+            return error.TransportUnknown;
+        }
         return result.response orelse error.MissingApplyResponse;
     }
 
@@ -990,6 +1143,10 @@ const TestDataClient = struct {
     fence_drains: usize = 0,
     recoveries: usize = 0,
     mark_ready_calls: usize = 0,
+    stage_now_ms: u64 = 1_000,
+    now_ms: u64 = 2_000,
+    mismatch_inspect_binding: bool = false,
+    holder_identity: Id = test_holder_boot_id,
 
     fn interface(self: *TestDataClient) DataServiceClient {
         return .{ .context = self, .vtable = &vtable };
@@ -1013,9 +1170,10 @@ const TestDataClient = struct {
         return self.service.deleteReplica(request);
     }
 
-    fn identifyHolderOpaque(_: *anyopaque, endpoint: []const u8) !Id {
+    fn identifyHolderOpaque(context: *anyopaque, endpoint: []const u8) !Id {
+        const self: *TestDataClient = @ptrCast(@alignCast(context));
         if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
-        return test_holder_boot_id;
+        return self.holder_identity;
     }
 
     fn stagePrimaryOpaque(context: *anyopaque, endpoint: []const u8, request: StageRequest) !StageAck {
@@ -1023,14 +1181,23 @@ const TestDataClient = struct {
         if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
         if (!std.mem.eql(u8, &request.binding.authority_digest, &authorityDigest(request.binding))) return error.InvalidAuthorityDigest;
         if (self.staged) |staged| {
-            if (!std.meta.eql(staged, request)) return error.StageConflict;
+            if (std.meta.eql(staged, request)) return .{ .request = request };
+            if (request.binding.authority_generation < staged.binding.authority_generation) return error.StageConflict;
+            _ = try self.holder.stage(.{
+                .lease_id = request.binding.lease_id,
+                .holder_boot_id = request.binding.holder_boot_id,
+                .authority_generation = request.binding.authority_generation,
+                .write_epoch = request.binding.write_epoch,
+            }, self.stage_now_ms);
+            self.staged = request;
+            self.stage_grants += 1;
         } else {
             _ = try self.holder.stage(.{
                 .lease_id = request.binding.lease_id,
                 .holder_boot_id = request.binding.holder_boot_id,
                 .authority_generation = request.binding.authority_generation,
                 .write_epoch = request.binding.write_epoch,
-            }, 1_000);
+            }, self.stage_now_ms);
             self.staged = request;
             self.stage_grants += 1;
         }
@@ -1097,8 +1264,28 @@ const TestDataClient = struct {
             .authority_generation = request.binding.authority_generation,
             .write_epoch = request.binding.write_epoch,
         };
-        if (self.holder.canAdmit(token, 2_000)) return;
-        try self.holder.markReady(request.binding.lease_id, 2_000);
+        if (self.holder.canAdmit(token, self.now_ms)) return;
+        try self.holder.markReady(request.binding.lease_id, self.now_ms);
+    }
+
+    fn inspectPrimaryOpaque(context: *anyopaque, endpoint: []const u8, request: MarkReadyRequest) !PrimaryLeaseStatus {
+        const self: *TestDataClient = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        const token: primary_lease.Token = .{
+            .lease_id = request.binding.lease_id,
+            .holder_boot_id = request.binding.holder_boot_id,
+            .authority_generation = request.binding.authority_generation,
+            .write_epoch = request.binding.write_epoch,
+        };
+        var echoed = request;
+        if (self.mismatch_inspect_binding) echoed.binding.holder_boot_id[0] ^= 1;
+        return .{
+            .request = echoed,
+            .current_active = self.holder.canComplete(token, self.now_ms),
+            .current_admitting = self.holder.canAdmit(token, self.now_ms),
+            .candidate_fresh = self.holder.canMarkReadyToken(token, self.now_ms),
+            .should_renew = self.holder.shouldRenew(token, self.now_ms),
+        };
     }
 
     fn cancelOpaque(_: *anyopaque) void {}
@@ -1111,6 +1298,7 @@ const TestDataClient = struct {
         .fence_replica = fenceReplicaOpaque,
         .recover_primary = recoverPrimaryOpaque,
         .mark_primary_ready = markPrimaryReadyOpaque,
+        .inspect_primary = inspectPrimaryOpaque,
         .cancel = cancelOpaque,
     };
 };
@@ -1173,12 +1361,72 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     try std.testing.expect(validUuidV7Bytes(authority.holder_boot_id[0..16].*));
     try std.testing.expect(validUuidV7Bytes(authority.activation_nonce[0..16].*));
     try rebuilt.runOnce();
-    try std.testing.expectEqual(@as(usize, 2), data_client.mark_ready_calls);
+    try std.testing.expectEqual(@as(usize, 1), data_client.mark_ready_calls);
+    try std.testing.expectEqual(@as(usize, 7), submitter.submissions);
+
+    data_client.mismatch_inspect_binding = true;
+    try std.testing.expectError(error.InvalidPrimaryLeaseStatus, rebuilt.runOnce());
+    try std.testing.expectEqual(@as(usize, 7), submitter.submissions);
+    data_client.mismatch_inspect_binding = false;
+
+    const old_lease = authority.lease_id[0..16].*;
+    data_client.stage_now_ms = 11_000;
+    data_client.now_ms = 11_000;
+    try rebuilt.runOnce();
+    try std.testing.expectEqual(@as(usize, 1), machine.primaryAuthorityCandidateCount());
+    try std.testing.expectEqual(@as(usize, 3), data_client.fence_drains);
+    try std.testing.expectEqual(@as(usize, 1), data_client.recoveries);
+    submitter.lose_next_response = true;
+    try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
+    var staged_candidate = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
+    defer staged_candidate.deinit(allocator);
+    try std.testing.expectEqual(pb.PrimaryAuthorityState.PRIMARY_AUTHORITY_STATE_ACTIVATED, staged_candidate.state);
+
+    data_client.stage_now_ms = 31_001;
+    data_client.now_ms = 31_001;
+    submitter.lose_next_response = true;
+    try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    var retained = (try machine.getPrimaryAuthority(allocator, test_volume_id)).?;
+    defer retained.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), retained.authority_generation);
+
+    data_client.holder_identity = try parseId(test_node_ids[1]);
+    const submissions_before_boot_mismatch = submitter.submissions;
+    try std.testing.expectError(error.HolderBootMismatch, rebuilt.runOnce());
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    try std.testing.expectEqual(submissions_before_boot_mismatch, submitter.submissions);
+    data_client.holder_identity = test_holder_boot_id;
+    try rebuilt.runOnce();
+    var replacement = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
+    defer replacement.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), replacement.authority_generation);
+    try std.testing.expect(!std.mem.eql(u8, staged_candidate.lease_id, replacement.lease_id));
+    try rebuilt.runOnce();
+    submitter.lose_next_response = true;
+    try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
+    data_client.stage_now_ms = 51_002;
+    data_client.now_ms = 51_002;
+    try rebuilt.runOnce();
+    var recovery_candidate = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
+    defer recovery_candidate.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 3), recovery_candidate.authority_generation);
+    try rebuilt.runOnce();
+    try rebuilt.runOnce();
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    var renewed = (try machine.getPrimaryAuthority(allocator, test_volume_id)).?;
+    defer renewed.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 3), renewed.authority_generation);
+    try std.testing.expect(!std.mem.eql(u8, &old_lease, renewed.lease_id));
+    try std.testing.expectEqual(@as(usize, 3), data_client.fence_drains);
+    try std.testing.expectEqual(@as(usize, 1), data_client.recoveries);
+    var renewed_volume = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer renewed_volume.deinit(allocator);
 
     const delete_command = try state_machine.encodeDeleteVolumeCommand(allocator, .{
         .request_id = "reconciler-delete",
         .volume_id = test_volume_id,
-        .expected_resource_version = active.resource_version,
+        .expected_resource_version = renewed_volume.resource_version,
         .proposed_deleted_at_unix_ms = 1_753_744_000_020,
     });
     defer allocator.free(delete_command);
@@ -1213,6 +1461,75 @@ test "reconciler rejects stale attestation without activation" {
         allocator.free(snapshot);
     }
     try std.testing.expectEqual(pb.ReplicaPlacementState.REPLICA_PLACEMENT_STATE_RESERVED, snapshot[0].placements[0].state);
+}
+
+test "reconciler aborts stale initial candidate before fencing and retries generation one" {
+    const allocator = std.testing.allocator;
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try setupMachine(&machine, .{ "rack-a", "rack-b", "rack-c" });
+    var submitter = TestSubmitter{ .machine = &machine };
+    var store = data_service.MemoryStore.init(allocator);
+    defer store.deinit();
+    var backend: TestBackend = .{};
+    var service = data_service.Service.init(store.store(), backend.interface());
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder };
+    var reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
+
+    for (0..6) |_| try reconciler.runOnce();
+    data_client.now_ms = 21_001;
+    try reconciler.runOnce();
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    try std.testing.expectEqual(@as(usize, 0), data_client.fence_drains);
+    try std.testing.expectEqual(@as(usize, 0), data_client.recoveries);
+    var fencing = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer fencing.deinit(allocator);
+    try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_PROVISIONING, fencing.lifecycle_state);
+    try std.testing.expectEqual(pb.VolumeOperationPhase.VOLUME_OPERATION_PHASE_FENCING, fencing.operation_phase);
+
+    data_client.stage_now_ms = 21_001;
+    try reconciler.runOnce();
+    var replacement = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
+    defer replacement.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), replacement.authority_generation);
+    try reconciler.runOnce();
+    try reconciler.runOnce();
+    try std.testing.expectEqual(@as(usize, 3), data_client.fence_drains);
+    try std.testing.expectEqual(@as(usize, 1), data_client.recoveries);
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    var active = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer active.deinit(allocator);
+    try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_ACTIVE, active.lifecycle_state);
+}
+
+test "completion-only current reacquires only on the same holder boot" {
+    const allocator = std.testing.allocator;
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try setupMachine(&machine, .{ "rack-a", "rack-b", "rack-c" });
+    var submitter = TestSubmitter{ .machine = &machine };
+    var store = data_service.MemoryStore.init(allocator);
+    defer store.deinit();
+    var backend: TestBackend = .{};
+    var service = data_service.Service.init(store.store(), backend.interface());
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder };
+    var reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
+
+    for (0..7) |_| try reconciler.runOnce();
+    data_client.now_ms = 26_000;
+    data_client.holder_identity = try parseId(test_node_ids[1]);
+    const before_mismatch = submitter.submissions;
+    try std.testing.expectError(error.HolderBootMismatch, reconciler.runOnce());
+    try std.testing.expectEqual(before_mismatch, submitter.submissions);
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+
+    data_client.holder_identity = test_holder_boot_id;
+    try reconciler.runOnce();
+    var candidate = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
+    defer candidate.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), candidate.authority_generation);
 }
 
 test "reconciler rejects invalid authority proofs without READY submission" {
