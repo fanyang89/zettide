@@ -30,6 +30,21 @@
     chdir: "{{ zettide_remote_workspace.path }}/spdk"
   changed_when: true
 
+- name: Read SPDK runtime library paths | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - pkg-config
+      - --libs-only-L
+      - spdk_event_iscsi
+      - spdk_env_dpdk
+      - spdk_syslibs
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
+  changed_when: false
+  register: zettide_iscsi_library_flags
+
 - name: Build the Catalog block benchmark | {{ zettide_optimize }}
   ansible.builtin.command:
     argv:
@@ -79,6 +94,8 @@
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
   environment:
-    LD_LIBRARY_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib"
+    LD_LIBRARY_PATH: >-
+      {{ zettide_iscsi_library_flags.stdout.split()
+         | map('regex_replace', '^-L', '') | join(':') }}
     ZETTIDE_SPDK_FRONTEND: iscsi
   changed_when: true
