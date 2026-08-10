@@ -2392,8 +2392,8 @@ fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
             4 => {
                 if (field.wire_type != 0) return error.InvalidWire;
                 state = try cursor.readVarint();
-                if (state != @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_PRESENT) and
-                    state != @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE))
+                if (state != @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_PRESENT) and
+                    state != @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE))
                 {
                     return error.InvalidWire;
                 }
@@ -2407,7 +2407,7 @@ fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
     }
     if (!seen[1] or !seen[2] or !seen[4] or
         std.mem.eql(u8, member_id, local_set_id) or
-        (state == @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE) and seen[5]))
+        (state == @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE) and seen[5]))
     {
         return error.InvalidWire;
     }
@@ -2691,7 +2691,7 @@ test "response command failures abort retained calls" {
         }
 
         fn id(_: *anyopaque) grpc.ServerCallId {
-            return @fromBackingInt(@intCast(@as(i32, 1)));
+            return @enumFromInt(1);
         }
 
         fn isCancelled(_: *anyopaque) bool {
@@ -3991,7 +3991,7 @@ const RaftDriver = struct {
 
 const StreamProbe = struct {
     completed: std.atomic.Value(bool) = .init(false),
-    code: std.atomic.Value(u8) = .init(@backingInt(grpc.StatusCode.unknown)),
+    code: std.atomic.Value(u8) = .init(@intFromEnum(grpc.StatusCode.unknown)),
 
     fn onMessage(_: ?*anyopaque, _: grpc.ClientStream, _: []const u8, _: grpc.Compression) grpc.StreamReceiveAction {
         return .continue_receiving;
@@ -4004,7 +4004,7 @@ const StreamProbe = struct {
         _: *const grpc.Metadata,
     ) void {
         const self: *StreamProbe = @ptrCast(@alignCast(ctx.?));
-        self.code.store(@backingInt(status.code), .release);
+        self.code.store(@intFromEnum(status.code), .release);
         self.completed.store(true, .release);
     }
 };

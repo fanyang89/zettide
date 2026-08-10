@@ -419,7 +419,7 @@ pub const FileStore = struct {
         std.mem.writeInt(u16, bytes[10..12], record_size, .little);
         std.mem.writeInt(u32, bytes[12..16], @intCast(records.len), .little);
         for (records, 0..) |record, index| encodeRecord(bytes[header_size + index * record_size ..][0..record_size], record);
-        std.mem.writeInt(u32, bytes[16..20], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[header_size..]), .little);
+        std.mem.writeInt(u32, bytes[16..20], std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]), .little);
         return bytes;
     }
 
@@ -431,7 +431,7 @@ pub const FileStore = struct {
         const count = std.mem.readInt(u32, bytes[12..16], .little);
         if (count > max_records or bytes.len != header_size + @as(usize, count) * record_size) return error.StoreCorrupt;
         if (!isZero(bytes[20..24]) or
-            std.mem.readInt(u32, bytes[16..20], .little) != std.hash.crc.@"CRC-32/ISCSI".hash(bytes[header_size..]))
+            std.mem.readInt(u32, bytes[16..20], .little) != std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]))
             return error.StoreCorrupt;
         const records = try allocator.alloc(OperationRecord, count);
         errdefer allocator.free(records);
@@ -445,9 +445,9 @@ pub const FileStore = struct {
     fn encodeRecord(bytes: *[record_size]u8, record: OperationRecord) void {
         @memset(bytes, 0);
         @memcpy(bytes[0..16], &record.operation_id);
-        bytes[16] = @backingInt(record.kind);
-        bytes[17] = @backingInt(record.result.state);
-        bytes[18] = @backingInt(record.status);
+        bytes[16] = @intFromEnum(record.kind);
+        bytes[17] = @intFromEnum(record.result.state);
+        bytes[18] = @intFromEnum(record.status);
         const binding = record.result.attestation.binding;
         @memcpy(bytes[24..40], &binding.volume_id);
         @memcpy(bytes[40..56], &binding.placement_id);

@@ -302,7 +302,7 @@ pub const FileStore = struct {
         std.mem.writeInt(u16, bytes[10..12], record_size, .little);
         std.mem.writeInt(u32, bytes[12..16], @intCast(records.len), .little);
         for (records, 0..) |record, index| encodeRecord(bytes[header_size + index * record_size ..][0..record_size], record);
-        std.mem.writeInt(u32, bytes[16..20], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[header_size..]), .little);
+        std.mem.writeInt(u32, bytes[16..20], std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]), .little);
         return bytes;
     }
 
@@ -313,7 +313,7 @@ pub const FileStore = struct {
         const count = std.mem.readInt(u32, bytes[12..16], .little);
         if (count > max_records or bytes.len != header_size + @as(usize, count) * record_size) return error.StoreCorrupt;
         if (!isZero(bytes[20..24]) or
-            std.mem.readInt(u32, bytes[16..20], .little) != std.hash.crc.@"CRC-32/ISCSI".hash(bytes[header_size..]))
+            std.mem.readInt(u32, bytes[16..20], .little) != std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]))
             return error.StoreCorrupt;
         const records = try allocator.alloc(Result, count);
         errdefer allocator.free(records);
@@ -519,7 +519,7 @@ test "FileStore rejects truncation corruption and nonzero reserved bytes" {
     try std.testing.expectError(error.StoreCorrupt, FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences"));
     {
         original[original.len - 1] = 1;
-        std.mem.writeInt(u32, original[16..20], std.hash.crc.@"CRC-32/ISCSI".hash(original[FileStore.header_size..]), .little);
+        std.mem.writeInt(u32, original[16..20], std.hash.crc.Crc32Iscsi.hash(original[FileStore.header_size..]), .little);
         const file = try tmp.dir.createFile(std.testing.io, "fences", .{ .truncate = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, original);
