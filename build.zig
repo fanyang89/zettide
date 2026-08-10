@@ -20,17 +20,33 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const node_protocol_dependency = b.dependency("zettide_node_protocol", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const generate_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
         .destination_directory = b.path(".zig-cache/generated"),
         .source_files = &.{b.path("proto/zettide/control/v1/control.proto")},
         .include_directories = &.{b.path("proto")},
     });
+    const generate_node_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
+        .destination_directory = b.path(".zig-cache/generated-node"),
+        .source_files = &.{node_protocol_dependency.path("proto/zettide/control/v1/data_service.proto")},
+        .include_directories = &.{node_protocol_dependency.path("proto")},
+    });
     const generate_proto_step = b.step("gen-proto", "Generate Zig protobuf sources");
     generate_proto_step.dependOn(generate_proto.step);
+    generate_proto_step.dependOn(generate_node_proto.step);
 
     const control_proto = b.createModule(.{
         .root_source_file = b.path(".zig-cache/generated/zettide/control/v1.pb.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
+    });
+    const node_proto = b.createModule(.{
+        .root_source_file = b.path(".zig-cache/generated-node/zettide/control/v1.pb.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
@@ -44,8 +60,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "clap", .module = clap_dependency.module("clap") },
             .{ .name = "control_proto", .module = control_proto },
             .{ .name = "grpc_lite", .module = grpc_module },
+            .{ .name = "node_proto", .module = node_proto },
             .{ .name = "raftz", .module = raft_dependency.module("raftz") },
             .{ .name = "uuid", .module = uuid_dependency.module("uuid") },
+            .{ .name = "zettide_node_protocol", .module = node_protocol_dependency.module("zettide_node_protocol") },
         },
     });
 
@@ -54,6 +72,7 @@ pub fn build(b: *std.Build) void {
         .root_module = control,
     });
     library.step.dependOn(generate_proto.step);
+    library.step.dependOn(generate_node_proto.step);
     b.installArtifact(library);
 
     const executable_module = b.createModule(.{
@@ -67,6 +86,7 @@ pub fn build(b: *std.Build) void {
         .root_module = executable_module,
     });
     executable.step.dependOn(generate_proto.step);
+    executable.step.dependOn(generate_node_proto.step);
     b.installArtifact(executable);
 
     const run_executable = b.addRunArtifact(executable);
@@ -76,6 +96,7 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{ .root_module = control });
     tests.step.dependOn(generate_proto.step);
+    tests.step.dependOn(generate_node_proto.step);
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);

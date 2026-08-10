@@ -13,6 +13,9 @@
         .uuid = .{
             .path = "vendor/uuid",
         },
+        .zettide_node_protocol = .{
+            .path = "vendor/zettide-node-protocol",
+        },
     },
     .paths = .{
         "build.zig",

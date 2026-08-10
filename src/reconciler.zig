@@ -3,57 +3,20 @@ const std = @import("std");
 const data_service = @import("data_service.zig");
 const pb = @import("control_proto");
 const primary_lease = @import("primary_lease.zig");
+const protocol = @import("zettide_node_protocol");
 const replica_fence = @import("replica_fence.zig");
 const state_machine = @import("state_machine.zig");
 const uuid = @import("uuid");
 
-pub const Id = [16]u8;
-pub const Digest = [32]u8;
-
-pub const AuthorityBinding = struct {
-    volume_id: Id,
-    primary_placement_id: Id,
-    primary_node_id: Id,
-    lease_id: Id,
-    holder_boot_id: Id,
-    authority_generation: u64,
-    write_epoch: u64,
-    placement_revision: u64,
-    activation_nonce: Id,
-    authority_digest: Digest,
-};
-
-pub const StageRequest = struct {
-    binding: AuthorityBinding,
-    lease_duration_ms: u32,
-};
-
-pub const StageAck = struct {
-    request: StageRequest,
-};
-
-pub const RecoveryRequest = struct {
-    binding: AuthorityBinding,
-};
-
-pub const RecoveryResult = struct {
-    request: RecoveryRequest,
-    certified_sequence: u64,
-    history_digest: Digest,
-    empty_frontier: bool,
-};
-
-pub const MarkReadyRequest = struct {
-    binding: AuthorityBinding,
-};
-
-pub const PrimaryLeaseStatus = struct {
-    request: MarkReadyRequest,
-    current_active: bool,
-    current_admitting: bool,
-    candidate_fresh: bool,
-    should_renew: bool,
-};
+pub const Id = protocol.Id;
+pub const Digest = protocol.Digest;
+pub const AuthorityBinding = protocol.AuthorityBinding;
+pub const StageRequest = protocol.StageRequest;
+pub const StageAck = protocol.StageAck;
+pub const RecoveryRequest = protocol.RecoveryRequest;
+pub const RecoveryResult = protocol.RecoveryResult;
+pub const MarkReadyRequest = protocol.MarkReadyRequest;
+pub const PrimaryLeaseStatus = protocol.PrimaryLeaseStatus;
 
 pub const DataServiceClient = struct {
     context: *anyopaque,

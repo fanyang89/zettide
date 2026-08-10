@@ -1,23 +1,10 @@
 const std = @import("std");
+const protocol = @import("zettide_node_protocol");
 
-pub const Id = [16]u8;
-pub const Digest = [32]u8;
-
-pub const Binding = struct {
-    operation_id: Id,
-    volume_id: Id,
-    placement_id: Id,
-    replica_generation: u64,
-    write_epoch: u64,
-    primary_node_id: Id,
-    lease_id: Id,
-    authority_digest: Digest,
-};
-
-pub const Result = struct {
-    binding: Binding,
-    fence_digest: Digest,
-};
+pub const Id = protocol.Id;
+pub const Digest = protocol.Digest;
+pub const Binding = protocol.FenceBinding;
+pub const Result = protocol.FenceResult;
 
 pub const Backend = struct {
     context: *anyopaque,

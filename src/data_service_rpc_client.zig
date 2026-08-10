@@ -2,7 +2,7 @@ const std = @import("std");
 
 const data_service = @import("data_service.zig");
 const grpc = @import("grpc_lite");
-const pb = @import("control_proto");
+const pb = @import("node_proto");
 const reconciler = @import("reconciler.zig");
 const replica_fence = @import("replica_fence.zig");
 const wire = @import("data_service_wire.zig");

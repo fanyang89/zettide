@@ -1,49 +1,15 @@
 const std = @import("std");
+const protocol = @import("zettide_node_protocol");
 const uuid = @import("uuid");
 
-pub const Id = [16]u8;
-pub const Digest = [32]u8;
-
-pub const Request = struct {
-    operation_id: []const u8,
-    volume_id: []const u8,
-    placement_id: []const u8,
-    allocation_id: []const u8,
-    generation: u64,
-    member_id: []const u8,
-    offset_bytes: u64,
-    length_bytes: u64,
-};
-
-pub const ReplicaState = enum(u8) {
-    active = 1,
-    tombstoned = 2,
-};
-
-pub const Binding = struct {
-    volume_id: Id,
-    placement_id: Id,
-    allocation_id: Id,
-    generation: u64,
-    member_id: Id,
-    offset_bytes: u64,
-    length_bytes: u64,
-};
-
-pub const Attestation = struct {
-    binding: Binding,
-    backend_digest: Digest,
-};
-
-pub const Replica = struct {
-    state: ReplicaState,
-    attestation: Attestation,
-};
-
-pub const Response = struct {
-    operation_id: Id,
-    replica: Replica,
-};
+pub const Id = protocol.Id;
+pub const Digest = protocol.Digest;
+pub const Request = protocol.ReplicaRequest;
+pub const ReplicaState = protocol.ReplicaState;
+pub const Binding = protocol.ReplicaBinding;
+pub const Attestation = protocol.ReplicaAttestation;
+pub const Replica = protocol.Replica;
+pub const Response = protocol.ReplicaResponse;
 
 pub const Backend = struct {
     context: *anyopaque,

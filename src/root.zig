@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub const pb = @import("control_proto");
+pub const node_pb = @import("node_proto");
+pub const node_protocol = @import("zettide_node_protocol");
 pub const grpc = @import("grpc_lite");
 pub const raft = @import("raftz");
 pub const uuid = @import("uuid");
@@ -87,6 +89,8 @@ test "uuid dependency generates version seven identifiers" {
 
 test {
     _ = grpc;
+    _ = node_pb;
+    _ = node_protocol;
     _ = raft;
     _ = config;
     _ = runtime;
