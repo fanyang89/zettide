@@ -55,7 +55,7 @@
       -o test/spdk-catalog-iscsi-benchmark -pthread -lstdc++ -Wl,--no-as-needed
       $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
       spdk_event spdk_event_bdev spdk_event_scsi spdk_event_iscsi spdk_event_nvmf
-      spdk_bdev_modules spdk_env_dpdk spdk_scsi spdk_iscsi spdk_nvmf
+      spdk_vhost spdk_bdev_modules spdk_env_dpdk spdk_scsi spdk_iscsi spdk_nvmf
       spdk_sock_modules spdk_syslibs) -Wl,--as-needed
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
