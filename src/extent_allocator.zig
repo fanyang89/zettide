@@ -1375,7 +1375,7 @@ fn descriptorForClaim(request: ClaimRequest, claim_epoch: u64) gate_format.Descr
     return .{
         .operation = .claim,
         .phase = .claim_lookup,
-        .kind = @intFromEnum(request.kind),
+        .kind = @backingInt(request.kind),
         .claim_id = request.claim_id,
         .owner_id = request.owner_id,
         .owner_incarnation = request.owner_incarnation,
@@ -1389,7 +1389,7 @@ fn descriptorForRelease(entry: allocation.Entry) gate_format.Descriptor {
     return .{
         .operation = .release,
         .phase = .release_lookup,
-        .kind = @intFromEnum(entry.kind),
+        .kind = @backingInt(entry.kind),
         .claim_id = entry.claim_id,
         .owner_id = entry.owner_id,
         .owner_incarnation = entry.owner_incarnation,

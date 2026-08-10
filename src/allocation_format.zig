@@ -270,8 +270,8 @@ fn sameAllocation(previous: Entry, next: Entry) !void {
 }
 
 fn encodeEntry(output: []u8, entry: Entry) void {
-    output[0] = @intFromEnum(entry.state);
-    output[1] = @intFromEnum(entry.kind);
+    output[0] = @backingInt(entry.state);
+    output[1] = @backingInt(entry.kind);
     putInt(u64, output, 8, entry.extent_index);
     @memcpy(output[16..32], &entry.claim_id);
     @memcpy(output[32..48], &entry.owner_id);

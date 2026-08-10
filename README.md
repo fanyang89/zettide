@@ -41,7 +41,7 @@ yet.
 
 ## Development
 
-The project requires Zig 0.16.0 and Task 3.48.0.
+The project uses the Zig master nightly and Task 3.48.0 through mise.
 
 ```sh
 task check

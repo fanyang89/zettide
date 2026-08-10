@@ -1,4 +1,4 @@
 [tools]
-zig = "0.16.0"
+zig = "master"
 task = "3.48.0"
 actionlint = "1.7.12"

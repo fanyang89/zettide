@@ -145,22 +145,22 @@ test "tree splits leaves and internal pages" {
     var mutator = cawfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
-    const value = "v" ** 900;
+    const value: [900]u8 = @splat('v');
     var key_buffer: [16]u8 = undefined;
     for (0..240) |index| {
         const key = try std.fmt.bufPrint(&key_buffer, "k{d:0>4}", .{index});
-        root = try mutator.put(root, key, value);
+        root = try mutator.put(root, key, &value);
     }
 
     var first = (try mutator.get(root, "k0000")).?;
     defer first.deinit();
-    try std.testing.expectEqualStrings(value, first.bytes);
+    try std.testing.expectEqualStrings(&value, first.bytes);
     var middle = (try mutator.get(root, "k0119")).?;
     defer middle.deinit();
-    try std.testing.expectEqualStrings(value, middle.bytes);
+    try std.testing.expectEqualStrings(&value, middle.bytes);
     var last = (try mutator.get(root, "k0239")).?;
     defer last.deinit();
-    try std.testing.expectEqualStrings(value, last.bytes);
+    try std.testing.expectEqualStrings(&value, last.bytes);
 
     try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
     var root_bytes = try store.loadImmutable(root, std.testing.allocator);
@@ -168,7 +168,7 @@ test "tree splits leaves and internal pages" {
     const root_page = try cawfs.page.decode(root_bytes.bytes);
     try std.testing.expectEqual(cawfs.page.Kind.internal, root_page.kind);
     try std.testing.expect(root_page.level >= 2);
-    try expectValue(store, root, "k0119", value);
+    try expectValue(store, root, "k0119", &value);
 }
 
 test "tree matches a randomized replacement model" {
@@ -219,18 +219,18 @@ test "tree splits correctly under randomized insertion order" {
     for (&order, 0..) |*item, index| item.* = @intCast(index);
     var random = std.Random.DefaultPrng.init(0x71_7d_ba5e);
     random.random().shuffle(u16, &order);
-    const value = "r" ** 900;
+    const value: [900]u8 = @splat('r');
     var key_buffer: [16]u8 = undefined;
     for (order) |key_index| {
         const key = try std.fmt.bufPrint(&key_buffer, "r{d:0>4}", .{key_index});
-        root = try mutator.put(root, key, value);
+        root = try mutator.put(root, key, &value);
     }
 
     var speculative = try mutator.scan(root, "r0050");
     defer speculative.deinit();
     for (50..order.len) |key_index| {
         const key = try std.fmt.bufPrint(&key_buffer, "r{d:0>4}", .{key_index});
-        try expectNext(&speculative, key, value);
+        try expectNext(&speculative, key, &value);
     }
     try std.testing.expectEqual(@as(?cawfs.tree.Entry, null), try speculative.next());
 
@@ -238,14 +238,14 @@ test "tree splits correctly under randomized insertion order" {
 
     for (0..order.len) |key_index| {
         const key = try std.fmt.bufPrint(&key_buffer, "r{d:0>4}", .{key_index});
-        try expectValue(store, root, key, value);
+        try expectValue(store, root, key, &value);
     }
 
     var stored = try cawfs.tree.scan(store, std.testing.allocator, root, "r0175-extra");
     defer stored.deinit();
     for (176..order.len) |key_index| {
         const key = try std.fmt.bufPrint(&key_buffer, "r{d:0>4}", .{key_index});
-        try expectNext(&stored, key, value);
+        try expectNext(&stored, key, &value);
     }
     try std.testing.expectEqual(@as(?cawfs.tree.Entry, null), try stored.next());
 }
@@ -298,11 +298,11 @@ test "tree delete retains an empty internal structure" {
     var initial_mutator = cawfs.tree.Mutator.init(&initial_transaction);
     defer initial_mutator.deinit();
     var historical_root = try initial_mutator.createEmpty();
-    const value = "d" ** 900;
+    const value: [900]u8 = @splat('d');
     var key_buffer: [16]u8 = undefined;
     for (0..80) |index| {
         const key = try std.fmt.bufPrint(&key_buffer, "d{d:0>3}", .{index});
-        historical_root = try initial_mutator.put(historical_root, key, value);
+        historical_root = try initial_mutator.put(historical_root, key, &value);
     }
     try std.testing.expectEqual(
         cawfs.transaction.Outcome.committed,
@@ -327,12 +327,12 @@ test "tree delete retains an empty internal structure" {
     const removed_separator = try mutator.delete(historical_root, separator);
     try std.testing.expect(removed_separator.removed);
     var root = removed_separator.root;
-    try expectValue(store, historical_root, separator, value);
+    try expectValue(store, historical_root, separator, &value);
     try std.testing.expectEqual(@as(?cawfs.store.OwnedBytes, null), try mutator.get(root, separator));
     var after_separator = try mutator.scan(root, separator);
     defer after_separator.deinit();
     const next_key = try std.fmt.bufPrint(&key_buffer, "d{d:0>3}", .{separator_index + 1});
-    try expectNext(&after_separator, next_key, value);
+    try expectNext(&after_separator, next_key, &value);
 
     for (0..80) |index| {
         if (index == separator_index) continue;
@@ -366,11 +366,11 @@ test "tree cursor is invalid after a cross-leaf load failure" {
     var mutator = cawfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
-    const value = "f" ** 900;
+    const value: [900]u8 = @splat('f');
     var key_buffer: [16]u8 = undefined;
     for (0..20) |index| {
         const key = try std.fmt.bufPrint(&key_buffer, "f{d:0>3}", .{index});
-        root = try mutator.put(root, key, value);
+        root = try mutator.put(root, key, &value);
     }
     try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
 
@@ -495,11 +495,11 @@ test "tree enforces key and inline entry limits" {
 
     try std.testing.expectError(
         error.KeyTooLarge,
-        mutator.put(root, "k" ** (cawfs.tree.max_key_size + 1), "value"),
+        mutator.put(root, &@as([cawfs.tree.max_key_size + 1]u8, @splat('k')), "value"),
     );
     try std.testing.expectError(
         error.EntryTooLarge,
-        mutator.put(root, "key", "v" ** cawfs.tree.max_entry_payload),
+        mutator.put(root, "key", &@as([cawfs.tree.max_entry_payload]u8, @splat('v'))),
     );
 }
 

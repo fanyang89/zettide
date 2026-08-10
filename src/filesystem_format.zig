@@ -145,7 +145,7 @@ pub fn decodeFilesystemRoot(bytes: []const u8) Error!FilesystemRoot {
 pub fn encodeInode(inode: Inode) Error!EncodedInode {
     try validateInode(inode);
     var encoded = initRecord(inode_record_size, inode_magic);
-    encoded[10] = @intFromEnum(inode.kind);
+    encoded[10] = @backingInt(inode.kind);
     putInt(u64, &encoded, 16, inode.inode_id);
     putInt(u64, &encoded, 24, inode.logical_size);
     putInt(u64, &encoded, 32, inode.allocated_bytes);
@@ -191,7 +191,7 @@ pub fn decodeInode(bytes: []const u8) Error!Inode {
 pub fn encodeDirectoryEntry(entry: DirectoryEntry) Error!EncodedDirectoryEntry {
     try validateDirectoryEntry(entry);
     var encoded = initRecord(directory_entry_size, directory_entry_magic);
-    encoded[10] = @intFromEnum(entry.child_kind);
+    encoded[10] = @backingInt(entry.child_kind);
     putInt(u64, &encoded, 16, entry.parent_inode_id);
     putInt(u64, &encoded, 24, entry.child_inode_id);
     seal(&encoded);
@@ -407,7 +407,7 @@ fn checksum(encoded: anytype, output: *[checksum_size]u8) void {
     const start = encoded.len - checksum_size;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(encoded[0..start]);
-    hasher.update(&([_]u8{0} ** checksum_size));
+    hasher.update(&@as([checksum_size]u8, @splat(0)));
     hasher.final(output);
 }
 
@@ -809,7 +809,7 @@ test "filesystem tree keys round trip and validate repeated identities" {
 test "filesystem tree keys reject invalid identities names and lengths" {
     try std.testing.expectError(error.InvalidInodeId, encodeInodeKey(0));
     try std.testing.expectError(error.InvalidSize, decodeInodeKey(&[_]u8{1}));
-    try std.testing.expectError(error.InvalidInodeId, decodeInodeKey(&([_]u8{0} ** 8)));
+    try std.testing.expectError(error.InvalidInodeId, decodeInodeKey(&@as([8]u8, @splat(0))));
 
     var buffer: DirectoryKeyBuffer = undefined;
     try std.testing.expectError(error.InvalidInodeId, encodeDirectoryKey(&buffer, 0, "name"));
@@ -817,15 +817,15 @@ test "filesystem tree keys reject invalid identities names and lengths" {
     try std.testing.expectError(error.InvalidName, encodeDirectoryKey(&buffer, 1, "a/b"));
     try std.testing.expectError(error.InvalidName, encodeDirectoryKey(&buffer, 1, "a\x00b"));
     try std.testing.expectError(error.BufferTooSmall, encodeDirectoryKey(buffer[0..8], 1, "a"));
-    try std.testing.expectError(error.InvalidSize, decodeDirectoryKey(&([_]u8{0} ** 8)));
-    const oversized_name = [_]u8{'a'} ** (max_name_size + 1);
+    try std.testing.expectError(error.InvalidSize, decodeDirectoryKey(&@as([8]u8, @splat(0))));
+    const oversized_name: [max_name_size + 1]u8 = @splat('a');
     try std.testing.expectError(error.InvalidName, encodeDirectoryKey(&buffer, 1, &oversized_name));
-    const maximum_name = [_]u8{'a'} ** max_name_size;
+    const maximum_name: [max_name_size]u8 = @splat('a');
     const maximum_key = try encodeDirectoryKey(&buffer, 1, &maximum_name);
     try std.testing.expectEqual(directory_key_max_size, maximum_key.len);
 
     try std.testing.expectError(error.InvalidInodeId, encodeExtentKey(0, 0));
-    try std.testing.expectError(error.InvalidSize, decodeExtentKey(&([_]u8{0} ** 15)));
+    try std.testing.expectError(error.InvalidSize, decodeExtentKey(&@as([15]u8, @splat(0))));
 }
 
 test "big-endian tree keys preserve numeric bytewise ordering" {

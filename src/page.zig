@@ -266,7 +266,7 @@ fn init(kind: Kind, level: u16, entry_count: u16) Encoded {
     var encoded: Encoded = @splat(0);
     @memcpy(encoded[magic_start..magic_end], magic);
     std.mem.writeInt(u16, encoded[version_start..version_end], format_version, .big);
-    encoded[kind_offset] = @intFromEnum(kind);
+    encoded[kind_offset] = @backingInt(kind);
     std.mem.writeInt(u16, encoded[entry_count_start..entry_count_end], entry_count, .big);
     std.mem.writeInt(u16, encoded[level_start..level_end], level, .big);
     return encoded;
@@ -471,7 +471,7 @@ test "page encoder requires strictly sorted keys" {
 test "page encoder enforces capacity and internal level" {
     try std.testing.expectError(error.PageFull, encodeLeaf(&.{.{
         .key = "key",
-        .value = "x" ** page_size,
+        .value = &@as([page_size]u8, @splat('x')),
     }}));
     try std.testing.expectError(error.InvalidLevel, encodeInternal(0, .{}, &.{.{
         .key = "key",
