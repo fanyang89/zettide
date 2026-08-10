@@ -75,7 +75,7 @@ pub fn encode(state: State) store.Anchor {
     var encoded: store.Anchor = @splat(0);
     @memcpy(encoded[magic_start..magic_end], magic);
     std.mem.writeInt(u16, encoded[version_start..version_end], format_version, .big);
-    encoded[mode_start] = @backingInt(state.mode);
+    encoded[mode_start] = @intFromEnum(state.mode);
     std.mem.writeInt(u64, encoded[revision_start..revision_end], state.revision, .big);
     std.mem.writeInt(u64, encoded[generation_start..generation_end], state.generation, .big);
     std.mem.writeInt(u64, encoded[mode_epoch_start..mode_epoch_end], state.mode_epoch, .big);
@@ -195,12 +195,12 @@ fn activeState(
 }
 
 test "active anchor may retain control ancestry" {
-    const control = objectRef(&@as([store.object_ref_size]u8, @splat(0x52)));
+    const control = objectRef(&([_]u8{0x52} ** store.object_ref_size));
     const encoded = encode(.{
         .revision = 9,
         .generation = 7,
         .transaction_id = @splat(0x31),
-        .head = objectRef(&@as([store.object_ref_size]u8, @splat(0x32))),
+        .head = objectRef(&([_]u8{0x32} ** store.object_ref_size)),
         .mode = .active,
         .mode_epoch = 2,
         .control_ref = control,
@@ -242,7 +242,7 @@ test "anchor v2 encoding matches the golden vector" {
     @memcpy(expected[0..8], magic);
     expected[9] = 2;
     expected[11] = 1;
-    expected[12] = @backingInt(Mode.active);
+    expected[12] = @intFromEnum(Mode.active);
     expected[16..24].* = .{ 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18 };
     expected[24..32].* = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
     expected[39] = 1;
@@ -320,12 +320,12 @@ test "anchor rejects nonzero reserved bytes" {
 
 test "maintenance anchor requires durable control identity" {
     const operation_id: store.TransactionId = @splat(0x41);
-    const control = objectRef(&@as([store.object_ref_size]u8, @splat(0x52)));
+    const control = objectRef(&([_]u8{0x52} ** store.object_ref_size));
     const encoded = encode(.{
         .revision = 8,
         .generation = 7,
         .transaction_id = @splat(0x31),
-        .head = objectRef(&@as([store.object_ref_size]u8, @splat(0x32))),
+        .head = objectRef(&([_]u8{0x32} ** store.object_ref_size)),
         .mode = .maintenance,
         .mode_epoch = 2,
         .control_operation_id = operation_id,

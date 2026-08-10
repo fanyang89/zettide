@@ -165,8 +165,8 @@ pub fn rangeForPage(block_size: u32, page_index: u64, total_slots: u64) !PageRan
 }
 
 fn encodeEntry(output: []u8, entry: Entry) void {
-    output[0] = @backingInt(entry.state);
-    output[1] = @backingInt(entry.kind);
+    output[0] = @intFromEnum(entry.state);
+    output[1] = @intFromEnum(entry.kind);
     @memcpy(output[8..24], &entry.claim_id);
     @memcpy(output[24..40], &entry.owner_id);
     @memcpy(output[40..56], &entry.owner_incarnation);
@@ -271,7 +271,7 @@ test "claim index pages round trip and bind their physical position" {
 
 test "claim index golden vector and canonical validation" {
     const volume_id = patternedId(1);
-    var entries: [4]Entry = @splat(Entry.empty());
+    var entries = [_]Entry{Entry.empty()} ** 4;
     var encoded = try encodePage(std.testing.allocator, 512, volume_id, 0, 0, 4, 1, &entries);
     defer encoded.deinit();
     try std.testing.expectEqualSlices(u8, "ZCAWCI\x00\x00", encoded.bytes[0..8]);
@@ -291,7 +291,7 @@ test "claim index golden vector and canonical validation" {
     );
 
     encoded.bytes[2] ^= 1;
-    encoded.bytes[64] = @backingInt(State.tombstone);
+    encoded.bytes[64] = @intFromEnum(State.tombstone);
     encoded.bytes[72] = 1;
     seal(encoded.bytes);
     try std.testing.expectError(

@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(integration_tests).step);
 
     const fmt = b.addFmt(.{
-        .paths = &.{ b.path("build.zig"), b.path("src"), b.path("tests") },
+        .paths = &.{ "build.zig", "src", "tests" },
         .check = true,
     });
     const fmt_step = b.step("fmt-check", "Check Zig formatting");

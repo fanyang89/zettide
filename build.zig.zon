@@ -1,7 +1,7 @@
 .{
     .name = .zettide_cawfs,
     .version = "0.1.0",
-    .minimum_zig_version = "0.17.0-dev.1640+2597da025",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0xf85d0cfc21ff038d,
     .dependencies = .{},
     .paths = .{

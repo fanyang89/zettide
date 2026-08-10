@@ -201,10 +201,10 @@ fn validateGeometry(block_size: u32, volume_id: [16]u8, stripe: u64, count: u32)
 }
 
 fn encodeDescriptor(output: []u8, descriptor: Descriptor) void {
-    output[0] = @backingInt(descriptor.operation);
-    output[1] = @backingInt(descriptor.phase);
+    output[0] = @intFromEnum(descriptor.operation);
+    output[1] = @intFromEnum(descriptor.phase);
     output[2] = descriptor.kind;
-    output[3] = @backingInt(descriptor.expected_target_state);
+    output[3] = @intFromEnum(descriptor.expected_target_state);
     @memcpy(output[8..24], &descriptor.claim_id);
     @memcpy(output[24..40], &descriptor.owner_id);
     @memcpy(output[40..56], &descriptor.owner_incarnation);
@@ -320,7 +320,7 @@ test "claim gate golden vector and validation" {
     try std.testing.expectError(error.ChecksumMismatch, decode(encoded.bytes, volume_id, 0, 1));
 
     encoded.bytes[200] = 0;
-    encoded.bytes[64] = @backingInt(Operation.claim);
+    encoded.bytes[64] = @intFromEnum(Operation.claim);
     seal(encoded.bytes);
     try std.testing.expectError(error.InvalidOperationIdentity, decode(encoded.bytes, volume_id, 0, 1));
 }
