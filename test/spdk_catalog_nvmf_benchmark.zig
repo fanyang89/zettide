@@ -16,7 +16,9 @@ const runtime_config =
 const iscsi_runtime_config =
     \\{"subsystems":[
     \\{"subsystem":"bdev","config":[
-    \\{"method":"bdev_set_options","params":{"bdev_io_pool_size":16384,"bdev_io_cache_size":256}}]}]}
+    \\{"method":"bdev_set_options","params":{"bdev_io_pool_size":16384,"bdev_io_cache_size":256}}]},
+    \\{"subsystem":"iscsi","config":[
+    \\{"method":"iscsi_set_options","params":{"max_sessions":16,"max_connections_per_session":1,"pdu_pool_size":8192,"immediate_data_pool_size":2048,"data_out_pool_size":256}}]}]}
 ;
 const rdma_runtime_config =
     \\{"subsystems":[

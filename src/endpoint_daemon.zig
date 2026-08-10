@@ -5,17 +5,24 @@ const catalog_endpoint_backend = @import("spdk/catalog_endpoint_backend.zig");
 const iscsi_export = @import("spdk/iscsi_export.zig");
 const runtime_api = @import("spdk/runtime.zig");
 
+const iscsi_runtime_config =
+    "{\"subsystem\":\"iscsi\",\"config\":[" ++
+    "{\"method\":\"iscsi_set_options\",\"params\":{" ++
+    "\"max_sessions\":16,\"max_connections_per_session\":1," ++
+    "\"pdu_pool_size\":8192,\"immediate_data_pool_size\":2048," ++
+    "\"data_out_pool_size\":256}}]}";
+
 const runtime_config =
     "{\"subsystems\":[{\"subsystem\":\"bdev\",\"config\":[" ++
     "{\"method\":\"bdev_set_options\",\"params\":{\"bdev_io_pool_size\":1024," ++
-    "\"bdev_io_cache_size\":32}}]}," ++
+    "\"bdev_io_cache_size\":32}}]}," ++ iscsi_runtime_config ++ "," ++
     "{\"subsystem\":\"nvmf\",\"config\":[" ++
     "{\"method\":\"nvmf_create_transport\",\"params\":{\"trtype\":\"TCP\"}}]}]}";
 
 const runtime_config_with_rdma =
     "{\"subsystems\":[{\"subsystem\":\"bdev\",\"config\":[" ++
     "{\"method\":\"bdev_set_options\",\"params\":{\"bdev_io_pool_size\":1024," ++
-    "\"bdev_io_cache_size\":32}}]}," ++
+    "\"bdev_io_cache_size\":32}}]}," ++ iscsi_runtime_config ++ "," ++
     "{\"subsystem\":\"nvmf\",\"config\":[" ++
     "{\"method\":\"nvmf_create_transport\",\"params\":{\"trtype\":\"TCP\"}}," ++
     "{\"method\":\"nvmf_create_transport\",\"params\":{\"trtype\":\"RDMA\"}}]}]}";
