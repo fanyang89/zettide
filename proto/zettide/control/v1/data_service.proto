@@ -20,7 +20,7 @@ enum DataReplicaState {
   DATA_REPLICA_STATE_TOMBSTONED = 2;
 }
 
-message ReplicaAttestation {
+message DataReplicaAttestation {
   string volume_id = 1;
   string placement_id = 2;
   string allocation_id = 3;
@@ -33,7 +33,7 @@ message ReplicaAttestation {
 
 message DataReplica {
   DataReplicaState state = 1;
-  ReplicaAttestation attestation = 2;
+  DataReplicaAttestation attestation = 2;
 }
 
 message EnsureReplicaRequest {

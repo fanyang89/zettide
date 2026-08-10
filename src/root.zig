@@ -1,9 +1,9 @@
 pub const Id = [16]u8;
 pub const Digest = [32]u8;
 
-pub const ReplicaState = enum {
-    active,
-    tombstoned,
+pub const ReplicaState = enum(u8) {
+    active = 1,
+    tombstoned = 2,
 };
 
 pub const ReplicaRequest = struct {
