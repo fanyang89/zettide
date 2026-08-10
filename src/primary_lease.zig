@@ -135,32 +135,101 @@ fn isZero(id: Id) bool {
     return true;
 }
 
-const boot: Id = .{1} ++ @as([15]u8, @splat(0));
-const lease: Id = .{2} ++ @as([15]u8, @splat(0));
+const boot_a: Id = .{1} ++ @as([15]u8, @splat(0));
+const boot_b: Id = .{2} ++ @as([15]u8, @splat(0));
+const lease_a: Id = .{3} ++ @as([15]u8, @splat(0));
+const lease_b: Id = .{4} ++ @as([15]u8, @splat(0));
 
-test "lease stops admission before completion deadline" {
-    var runtime = try Runtime.init(boot);
-    const token: Token = .{ .lease_id = lease, .holder_boot_id = boot, .authority_generation = 1, .write_epoch = 1 };
-    _ = try runtime.stage(token, 1_000);
-    try runtime.markReady(lease, 2_000);
-    try std.testing.expect(runtime.canAdmit(token, 25_999));
-    try std.testing.expect(!runtime.canAdmit(token, 26_000));
-    try std.testing.expect(runtime.canComplete(token, 30_999));
-    try std.testing.expect(!runtime.canComplete(token, 31_000));
+fn testToken(lease_id: Id, epoch: u64) Token {
+    return .{ .lease_id = lease_id, .holder_boot_id = boot_a, .authority_generation = epoch, .write_epoch = epoch };
 }
 
-test "restart and stale authority fail closed" {
-    var runtime = try Runtime.init(boot);
-    const current: Token = .{ .lease_id = lease, .holder_boot_id = boot, .authority_generation = 2, .write_epoch = 2 };
-    _ = try runtime.stage(current, 1_000);
-    var stale = current;
-    stale.lease_id[0] = 3;
-    stale.authority_generation = 1;
-    stale.write_epoch = 1;
-    try std.testing.expectError(error.StaleAuthority, runtime.stage(stale, 2_000));
+test "lease window stops admission before hard completion deadline" {
+    var runtime = try Runtime.init(boot_a);
+    const authority = testToken(lease_a, 7);
+    _ = try runtime.stage(authority, 1_000);
+    try std.testing.expect(!runtime.canAdmit(authority, 1_000));
+    try runtime.markReady(lease_a, 2_000);
+    try std.testing.expect(runtime.canAdmit(authority, 25_999));
+    try std.testing.expect(!runtime.canAdmit(authority, 26_000));
+    try std.testing.expect(runtime.canComplete(authority, 30_999));
+    try std.testing.expect(!runtime.canComplete(authority, 31_000));
+}
 
-    var other_boot = boot;
-    other_boot[0] = 4;
-    var restarted = try Runtime.init(other_boot);
-    try std.testing.expectError(error.BootMismatch, restarted.stage(current, 3_000));
+test "unknown renewal never extends the current window" {
+    var runtime = try Runtime.init(boot_a);
+    const current = testToken(lease_a, 7);
+    _ = try runtime.stage(current, 1_000);
+    try runtime.markReady(lease_a, 2_000);
+    const renewal = testToken(lease_b, 7);
+    _ = try runtime.stage(renewal, 12_000);
+    try std.testing.expect(runtime.canAdmit(current, 25_000));
+    try std.testing.expect(!runtime.canAdmit(current, 26_000));
+    try std.testing.expect(!runtime.canAdmit(renewal, 12_000));
+}
+
+test "pause and boot changes fail closed" {
+    var runtime = try Runtime.init(boot_a);
+    const authority = testToken(lease_a, 7);
+    _ = try runtime.stage(authority, 1_000);
+    try runtime.markReady(lease_a, 2_000);
+    try std.testing.expect(!runtime.canAdmit(authority, 40_000));
+
+    var restarted = try Runtime.init(boot_b);
+    try std.testing.expectError(error.BootMismatch, restarted.stage(authority, 40_000));
+    try std.testing.expect(!restarted.canComplete(authority, 40_000));
+}
+
+test "ready requires a fresh committed candidate" {
+    var runtime = try Runtime.init(boot_a);
+    const authority = testToken(lease_a, 7);
+    _ = try runtime.stage(authority, 1_000);
+    try std.testing.expectError(error.InsufficientWindow, runtime.markReady(lease_a, 21_001));
+    try std.testing.expect(!runtime.canAdmit(authority, 21_001));
+}
+
+test "older candidate cannot replace newer authority" {
+    var runtime = try Runtime.init(boot_a);
+    _ = try runtime.stage(testToken(lease_a, 9), 1_000);
+    try std.testing.expectError(error.StaleAuthority, runtime.stage(testToken(lease_b, 8), 2_000));
+    try runtime.markReady(lease_a, 3_000);
+    try std.testing.expect(runtime.canAdmit(testToken(lease_a, 9), 3_000));
+}
+
+test "renewal requires exact ready token and observes boundaries" {
+    var runtime = try Runtime.init(boot_a);
+    const current = testToken(lease_a, 7);
+    _ = try runtime.stage(current, 1_000);
+    try runtime.markReady(lease_a, 2_000);
+
+    try std.testing.expect(!runtime.shouldRenew(current, 10_999));
+    try std.testing.expect(runtime.shouldRenew(current, 11_000));
+    try std.testing.expect(runtime.shouldRenew(current, 25_999));
+    try std.testing.expect(!runtime.shouldRenew(current, 26_000));
+    try std.testing.expect(!runtime.shouldRenew(testToken(lease_b, 7), 11_000));
+    var wrong_generation = current;
+    wrong_generation.authority_generation += 1;
+    try std.testing.expect(!runtime.shouldRenew(wrong_generation, 11_000));
+}
+
+test "candidate freshness uses mark ready boundaries and exact lease" {
+    var runtime = try Runtime.init(boot_a);
+    try std.testing.expect(!runtime.canMarkReady(lease_a, 1_000));
+    _ = try runtime.stage(testToken(lease_a, 7), 1_000);
+    try std.testing.expect(runtime.canMarkReady(lease_a, 21_000));
+    try std.testing.expect(!runtime.canMarkReady(lease_a, 21_001));
+    try std.testing.expect(!runtime.canMarkReady(lease_b, 2_000));
+    var wrong_token = testToken(lease_a, 8);
+    try std.testing.expect(!runtime.canMarkReadyToken(wrong_token, 2_000));
+    wrong_token = testToken(lease_a, 7);
+    try std.testing.expect(runtime.canMarkReadyToken(wrong_token, 2_000));
+    try std.testing.expectError(error.InsufficientWindow, runtime.markReady(lease_a, 21_001));
+}
+
+test "stale same generation candidate can be replaced" {
+    var runtime = try Runtime.init(boot_a);
+    _ = try runtime.stage(testToken(lease_a, 7), 1_000);
+    _ = try runtime.stage(testToken(lease_b, 7), 21_000);
+    try std.testing.expect(!runtime.canMarkReady(lease_a, 21_000));
+    try std.testing.expect(runtime.canMarkReady(lease_b, 21_000));
 }
