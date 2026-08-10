@@ -130,6 +130,12 @@ pub const Reconciler = struct {
     machine: *const state_machine.PoolStateMachine,
     data_client: DataServiceClient,
     submitter: CommandSubmitter,
+    failover_observations: std.AutoHashMapUnmanaged(Id, FailoverObservation) = .empty,
+    deletion_observations: std.AutoHashMapUnmanaged(Id, DeletionObservation) = .empty,
+    awake_now_ms_override: ?u64 = null,
+
+    const FailoverObservation = struct { resource_version: u64, first_seen_ms: u64 };
+    const DeletionObservation = struct { resource_version: u64, lease_id: Id, first_seen_ms: u64 };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -147,6 +153,12 @@ pub const Reconciler = struct {
         };
     }
 
+    pub fn deinit(self: *Reconciler) void {
+        self.failover_observations.deinit(self.allocator);
+        self.deletion_observations.deinit(self.allocator);
+        self.* = undefined;
+    }
+
     /// Must run on the Raft driver thread, normally from a ReadIndex callback.
     /// The returned action owns everything needed by `execute`.
     pub fn planOnce(self: *Reconciler) !?*Action {
@@ -155,11 +167,39 @@ pub const Reconciler = struct {
             for (volumes) |*volume| volume.deinit(self.allocator);
             self.allocator.free(volumes);
         }
+        try self.pruneFailoverObservations(volumes);
+        try self.pruneDeletionObservations(volumes);
+        // Deletion is globally highest priority, but immature/attached volumes do not block others.
+        for (volumes) |volume| {
+            if (volume.volume.lifecycle_state != .VOLUME_LIFECYCLE_STATE_DELETING or volume.has_attachments) continue;
+            if (volume.primary_authority != null and !try self.deletionWaitMature(volume)) continue;
+            return try self.planDelete(volume);
+        }
+        // Failover work precedes ordinary provisioning and lease maintenance.
         for (volumes) |volume| {
             if (volume.placements.len != volume.allocations.len) return error.InconsistentSnapshot;
-            if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_DELETING) {
-                return try self.planDelete(volume);
+            if (volume.primary_failover) |failover| {
+                if (volume.primary_authority == null) return error.InconsistentSnapshot;
+                switch (failover.state) {
+                    .PRIMARY_FAILOVER_STATE_WAITING_LEASE => {
+                        if (!try self.failoverWaitMature(failover)) continue;
+                        return try self.planCompleteFailoverWait(volume, volume.primary_authority.?, failover);
+                    },
+                    .PRIMARY_FAILOVER_STATE_LEASE_EXPIRED => return try self.planFailoverProposal(volume, volume.primary_authority.?, failover),
+                    .PRIMARY_FAILOVER_STATE_FENCING => {
+                        if (volume.primary_authority_candidate) |candidate| switch (candidate.state) {
+                            .PRIMARY_AUTHORITY_STATE_PENDING => return try self.planActivateAuthority(volume, candidate),
+                            .PRIMARY_AUTHORITY_STATE_ACTIVATED => return try self.planFailoverReady(volume, volume.primary_authority.?, candidate, failover),
+                            else => return error.InconsistentSnapshot,
+                        } else return try self.planFailoverProposal(volume, volume.primary_authority.?, failover);
+                    },
+                    else => return error.InconsistentSnapshot,
+                }
             }
+        }
+        // Provisioning and existing candidates are deterministic finite work.
+        for (volumes) |volume| {
+            if (volume.placements.len != volume.allocations.len or volume.primary_failover != null) continue;
             if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_PROVISIONING and
                 volume.volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE and
                 volume.placements.len == 0 and volume.allocations.len == 0)
@@ -191,10 +231,101 @@ pub const Reconciler = struct {
                     .PRIMARY_AUTHORITY_STATE_PENDING => return try self.planActivateAuthority(volume, candidate),
                     .PRIMARY_AUTHORITY_STATE_ACTIVATED => return try self.planRenewalReady(volume, volume.primary_authority.?, candidate),
                     else => return error.InconsistentSnapshot,
-                } else return try self.planInspectRenewal(volume, volume.primary_authority.?);
+                };
             }
         }
+        // Stable ACTIVE inspection is last so it cannot starve finite work behind it.
+        for (volumes) |volume| {
+            if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE and volume.volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE and
+                volume.primary_failover == null and volume.primary_authority_candidate == null and volume.primary_authority != null and
+                volume.primary_authority.?.state == .PRIMARY_AUTHORITY_STATE_READY)
+                return try self.planInspectRenewal(volume, volume.primary_authority.?);
+        }
         return null;
+    }
+
+    fn pruneFailoverObservations(self: *Reconciler, volumes: []const state_machine.PoolStateMachine.ReconcileVolume) !void {
+        var live: std.AutoHashMapUnmanaged(Id, u64) = .empty;
+        defer live.deinit(self.allocator);
+        for (volumes) |volume| if (volume.primary_failover) |failover| {
+            if (failover.failover_id.len != 16) return error.InconsistentSnapshot;
+            try live.put(self.allocator, failover.failover_id[0..16].*, failover.resource_version);
+        };
+        var stale: std.ArrayList(Id) = .empty;
+        defer stale.deinit(self.allocator);
+        var iterator = self.failover_observations.iterator();
+        while (iterator.next()) |entry| {
+            if (live.get(entry.key_ptr.*)) |revision| {
+                if (revision == entry.value_ptr.resource_version) continue;
+            }
+            try stale.append(self.allocator, entry.key_ptr.*);
+        }
+        for (stale.items) |id| _ = self.failover_observations.remove(id);
+    }
+
+    fn failoverWaitMature(self: *Reconciler, failover: pb.PrimaryFailover) !bool {
+        const id = failover.failover_id[0..16].*;
+        const now_ms = self.awake_now_ms_override orelse
+            (std.math.cast(u64, std.Io.Timestamp.now(self.io, .awake).toMilliseconds()) orelse return error.InvalidTimestamp);
+        const result = try self.failover_observations.getOrPut(self.allocator, id);
+        if (!result.found_existing or result.value_ptr.resource_version != failover.resource_version) {
+            result.value_ptr.* = .{ .resource_version = failover.resource_version, .first_seen_ms = now_ms };
+            return false;
+        }
+        return now_ms -| result.value_ptr.first_seen_ms >= primary_lease.duration_ms;
+    }
+
+    fn pruneDeletionObservations(self: *Reconciler, volumes: []const state_machine.PoolStateMachine.ReconcileVolume) !void {
+        var live: std.AutoHashMapUnmanaged(Id, DeletionObservation) = .empty;
+        defer live.deinit(self.allocator);
+        for (volumes) |volume| {
+            if (volume.volume.lifecycle_state != .VOLUME_LIFECYCLE_STATE_DELETING) continue;
+            const current = volume.primary_authority orelse continue;
+            try live.put(self.allocator, try parseId(volume.volume.id), .{
+                .resource_version = volume.volume.resource_version,
+                .lease_id = current.lease_id[0..16].*,
+                .first_seen_ms = 0,
+            });
+        }
+        var stale: std.ArrayList(Id) = .empty;
+        defer stale.deinit(self.allocator);
+        var iterator = self.deletion_observations.iterator();
+        while (iterator.next()) |entry| {
+            const expected = live.get(entry.key_ptr.*);
+            if (expected != null and expected.?.resource_version == entry.value_ptr.resource_version and std.mem.eql(u8, &expected.?.lease_id, &entry.value_ptr.lease_id)) continue;
+            try stale.append(self.allocator, entry.key_ptr.*);
+        }
+        for (stale.items) |id| _ = self.deletion_observations.remove(id);
+    }
+
+    fn deletionWaitMature(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume) !bool {
+        const current = volume.primary_authority orelse return true;
+        const id = try parseId(volume.volume.id);
+        const now_ms = self.awake_now_ms_override orelse
+            (std.math.cast(u64, std.Io.Timestamp.now(self.io, .awake).toMilliseconds()) orelse return error.InvalidTimestamp);
+        const result = try self.deletion_observations.getOrPut(self.allocator, id);
+        const lease_id = current.lease_id[0..16].*;
+        if (!result.found_existing or result.value_ptr.resource_version != volume.volume.resource_version or !std.mem.eql(u8, &result.value_ptr.lease_id, &lease_id)) {
+            result.value_ptr.* = .{ .resource_version = volume.volume.resource_version, .lease_id = lease_id, .first_seen_ms = now_ms };
+            return false;
+        }
+        return now_ms -| result.value_ptr.first_seen_ms >= primary_lease.duration_ms;
+    }
+
+    fn planCompleteFailoverWait(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, current: pb.PrimaryAuthority, failover: pb.PrimaryFailover) !*Action {
+        const action = try Action.create(self.allocator);
+        errdefer action.deinit();
+        action.kind = .{ .complete_failover_wait = try state_machine.encodeCompletePrimaryFailoverLeaseWaitCommand(action.arena.allocator(), .{
+            .volume_id = volume.volume.id,
+            .failover_id = failover.failover_id,
+            .revoked_lease_id = failover.revoked_lease_id,
+            .revoked_authority_generation = failover.revoked_authority_generation,
+            .revoked_write_epoch = failover.revoked_write_epoch,
+            .expected_volume_resource_version = volume.volume.resource_version,
+            .expected_failover_resource_version = failover.resource_version,
+            .expected_current_resource_version = current.resource_version,
+        }) };
+        return action;
     }
 
     pub fn runOnce(self: *Reconciler) !void {
@@ -247,6 +378,7 @@ pub const Reconciler = struct {
     }
 
     fn planDelete(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume) !*Action {
+        if (volume.has_attachments) return error.VolumeHasAttachments;
         const action = try Action.create(self.allocator);
         errdefer action.deinit();
         const allocator = action.arena.allocator();
@@ -315,6 +447,14 @@ pub const Reconciler = struct {
             .volume_id_text = try allocator.dupe(u8, authority.volume_id),
             .expected_volume_resource_version = volume.volume.resource_version,
             .expected_authority_resource_version = authority.resource_version,
+            .abort_command = try state_machine.encodeAbortPrimaryAuthorityCandidateCommand(allocator, .{
+                .volume_id = authority.volume_id,
+                .lease_id = authority.lease_id,
+                .authority_generation = authority.authority_generation,
+                .expected_volume_resource_version = volume.volume.resource_version,
+                .expected_candidate_resource_version = authority.resource_version,
+                .expected_current_resource_version = if (volume.primary_authority) |current| current.resource_version else 0,
+            }),
         } };
         return action;
     }
@@ -392,10 +532,96 @@ pub const Reconciler = struct {
             .authority = proposed,
             .expected_volume_resource_version = volume.volume.resource_version,
         });
+        const failover_id = randomId(self.io);
         action.kind = .{ .inspect_renewal = .{
             .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
             .request = .{ .binding = try authorityBinding(authority) },
             .command = command,
+            .begin_failover_command = try state_machine.encodeBeginPrimaryFailoverCommand(allocator, .{
+                .volume_id = authority.volume_id,
+                .current_lease_id = authority.lease_id,
+                .current_authority_generation = authority.authority_generation,
+                .current_write_epoch = authority.write_epoch,
+                .failover_id = &failover_id,
+                .expected_volume_resource_version = volume.volume.resource_version,
+                .expected_current_resource_version = authority.resource_version,
+            }),
+        } };
+        return action;
+    }
+
+    fn planFailoverProposal(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, current: pb.PrimaryAuthority, failover: pb.PrimaryFailover) !*Action {
+        var target: ?pb.ReplicaPlacement = null;
+        for (volume.placements) |placement| {
+            if (std.mem.eql(u8, placement.id, current.primary_placement_id) or placement.state != .REPLICA_PLACEMENT_STATE_ACTIVE) continue;
+            if (target == null or placement.replica_index < target.?.replica_index) target = placement;
+        }
+        const placement = target orelse return error.InconsistentSnapshot;
+        const node = nodeById(volume.nodes, placement.node_id) orelse return error.InconsistentSnapshot;
+        const action = try Action.create(self.allocator);
+        errdefer action.deinit();
+        const allocator = action.arena.allocator();
+        action.kind = .{ .propose_failover = .{
+            .endpoint = try allocator.dupe(u8, node.control_endpoint),
+            .volume_id_text = try allocator.dupe(u8, volume.volume.id),
+            .placement_id_text = try allocator.dupe(u8, placement.id),
+            .node_id_text = try allocator.dupe(u8, placement.node_id),
+            .volume_id = try parseId(volume.volume.id),
+            .placement_id = try parseId(placement.id),
+            .node_id = try parseId(placement.node_id),
+            .lease_id = randomId(self.io),
+            .activation_nonce = randomId(self.io),
+            .failover_id = failover.failover_id[0..16].*,
+            .holder_generation = current.authority_generation + 1,
+            .write_epoch = failover.target_write_epoch,
+            .placement_revision = current.placement_revision,
+            .expected_volume_resource_version = volume.volume.resource_version,
+            .expected_failover_resource_version = failover.resource_version,
+        } };
+        return action;
+    }
+
+    fn planFailoverReady(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume, current: pb.PrimaryAuthority, candidate: pb.PrimaryAuthority, failover: pb.PrimaryFailover) !*Action {
+        const action = try Action.create(self.allocator);
+        errdefer action.deinit();
+        const allocator = action.arena.allocator();
+        const binding = try authorityBinding(candidate);
+        const replicas = try allocator.alloc(Action.FenceReplica, volume.placements.len);
+        for (volume.placements, replicas) |placement, *replica| {
+            const node = nodeById(volume.nodes, placement.node_id) orelse return error.InconsistentSnapshot;
+            replica.* = .{
+                .endpoint = try allocator.dupe(u8, node.control_endpoint),
+                .binding = .{
+                    .operation_id = stableFenceOperationId(binding, try parseId(placement.id), placement.generation),
+                    .volume_id = binding.volume_id,
+                    .placement_id = try parseId(placement.id),
+                    .replica_generation = placement.generation,
+                    .write_epoch = binding.write_epoch,
+                    .primary_node_id = binding.primary_node_id,
+                    .lease_id = binding.lease_id,
+                    .authority_digest = binding.authority_digest,
+                },
+            };
+        }
+        action.kind = .{ .failover_ready = .{
+            .primary_endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, candidate.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
+            .volume_id_text = try allocator.dupe(u8, candidate.volume_id),
+            .placement_id_texts = try dupePlacementIds(allocator, volume.placements),
+            .request = .{ .binding = binding },
+            .replicas = replicas,
+            .failover_id = failover.failover_id[0..16].*,
+            .expected_volume_resource_version = volume.volume.resource_version,
+            .expected_candidate_resource_version = candidate.resource_version,
+            .expected_current_resource_version = current.resource_version,
+            .expected_failover_resource_version = failover.resource_version,
+            .abort_command = try state_machine.encodeAbortPrimaryAuthorityCandidateCommand(allocator, .{
+                .volume_id = candidate.volume_id,
+                .lease_id = candidate.lease_id,
+                .authority_generation = candidate.authority_generation,
+                .expected_volume_resource_version = volume.volume.resource_version,
+                .expected_candidate_resource_version = candidate.resource_version,
+                .expected_current_resource_version = current.resource_version,
+            }),
         } };
         return action;
     }
@@ -476,6 +702,7 @@ pub const Action = struct {
         volume_id_text: []const u8,
         expected_volume_resource_version: u64,
         expected_authority_resource_version: u64,
+        abort_command: []const u8,
     };
 
     const FenceReplica = struct {
@@ -499,6 +726,39 @@ pub const Action = struct {
         endpoint: []const u8,
         request: MarkReadyRequest,
         command: []const u8,
+        begin_failover_command: []const u8,
+    };
+
+    const ProposeFailover = struct {
+        endpoint: []const u8,
+        volume_id_text: []const u8,
+        placement_id_text: []const u8,
+        node_id_text: []const u8,
+        volume_id: Id,
+        placement_id: Id,
+        node_id: Id,
+        lease_id: Id,
+        activation_nonce: Id,
+        failover_id: Id,
+        holder_generation: u64,
+        write_epoch: u64,
+        placement_revision: u64,
+        expected_volume_resource_version: u64,
+        expected_failover_resource_version: u64,
+    };
+
+    const FailoverReady = struct {
+        primary_endpoint: []const u8,
+        volume_id_text: []const u8,
+        placement_id_texts: []const []const u8,
+        request: MarkReadyRequest,
+        replicas: []const FenceReplica,
+        failover_id: Id,
+        expected_volume_resource_version: u64,
+        expected_candidate_resource_version: u64,
+        expected_current_resource_version: u64,
+        expected_failover_resource_version: u64,
+        abort_command: []const u8,
     };
 
     const RenewalReady = struct {
@@ -517,6 +777,9 @@ pub const Action = struct {
         ready_authority: ReadyAuthority,
         inspect_renewal: InspectRenewal,
         renewal_ready: RenewalReady,
+        propose_failover: ProposeFailover,
+        failover_ready: FailoverReady,
+        complete_failover_wait: []const u8,
     };
 
     fn create(allocator: std.mem.Allocator) !*Action {
@@ -602,6 +865,12 @@ pub const Action = struct {
                 try submitAndValidate(self.parent_allocator, submitter, command, .propose_authority);
             },
             .activate_authority => |activate| {
+                const holder_boot_id = try data_client.identifyHolder(activate.endpoint);
+                if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
+                if (!std.mem.eql(u8, &holder_boot_id, &activate.request.binding.holder_boot_id)) {
+                    try submitAndValidate(self.parent_allocator, submitter, activate.abort_command, .abort_authority);
+                    return;
+                }
                 const ack = try data_client.stagePrimary(activate.endpoint, activate.request);
                 if (!std.meta.eql(ack.request, activate.request)) return error.InvalidStageAck;
                 const binding = activate.request.binding;
@@ -674,8 +943,13 @@ pub const Action = struct {
                 } else if (status.current_admitting) {
                     if (status.should_renew) try submitAndValidate(self.parent_allocator, submitter, inspect.command, .propose_authority);
                 } else {
-                    try requireSameHolder(data_client, inspect.endpoint, inspect.request.binding.holder_boot_id);
-                    try submitAndValidate(self.parent_allocator, submitter, inspect.command, .propose_authority);
+                    const holder_boot_id = try data_client.identifyHolder(inspect.endpoint);
+                    if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
+                    if (std.mem.eql(u8, &holder_boot_id, &inspect.request.binding.holder_boot_id)) {
+                        try submitAndValidate(self.parent_allocator, submitter, inspect.command, .propose_authority);
+                    } else {
+                        try submitAndValidate(self.parent_allocator, submitter, inspect.begin_failover_command, .begin_failover);
+                    }
                 }
             },
             .renewal_ready => |renewal| {
@@ -687,11 +961,101 @@ pub const Action = struct {
                     try data_client.markPrimaryReady(renewal.endpoint, renewal.request);
                 }
             },
+            .propose_failover => |propose| {
+                const holder_boot_id = try data_client.identifyHolder(propose.endpoint);
+                if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
+                var binding: AuthorityBinding = .{
+                    .volume_id = propose.volume_id,
+                    .primary_placement_id = propose.placement_id,
+                    .primary_node_id = propose.node_id,
+                    .lease_id = propose.lease_id,
+                    .holder_boot_id = holder_boot_id,
+                    .authority_generation = propose.holder_generation,
+                    .write_epoch = propose.write_epoch,
+                    .placement_revision = propose.placement_revision,
+                    .activation_nonce = propose.activation_nonce,
+                    .authority_digest = @splat(0),
+                };
+                binding.authority_digest = authorityDigest(binding);
+                const command = try state_machine.encodeProposePrimaryAuthorityCommand(self.parent_allocator, .{
+                    .authority = .{
+                        .volume_id = propose.volume_id_text,
+                        .primary_placement_id = propose.placement_id_text,
+                        .primary_node_id = propose.node_id_text,
+                        .lease_id = &binding.lease_id,
+                        .holder_boot_id = &binding.holder_boot_id,
+                        .authority_generation = binding.authority_generation,
+                        .write_epoch = binding.write_epoch,
+                        .placement_revision = binding.placement_revision,
+                        .activation_nonce = &binding.activation_nonce,
+                        .lease_duration_ms = primary_lease.duration_ms,
+                        .state = .PRIMARY_AUTHORITY_STATE_PENDING,
+                        .authority_digest = &binding.authority_digest,
+                    },
+                    .expected_volume_resource_version = propose.expected_volume_resource_version,
+                    .failover_id = &propose.failover_id,
+                    .expected_failover_resource_version = propose.expected_failover_resource_version,
+                });
+                defer self.parent_allocator.free(command);
+                try submitAndValidate(self.parent_allocator, submitter, command, .propose_authority);
+            },
+            .failover_ready => |ready| {
+                const status = try data_client.inspectPrimary(ready.primary_endpoint, ready.request);
+                try validatePrimaryLeaseStatus(status, ready.request);
+                if (!status.candidate_fresh) {
+                    try submitAndValidate(self.parent_allocator, submitter, ready.abort_command, .abort_authority);
+                    return;
+                }
+                const evidence = try self.parent_allocator.alloc(pb.ReplicaFenceEvidence, ready.replicas.len);
+                defer self.parent_allocator.free(evidence);
+                for (ready.replicas, evidence, ready.placement_id_texts) |replica, *proof, placement_id| {
+                    const result = try data_client.fenceReplica(replica.endpoint, replica.binding);
+                    if (!std.meta.eql(result.binding, replica.binding) or isZero(&result.fence_digest)) return error.InvalidFenceProof;
+                    proof.* = .{
+                        .placement_id = placement_id,
+                        .replica_generation = result.binding.replica_generation,
+                        .write_epoch = result.binding.write_epoch,
+                        .lease_id = &result.binding.lease_id,
+                        .authority_digest = &result.binding.authority_digest,
+                        .fence_digest = &result.fence_digest,
+                    };
+                }
+                const recovery_request: RecoveryRequest = .{ .binding = ready.request.binding };
+                const recovery = try data_client.recoverPrimary(ready.primary_endpoint, recovery_request);
+                if (!std.meta.eql(recovery.request, recovery_request) or isZero(&recovery.history_digest) or
+                    (recovery.certified_sequence == 0) != recovery.empty_frontier) return error.InvalidRecoveryProof;
+                const binding = ready.request.binding;
+                const command = try state_machine.encodeCommitPrimaryAuthorityFailoverReadyCommand(self.parent_allocator, .{
+                    .volume_id = ready.volume_id_text,
+                    .failover_id = &ready.failover_id,
+                    .lease_id = &binding.lease_id,
+                    .authority_digest = &binding.authority_digest,
+                    .authority_generation = binding.authority_generation,
+                    .write_epoch = binding.write_epoch,
+                    .placement_revision = binding.placement_revision,
+                    .expected_volume_resource_version = ready.expected_volume_resource_version,
+                    .expected_candidate_resource_version = ready.expected_candidate_resource_version,
+                    .expected_current_resource_version = ready.expected_current_resource_version,
+                    .expected_failover_resource_version = ready.expected_failover_resource_version,
+                    .fence_evidence = .{ .items = evidence, .capacity = evidence.len },
+                    .recovery_evidence = .{
+                        .volume_id = ready.volume_id_text,
+                        .write_epoch = binding.write_epoch,
+                        .certified_sequence = recovery.certified_sequence,
+                        .history_digest = &recovery.history_digest,
+                        .empty_frontier = recovery.empty_frontier,
+                    },
+                });
+                defer self.parent_allocator.free(command);
+                if (try submitReadyAndValidate(self.parent_allocator, submitter, command, binding))
+                    try data_client.markPrimaryReady(ready.primary_endpoint, ready.request);
+            },
+            .complete_failover_wait => |command| try submitAndValidate(self.parent_allocator, submitter, command, .complete_failover_wait),
         }
     }
 };
 
-const ApplyKind = enum { reserve, activate, finalize, propose_authority, activate_authority, abort_authority };
+const ApplyKind = enum { reserve, activate, finalize, propose_authority, activate_authority, abort_authority, begin_failover, complete_failover_wait };
 
 fn submitAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, command: []const u8, kind: ApplyKind) !void {
     const response_bytes = try submitter.submit(allocator, command);
@@ -765,6 +1129,18 @@ fn submitAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, 
                 else => return error.PrimaryAuthorityAbortRejected,
             }
         },
+        .begin_failover, .complete_failover_wait => {
+            var response = try state_machine.decodePrimaryFailoverApplyResponse(allocator, response_bytes);
+            defer response.deinit(allocator);
+            switch (response.code) {
+                .PRIMARY_FAILOVER_APPLY_CODE_BEGUN,
+                .PRIMARY_FAILOVER_APPLY_CODE_LEASE_WAIT_COMPLETED,
+                .PRIMARY_FAILOVER_APPLY_CODE_VERSION_CONFLICT,
+                .PRIMARY_FAILOVER_APPLY_CODE_INVALID_STATE,
+                => {},
+                else => return if (kind == .begin_failover) error.PrimaryFailoverRejected else error.PrimaryFailoverWaitCompletionRejected,
+            }
+        },
     }
 }
 
@@ -776,12 +1152,6 @@ fn validatePrimaryLeaseStatus(status: PrimaryLeaseStatus, request: MarkReadyRequ
     {
         return error.InvalidPrimaryLeaseStatus;
     }
-}
-
-fn requireSameHolder(data_client: DataServiceClient, endpoint: []const u8, expected_boot_id: Id) !void {
-    const holder_boot_id = try data_client.identifyHolder(endpoint);
-    if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
-    if (!std.mem.eql(u8, &holder_boot_id, &expected_boot_id)) return error.HolderBootMismatch;
 }
 
 fn submitReadyAndValidate(allocator: std.mem.Allocator, submitter: CommandSubmitter, command: []const u8, binding: AuthorityBinding) !bool {
@@ -1138,7 +1508,7 @@ const TestDataClient = struct {
     invalid_fence_proof: bool = false,
     invalid_recovery_proof: bool = false,
     staged: ?StageRequest = null,
-    fences: [state_machine.volume_target_replica_count]?replica_fence.Result = @splat(null),
+    fences: [state_machine.volume_target_replica_count * 3]?replica_fence.Result = @splat(null),
     stage_grants: usize = 0,
     fence_drains: usize = 0,
     recoveries: usize = 0,
@@ -1214,7 +1584,7 @@ const TestDataClient = struct {
         var slot: ?usize = null;
         for (&self.fences, 0..) |*existing, index| {
             if (existing.*) |result| {
-                if (std.mem.eql(u8, &result.binding.placement_id, &binding.placement_id)) {
+                if (std.mem.eql(u8, &result.binding.operation_id, &binding.operation_id)) {
                     if (!std.meta.eql(result.binding, binding)) return error.FenceConflict;
                     slot = index;
                     break;
@@ -1302,6 +1672,24 @@ const TestDataClient = struct {
         .cancel = cancelOpaque,
     };
 };
+
+test "reconciler refuses to plan attached volume deletion" {
+    const allocator = std.testing.allocator;
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var submitter = TestSubmitter{ .machine = &machine };
+    var store = data_service.MemoryStore.init(allocator);
+    defer store.deinit();
+    var backend: TestBackend = .{};
+    var service = data_service.Service.init(store.store(), backend.interface());
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder };
+    var reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
+    defer reconciler.deinit();
+    var volume: state_machine.PoolStateMachine.ReconcileVolume = undefined;
+    volume.has_attachments = true;
+    try std.testing.expectError(error.VolumeHasAttachments, reconciler.planDelete(volume));
+}
 
 test "reconciler completes lifecycle and resumes lost ensure after reconstruction" {
     const allocator = std.testing.allocator;
@@ -1391,12 +1779,6 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     defer retained.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 1), retained.authority_generation);
 
-    data_client.holder_identity = try parseId(test_node_ids[1]);
-    const submissions_before_boot_mismatch = submitter.submissions;
-    try std.testing.expectError(error.HolderBootMismatch, rebuilt.runOnce());
-    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
-    try std.testing.expectEqual(submissions_before_boot_mismatch, submitter.submissions);
-    data_client.holder_identity = test_holder_boot_id;
     try rebuilt.runOnce();
     var replacement = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
     defer replacement.deinit(allocator);
@@ -1432,7 +1814,17 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     defer allocator.free(delete_command);
     const delete_response = try submitter.interface().submit(allocator, delete_command);
     allocator.free(delete_response);
+    rebuilt.awake_now_ms_override = 1_000;
     try rebuilt.runOnce();
+    try std.testing.expectEqual(@as(usize, 0), backend.deletes);
+    rebuilt.deinit();
+    var deletion_reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
+    defer deletion_reconciler.deinit();
+    deletion_reconciler.awake_now_ms_override = 2_000;
+    try deletion_reconciler.runOnce();
+    try std.testing.expectEqual(@as(usize, 0), backend.deletes);
+    deletion_reconciler.awake_now_ms_override = 2_000 + primary_lease.duration_ms;
+    try deletion_reconciler.runOnce();
     try std.testing.expectEqual(@as(usize, 3), backend.deletes);
     try std.testing.expectEqual(@as(usize, 2), data_client.mark_ready_calls);
     try std.testing.expectEqual(@as(usize, 1), machine.volumeTombstoneCount());
@@ -1503,7 +1895,7 @@ test "reconciler aborts stale initial candidate before fencing and retries gener
     try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_ACTIVE, active.lifecycle_state);
 }
 
-test "completion-only current reacquires only on the same holder boot" {
+test "boot mismatch waits a full observation window and completes higher epoch failover" {
     const allocator = std.testing.allocator;
     var machine = state_machine.PoolStateMachine.init(allocator);
     defer machine.deinit();
@@ -1520,16 +1912,96 @@ test "completion-only current reacquires only on the same holder boot" {
     for (0..7) |_| try reconciler.runOnce();
     data_client.now_ms = 26_000;
     data_client.holder_identity = try parseId(test_node_ids[1]);
-    const before_mismatch = submitter.submissions;
-    try std.testing.expectError(error.HolderBootMismatch, reconciler.runOnce());
-    try std.testing.expectEqual(before_mismatch, submitter.submissions);
+    submitter.lose_next_response = true;
+    try std.testing.expectError(error.TransportUnknown, reconciler.runOnce());
+    try std.testing.expectEqual(@as(usize, 1), machine.primaryFailoverCount());
     try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    var current = (try machine.getPrimaryAuthority(allocator, test_volume_id)).?;
+    defer current.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 1), current.authority_generation);
+    var volume = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer volume.deinit(allocator);
+    try std.testing.expectEqual(pb.VolumeAvailabilityState.VOLUME_AVAILABILITY_STATE_UNAVAILABLE, volume.availability_state);
+    try std.testing.expectEqual(pb.VolumeOperationPhase.VOLUME_OPERATION_PHASE_FENCING, volume.operation_phase);
 
-    data_client.holder_identity = test_holder_boot_id;
+    const submissions_after_begin = submitter.submissions;
+    reconciler.awake_now_ms_override = 1_000;
     try reconciler.runOnce();
-    var candidate = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
-    defer candidate.deinit(allocator);
-    try std.testing.expectEqual(@as(u64, 2), candidate.authority_generation);
+    try std.testing.expectEqual(submissions_after_begin, submitter.submissions);
+    try std.testing.expectEqual(@as(usize, 1), reconciler.failover_observations.count());
+    reconciler.deinit();
+
+    var restarted = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
+    defer restarted.deinit();
+    restarted.awake_now_ms_override = 2_000;
+    try restarted.runOnce();
+    try std.testing.expectEqual(submissions_after_begin, submitter.submissions);
+    var failover = (try machine.getPrimaryFailover(allocator, test_volume_id)).?;
+    defer failover.deinit(allocator);
+    const failover_id = failover.failover_id[0..16].*;
+    try std.testing.expectEqual(@as(u64, 2_000), restarted.failover_observations.getPtr(failover_id).?.first_seen_ms);
+    restarted.awake_now_ms_override = 2_000 + primary_lease.duration_ms;
+
+    const old_token: primary_lease.Token = .{
+        .lease_id = current.lease_id[0..16].*,
+        .holder_boot_id = current.holder_boot_id[0..16].*,
+        .authority_generation = current.authority_generation,
+        .write_epoch = current.write_epoch,
+    };
+    const old_holder = holder;
+    holder = try primary_lease.Runtime.init(data_client.holder_identity);
+    data_client.stage_now_ms = 32_000;
+    data_client.now_ms = 32_000;
+    submitter.lose_next_response = true;
+    try std.testing.expectError(error.TransportUnknown, restarted.runOnce());
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    var completed_failover = (try machine.getPrimaryFailover(allocator, test_volume_id)).?;
+    defer completed_failover.deinit(allocator);
+    try std.testing.expectEqual(pb.PrimaryFailoverState.PRIMARY_FAILOVER_STATE_LEASE_EXPIRED, completed_failover.state);
+    submitter.lose_next_response = true;
+    try std.testing.expectError(error.TransportUnknown, restarted.runOnce());
+    try std.testing.expectEqual(@as(usize, 1), machine.primaryAuthorityCandidateCount());
+    var failover_volume = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer failover_volume.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), failover_volume.write_epoch);
+
+    data_client.holder_identity = try parseId(test_node_ids[2]);
+    try restarted.runOnce();
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    try std.testing.expectEqual(@as(usize, 1), machine.primaryFailoverCount());
+    var after_target_abort = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer after_target_abort.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 3), after_target_abort.write_epoch);
+    data_client.holder_identity = try parseId(test_node_ids[1]);
+    try restarted.runOnce();
+    try std.testing.expectEqual(@as(usize, 1), machine.primaryAuthorityCandidateCount());
+    try restarted.runOnce();
+    data_client.lose_fence_response = true;
+    try std.testing.expectError(error.TransportUnknown, restarted.runOnce());
+    try std.testing.expectEqual(@as(usize, 4), data_client.fence_drains);
+    data_client.now_ms = 52_001;
+    submitter.lose_next_response = true;
+    try std.testing.expectError(error.TransportUnknown, restarted.runOnce());
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
+    var after_partial_abort = (try machine.getVolumeById(allocator, test_volume_id)).?;
+    defer after_partial_abort.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 4), after_partial_abort.write_epoch);
+    data_client.stage_now_ms = 52_001;
+    try restarted.runOnce();
+    try restarted.runOnce();
+    submitter.lose_next_response = true;
+    try std.testing.expectError(error.TransportUnknown, restarted.runOnce());
+    try restarted.runOnce();
+    var failed_over = (try machine.getPrimaryAuthority(allocator, test_volume_id)).?;
+    defer failed_over.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), failed_over.authority_generation);
+    try std.testing.expectEqual(@as(u64, 4), failed_over.write_epoch);
+    try std.testing.expectEqualSlices(u8, test_node_ids[1], failed_over.primary_node_id);
+    try std.testing.expectEqual(@as(usize, 0), machine.primaryFailoverCount());
+    try std.testing.expectEqual(@as(usize, 7), data_client.fence_drains);
+    try std.testing.expectEqual(@as(usize, 2), data_client.recoveries);
+    try std.testing.expectEqual(@as(usize, 2), data_client.mark_ready_calls);
+    try std.testing.expect(!old_holder.canAdmit(old_token, 31_000));
 }
 
 test "reconciler rejects invalid authority proofs without READY submission" {

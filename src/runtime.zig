@@ -156,6 +156,7 @@ pub const Runtime = struct {
                 data_client,
                 self.commandSubmitter(),
             );
+            errdefer self.reconciler.?.deinit();
             self.reconcile_thread = try std.Thread.spawn(.{}, runReconciler, .{self});
         }
         self.running = true;
@@ -187,6 +188,7 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         std.debug.assert(!self.running);
+        if (self.reconciler) |*reconciler| reconciler.deinit();
         self.pool_rpc.deinit();
         self.management_server.deinit();
         self.raftor.destroy();

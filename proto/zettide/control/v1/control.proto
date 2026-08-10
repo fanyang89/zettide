@@ -506,6 +506,25 @@ message PrimaryAuthority {
   bool recovery_empty_frontier = 19;
 }
 
+enum PrimaryFailoverState {
+  PRIMARY_FAILOVER_STATE_UNSPECIFIED = 0;
+  PRIMARY_FAILOVER_STATE_WAITING_LEASE = 1;
+  PRIMARY_FAILOVER_STATE_LEASE_EXPIRED = 2;
+  PRIMARY_FAILOVER_STATE_FENCING = 3;
+}
+
+message PrimaryFailover {
+  bytes failover_id = 1;
+  string volume_id = 2;
+  bytes revoked_lease_id = 3;
+  uint64 revoked_authority_generation = 4;
+  uint64 revoked_write_epoch = 5;
+  uint64 target_write_epoch = 6;
+  PrimaryFailoverState state = 7;
+  uint64 created_revision = 8;
+  uint64 resource_version = 9;
+}
+
 message ReplicaFenceEvidence {
   string placement_id = 1;
   uint64 replica_generation = 2;
@@ -546,6 +565,9 @@ message CommandEnvelope {
     CommitPrimaryAuthorityReadyCommand commit_primary_authority_ready = 13;
     CommitPrimaryAuthorityRenewalReadyCommand commit_primary_authority_renewal_ready = 14;
     AbortPrimaryAuthorityCandidateCommand abort_primary_authority_candidate = 15;
+    BeginPrimaryFailoverCommand begin_primary_failover = 16;
+    CommitPrimaryAuthorityFailoverReadyCommand commit_primary_authority_failover_ready = 17;
+    CompletePrimaryFailoverLeaseWaitCommand complete_primary_failover_lease_wait = 18;
   }
 }
 
@@ -640,6 +662,8 @@ message FinalizeVolumeDeletionCommand {
 message ProposePrimaryAuthorityCommand {
   PrimaryAuthority authority = 1;
   uint64 expected_volume_resource_version = 2;
+  bytes failover_id = 3;
+  uint64 expected_failover_resource_version = 4;
 }
 
 message ActivatePrimaryAuthorityCommand {
@@ -684,6 +708,43 @@ message AbortPrimaryAuthorityCandidateCommand {
   uint64 expected_volume_resource_version = 4;
   uint64 expected_candidate_resource_version = 5;
   uint64 expected_current_resource_version = 6;
+}
+
+message BeginPrimaryFailoverCommand {
+  string volume_id = 1;
+  bytes current_lease_id = 2;
+  uint64 current_authority_generation = 3;
+  uint64 current_write_epoch = 4;
+  bytes failover_id = 5;
+  uint64 expected_volume_resource_version = 6;
+  uint64 expected_current_resource_version = 7;
+}
+
+message CompletePrimaryFailoverLeaseWaitCommand {
+  string volume_id = 1;
+  bytes failover_id = 2;
+  bytes revoked_lease_id = 3;
+  uint64 revoked_authority_generation = 4;
+  uint64 revoked_write_epoch = 5;
+  uint64 expected_volume_resource_version = 6;
+  uint64 expected_failover_resource_version = 7;
+  uint64 expected_current_resource_version = 8;
+}
+
+message CommitPrimaryAuthorityFailoverReadyCommand {
+  string volume_id = 1;
+  bytes failover_id = 2;
+  bytes lease_id = 3;
+  bytes authority_digest = 4;
+  uint64 authority_generation = 5;
+  uint64 write_epoch = 6;
+  uint64 placement_revision = 7;
+  uint64 expected_volume_resource_version = 8;
+  uint64 expected_candidate_resource_version = 9;
+  uint64 expected_current_resource_version = 10;
+  uint64 expected_failover_resource_version = 11;
+  repeated ReplicaFenceEvidence fence_evidence = 12;
+  RecoveryEvidence recovery_evidence = 13;
 }
 
 enum ApplyCode {
@@ -855,6 +916,23 @@ message PrimaryAuthorityApplyResponse {
   Volume volume = 3;
 }
 
+enum PrimaryFailoverApplyCode {
+  PRIMARY_FAILOVER_APPLY_CODE_UNSPECIFIED = 0;
+  PRIMARY_FAILOVER_APPLY_CODE_BEGUN = 1;
+  PRIMARY_FAILOVER_APPLY_CODE_NOT_FOUND = 2;
+  PRIMARY_FAILOVER_APPLY_CODE_VERSION_CONFLICT = 3;
+  PRIMARY_FAILOVER_APPLY_CODE_INVALID_STATE = 4;
+  PRIMARY_FAILOVER_APPLY_CODE_BINDING_MISMATCH = 5;
+  PRIMARY_FAILOVER_APPLY_CODE_LEASE_WAIT_COMPLETED = 6;
+}
+
+message PrimaryFailoverApplyResponse {
+  PrimaryFailoverApplyCode code = 1;
+  PrimaryFailover failover = 2;
+  PrimaryAuthority authority = 3;
+  Volume volume = 4;
+}
+
 message RequestRecord {
   string request_id = 1;
   bytes request_fingerprint = 2;
@@ -876,4 +954,5 @@ message StateSnapshot {
   repeated VolumeAttachment volume_attachments = 10;
   repeated PrimaryAuthority primary_authorities = 11;
   repeated PrimaryAuthority primary_authority_candidates = 12;
+  repeated PrimaryFailover primary_failovers = 13;
 }

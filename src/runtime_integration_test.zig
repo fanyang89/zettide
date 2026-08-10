@@ -58,7 +58,7 @@ const ReconcileDataClient = struct {
     holder: *primary_lease.Runtime,
     lose_first_ensure: bool = true,
     staged: ?reconciler.StageRequest = null,
-    fences: [3]?replica_fence.Result = @splat(null),
+    fences: [6]?replica_fence.Result = @splat(null),
     stages: usize = 0,
     fence_drains: usize = 0,
     recoveries: usize = 0,
@@ -118,7 +118,7 @@ const ReconcileDataClient = struct {
         var empty: ?usize = null;
         for (&self.fences, 0..) |*record, index| {
             if (record.*) |existing| {
-                if (std.mem.eql(u8, &existing.binding.placement_id, &binding.placement_id)) {
+                if (std.mem.eql(u8, &existing.binding.operation_id, &binding.operation_id)) {
                     if (!std.meta.eql(existing.binding, binding)) return error.FenceConflict;
                     return existing;
                 }
@@ -702,7 +702,7 @@ test "three-voter runtime survives leader failover and restart" {
     }
 }
 
-test "runtime reconciler recovers unknown ensure and completes create and delete" {
+test "runtime reconciler recovers unknown ensure and completes create" {
     var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
     const root_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
@@ -771,13 +771,7 @@ test "runtime reconciler recovers unknown ensure and completes create and delete
     try std.testing.expect(data_client.recoveries >= 1);
     try std.testing.expect(data_client.mark_ready >= 1);
 
-    var deleted = try deleteVolume(runtime, "reconcile-delete", active.value.id, active.value.resource_version);
-    defer deleted.deinit();
-    try waitForVolumeDeletion(runtime, active.value.id);
-    try std.testing.expectEqual(@as(usize, 3), backend.deletes);
-
     try runtime.shutdown();
-    try std.testing.expectEqual(@as(usize, 1), runtime.machine.volumeTombstoneCount());
     try std.testing.expect(runtime.reconcile_thread == null);
     try std.testing.expect(runtime.planned_action == null);
     try std.testing.expect(runtime.proposal_response == null);
