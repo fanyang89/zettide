@@ -132,6 +132,7 @@ pub const Reconciler = struct {
     submitter: CommandSubmitter,
     failover_observations: std.AutoHashMapUnmanaged(Id, FailoverObservation) = .empty,
     deletion_observations: std.AutoHashMapUnmanaged(Id, DeletionObservation) = .empty,
+    maintenance_cursor: usize = 0,
     awake_now_ms_override: ?u64 = null,
 
     const FailoverObservation = struct { resource_version: u64, first_seen_ms: u64 };
@@ -235,11 +236,10 @@ pub const Reconciler = struct {
             }
         }
         // Stable ACTIVE inspection is last so it cannot starve finite work behind it.
-        for (volumes) |volume| {
-            if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE and volume.volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE and
-                volume.primary_failover == null and volume.primary_authority_candidate == null and volume.primary_authority != null and
-                volume.primary_authority.?.state == .PRIMARY_AUTHORITY_STATE_READY)
-                return try self.planInspectRenewal(volume, volume.primary_authority.?);
+        if (nextMaintenanceIndex(volumes, self.maintenance_cursor)) |index| {
+            self.maintenance_cursor = (index + 1) % volumes.len;
+            const volume = volumes[index];
+            return try self.planInspectRenewal(volume, volume.primary_authority.?);
         }
         return null;
     }
@@ -657,6 +657,20 @@ pub const Reconciler = struct {
         return action;
     }
 };
+
+fn nextMaintenanceIndex(volumes: []const state_machine.PoolStateMachine.ReconcileVolume, start: usize) ?usize {
+    if (volumes.len == 0) return null;
+    for (0..volumes.len) |offset| {
+        const index = (start + offset) % volumes.len;
+        const volume = volumes[index];
+        if (volume.volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE and
+            volume.volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE and
+            volume.primary_failover == null and volume.primary_authority_candidate == null and
+            volume.primary_authority != null and volume.primary_authority.?.state == .PRIMARY_AUTHORITY_STATE_READY)
+            return index;
+    }
+    return null;
+}
 
 pub const Action = struct {
     parent_allocator: std.mem.Allocator,
@@ -2045,4 +2059,25 @@ test "reconciler emits no command when placement is insufficient" {
     var reconciler = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
     try std.testing.expectError(error.InsufficientPlacement, reconciler.runOnce());
     try std.testing.expectEqual(@as(usize, 0), submitter.submissions);
+}
+
+test "stable authority maintenance rotates across volumes" {
+    const stable: state_machine.PoolStateMachine.ReconcileVolume = .{
+        .volume = .{
+            .lifecycle_state = .VOLUME_LIFECYCLE_STATE_ACTIVE,
+            .operation_phase = .VOLUME_OPERATION_PHASE_NONE,
+        },
+        .primary_authority = .{ .state = .PRIMARY_AUTHORITY_STATE_READY },
+        .primary_authority_candidate = null,
+        .primary_failover = null,
+        .has_attachments = false,
+        .placements = &.{},
+        .allocations = &.{},
+        .nodes = &.{},
+        .members = &.{},
+    };
+    const volumes = [_]state_machine.PoolStateMachine.ReconcileVolume{ stable, stable };
+    try std.testing.expectEqual(@as(?usize, 0), nextMaintenanceIndex(&volumes, 0));
+    try std.testing.expectEqual(@as(?usize, 1), nextMaintenanceIndex(&volumes, 1));
+    try std.testing.expectEqual(@as(?usize, 0), nextMaintenanceIndex(&volumes, 2));
 }

@@ -3486,12 +3486,14 @@ fn restorePrimaryAuthority(allocator: std.mem.Allocator, state: *State, source: 
     }
     const volume = state.volumes_by_id.get(source.volume_id) orelse return error.PayloadParseFailed;
     const placement = state.replica_placements_by_id.get(source.primary_placement_id) orelse return error.PayloadParseFailed;
-    const expected_epoch = if (state.primary_failovers_by_volume.get(source.volume_id)) |failover|
-        if (candidate) failover.target_write_epoch else failover.revoked_write_epoch
+    const epoch_matches = if (state.primary_failovers_by_volume.get(source.volume_id)) |failover|
+        source.write_epoch == (if (candidate) failover.target_write_epoch else failover.revoked_write_epoch)
+    else if (!candidate and volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_DELETING)
+        source.write_epoch <= volume.write_epoch
     else
-        volume.write_epoch;
+        source.write_epoch == volume.write_epoch;
     if (!std.mem.eql(u8, placement.volume_id, volume.id) or !std.mem.eql(u8, placement.node_id, source.primary_node_id) or
-        source.write_epoch != expected_epoch or source.placement_revision != volume.placement_revision or volume.resource_version < source.resource_version or
+        !epoch_matches or source.placement_revision != volume.placement_revision or volume.resource_version < source.resource_version or
         !activePlacementSetValid(state, volume, source.primary_placement_id, source.primary_node_id)) return error.PayloadParseFailed;
     var authority = try PrimaryAuthority.init(allocator, source);
     errdefer authority.deinit(allocator);
@@ -3504,6 +3506,7 @@ fn restorePrimaryFailover(allocator: std.mem.Allocator, state: *State, source: p
     if (!validUuidV7Bytes(source.failover_id) or !validUuidV7(source.volume_id) or !validFixedNonzero(source.revoked_lease_id, 16) or
         source.revoked_authority_generation == 0 or source.revoked_write_epoch == 0 or source.revoked_write_epoch == std.math.maxInt(u64) or
         source.target_write_epoch <= source.revoked_write_epoch or
+        (source.state != .PRIMARY_FAILOVER_STATE_FENCING and source.target_write_epoch != source.revoked_write_epoch + 1) or
         (source.state != .PRIMARY_FAILOVER_STATE_WAITING_LEASE and source.state != .PRIMARY_FAILOVER_STATE_LEASE_EXPIRED and source.state != .PRIMARY_FAILOVER_STATE_FENCING) or
         !validResourceRevisions(source.created_revision, source.resource_version, snapshot_index) or
         (source.state == .PRIMARY_FAILOVER_STATE_WAITING_LEASE and source.resource_version != source.created_revision) or
@@ -6838,6 +6841,14 @@ test "volume deletion cleans current candidate and primary failover" {
     defer malformed_arena.deinit();
     var malformed_wire_reader: std.Io.Reader = .fixed(failover_snapshot.data);
     var malformed = try pb.StateSnapshot.decode(&malformed_wire_reader, malformed_arena.allocator());
+    malformed.primary_failovers.items[0].target_write_epoch += 1;
+    const malformed_epoch_wire = try encodeMessage(allocator, malformed);
+    defer allocator.free(malformed_epoch_wire);
+    var malformed_epoch_machine = PoolStateMachine.init(allocator);
+    defer malformed_epoch_machine.deinit();
+    var malformed_epoch_reader = TestSnapshotReader{ .data = malformed_epoch_wire };
+    try std.testing.expectError(error.PayloadParseFailed, malformed_epoch_machine.stateMachine().restoreSnapshot(failover_snapshot.metadata, malformed_epoch_reader.reader()));
+    malformed.primary_failovers.items[0].target_write_epoch -= 1;
     malformed.volumes.items[0].lifecycle_state = .VOLUME_LIFECYCLE_STATE_DELETING;
     malformed.volumes.items[0].availability_state = .VOLUME_AVAILABILITY_STATE_UNAVAILABLE;
     malformed.volumes.items[0].operation_phase = .VOLUME_OPERATION_PHASE_NONE;
@@ -6847,6 +6858,7 @@ test "volume deletion cleans current candidate and primary failover" {
     defer malformed_machine.deinit();
     var malformed_reader = TestSnapshotReader{ .data = malformed_wire };
     try std.testing.expectError(error.PayloadParseFailed, malformed_machine.stateMachine().restoreSnapshot(failover_snapshot.metadata, malformed_reader.reader()));
+    machine.state.volumes_by_id.getPtr(test_volume_id).?.write_epoch = 2;
     const delete = try encodeDeleteVolumeCommand(allocator, .{
         .request_id = "delete-failover-volume",
         .volume_id = test_volume_id,
