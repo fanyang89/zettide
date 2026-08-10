@@ -2,6 +2,7 @@ const std = @import("std");
 const endpoint_control = @import("endpoint_control.zig");
 const endpoint_registry = @import("endpoint_registry.zig");
 const catalog_endpoint_backend = @import("spdk/catalog_endpoint_backend.zig");
+const iscsi_export = @import("spdk/iscsi_export.zig");
 const runtime_api = @import("spdk/runtime.zig");
 
 const runtime_config =
@@ -37,6 +38,11 @@ const Options = struct {
     nvmf_rdma_trsvcid: []const u8 = "4420",
     nvmf_rdma_host_nqn: ?[]const u8 = null,
     nvmf_rdma_allow_any_host: bool = false,
+    iscsi_traddr: ?[]const u8 = null,
+    iscsi_trsvcid: []const u8 = "3260",
+    iscsi_initiator_name: ?[]const u8 = null,
+    iscsi_netmask: ?[]const u8 = null,
+    iscsi_allow_any_initiator: bool = false,
 
     fn parse(allocator: std.mem.Allocator, args: []const []const u8) !Options {
         var runtime_dir: ?[]const u8 = null;
@@ -49,6 +55,11 @@ const Options = struct {
         var nvmf_rdma_trsvcid: ?[]const u8 = null;
         var nvmf_rdma_host_nqn: ?[]const u8 = null;
         var nvmf_rdma_allow_any_host = false;
+        var iscsi_traddr: ?[]const u8 = null;
+        var iscsi_trsvcid: ?[]const u8 = null;
+        var iscsi_initiator_name: ?[]const u8 = null;
+        var iscsi_netmask: ?[]const u8 = null;
+        var iscsi_allow_any_initiator = false;
         var pool_members: std.ArrayList(PoolMember) = .empty;
         errdefer pool_members.deinit(allocator);
 
@@ -108,6 +119,29 @@ const Options = struct {
             } else if (std.mem.eql(u8, option, "--nvmf-rdma-allow-any-host")) {
                 if (nvmf_rdma_allow_any_host) return error.DuplicateOption;
                 nvmf_rdma_allow_any_host = true;
+            } else if (std.mem.eql(u8, option, "--iscsi-traddr")) {
+                if (iscsi_traddr != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                iscsi_traddr = args[index];
+            } else if (std.mem.eql(u8, option, "--iscsi-trsvcid")) {
+                if (iscsi_trsvcid != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                iscsi_trsvcid = args[index];
+            } else if (std.mem.eql(u8, option, "--iscsi-initiator-name")) {
+                if (iscsi_initiator_name != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                iscsi_initiator_name = args[index];
+            } else if (std.mem.eql(u8, option, "--iscsi-netmask")) {
+                if (iscsi_netmask != null) return error.DuplicateOption;
+                index += 1;
+                if (index == args.len) return error.MissingOptionValue;
+                iscsi_netmask = args[index];
+            } else if (std.mem.eql(u8, option, "--iscsi-allow-any-initiator")) {
+                if (iscsi_allow_any_initiator) return error.DuplicateOption;
+                iscsi_allow_any_initiator = true;
             } else {
                 return error.UnknownOption;
             }
@@ -134,6 +168,15 @@ const Options = struct {
             nvmf_rdma_host_nqn,
             nvmf_rdma_allow_any_host,
         );
+        const iscsi_service_id: []const u8 = iscsi_trsvcid orelse "3260";
+        try validateIscsiOptions(
+            iscsi_traddr,
+            iscsi_service_id,
+            iscsi_trsvcid != null,
+            iscsi_initiator_name,
+            iscsi_netmask,
+            iscsi_allow_any_initiator,
+        );
         return .{
             .allocator = allocator,
             .runtime_dir = directory,
@@ -147,6 +190,11 @@ const Options = struct {
             .nvmf_rdma_trsvcid = nvmf_rdma_service_id,
             .nvmf_rdma_host_nqn = nvmf_rdma_host_nqn,
             .nvmf_rdma_allow_any_host = nvmf_rdma_allow_any_host,
+            .iscsi_traddr = iscsi_traddr,
+            .iscsi_trsvcid = iscsi_service_id,
+            .iscsi_initiator_name = iscsi_initiator_name,
+            .iscsi_netmask = iscsi_netmask,
+            .iscsi_allow_any_initiator = iscsi_allow_any_initiator,
         };
     }
 
@@ -169,6 +217,24 @@ fn validateNvmfOptions(
         if (host_nqn) |nqn| if (nqn.len == 0) return error.InvalidNvmfAccessPolicy;
     } else if (trsvcid_was_set or host_nqn != null or allow_any_host) {
         return error.MissingNvmfTransportAddress;
+    }
+}
+
+fn validateIscsiOptions(
+    traddr: ?[]const u8,
+    trsvcid: []const u8,
+    trsvcid_was_set: bool,
+    initiator_name: ?[]const u8,
+    netmask: ?[]const u8,
+    allow_any_initiator: bool,
+) !void {
+    if (traddr) |address| {
+        if (address.len == 0 or trsvcid.len == 0) return error.InvalidIscsiListenAddress;
+        if (allow_any_initiator == (initiator_name != null)) return error.InvalidIscsiAccessPolicy;
+        if (initiator_name) |name| if (name.len == 0) return error.InvalidIscsiAccessPolicy;
+        if (netmask == null or netmask.?.len == 0) return error.InvalidIscsiAccessPolicy;
+    } else if (trsvcid_was_set or initiator_name != null or netmask != null or allow_any_initiator) {
+        return error.MissingIscsiTransportAddress;
     }
 }
 
@@ -247,6 +313,8 @@ const DynamicModules = struct {
     const names = [_][:0]const u8{
         "librte_mempool_ring.so",
         "libspdk_event_bdev.so",
+        "libspdk_event_scsi.so",
+        "libspdk_event_iscsi.so",
         "libspdk_event_nvmf.so",
         "libspdk_event_vhost_blk.so",
     };
@@ -300,6 +368,30 @@ pub fn serve(
         .vhost_socket_path = options.runtime_dir,
     });
     errdefer runtime.deinit();
+    var iscsi_service: ?iscsi_export.IscsiService = if (options.iscsi_traddr) |traddr|
+        try iscsi_export.IscsiService.create(
+            allocator,
+            &runtime,
+            .{
+                .traddr = traddr,
+                .trsvcid = options.iscsi_trsvcid,
+                .initiator_name = options.iscsi_initiator_name orelse "ANY",
+                .netmask = options.iscsi_netmask.?,
+            },
+        )
+    else
+        null;
+    errdefer if (iscsi_service) |*service|
+        service.close() catch |err|
+            std.debug.panic("failed to clean up iSCSI service: {s}", .{@errorName(err)});
+    const iscsi_portal = if (options.iscsi_traddr) |traddr|
+        if (std.mem.indexOfScalar(u8, traddr, ':') == null)
+            try std.fmt.allocPrint(allocator, "{s}:{s}", .{ traddr, options.iscsi_trsvcid })
+        else
+            try std.fmt.allocPrint(allocator, "[{s}]:{s}", .{ traddr, options.iscsi_trsvcid })
+    else
+        null;
+    defer if (iscsi_portal) |portal| allocator.free(portal);
     const runtime_dir = try std.Io.Dir.cwd().openDir(io, options.runtime_dir, .{});
     defer runtime_dir.close(io);
     try endpoint_control.validateControlDirectory(runtime_dir);
@@ -315,6 +407,10 @@ pub fn serve(
         source.poolSource(),
         .{
             .cpumask = options.reactor_mask,
+            .iscsi = if (iscsi_service) |*service| .{
+                .service = service,
+                .portal = iscsi_portal.?,
+            } else null,
             .nvme_of_tcp = .{
                 .traddr = options.nvmf_traddr,
                 .trsvcid = options.nvmf_trsvcid,
@@ -357,6 +453,7 @@ pub fn serve(
     }
     try registry.shutdown();
     registry.deinit();
+    if (iscsi_service) |*service| try service.close();
     runtime.deinit();
 }
 
@@ -391,6 +488,14 @@ test "endpoint daemon parses runtime and grouped pool options" {
         "--nvmf-rdma-trsvcid",
         "4422",
         "--nvmf-rdma-allow-any-host",
+        "--iscsi-traddr",
+        "192.0.2.30",
+        "--iscsi-trsvcid",
+        "3261",
+        "--iscsi-netmask",
+        "192.0.2.0/24",
+        "--iscsi-initiator-name",
+        "iqn.2026-08.io.zettide:test-initiator",
     });
     defer options.deinit();
     try std.testing.expectEqualStrings("/run/zettide", options.runtime_dir);
@@ -405,6 +510,13 @@ test "endpoint daemon parses runtime and grouped pool options" {
     try std.testing.expectEqualStrings("192.0.2.20", options.nvmf_rdma_traddr.?);
     try std.testing.expectEqualStrings("4422", options.nvmf_rdma_trsvcid);
     try std.testing.expect(options.nvmf_rdma_allow_any_host);
+    try std.testing.expectEqualStrings("192.0.2.30", options.iscsi_traddr.?);
+    try std.testing.expectEqualStrings("3261", options.iscsi_trsvcid);
+    try std.testing.expectEqualStrings("192.0.2.0/24", options.iscsi_netmask.?);
+    try std.testing.expectEqualStrings(
+        "iqn.2026-08.io.zettide:test-initiator",
+        options.iscsi_initiator_name.?,
+    );
     try std.testing.expect(std.mem.indexOf(u8, runtime_config_with_rdma, "\"trtype\":\"RDMA\"") != null);
 
     var pools = try PoolTable.init(std.testing.allocator, options.pool_members);
@@ -463,6 +575,16 @@ test "endpoint daemon rejects incomplete options" {
             "--runtime-dir",
             "/run/zettide",
             "--nvmf-rdma-allow-any-host",
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidIscsiAccessPolicy,
+        Options.parse(std.testing.allocator, &.{
+            "--runtime-dir",
+            "/run/zettide",
+            "--iscsi-traddr",
+            "192.0.2.30",
+            "--iscsi-allow-any-initiator",
         }),
     );
 }

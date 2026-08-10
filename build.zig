@@ -103,7 +103,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    run_cmd.addPassthruArgs();
+    if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run zettide");
     run_step.dependOn(&run_cmd.step);
 
@@ -183,7 +183,7 @@ pub fn build(b: *std.Build) void {
         .root_module = fs_ops_benchmark_module,
     });
     const run_fs_ops_benchmark = b.addRunArtifact(fs_ops_benchmark);
-    run_fs_ops_benchmark.addPassthruArgs();
+    if (b.args) |args| run_fs_ops_benchmark.addArgs(args);
     const fs_ops_benchmark_step = b.step("bench-fs-ops", "Benchmark direct Blob filesystem operations");
     fs_ops_benchmark_step.dependOn(&run_fs_ops_benchmark.step);
     const install_fs_ops_benchmark = b.addInstallArtifact(fs_ops_benchmark, .{});
@@ -217,7 +217,7 @@ pub fn build(b: *std.Build) void {
         .root_module = blob_device_benchmark_module,
     });
     const run_blob_device_benchmark = b.addRunArtifact(blob_device_benchmark);
-    run_blob_device_benchmark.addPassthruArgs();
+    if (b.args) |args| run_blob_device_benchmark.addArgs(args);
     const blob_device_benchmark_step = b.step("bench-blob-device", "Benchmark sequential BlobDevice IO");
     blob_device_benchmark_step.dependOn(&run_blob_device_benchmark.step);
     const install_blob_device_benchmark = b.addInstallArtifact(blob_device_benchmark, .{});
@@ -240,7 +240,7 @@ pub fn build(b: *std.Build) void {
         .root_module = blob_store_benchmark_module,
     });
     const run_blob_store_benchmark = b.addRunArtifact(blob_store_benchmark);
-    run_blob_store_benchmark.addPassthruArgs();
+    if (b.args) |args| run_blob_store_benchmark.addArgs(args);
     const blob_store_benchmark_step = b.step("bench-blob-store", "Benchmark immutable BlobStore IO");
     blob_store_benchmark_step.dependOn(&run_blob_store_benchmark.step);
     const install_blob_store_benchmark = b.addInstallArtifact(blob_store_benchmark, .{});
@@ -263,7 +263,7 @@ pub fn build(b: *std.Build) void {
         .root_module = blob_metadata_map_benchmark_module,
     });
     const run_blob_metadata_map_benchmark = b.addRunArtifact(blob_metadata_map_benchmark);
-    run_blob_metadata_map_benchmark.addPassthruArgs();
+    if (b.args) |args| run_blob_metadata_map_benchmark.addArgs(args);
     const blob_metadata_map_benchmark_step = b.step(
         "bench-blob-metadata-map",
         "Benchmark incremental Blob metadata updates",
@@ -292,7 +292,7 @@ pub fn build(b: *std.Build) void {
         .root_module = blob_object_benchmark_module,
     });
     const run_blob_object_benchmark = b.addRunArtifact(blob_object_benchmark);
-    run_blob_object_benchmark.addPassthruArgs();
+    if (b.args) |args| run_blob_object_benchmark.addArgs(args);
     const blob_object_benchmark_step = b.step("bench-blob-object", "Benchmark sequential BlobObject IO");
     blob_object_benchmark_step.dependOn(&run_blob_object_benchmark.step);
     const install_blob_object_benchmark = b.addInstallArtifact(blob_object_benchmark, .{});
@@ -718,23 +718,28 @@ fn configureSpdk(
         .files = &.{
             "src/spdk/runtime.c",
             "src/spdk/bdev_provider.c",
+            "src/spdk/iscsi_export.c",
             "src/spdk/nvmf_tcp_export.c",
             "src/spdk/vhost_blk_controller.c",
         },
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
-    for ([_][]const u8{
+    const libraries = [_][]const u8{
         "spdk_event",
         "spdk_event_bdev",
+        "spdk_event_scsi",
+        "spdk_event_iscsi",
         "spdk_event_nvmf",
         "spdk_event_vhost_blk",
         "spdk_bdev_modules",
         "spdk_env_dpdk",
         "spdk_nvmf",
+        "spdk_scsi",
+        "spdk_iscsi",
         "spdk_sock_modules",
         "spdk_syslibs",
-    }) |library| module.linkSystemLibrary(library, .{ .needed = true, .use_pkg_config = .force });
-
+    };
+    for (libraries) |library| module.linkSystemLibrary(library, .{ .needed = true, .use_pkg_config = .force });
     const spdk_c = createSpdkCModule(b, target, optimize, true);
     module.addImport("spdk_c", spdk_c);
     return spdk_c;
@@ -753,6 +758,7 @@ fn createSpdkCModule(
         \\#include <spdk/bdev_dispatcher.h>
         \\#include <spdk/nvme_controller.h>
         \\#include <spdk/bdev_provider.h>
+        \\#include <spdk/iscsi_export.h>
         \\#include <spdk/nvmf_tcp_export.h>
         \\#include <spdk/vhost_blk_controller.h>
     ;

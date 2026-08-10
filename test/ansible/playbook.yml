@@ -101,6 +101,7 @@
       nvmf-catalog-rxe-fio: tasks/run-nvmf-fio.yml
       nvmf-catalog-mapped-fio: tasks/run-nvmf-fio.yml
       nvmf-catalog-optane-fio: tasks/run-nvmf-fio.yml
+      iscsi-catalog-fio: tasks/run-iscsi-fio.yml
       nvmf-scheduled-pool-rxe-fio: tasks/run-nvmf-scheduled-pool-rxe-fio.yml
     zettide_packages:
       RedHat:
@@ -286,6 +287,11 @@
         - psmisc
         - rdma-core
         - util-linux
+    zettide_iscsi_packages:
+      RedHat:
+        - iscsi-initiator-utils
+      Debian:
+        - open-iscsi
 
   pre_tasks:
     - name: Read the source revision
@@ -371,7 +377,7 @@
       become: false
       run_once: true
       changed_when: true
-      when: zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
+      when: zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio', 'iscsi-catalog-fio']
 
     - name: Require a supported target family
       ansible.builtin.assert:
@@ -406,10 +412,12 @@
               {{ (zettide_packages[ansible_facts.os_family]
                   if zettide_test_profile == 'tier1'
                   else (zettide_nvmf_packages[ansible_facts.os_family]
-                        if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
+                        if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio', 'iscsi-catalog-fio']
                         else zettide_io_packages[ansible_facts.os_family]))
                  + (zettide_nvmf_rdma_packages[ansible_facts.os_family]
                      if zettide_test_profile in ['nvmf-catalog-rxe-fio', 'nvmf-scheduled-pool-rxe-fio'] else [])
+                 + (zettide_iscsi_packages[ansible_facts.os_family]
+                    if zettide_test_profile == 'iscsi-catalog-fio' else [])
                  + (zettide_nfs_ganesha_packages[ansible_facts.os_family]
                     if zettide_test_profile == 'blob-pool-nfs-fio' else []) }}
             state: present
@@ -426,8 +434,9 @@
                if zettide_test_profile == 'nvmf-catalog-rxe-fio'
                else (['nvme', 'nvme-tcp']
                if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
+               else (['iscsi_tcp'] if zettide_test_profile == 'iscsi-catalog-fio'
                else (['fuse'] if zettide_test_profile in ['blob-fuse-fio', 'blob-pool-fio']
-               else ['fuse', 'loop']))) }}
+               else ['fuse', 'loop'])))) }}
           changed_when: false
           when: zettide_test_profile != 'blob-pool-nfs-fio'
 
@@ -435,7 +444,7 @@
           ansible.builtin.stat:
             path: /dev/fuse
           register: zettide_fuse_device
-          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
+          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio', 'iscsi-catalog-fio']
 
         - name: Require the FUSE device
           ansible.builtin.assert:
@@ -443,7 +452,7 @@
               - zettide_fuse_device.stat.exists
               - zettide_fuse_device.stat.ischr
             fail_msg: "/dev/fuse is unavailable on the remote test host."
-          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
+          when: zettide_test_profile not in ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio', 'iscsi-catalog-fio']
 
         - name: Check the remote Zig version
           ansible.builtin.command:
@@ -500,7 +509,8 @@
                 {{ 'nfs' if zettide_test_profile == 'blob-pool-nfs-fio'
                    else ('nvmf'
                            if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
-                           else 'fuse') }}
+                           else ('iscsi' if zettide_test_profile == 'iscsi-catalog-fio'
+                           else 'fuse')) }}
               nvmf_transport: >-
                 {{ 'rdma' if zettide_test_profile in ['nvmf-catalog-rxe-fio', 'nvmf-scheduled-pool-rxe-fio']
                    else ('tcp'

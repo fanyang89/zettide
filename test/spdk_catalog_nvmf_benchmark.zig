@@ -13,6 +13,11 @@ const runtime_config =
     \\{"subsystem":"nvmf","config":[
     \\{"method":"nvmf_create_transport","params":{"trtype":"TCP","max_queue_depth":256,"max_io_size":1048576}}]}]}
 ;
+const iscsi_runtime_config =
+    \\{"subsystems":[
+    \\{"subsystem":"bdev","config":[
+    \\{"method":"bdev_set_options","params":{"bdev_io_pool_size":16384,"bdev_io_cache_size":256}}]}]}
+;
 const rdma_runtime_config =
     \\{"subsystems":[
     \\{"subsystem":"iobuf","config":[
@@ -34,6 +39,20 @@ pub export fn zettide_spdk_catalog_nvmf_benchmark(
         return 1;
     };
     return 0;
+}
+
+pub export fn zettide_spdk_catalog_iscsi_benchmark(
+    ready_path_z: [*:0]const u8,
+    member_path_z: [*:0]const u8,
+    mode: c_int,
+    expected_pool_id_z: ?[*:0]const u8,
+) c_int {
+    return zettide_spdk_catalog_nvmf_benchmark(
+        ready_path_z,
+        member_path_z,
+        mode,
+        expected_pool_id_z,
+    );
 }
 
 fn run(
@@ -110,6 +129,10 @@ fn run(
     defer provisioned.deinit();
     var set = try provisioned.intoMemberSet();
     defer set.deinit();
+    const authority = set.authority() orelse return error.MissingAuthority;
+    std.debug.print("Catalog Pool ID: ", .{});
+    for (authority.topology.set_id) |byte| std.debug.print("{x:0>2}", .{byte});
+    std.debug.print("\n", .{});
     const volume_id = try publishCatalog(io, &set, mapped);
 
     try serve(io, allocator, ready_path, reactor_mask, &signals, &set, volume_id);
@@ -260,6 +283,10 @@ fn serve(
     set: *zettide.v3.pool_member_set.PoolMemberSet,
     volume_id: [16]u8,
 ) !void {
+    const frontend = if (c.getenv("ZETTIDE_SPDK_FRONTEND")) |value| std.mem.span(value) else "nvmf";
+    if (!std.mem.eql(u8, frontend, "nvmf") and !std.mem.eql(u8, frontend, "iscsi"))
+        return error.InvalidSpdkFrontend;
+    const use_iscsi = std.mem.eql(u8, frontend, "iscsi");
     const transport_text = if (c.getenv("ZETTIDE_NVMF_TRANSPORT")) |value| std.mem.span(value) else "tcp";
     const transport: zettide.spdk_nvmf_tcp_export.Transport = if (std.mem.eql(u8, transport_text, "tcp"))
         .tcp
@@ -272,13 +299,44 @@ fn serve(
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_catalog_nvmf_benchmark",
         .reactor_mask = reactor_mask,
-        .json_data = if (transport == .rdma) rdma_runtime_config else runtime_config,
+        .json_data = if (use_iscsi) iscsi_runtime_config else if (transport == .rdma) rdma_runtime_config else runtime_config,
         .mem_size_mb = if (transport == .rdma) 128 else 512,
         .no_pci = true,
         .no_huge = true,
         .disable_cpumask_locks = true,
     });
     defer runtime.deinit();
+    if (use_iscsi) {
+        const iscsi_addr = if (c.getenv("ZETTIDE_ISCSI_TARGET_ADDR")) |value| std.mem.span(value) else "127.0.0.1";
+        const iscsi_port = if (c.getenv("ZETTIDE_ISCSI_TARGET_PORT")) |value| std.mem.span(value) else "3260";
+        const initiator_name = if (c.getenv("ZETTIDE_ISCSI_INITIATOR_NAME")) |value| std.mem.span(value) else "ANY";
+        const initiator_netmask = if (c.getenv("ZETTIDE_ISCSI_INITIATOR_NETMASK")) |value| std.mem.span(value) else "127.0.0.1/32";
+        var service = try zettide.spdk_iscsi_export.IscsiService.create(
+            allocator,
+            &runtime,
+            .{
+                .traddr = iscsi_addr,
+                .trsvcid = iscsi_port,
+                .initiator_name = initiator_name,
+                .netmask = initiator_netmask,
+            },
+        );
+        defer service.close() catch @panic("failed to close iSCSI service");
+        var iscsi_handle = try zettide.spdk_catalog_iscsi_export.CatalogIscsiExport.create(
+            allocator,
+            io,
+            &runtime,
+            &service,
+            set,
+            volume_id,
+            .{
+                .bdev_name = "ZettideCatalogBenchmark0",
+                .target_name = "iqn.2026-08.io.zettide:benchmark",
+            },
+        );
+        defer iscsi_handle.close() catch @panic("failed to close Catalog iSCSI export");
+        return waitForStop(io, ready_path, signals);
+    }
     var export_handle = try zettide.spdk_catalog_nvmf_export.CatalogNvmfExport.create(
         allocator,
         io,
@@ -298,6 +356,10 @@ fn serve(
     );
     defer export_handle.close() catch @panic("failed to close Catalog NVMe-oF export");
 
+    try waitForStop(io, ready_path, signals);
+}
+
+fn waitForStop(io: std.Io, ready_path: []const u8, signals: *const c.sigset_t) !void {
     const ready = try std.Io.Dir.createFileAbsolute(io, ready_path, .{ .exclusive = true });
     ready.close(io);
     var signal_number: c_int = undefined;

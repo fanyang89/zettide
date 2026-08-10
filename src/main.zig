@@ -740,7 +740,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected|scheduled-replicated] [--label <label>] [--name-profile <profile>]
         \\  zettide pool create --device <device>... [--profile replicated|unprotected|scheduled-replicated] [--label <label>] [--name-profile <profile>] --confirm <token>
         \\  zettide serve dufs <file> [--read-only] [--noatime] [-- <dufs-options>...]
-        \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]... [--nvmf-traddr <address> [--nvmf-trsvcid <port>] (--nvmf-host-nqn <nqn>|--nvmf-allow-any-host)] [--nvmf-rdma-traddr <address> [--nvmf-rdma-trsvcid <port>] (--nvmf-rdma-host-nqn <nqn>|--nvmf-rdma-allow-any-host)]
+        \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]... [--nvmf-traddr <address> [--nvmf-trsvcid <port>] (--nvmf-host-nqn <nqn>|--nvmf-allow-any-host)] [--nvmf-rdma-traddr <address> [--nvmf-rdma-trsvcid <port>] (--nvmf-rdma-host-nqn <nqn>|--nvmf-rdma-allow-any-host)] [--iscsi-traddr <address> [--iscsi-trsvcid <port>] --iscsi-netmask <cidr> (--iscsi-initiator-name <iqn>|--iscsi-allow-any-initiator)]
         \\
         \\Sizes accept binary suffixes such as 512MiB and 16GiB.
         \\Pool commands require Blob data mode; scheduled-replicated requires 3..12 devices.

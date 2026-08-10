@@ -1,7 +1,9 @@
 const std = @import("std");
+const catalog_iscsi_export = @import("catalog_iscsi_export.zig");
 const catalog_nvmf_export = @import("catalog_nvmf_export.zig");
 const catalog_vhost_export = @import("catalog_vhost_export.zig");
 const endpoint_registry = @import("../endpoint_registry.zig");
+const iscsi_export = @import("iscsi_export.zig");
 const nvmf_export = @import("nvmf_tcp_export.zig");
 const pool_member_set = @import("../v3/pool_member_set.zig");
 const runtime_api = @import("runtime.zig");
@@ -151,8 +153,16 @@ pub const Options = struct {
     block_size: u32 = 4096,
     write_unit_blocks: u32 = 1,
     max_io_blocks: u32 = 256,
+    iscsi: ?IscsiOptions = null,
     nvme_of_tcp: NvmeOfOptions = .{},
     nvme_of_rdma: NvmeOfOptions = .{},
+};
+
+pub const IscsiOptions = struct {
+    service: *iscsi_export.IscsiService,
+    portal: []const u8,
+    lun: i32 = 0,
+    queue_depth: i32 = 64,
 };
 
 pub const NvmeOfOptions = struct {
@@ -174,6 +184,7 @@ pub const CatalogEndpointBackend = struct {
     options: Options,
     vhost_driver: ExportDriver,
     nvmf_driver: NvmfExportDriver,
+    iscsi_driver: IscsiExportDriver,
 
     const Instance = struct {
         set: *pool_member_set.PoolMemberSet,
@@ -197,7 +208,7 @@ pub const CatalogEndpointBackend = struct {
         source: PoolSource,
         options: Options,
     ) CatalogEndpointBackend {
-        return initWithDrivers(
+        return initWithAllDrivers(
             allocator,
             io,
             runtime,
@@ -205,6 +216,7 @@ pub const CatalogEndpointBackend = struct {
             options,
             catalog_driver,
             catalog_nvmf_driver,
+            catalog_iscsi_driver,
         );
     }
 
@@ -220,7 +232,7 @@ pub const CatalogEndpointBackend = struct {
         options: Options,
         driver: ExportDriver,
     ) CatalogEndpointBackend {
-        return initWithDrivers(
+        return initWithAllDrivers(
             allocator,
             io,
             runtime,
@@ -228,6 +240,7 @@ pub const CatalogEndpointBackend = struct {
             options,
             driver,
             unsupported_nvmf_driver,
+            unsupported_iscsi_driver,
         );
     }
 
@@ -240,6 +253,28 @@ pub const CatalogEndpointBackend = struct {
         vhost_driver: ExportDriver,
         nvmf_driver: NvmfExportDriver,
     ) CatalogEndpointBackend {
+        return initWithAllDrivers(
+            allocator,
+            io,
+            runtime,
+            source,
+            options,
+            vhost_driver,
+            nvmf_driver,
+            unsupported_iscsi_driver,
+        );
+    }
+
+    fn initWithAllDrivers(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        runtime: *runtime_api.Runtime,
+        source: PoolSource,
+        options: Options,
+        vhost_driver: ExportDriver,
+        nvmf_driver: NvmfExportDriver,
+        iscsi_driver: IscsiExportDriver,
+    ) CatalogEndpointBackend {
         return .{
             .allocator = allocator,
             .io = io,
@@ -248,6 +283,7 @@ pub const CatalogEndpointBackend = struct {
             .options = options,
             .vhost_driver = vhost_driver,
             .nvmf_driver = nvmf_driver,
+            .iscsi_driver = iscsi_driver,
         };
     }
 
@@ -260,8 +296,14 @@ pub const CatalogEndpointBackend = struct {
             .vhost_user_blk => null,
             .nvme_of_tcp => self.options.nvme_of_tcp,
             .nvme_of_rdma => self.options.nvme_of_rdma,
-            .iscsi => return error.UnsupportedFrontend,
+            .iscsi => null,
         };
+        const iscsi_options = if (spec.frontend == .iscsi)
+            self.options.iscsi orelse return error.UnsupportedFrontend
+        else
+            null;
+        if (iscsi_options) |options|
+            if (options.lun < 0 or options.queue_depth <= 0) return error.InvalidEndpointSpec;
         const traddr = if (nvmf_options) |options|
             options.traddr orelse return error.UnsupportedFrontend
         else
@@ -357,7 +399,35 @@ pub const CatalogEndpointBackend = struct {
                     },
                 };
             },
-            .iscsi => unreachable,
+            .iscsi => {
+                const options = iscsi_options.?;
+                writeNqn(&instance.nqn, spec.endpoint_id);
+                instance.export_handle = try self.iscsi_driver.create(
+                    self.allocator,
+                    self.io,
+                    self.runtime,
+                    options.service,
+                    opened.set,
+                    spec.volume_id,
+                    .{
+                        .bdev_name = names.bdevSlice(),
+                        .target_name = &instance.nqn,
+                        .lun = options.lun,
+                        .queue_depth = options.queue_depth,
+                        .block_size = self.options.block_size,
+                        .write_unit_blocks = self.options.write_unit_blocks,
+                        .max_io_blocks = self.options.max_io_blocks,
+                    },
+                );
+                return .{
+                    .handle = instance,
+                    .locator = .{ .iscsi = .{
+                        .portal = options.portal,
+                        .target_name = &instance.nqn,
+                        .lun = @intCast(options.lun),
+                    } },
+                };
+            },
         }
     }
 
@@ -368,7 +438,7 @@ pub const CatalogEndpointBackend = struct {
             switch (instance.frontend) {
                 .vhost_user_blk => try self.vhost_driver.close(self.allocator, export_handle),
                 .nvme_of_tcp, .nvme_of_rdma => try self.nvmf_driver.close(self.allocator, export_handle),
-                .iscsi => unreachable,
+                .iscsi => try self.iscsi_driver.close(self.allocator, export_handle),
             }
             instance.export_handle = null;
         }
@@ -565,6 +635,114 @@ const unsupported_nvmf_driver: NvmfExportDriver = .{
     },
 };
 
+const IscsiExportDriver = struct {
+    context: ?*anyopaque,
+    vtable: *const VTable,
+
+    const VTable = struct {
+        create: *const fn (
+            ?*anyopaque,
+            std.mem.Allocator,
+            std.Io,
+            *runtime_api.Runtime,
+            *iscsi_export.IscsiService,
+            *pool_member_set.PoolMemberSet,
+            endpoint_registry.VolumeId,
+            catalog_iscsi_export.Options,
+        ) anyerror!*anyopaque,
+        close: *const fn (?*anyopaque, std.mem.Allocator, *anyopaque) anyerror!void,
+    };
+
+    fn create(
+        self: IscsiExportDriver,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        runtime: *runtime_api.Runtime,
+        service: *iscsi_export.IscsiService,
+        set: *pool_member_set.PoolMemberSet,
+        volume_id: endpoint_registry.VolumeId,
+        options: catalog_iscsi_export.Options,
+    ) !*anyopaque {
+        return self.vtable.create(
+            self.context,
+            allocator,
+            io,
+            runtime,
+            service,
+            set,
+            volume_id,
+            options,
+        );
+    }
+
+    fn close(self: IscsiExportDriver, allocator: std.mem.Allocator, handle: *anyopaque) !void {
+        return self.vtable.close(self.context, allocator, handle);
+    }
+};
+
+fn createCatalogIscsiExport(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    runtime: *runtime_api.Runtime,
+    service: *iscsi_export.IscsiService,
+    set: *pool_member_set.PoolMemberSet,
+    volume_id: endpoint_registry.VolumeId,
+    options: catalog_iscsi_export.Options,
+) !*anyopaque {
+    const export_handle = try allocator.create(catalog_iscsi_export.CatalogIscsiExport);
+    errdefer allocator.destroy(export_handle);
+    export_handle.* = try catalog_iscsi_export.CatalogIscsiExport.create(
+        allocator,
+        io,
+        runtime,
+        service,
+        set,
+        volume_id,
+        options,
+    );
+    return export_handle;
+}
+
+fn closeCatalogIscsiExport(_: ?*anyopaque, allocator: std.mem.Allocator, handle: *anyopaque) !void {
+    const export_handle: *catalog_iscsi_export.CatalogIscsiExport = @ptrCast(@alignCast(handle));
+    try export_handle.close();
+    allocator.destroy(export_handle);
+}
+
+const catalog_iscsi_driver: IscsiExportDriver = .{
+    .context = null,
+    .vtable = &.{
+        .create = createCatalogIscsiExport,
+        .close = closeCatalogIscsiExport,
+    },
+};
+
+fn unsupportedIscsiCreate(
+    _: ?*anyopaque,
+    _: std.mem.Allocator,
+    _: std.Io,
+    _: *runtime_api.Runtime,
+    _: *iscsi_export.IscsiService,
+    _: *pool_member_set.PoolMemberSet,
+    _: endpoint_registry.VolumeId,
+    _: catalog_iscsi_export.Options,
+) !*anyopaque {
+    return error.UnsupportedFrontend;
+}
+
+fn unsupportedIscsiClose(_: ?*anyopaque, _: std.mem.Allocator, _: *anyopaque) !void {
+    unreachable;
+}
+
+const unsupported_iscsi_driver: IscsiExportDriver = .{
+    .context = null,
+    .vtable = &.{
+        .create = unsupportedIscsiCreate,
+        .close = unsupportedIscsiClose,
+    },
+};
+
 const Events = struct {
     values: [8]u8 = @splat(0),
     len: usize = 0,
@@ -720,6 +898,49 @@ const FakeNvmfExportDriver = struct {
     }
 
     const vtable: NvmfExportDriver.VTable = .{ .create = create, .close = close };
+};
+
+const FakeIscsiExportDriver = struct {
+    events: *Events,
+    expected_set: *pool_member_set.PoolMemberSet,
+    creates: usize = 0,
+    closes: usize = 0,
+    bdev_name: [name_length]u8 = @splat(0),
+    target_name: [CatalogEndpointBackend.nqn_length]u8 = @splat(0),
+
+    fn exportDriver(self: *FakeIscsiExportDriver) IscsiExportDriver {
+        return .{ .context = self, .vtable = &vtable };
+    }
+
+    fn create(
+        context: ?*anyopaque,
+        _: std.mem.Allocator,
+        _: std.Io,
+        _: *runtime_api.Runtime,
+        _: *iscsi_export.IscsiService,
+        set: *pool_member_set.PoolMemberSet,
+        _: endpoint_registry.VolumeId,
+        options: catalog_iscsi_export.Options,
+    ) !*anyopaque {
+        const self: *FakeIscsiExportDriver = @ptrCast(@alignCast(context.?));
+        std.debug.assert(set == self.expected_set);
+        self.creates += 1;
+        self.events.add(2);
+        try std.testing.expectEqual(@as(i32, 0), options.lun);
+        try std.testing.expectEqual(@as(i32, 64), options.queue_depth);
+        @memcpy(&self.bdev_name, options.bdev_name);
+        @memcpy(&self.target_name, options.target_name);
+        return self;
+    }
+
+    fn close(context: ?*anyopaque, _: std.mem.Allocator, handle: *anyopaque) !void {
+        const self: *FakeIscsiExportDriver = @ptrCast(@alignCast(context.?));
+        std.debug.assert(handle == @as(*anyopaque, @ptrCast(self)));
+        self.closes += 1;
+        self.events.add(3);
+    }
+
+    const vtable: IscsiExportDriver.VTable = .{ .create = create, .close = close };
 };
 
 fn testId(value: u8) [16]u8 {
@@ -1044,6 +1265,46 @@ test "catalog endpoint backend creates an NVMe-oF locator with global options" {
     try std.testing.expectEqual(@as(u32, 1), rdma_instance.locator.nvme_of_rdma.nsid);
     try backend.stop(rdma_instance.handle);
     try std.testing.expectEqualSlices(u8, &.{ 1, 6, 7, 4, 1, 6, 7, 4 }, events.values[0..events.len]);
+}
+
+test "catalog endpoint backend creates an iSCSI locator on the shared Catalog backend" {
+    var events: Events = .{};
+    var source: FakePoolSource = .{ .events = &events, .actual_pool_id = testId(2) };
+    var vhost_driver: FakeExportDriver = .{ .events = &events, .expected_set = &source.set };
+    var nvmf_driver: FakeNvmfExportDriver = .{ .events = &events, .expected_set = &source.set };
+    var iscsi_driver: FakeIscsiExportDriver = .{ .events = &events, .expected_set = &source.set };
+    var runtime: runtime_api.Runtime = .{ .handle = null };
+    const service: *iscsi_export.IscsiService = @ptrFromInt(@alignOf(iscsi_export.IscsiService));
+    var adapter = CatalogEndpointBackend.initWithAllDrivers(
+        std.testing.allocator,
+        std.testing.io,
+        &runtime,
+        source.poolSource(),
+        .{ .iscsi = .{ .service = service, .portal = "127.0.0.1:3260" } },
+        vhost_driver.exportDriver(),
+        nvmf_driver.exportDriver(),
+        iscsi_driver.exportDriver(),
+    );
+    const backend = adapter.endpointBackend();
+    const spec: endpoint_registry.Spec = .{
+        .endpoint_id = testId(0xab),
+        .pool_id = testId(2),
+        .volume_id = testId(3),
+        .frontend = .iscsi,
+    };
+    const instance = try backend.start(spec);
+
+    try std.testing.expectEqual(@as(usize, 1), iscsi_driver.creates);
+    try std.testing.expectEqualStrings(namesFor(spec.endpoint_id).bdevSlice(), &iscsi_driver.bdev_name);
+    try std.testing.expectEqualStrings(
+        "nqn.2026-08.io.zettide:000000000000000000000000000000ab",
+        &iscsi_driver.target_name,
+    );
+    try std.testing.expectEqualStrings("127.0.0.1:3260", instance.locator.iscsi.portal);
+    try std.testing.expectEqualStrings(&iscsi_driver.target_name, instance.locator.iscsi.target_name);
+    try std.testing.expectEqual(@as(u64, 0), instance.locator.iscsi.lun);
+    try backend.stop(instance.handle);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, events.values[0..events.len]);
 }
 
 test "catalog endpoint backend retries NVMe export before pool teardown" {

@@ -1,0 +1,7 @@
+---
+- name: Verify a Catalog Volume through SPDK iSCSI and the Linux initiator
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: iscsi-catalog-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe
