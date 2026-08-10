@@ -2,10 +2,7 @@ const std = @import("std");
 const pool_catalog_volume = @import("../v3/pool_catalog_volume.zig");
 const pool_member_set = @import("../v3/pool_member_set.zig");
 
-pub const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("spdk/bdev_provider.h");
-});
+pub const c = @import("spdk_c");
 
 const ReadBatch = struct {
     const max_concurrent = 16;

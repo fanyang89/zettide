@@ -255,8 +255,8 @@ pub fn encodeVolume(descriptor: VolumeDescriptor) ![volume_encoded_size]u8 {
     var bytes: [volume_encoded_size]u8 = @splat(0);
     @memcpy(bytes[0x000..0x008], &volume_magic);
     codec.putInt(u16, &bytes, 0x008, volume_format_version);
-    codec.putInt(u16, &bytes, 0x00a, @intFromEnum(descriptor.state));
-    codec.putInt(u16, &bytes, 0x00c, @intFromEnum(descriptor.provisioning));
+    codec.putInt(u16, &bytes, 0x00a, @backingInt(descriptor.state));
+    codec.putInt(u16, &bytes, 0x00c, @backingInt(descriptor.provisioning));
     codec.putInt(u16, &bytes, 0x00e, volume_name_offset);
     @memcpy(bytes[0x010..0x020], &descriptor.volume_id);
     codec.putInt(i64, &bytes, 0x020, descriptor.created_ns);
@@ -342,7 +342,7 @@ pub fn encodeExtentRun(run: ExtentRun) ![extent_run_encoded_size]u8 {
     codec.putInt(u64, &bytes, 0x000, run.logical_start);
     codec.putInt(u64, &bytes, 0x008, run.physical_start);
     codec.putInt(u32, &bytes, 0x010, run.extent_count);
-    codec.putInt(u16, &bytes, 0x014, @intFromEnum(run.state));
+    codec.putInt(u16, &bytes, 0x014, @backingInt(run.state));
     codec.putInt(u16, &bytes, 0x016, run.member_count);
     for (run.memberSlice(), 0..) |slot, index|
         codec.putInt(u16, &bytes, 0x018 + index * @sizeOf(u16), slot);
@@ -608,7 +608,7 @@ test "volume descriptor round trips and rejects padding" {
     _ = try std.fmt.hexToBytes(&expected_digest, "80e1959f338e52ab5446013837b6961f5b4a6ab20e970cdd84ae3f4f070f7878");
     try std.testing.expectEqualSlices(u8, &expected_digest, &codec.blake3(&encoded));
     try std.testing.expectEqualSlices(u8, &volume_magic, encoded[0x000..0x008]);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(Provisioning.thin)), codec.getInt(u16, &encoded, 0x00c));
+    try std.testing.expectEqual(@as(u16, @backingInt(Provisioning.thin)), codec.getInt(u16, &encoded, 0x00c));
     try std.testing.expectEqual(@as(u64, 16 * 1024 * 1024), codec.getInt(u64, &encoded, 0x028));
     try std.testing.expectEqual(@as(u32, 1024 * 1024), codec.getInt(u32, &encoded, 0x098));
     try std.testing.expectEqualStrings("workspace", encoded[volume_name_offset..][0.."workspace".len]);

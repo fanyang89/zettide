@@ -398,7 +398,7 @@ pub const FileStore = struct {
             @memcpy(record[0..16], &spec.endpoint_id);
             @memcpy(record[16..32], &spec.pool_id);
             @memcpy(record[32..48], &spec.volume_id);
-            record[48] = @intFromEnum(spec.frontend);
+            record[48] = @backingInt(spec.frontend);
         }
         std.mem.writeInt(u32, bytes[16..20], google_crc32c.value(bytes[header_size..]), .little);
         return bytes;
@@ -878,8 +878,8 @@ test "file store atomically replaces and validates desired state" {
     const loaded = try desired_store.load(std.testing.allocator);
     defer std.testing.allocator.free(loaded);
     try std.testing.expectEqualSlices(Spec, &specs, loaded);
-    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(Frontend.nvme_of_tcp));
-    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(Frontend.nvme_of_rdma));
+    try std.testing.expectEqual(@as(u8, 3), @backingInt(Frontend.nvme_of_tcp));
+    try std.testing.expectEqual(@as(u8, 4), @backingInt(Frontend.nvme_of_rdma));
 
     const file = try tmp.dir.openFile(std.testing.io, "endpoints.state", .{ .mode = .read_write });
     defer file.close(std.testing.io);

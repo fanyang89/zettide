@@ -503,11 +503,11 @@ fn resetTransportStats(context_ptr: *anyopaque, _: Io) void {
 
 fn addStats(total: *storage_api.TransportStats, value: storage_api.TransportStats) void {
     // max_inflight is the sum of each member's peak, not a time-correlated Pool peak.
-    inline for (std.meta.fields(storage_api.TransportStats)) |field| {
-        @field(total, field.name) = std.math.add(
+    inline for (comptime std.meta.fieldNames(storage_api.TransportStats)) |field_name| {
+        @field(total, field_name) = std.math.add(
             u64,
-            @field(total, field.name),
-            @field(value, field.name),
+            @field(total, field_name),
+            @field(value, field_name),
         ) catch std.math.maxInt(u64);
     }
 }

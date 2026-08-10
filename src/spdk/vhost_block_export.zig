@@ -1,11 +1,7 @@
 const std = @import("std");
 const provider_bdev = @import("provider_bdev.zig");
 
-pub const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("spdk/bdev_provider.h");
-    @cInclude("spdk/vhost_blk_controller.h");
-});
+pub const c = @import("spdk_c");
 
 pub const Backend = provider_bdev.Backend;
 
@@ -29,11 +25,11 @@ pub const VhostBlockExport = struct {
         backend: Backend,
         options: Options,
     ) !VhostBlockExport {
-        const bdev_name = try allocator.dupeZ(u8, options.bdev_name);
+        const bdev_name = try allocator.dupeSentinel(u8, options.bdev_name, 0);
         defer allocator.free(bdev_name);
-        const controller_name = try allocator.dupeZ(u8, options.controller_name);
+        const controller_name = try allocator.dupeSentinel(u8, options.controller_name, 0);
         defer allocator.free(controller_name);
-        const cpumask = if (options.cpumask) |value| try allocator.dupeZ(u8, value) else null;
+        const cpumask = if (options.cpumask) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         defer if (cpumask) |value| allocator.free(value);
         const socket_directory_raw = c.zettide_spdk_runtime_get_vhost_socket_path(@ptrCast(runtime));
         const socket_directory = std.mem.span(socket_directory_raw orelse return error.VhostNotConfigured);

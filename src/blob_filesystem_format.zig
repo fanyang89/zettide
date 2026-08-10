@@ -272,7 +272,7 @@ pub fn orphanKey(inode: u64) ![9]u8 {
 pub fn reservationKey(inode: u64, start_block: u64) ![17]u8 {
     if (inode == 0) return error.InvalidBlobFilesystemKey;
     var key: [17]u8 = undefined;
-    key[0] = @intFromEnum(KeyKind.reservation);
+    key[0] = @backingInt(KeyKind.reservation);
     std.mem.writeInt(u64, key[1..9], inode, .big);
     std.mem.writeInt(u64, key[9..17], start_block, .big);
     return key;
@@ -285,7 +285,7 @@ pub fn reservationPrefix(inode: u64) ![9]u8 {
 pub fn dentryKey(output: *[max_key_size]u8, parent_inode: u64, lookup_name: []const u8) ![]const u8 {
     if (parent_inode == 0) return error.InvalidBlobFilesystemKey;
     try validateLookupName(lookup_name);
-    output[0] = @intFromEnum(KeyKind.dentry);
+    output[0] = @backingInt(KeyKind.dentry);
     std.mem.writeInt(u64, output[1..9], parent_inode, .big);
     @memcpy(output[9..][0..lookup_name.len], lookup_name);
     return output[0 .. 9 + lookup_name.len];
@@ -337,7 +337,7 @@ pub fn encodeDentry(output: *[max_dentry_size]u8, record: DentryRecord) ![]const
     putInt(u64, output, 0, record.child_inode, .little);
     putInt(u64, output, 8, record.child_generation, .little);
     putInt(u16, output, 16, @intCast(record.spelling.len), .little);
-    output[18] = @intFromEnum(record.kind);
+    output[18] = @backingInt(record.kind);
     @memcpy(output[24..][0..record.spelling.len], spelling[0..record.spelling.len]);
     return output[0 .. 24 + record.spelling.len];
 }
@@ -391,7 +391,7 @@ pub fn encodeOrphan(record: OrphanRecord) ![orphan_encoded_size]u8 {
     if (record.generation == 0) return error.InvalidBlobFilesystemOrphan;
     var bytes: [orphan_encoded_size]u8 = @splat(0);
     std.mem.writeInt(u64, bytes[0..8], record.generation, .little);
-    bytes[8] = @intFromEnum(record.kind);
+    bytes[8] = @backingInt(record.kind);
     return bytes;
 }
 
@@ -409,7 +409,7 @@ pub fn decodeOrphan(bytes: *const [orphan_encoded_size]u8) !OrphanRecord {
 fn fixedKey(kind: KeyKind, inode: u64) ![9]u8 {
     if (inode == 0) return error.InvalidBlobFilesystemKey;
     var key: [9]u8 = undefined;
-    key[0] = @intFromEnum(kind);
+    key[0] = @backingInt(kind);
     std.mem.writeInt(u64, key[1..9], inode, .big);
     return key;
 }
@@ -570,8 +570,12 @@ test "blob filesystem keys sort and dentry records preserve spelling" {
         validateDentryIdentity(std.testing.allocator, .portable_v1, "wrong", decoded),
     );
 
-    const expanded_spelling = "İ" ** 127;
-    var prepared = try name_profile.preparePortableV1(std.testing.allocator, expanded_spelling);
+    const expanded_spelling = comptime spelling: {
+        var bytes: ["İ".len * 127]u8 = undefined;
+        for (0..127) |index| @memcpy(bytes[index * "İ".len ..][0.."İ".len], "İ");
+        break :spelling bytes;
+    };
+    var prepared = try name_profile.preparePortableV1(std.testing.allocator, &expanded_spelling);
     defer prepared.deinit(std.testing.allocator);
     try std.testing.expect(prepared.key.len > max_name_bytes);
     _ = try dentryKey(&first_buffer, 4, prepared.key);

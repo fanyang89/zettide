@@ -2,10 +2,7 @@ const std = @import("std");
 const storage_api = @import("storage.zig");
 const v3_storage = @import("../v3/storage.zig");
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("spdk/runtime.h");
-});
+const c = @import("spdk_c");
 
 pub const Runtime = struct {
     handle: ?*c.struct_zettide_spdk_runtime,
@@ -22,11 +19,11 @@ pub const Runtime = struct {
     };
 
     pub fn start(allocator: std.mem.Allocator, options: Options) !Runtime {
-        const name_z = try allocator.dupeZ(u8, options.name);
+        const name_z = try allocator.dupeSentinel(u8, options.name, 0);
         defer allocator.free(name_z);
-        const reactor_mask_z = if (options.reactor_mask) |value| try allocator.dupeZ(u8, value) else null;
+        const reactor_mask_z = if (options.reactor_mask) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         defer if (reactor_mask_z) |value| allocator.free(value);
-        const vhost_socket_path_z = if (options.vhost_socket_path) |value| try allocator.dupeZ(u8, value) else null;
+        const vhost_socket_path_z = if (options.vhost_socket_path) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         defer if (vhost_socket_path_z) |value| allocator.free(value);
 
         var c_options: c.struct_zettide_spdk_runtime_opts = undefined;

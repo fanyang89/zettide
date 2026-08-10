@@ -5,12 +5,7 @@ const linux = std.os.linux;
 
 var spawn_signal_received = std.atomic.Value(bool).init(false);
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("signal.h");
-    @cInclude("sys/signalfd.h");
-    @cInclude("unistd.h");
-});
+const c = @import("linux_c");
 
 const Notification = struct {
     read_fd: c_int,

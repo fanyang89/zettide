@@ -1,9 +1,6 @@
 const std = @import("std");
 
-pub const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("spdk/nvmf_tcp_export.h");
-});
+pub const c = @import("spdk_c");
 
 pub const Transport = enum {
     tcp,
@@ -33,21 +30,21 @@ pub const NvmfExport = struct {
         runtime: *anyopaque,
         options: Options,
     ) !NvmfExport {
-        const target_name = if (options.target_name) |value| try allocator.dupeZ(u8, value) else null;
+        const target_name = if (options.target_name) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         defer if (target_name) |value| allocator.free(value);
-        const nqn = try allocator.dupeZ(u8, options.nqn);
+        const nqn = try allocator.dupeSentinel(u8, options.nqn, 0);
         defer allocator.free(nqn);
-        const bdev_name = try allocator.dupeZ(u8, options.bdev_name);
+        const bdev_name = try allocator.dupeSentinel(u8, options.bdev_name, 0);
         defer allocator.free(bdev_name);
-        const serial_number = if (options.serial_number) |value| try allocator.dupeZ(u8, value) else null;
+        const serial_number = if (options.serial_number) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         defer if (serial_number) |value| allocator.free(value);
-        const model_number = if (options.model_number) |value| try allocator.dupeZ(u8, value) else null;
+        const model_number = if (options.model_number) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         defer if (model_number) |value| allocator.free(value);
-        const host_nqn = if (options.host_nqn) |value| try allocator.dupeZ(u8, value) else null;
+        const host_nqn = if (options.host_nqn) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         defer if (host_nqn) |value| allocator.free(value);
-        const traddr = try allocator.dupeZ(u8, options.traddr);
+        const traddr = try allocator.dupeSentinel(u8, options.traddr, 0);
         defer allocator.free(traddr);
-        const trsvcid = try allocator.dupeZ(u8, options.trsvcid);
+        const trsvcid = try allocator.dupeSentinel(u8, options.trsvcid, 0);
         defer allocator.free(trsvcid);
 
         var c_options: c.struct_zettide_spdk_nvmf_tcp_export_opts = undefined;

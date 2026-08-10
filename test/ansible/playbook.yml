@@ -9,7 +9,7 @@
     zettide_test_profile: "{{ zettide_test_profile_override | default('tier1') }}"
     zettide_optimize_modes: "{{ zettide_optimize_modes_override | default(['Debug', 'ReleaseSafe']) }}"
     zettide_zig: zig
-    zettide_zig_version: 0.16.0
+    zettide_zig_version: 0.17.0-dev.1640+2597da025
     zettide_results_root: "{{ zettide_controller_root }}/test-results/ansible"
     zettide_keep_remote_workspace: false
     zettide_keep_test_artifacts: false

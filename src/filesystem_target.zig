@@ -608,13 +608,13 @@ test "Catalog Pool marker rejects Blob formatting without data changes" {
 }
 
 test "format classifier uses both slots and rejects conflicts" {
-    var blob = [_]u8{0} ** header_size;
+    var blob: [header_size]u8 = @splat(0);
     @memcpy(blob[0..8], "ZTBLOB01");
-    var littlefs = [_]u8{0} ** header_size;
+    var littlefs: [header_size]u8 = @splat(0);
     @memcpy(littlefs[0..8], "LFSDRV2\x00");
-    var pool = [_]u8{0} ** header_size;
+    var pool: [header_size]u8 = @splat(0);
     @memcpy(pool[0..8], "DDVMEM3\x00");
-    const empty = [_]u8{0} ** header_size;
+    const empty: [header_size]u8 = @splat(0);
 
     try std.testing.expectEqual(FormatKind.blob, try classifyHeaderSlots(&blob, &empty));
     try std.testing.expectEqual(FormatKind.blob, try classifyHeaderSlots(&empty, &blob));

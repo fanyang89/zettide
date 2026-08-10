@@ -225,7 +225,7 @@ fn validateLeafEntry(entry: LeafEntry) !void {
 fn finishPage(bytes: *[page_size]u8, header: Header, cells_start: usize) void {
     @memcpy(bytes[0..8], &magic);
     std.mem.writeInt(u16, bytes[8..10], version, .little);
-    bytes[10] = @intFromEnum(header.kind);
+    bytes[10] = @backingInt(header.kind);
     bytes[11] = header.level;
     std.mem.writeInt(u16, bytes[12..14], header.count, .little);
     std.mem.writeInt(u64, bytes[16..24], header.generation, .little);
@@ -329,11 +329,11 @@ test "blob metadata pages reject unsorted and oversized entries" {
     };
     try std.testing.expectError(error.UnsortedBlobMetadataEntries, encodeLeaf(1, &unsorted));
 
-    const lookup_name = "a" ** filesystem_format.max_lookup_name_bytes;
+    const lookup_name: [filesystem_format.max_lookup_name_bytes]u8 = @splat('a');
     var key_buffers: [4][filesystem_format.max_key_size]u8 = undefined;
     var oversized: [4]InternalEntry = undefined;
     for (&oversized, &key_buffers, 1..) |*entry, *key_buffer, parent| entry.* = .{
-        .upper_key = try filesystem_format.dentryKey(key_buffer, parent, lookup_name),
+        .upper_key = try filesystem_format.dentryKey(key_buffer, parent, &lookup_name),
         .child = .{ .page = parent, .level = 0, .digest = @splat(@intCast(parent)) },
     };
     try std.testing.expectError(error.BlobMetadataPageFull, encodeInternal(1, 1, &oversized));

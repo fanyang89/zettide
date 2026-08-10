@@ -1,9 +1,6 @@
 const std = @import("std");
 
-pub const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("spdk/bdev_provider.h");
-});
+pub const c = @import("spdk_c");
 
 pub const Backend = struct {
     context: *anyopaque,
@@ -26,7 +23,7 @@ pub const ProviderBdev = struct {
         name: []const u8,
     ) !ProviderBdev {
         if (backend.submit == null or backend.block_count == 0) return error.InvalidBackend;
-        const name_z = try allocator.dupeZ(u8, name);
+        const name_z = try allocator.dupeSentinel(u8, name, 0);
         defer allocator.free(name_z);
 
         var options: c.struct_zettide_spdk_bdev_provider_opts = undefined;

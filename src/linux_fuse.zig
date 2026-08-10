@@ -9,12 +9,7 @@ const FileId = filesystem_backend.FileId;
 const FileHandle = filesystem_backend.FileHandle;
 const DirectoryHandle = filesystem_backend.DirectoryHandle;
 
-const c = @cImport({
-    @cDefine("_FORTIFY_SOURCE", "0");
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-    @cInclude("fuse_shim.h");
-});
+const c = @import("linux_c");
 
 const path_capacity = 4096;
 const name_capacity = 256;
@@ -479,17 +474,17 @@ pub const Session = struct {
         );
         errdefer state.deinit();
 
-        const program = try allocator.dupeZ(u8, "zettide");
+        const program = try allocator.dupeSentinel(u8, "zettide", 0);
         defer allocator.free(program);
-        const foreground = try allocator.dupeZ(u8, "-f");
+        const foreground = try allocator.dupeSentinel(u8, "-f", 0);
         defer allocator.free(foreground);
-        const single_thread = try allocator.dupeZ(u8, "-s");
+        const single_thread = try allocator.dupeSentinel(u8, "-s", 0);
         defer allocator.free(single_thread);
-        const option = try allocator.dupeZ(u8, "-o");
+        const option = try allocator.dupeSentinel(u8, "-o", 0);
         defer allocator.free(option);
-        const permissions = try allocator.dupeZ(u8, mountOptions(options.allow_other, options.read_only));
+        const permissions = try allocator.dupeSentinel(u8, mountOptions(options.allow_other, options.read_only), 0);
         defer allocator.free(permissions);
-        const mountpoint_z = try allocator.dupeZ(u8, mountpoint);
+        const mountpoint_z = try allocator.dupeSentinel(u8, mountpoint, 0);
         defer allocator.free(mountpoint_z);
         var argv = [_][*c]u8{
             program.ptr,
@@ -544,17 +539,17 @@ pub const Session = struct {
 
 pub fn mount(filesystem: Filesystem, io: Io, mountpoint: []const u8, options: Session.Options) !void {
     const allocator = std.heap.c_allocator;
-    const program = try allocator.dupeZ(u8, "zettide");
+    const program = try allocator.dupeSentinel(u8, "zettide", 0);
     defer allocator.free(program);
-    const foreground = try allocator.dupeZ(u8, "-f");
+    const foreground = try allocator.dupeSentinel(u8, "-f", 0);
     defer allocator.free(foreground);
-    const single_thread = try allocator.dupeZ(u8, "-s");
+    const single_thread = try allocator.dupeSentinel(u8, "-s", 0);
     defer allocator.free(single_thread);
-    const option = try allocator.dupeZ(u8, "-o");
+    const option = try allocator.dupeSentinel(u8, "-o", 0);
     defer allocator.free(option);
-    const permissions = try allocator.dupeZ(u8, mountOptions(options.allow_other, options.read_only));
+    const permissions = try allocator.dupeSentinel(u8, mountOptions(options.allow_other, options.read_only), 0);
     defer allocator.free(permissions);
-    const mountpoint_z = try allocator.dupeZ(u8, mountpoint);
+    const mountpoint_z = try allocator.dupeSentinel(u8, mountpoint, 0);
     defer allocator.free(mountpoint_z);
 
     var state = try MountState.init(

@@ -1,11 +1,7 @@
 const std = @import("std");
 const storage_api = @import("../v3/storage.zig");
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("stdlib.h");
-    @cInclude("spdk/bdev_dispatcher.h");
-});
+const c = @import("spdk_c");
 
 const Context = struct {
     allocator: std.mem.Allocator,
@@ -20,7 +16,7 @@ pub fn open(
     name: []const u8,
     writable: bool,
 ) !storage_api.Storage {
-    const name_z = try allocator.dupeZ(u8, name);
+    const name_z = try allocator.dupeSentinel(u8, name, 0);
     defer allocator.free(name_z);
 
     var dispatcher: ?*c.struct_zettide_spdk_bdev_dispatcher = null;

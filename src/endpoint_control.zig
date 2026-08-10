@@ -492,7 +492,7 @@ pub fn connectPath(path: []const u8) !i32 {
             @ptrCast(&socket_error),
             &error_size,
         )) != .SUCCESS) return error.ControlSocketConnectFailed;
-        err = @enumFromInt(socket_error);
+        err = @fromBackingInt(@intCast(socket_error));
     }
     switch (err) {
         .SUCCESS => {},

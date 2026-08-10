@@ -940,12 +940,12 @@ test "blob metadata map builds looks up enumerates and reopens" {
     try std.testing.expectEqual(entries.len, all.len);
     try std.testing.expectEqualSlices(u8, entries[129].key, all[129].key);
 
-    const long_name = "a" ** filesystem_format.max_lookup_name_bytes;
+    const long_name: [filesystem_format.max_lookup_name_bytes]u8 = @splat('a');
     var deep_keys: [10][filesystem_format.max_key_size]u8 = undefined;
     var deep_values: [10][filesystem_format.max_dentry_size]u8 = undefined;
     var deep_entries: [10]metadata_map.LeafEntry = undefined;
     for (&deep_keys, &deep_values, &deep_entries, 1..) |*key, *value, *entry, parent| {
-        const encoded_key = try filesystem_format.dentryKey(key, parent, long_name);
+        const encoded_key = try filesystem_format.dentryKey(key, parent, &long_name);
         const encoded_value = try filesystem_format.encodeDentry(value, .{
             .child_inode = parent + 20,
             .child_generation = 1,
@@ -1206,13 +1206,13 @@ test "blob metadata map path-copy splits variable records and grows roots" {
     defer blobs.close(std.testing.io) catch {};
     var maps = MapStore.init(std.testing.allocator, &blobs);
 
-    const long_name = "a" ** filesystem_format.max_lookup_name_bytes;
+    const long_name: [filesystem_format.max_lookup_name_bytes]u8 = @splat('a');
     var keys: [9][filesystem_format.max_key_size]u8 = undefined;
     var values: [9][filesystem_format.max_dentry_size]u8 = undefined;
     var entries: [9]metadata_map.LeafEntry = undefined;
     for (&keys, &values, &entries, 0..) |*key, *value, *entry, index| {
         const parent = 2 + index * 2;
-        const encoded_key = try filesystem_format.dentryKey(key, parent, long_name);
+        const encoded_key = try filesystem_format.dentryKey(key, parent, &long_name);
         const encoded_value = try filesystem_format.encodeDentry(value, .{
             .child_inode = parent + 100,
             .child_generation = 1,
@@ -1230,7 +1230,7 @@ test "blob metadata map path-copy splits variable records and grows roots" {
     var inserted_values: [parents.len][filesystem_format.max_dentry_size]u8 = undefined;
     var mutations: [parents.len]Mutation = undefined;
     for (parents, &inserted_keys, &inserted_values, &mutations) |parent, *key, *value, *mutation| {
-        const encoded_key = try filesystem_format.dentryKey(key, parent, long_name);
+        const encoded_key = try filesystem_format.dentryKey(key, parent, &long_name);
         const encoded_value = try filesystem_format.encodeDentry(value, .{
             .child_inode = parent + 100,
             .child_generation = 2,

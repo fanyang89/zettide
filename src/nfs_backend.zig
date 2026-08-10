@@ -740,7 +740,7 @@ fn fillResult(self: *Export, info: filesystem_api.NodeInfo, handle: *Handle, att
 
 fn attributes(info: filesystem_api.NodeInfo) Attributes {
     return .{
-        .kind = @intFromEnum(info.metadata.kind),
+        .kind = @backingInt(info.metadata.kind),
         .reserved = @splat(0),
         .mode = info.metadata.mode,
         .uid = info.metadata.uid,
@@ -760,7 +760,7 @@ fn node(handle: nfs_handle.Handle) filesystem_api.Node {
 }
 
 fn status(value: Status) c_int {
-    return @intFromEnum(value);
+    return @backingInt(value);
 }
 
 fn statusFor(err: anyerror, stale_context: bool) c_int {
@@ -820,7 +820,7 @@ test "direct NFS backend resolves and reads stable handles" {
         try filesystem.close(std.testing.io);
     }
 
-    const path_z = try std.testing.allocator.dupeZ(u8, path);
+    const path_z = try std.testing.allocator.dupeSentinel(u8, path, 0);
     defer std.testing.allocator.free(path_z);
     var export_handle: *Export = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_export_open(path_z, true, &export_handle));
@@ -832,7 +832,7 @@ test "direct NFS backend resolves and reads stable handles" {
     var root_handle: Handle = undefined;
     var root_attributes: Attributes = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &root_handle, &root_attributes));
-    try std.testing.expectEqual(@intFromEnum(zettide.metadata.Kind.directory), root_attributes.kind);
+    try std.testing.expectEqual(@backingInt(zettide.metadata.Kind.directory), root_attributes.kind);
     var filesystem_info: FilesystemInfo = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_statfs(export_handle, &filesystem_info));
     try std.testing.expect(filesystem_info.total_bytes > 0);
@@ -1083,7 +1083,7 @@ test "direct NFS backend exports standalone BlobFilesystem" {
         .portable_v1,
         .{},
     );
-    const path_z = try std.testing.allocator.dupeZ(u8, path);
+    const path_z = try std.testing.allocator.dupeSentinel(u8, path, 0);
     defer std.testing.allocator.free(path_z);
 
     var export_handle: *Export = undefined;
@@ -1095,7 +1095,7 @@ test "direct NFS backend exports standalone BlobFilesystem" {
     var root_handle: Handle = undefined;
     var root_attributes: Attributes = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &root_handle, &root_attributes));
-    try std.testing.expectEqual(@intFromEnum(zettide.metadata.Kind.directory), root_attributes.kind);
+    try std.testing.expectEqual(@backingInt(zettide.metadata.Kind.directory), root_attributes.kind);
 
     var file_handle: Handle = undefined;
     var file_attributes: Attributes = undefined;
@@ -1243,7 +1243,7 @@ test "direct NFS backend exports a single-member Blob Pool" {
     const root_length = try tmp.dir.realPath(std.testing.io, &path_buffer);
     path_buffer[root_length] = '/';
     @memcpy(path_buffer[root_length + 1 .. root_length + 1 + member_name.len], member_name);
-    const path_z = try std.testing.allocator.dupeZ(u8, path_buffer[0 .. root_length + 1 + member_name.len]);
+    const path_z = try std.testing.allocator.dupeSentinel(u8, path_buffer[0 .. root_length + 1 + member_name.len], 0);
     defer std.testing.allocator.free(path_z);
 
     var export_handle: *Export = undefined;

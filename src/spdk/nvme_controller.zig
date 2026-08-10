@@ -1,10 +1,7 @@
 const std = @import("std");
 const runtime_api = @import("runtime.zig");
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("spdk/nvme_controller.h");
-});
+const c = @import("spdk_c");
 
 pub const Controller = struct {
     handle: ?*c.struct_zettide_spdk_nvme_controller,
@@ -38,15 +35,15 @@ pub const Controller = struct {
         options: Options,
     ) !Controller {
         const runtime_handle = runtime.handle orelse return error.RuntimeStopped;
-        const name_z = try allocator.dupeZ(u8, options.name);
+        const name_z = try allocator.dupeSentinel(u8, options.name, 0);
         defer allocator.free(name_z);
-        const address_z = try allocator.dupeZ(u8, options.transport_address);
+        const address_z = try allocator.dupeSentinel(u8, options.transport_address, 0);
         defer allocator.free(address_z);
-        const service_z = try allocator.dupeZ(u8, options.transport_service_id);
+        const service_z = try allocator.dupeSentinel(u8, options.transport_service_id, 0);
         defer allocator.free(service_z);
-        const subsystem_nqn_z = try allocator.dupeZ(u8, options.subsystem_nqn);
+        const subsystem_nqn_z = try allocator.dupeSentinel(u8, options.subsystem_nqn, 0);
         defer allocator.free(subsystem_nqn_z);
-        const host_nqn_z = if (options.host_nqn) |value| try allocator.dupeZ(u8, value) else null;
+        const host_nqn_z = if (options.host_nqn) |value| try allocator.dupeSentinel(u8, value, 0) else null;
         defer if (host_nqn_z) |value| allocator.free(value);
 
         var c_options: c.struct_zettide_spdk_nvme_controller_opts = undefined;

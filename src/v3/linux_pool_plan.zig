@@ -189,7 +189,7 @@ fn computeToken(devices: []const linux_block.DeviceInfo, contains_data: []const 
     hasher.update(&.{@intFromBool(options.scheduled_blob)});
     var plan_header: [10]u8 = undefined;
     std.mem.writeInt(u64, plan_header[0..8], options.label.len, .little);
-    plan_header[8] = @intFromEnum(std.meta.activeTag(options.protection));
+    plan_header[8] = @backingInt(std.meta.activeTag(options.protection));
     plan_header[9] = @intCast(devices.len);
     hasher.update(&plan_header);
     hasher.update(options.label);

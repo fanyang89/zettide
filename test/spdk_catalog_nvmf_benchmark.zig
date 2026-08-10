@@ -1,12 +1,7 @@
 const std = @import("std");
 const zettide = @import("zettide");
 
-const c = @cImport({
-    @cInclude("pthread.h");
-    @cInclude("signal.h");
-    @cInclude("stdlib.h");
-    @cInclude("spdk_runtime.h");
-});
+const c = @import("spdk_c");
 
 const catalog_size = 64 * 1024 * 1024 * 1024;
 const mapped_size = 1024 * 1024 * 1024;

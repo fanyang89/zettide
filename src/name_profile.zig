@@ -1,10 +1,6 @@
 const std = @import("std");
 
-const c = @cImport({
-    @cDefine("UTF8PROC_STATIC", "1");
-    @cInclude("stdlib.h");
-    @cInclude("utf8proc.h");
-});
+const c = @import("utf8proc_c");
 
 pub const Profile = enum {
     legacy_raw,
@@ -219,9 +215,10 @@ test "portable v1 permits non-device prefixes and enforces byte length" {
         prepared.deinit(allocator);
     }
 
-    const valid = "a" ** max_utf8_bytes;
-    var prepared = try preparePortableV1(allocator, valid);
+    const valid: [max_utf8_bytes]u8 = @splat('a');
+    var prepared = try preparePortableV1(allocator, &valid);
     prepared.deinit(allocator);
     try std.testing.expectError(error.NameTooLong, preparePortableV1(allocator, valid ++ "a"));
-    try std.testing.expectError(error.NameTooLong, preparePortableV1(allocator, "a" ** (max_input_bytes + 1)));
+    const too_long: [max_input_bytes + 1]u8 = @splat('a');
+    try std.testing.expectError(error.NameTooLong, preparePortableV1(allocator, &too_long));
 }

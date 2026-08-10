@@ -317,7 +317,7 @@ pub const Engine = struct {
             return err;
         };
         if (completion.user_data != token) return self.invalidCompletion();
-        if (completion.res < 0) return completionError(@enumFromInt(-completion.res));
+        if (completion.res < 0) return completionError(@fromBackingInt(@intCast(-completion.res)));
         return @intCast(completion.res);
     }
 
@@ -426,7 +426,7 @@ pub const Engine = struct {
         };
         if (completion.user_data != token) return self.invalidCompletion();
         if (completion.res < 0) {
-            const err: linux.E = @enumFromInt(-completion.res);
+            const err: linux.E = @fromBackingInt(@intCast(-completion.res));
             if (err == .OPNOTSUPP) return error.WritevNotSupported;
             return completionError(err);
         }
@@ -473,7 +473,7 @@ const BatchTracker = struct {
         if (self.seen[completion_index]) return error.InvalidIoUringCompletion;
         self.seen[completion_index] = true;
         if (completion.res < 0) {
-            self.errors[completion_index] = completionError(@enumFromInt(-completion.res));
+            self.errors[completion_index] = completionError(@fromBackingInt(@intCast(-completion.res)));
         } else {
             const amount: usize = @intCast(completion.res);
             if (amount > self.lengths[completion_index]) return error.InvalidIoUringCompletion;
@@ -538,7 +538,7 @@ test "io_uring batch tracker accepts deterministic out-of-order completions" {
     };
     try tracker.record(.{ .user_data = 13, .res = 6, .flags = 0 });
     try tracker.record(.{ .user_data = 11, .res = 4, .flags = 0 });
-    try tracker.record(.{ .user_data = 12, .res = -@as(i32, @intFromEnum(linux.E.INTR)), .flags = 0 });
+    try tracker.record(.{ .user_data = 12, .res = -@as(i32, @backingInt(linux.E.INTR)), .flags = 0 });
     try std.testing.expectEqualSlices(usize, &.{ 4, 0, 6 }, &amounts);
     try std.testing.expectEqual(error.OperationInterrupted, errors[1].?);
     try std.testing.expectError(

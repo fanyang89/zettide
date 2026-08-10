@@ -19,7 +19,7 @@ iSCSI remains a target.
 
 - SSH access and Python 3
 - Privilege escalation through `sudo`
-- Zig 0.16.0 available in `PATH`, or configured as `zettide_zig`
+- Zig 0.17.0-dev.1640+2597da025 available in `PATH`, or configured as `zettide_zig`
 - Internet access for OS packages and pinned external suite checkouts
 - Kernel access to FUSE and loop devices
 

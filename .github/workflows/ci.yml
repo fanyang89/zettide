@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: master
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
       - name: Run portable tests
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: master
       - name: Install FUSE, fio, and Samba
         run: sudo apt-get update && sudo apt-get install -y e2fsprogs fio fuse3 libfuse3-dev samba smbclient util-linux
       - name: Install dufs

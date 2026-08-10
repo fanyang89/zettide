@@ -1,11 +1,7 @@
 const std = @import("std");
 const zettide = @import("zettide");
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("spdk/runtime.h");
-    @cInclude("spdk_runtime.h");
-});
+const c = @import("spdk_c");
 
 const malloc_bdev_config =
     \\{"subsystems":[{"subsystem":"bdev","config":[

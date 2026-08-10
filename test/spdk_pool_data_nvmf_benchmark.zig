@@ -2,14 +2,7 @@ const std = @import("std");
 const zettide = @import("zettide");
 const args = @import("spdk_pool_data_nvmf_args.zig");
 
-const c = @cImport({
-    @cInclude("errno.h");
-    @cInclude("pthread.h");
-    @cInclude("signal.h");
-    @cInclude("stdlib.h");
-    @cInclude("spdk/bdev_provider.h");
-    @cInclude("spdk_runtime.h");
-});
+const c = @import("spdk_c");
 
 const block_size = 4096;
 const max_batch_requests = 32;

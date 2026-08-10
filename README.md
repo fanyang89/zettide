@@ -65,7 +65,7 @@ NQN and NVMe serial values. The iSCSI target lifecycle is also not implemented.
 
 ## Requirements
 
-- Zig 0.16.0
+- Zig master nightly (managed by the root `mise.toml`)
 - Linux: libfuse3 development files for mounting support
 - Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
 - Optional Linux SMB3 feasibility tests: Samba server and client tools

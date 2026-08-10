@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
 
     const portable_core = createCoreModule(b, target, optimize, false, crc32c_dependency);
     const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux, crc32c_dependency);
-    if (enable_spdk) configureSpdk(app_core);
+    if (enable_spdk) _ = configureSpdk(b, app_core, target, optimize);
     const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
 
@@ -33,7 +33,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "zettide", .module = portable_core }},
+            .imports = &.{
+                .{ .name = "zettide", .module = portable_core },
+                .{ .name = "spdk_c", .module = createSpdkCModule(b, target, optimize, true) },
+            },
         });
         catalog_nvmf_benchmark_module.addIncludePath(b.path("test"));
         const catalog_nvmf_benchmark = b.addLibrary(.{
@@ -61,7 +64,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = .ReleaseSafe,
             .link_libc = true,
-            .imports = &.{.{ .name = "zettide", .module = pool_data_benchmark_core }},
+            .imports = &.{
+                .{ .name = "zettide", .module = pool_data_benchmark_core },
+                .{ .name = "spdk_c", .module = createSpdkCModule(b, target, .ReleaseSafe, true) },
+            },
         });
         pool_data_nvmf_benchmark_module.addIncludePath(b.path("src"));
         pool_data_nvmf_benchmark_module.addIncludePath(b.path("test"));
@@ -97,7 +103,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run zettide");
     run_step.dependOn(&run_cmd.step);
 
@@ -177,7 +183,7 @@ pub fn build(b: *std.Build) void {
         .root_module = fs_ops_benchmark_module,
     });
     const run_fs_ops_benchmark = b.addRunArtifact(fs_ops_benchmark);
-    if (b.args) |args| run_fs_ops_benchmark.addArgs(args);
+    run_fs_ops_benchmark.addPassthruArgs();
     const fs_ops_benchmark_step = b.step("bench-fs-ops", "Benchmark direct Blob filesystem operations");
     fs_ops_benchmark_step.dependOn(&run_fs_ops_benchmark.step);
     const install_fs_ops_benchmark = b.addInstallArtifact(fs_ops_benchmark, .{});
@@ -211,7 +217,7 @@ pub fn build(b: *std.Build) void {
         .root_module = blob_device_benchmark_module,
     });
     const run_blob_device_benchmark = b.addRunArtifact(blob_device_benchmark);
-    if (b.args) |args| run_blob_device_benchmark.addArgs(args);
+    run_blob_device_benchmark.addPassthruArgs();
     const blob_device_benchmark_step = b.step("bench-blob-device", "Benchmark sequential BlobDevice IO");
     blob_device_benchmark_step.dependOn(&run_blob_device_benchmark.step);
     const install_blob_device_benchmark = b.addInstallArtifact(blob_device_benchmark, .{});
@@ -234,7 +240,7 @@ pub fn build(b: *std.Build) void {
         .root_module = blob_store_benchmark_module,
     });
     const run_blob_store_benchmark = b.addRunArtifact(blob_store_benchmark);
-    if (b.args) |args| run_blob_store_benchmark.addArgs(args);
+    run_blob_store_benchmark.addPassthruArgs();
     const blob_store_benchmark_step = b.step("bench-blob-store", "Benchmark immutable BlobStore IO");
     blob_store_benchmark_step.dependOn(&run_blob_store_benchmark.step);
     const install_blob_store_benchmark = b.addInstallArtifact(blob_store_benchmark, .{});
@@ -257,7 +263,7 @@ pub fn build(b: *std.Build) void {
         .root_module = blob_metadata_map_benchmark_module,
     });
     const run_blob_metadata_map_benchmark = b.addRunArtifact(blob_metadata_map_benchmark);
-    if (b.args) |args| run_blob_metadata_map_benchmark.addArgs(args);
+    run_blob_metadata_map_benchmark.addPassthruArgs();
     const blob_metadata_map_benchmark_step = b.step(
         "bench-blob-metadata-map",
         "Benchmark incremental Blob metadata updates",
@@ -286,7 +292,7 @@ pub fn build(b: *std.Build) void {
         .root_module = blob_object_benchmark_module,
     });
     const run_blob_object_benchmark = b.addRunArtifact(blob_object_benchmark);
-    if (b.args) |args| run_blob_object_benchmark.addArgs(args);
+    run_blob_object_benchmark.addPassthruArgs();
     const blob_object_benchmark_step = b.step("bench-blob-object", "Benchmark sequential BlobObject IO");
     blob_object_benchmark_step.dependOn(&run_blob_object_benchmark.step);
     const install_blob_object_benchmark = b.addInstallArtifact(blob_object_benchmark, .{});
@@ -532,6 +538,14 @@ fn createCoreModule(
         .optimize = optimize,
         .link_libc = true,
     });
+    const unavailable_c_source = b.addWriteFiles().add("unavailable_c.zig", "");
+    const unavailable_c = b.createModule(.{
+        .root_source_file = unavailable_c_source,
+        .target = target,
+        .optimize = optimize,
+    });
+    core.addImport("linux_c", unavailable_c);
+    core.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
     core.addIncludePath(b.path("vendor/utf8proc"));
     core.addIncludePath(b.path("src"));
     core.addCMacro("UTF8PROC_STATIC", "1");
@@ -539,15 +553,56 @@ fn createCoreModule(
         .files = &.{"vendor/utf8proc/utf8proc.c"},
         .flags = &.{ "-std=c99", "-DUTF8PROC_STATIC" },
     });
+    const utf8proc_header = b.addWriteFiles().add("utf8proc_c.h",
+        \\#include <stdlib.h>
+        \\#include <utf8proc.h>
+    );
+    const utf8proc_translate = b.addTranslateC(.{
+        .root_source_file = utf8proc_header,
+        .target = target,
+        .optimize = optimize,
+    });
+    utf8proc_translate.addIncludePath(b.path("vendor/utf8proc"));
+    utf8proc_translate.defineCMacro("UTF8PROC_STATIC", "1");
+    core.addImport("utf8proc_c", utf8proc_translate.createModule());
     const crc32c = b.createModule(.{
         .root_source_file = b.path("src/crc32c.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    addCrc32c(crc32c, crc32c_dependency, target);
+    const crc32c_config = addCrc32c(crc32c, crc32c_dependency, target);
+    const crc32c_translate = b.addTranslateC(.{
+        .root_source_file = crc32c_dependency.path("include/crc32c/crc32c.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    crc32c_translate.addConfigHeader(crc32c_config);
+    crc32c_translate.addIncludePath(crc32c_dependency.path("include"));
+    crc32c_translate.addIncludePath(crc32c_dependency.path("src"));
+    crc32c.addImport("crc32c_c", crc32c_translate.createModule());
     crc32c.link_libcpp = true;
     core.addImport("crc32c", crc32c);
+    if (target.result.os.tag == .linux) {
+        const linux_header = b.addWriteFiles().add("linux_c.h",
+            \\#include <errno.h>
+            \\#include <fcntl.h>
+            \\#include <signal.h>
+            \\#include <sys/signalfd.h>
+            \\#include <unistd.h>
+            \\#include <fuse_shim.h>
+        );
+        const linux_translate = b.addTranslateC(.{
+            .root_source_file = linux_header,
+            .target = target,
+            .optimize = optimize,
+        });
+        linux_translate.addIncludePath(b.path("src"));
+        linux_translate.defineCMacro("_FORTIFY_SOURCE", "0");
+        linux_translate.defineCMacro("FUSE_USE_VERSION", "35");
+        linux_translate.linkSystemLibrary("fuse3", .{});
+        core.addImport("linux_c", linux_translate.createModule());
+    }
     if (with_fuse) {
         core.addCMacro("FUSE_USE_VERSION", "35");
         core.linkSystemLibrary("fuse3", .{});
@@ -563,7 +618,7 @@ fn addCrc32c(
     module: *std.Build.Module,
     dependency: *std.Build.Dependency,
     target: std.Build.ResolvedTarget,
-) void {
+) *std.Build.Step.ConfigHeader {
     const b = module.owner;
     const arch = target.result.cpu.arch;
     const is_x86 = arch == .x86 or arch == .x86_64;
@@ -626,6 +681,7 @@ fn addCrc32c(
             },
         });
     }
+    return config_header;
 }
 
 fn createExecutable(
@@ -652,7 +708,12 @@ fn createExecutable(
     });
 }
 
-fn configureSpdk(module: *std.Build.Module) void {
+fn configureSpdk(
+    b: *std.Build,
+    module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Module {
     module.addCSourceFiles(.{
         .files = &.{
             "src/spdk/runtime.c",
@@ -673,6 +734,45 @@ fn configureSpdk(module: *std.Build.Module) void {
         "spdk_sock_modules",
         "spdk_syslibs",
     }) |library| module.linkSystemLibrary(library, .{ .needed = true, .use_pkg_config = .force });
+
+    const spdk_c = createSpdkCModule(b, target, optimize, true);
+    module.addImport("spdk_c", spdk_c);
+    return spdk_c;
+}
+
+fn createSpdkCModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    include_test_api: bool,
+) *std.Build.Module {
+    const portable_header =
+        \\#include <errno.h>
+        \\#include <stdlib.h>
+        \\#include <spdk/runtime.h>
+        \\#include <spdk/bdev_dispatcher.h>
+        \\#include <spdk/nvme_controller.h>
+        \\#include <spdk/bdev_provider.h>
+        \\#include <spdk/nvmf_tcp_export.h>
+        \\#include <spdk/vhost_blk_controller.h>
+    ;
+    const test_header =
+        \\#include <pthread.h>
+        \\#include <signal.h>
+        \\#include <spdk_runtime.h>
+    ;
+    const spdk_header = b.addWriteFiles().add(
+        "spdk_c.h",
+        if (include_test_api) portable_header ++ "\n" ++ test_header else portable_header,
+    );
+    const spdk_translate = b.addTranslateC(.{
+        .root_source_file = spdk_header,
+        .target = target,
+        .optimize = optimize,
+    });
+    spdk_translate.addIncludePath(b.path("src"));
+    spdk_translate.addIncludePath(b.path("test"));
+    return spdk_translate.createModule();
 }
 
 fn createLinuxBlockProbe(
@@ -703,7 +803,10 @@ fn createSpdkStorageTest(
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "zettide", .module = core }},
+        .imports = &.{
+            .{ .name = "zettide", .module = core },
+            .{ .name = "spdk_c", .module = createSpdkCModule(b, target, optimize, true) },
+        },
     });
     module.addIncludePath(b.path("src"));
     module.addIncludePath(b.path("test"));
