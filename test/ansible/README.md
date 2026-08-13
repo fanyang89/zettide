@@ -287,6 +287,26 @@ read-only and defaults to `first_available`; set
 Results include fio JSON, NVMe/RDMA topology, target stage logs, and lifecycle
 cleanup state. Synthetic members do not measure physical fault isolation.
 
+The vhost profile reuses the same scheduled Pool lifecycle but exposes its data
+through read-only SPDK vhost-user-blk. Guest fio runs in a KVM Fedora VM and
+does not traverse NVMe-oF or RXE. Configure both disposable disks and confirm
+their exact identities and the existing Pool ID:
+
+```sh
+uv run ansible-playbook test/ansible/vhost-scheduled-pool-fio.yml \
+  --limit zettide-tier1 \
+  -e 'zettide_raw_device={"path":"/dev/nvme1n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}' \
+  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:/dev/nvme1n1:PHMB747600DE280CGN:/dev/nvme0n1:PHMB746600SS280CGN' \
+  -e zettide_nvmf_scheduled_pool_expected_pool_id=0dc67e4cdded2d37fc13e49f5544ba37
+```
+
+The baseline uses one SPDK reactor, one vhost queue, four guest vCPUs, and the
+`randread-4k-qd32-j16` case. Keep all other parameters fixed, then test queue
+counts `2` and `4` before changing the reactor count. The result archive adds
+per-thread target/QEMU `pidstat`, per-CPU `mpstat`, block-device `iostat`, host
+softirq snapshots, guest topology, and provider worker metrics. A completed run
+fails if provider queue-full rejections are nonzero.
+
 The Catalog profile uses the same cases and export identity, but reads a real
 64 GiB thin Catalog Volume from an 8 MiB temporary file-backed Pool. Unmapped
 extents read as zero, so this isolates Catalog lookup, worker scheduling, and
