@@ -28,7 +28,7 @@ rxe_target_link_created=false
 rxe_target_device_created=false
 target_arguments=("$@")
 case $fio_case in
-    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4) ;;
+    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16) ;;
     *)
         echo "unknown NVMe-oF fio case: $fio_case" >&2
         exit 2
@@ -220,6 +220,7 @@ run_selected_case seq-read-128k-qd1-j1 read 128k 1 1 "$fio_size"
 run_selected_case randread-4k-qd1-j1 randread 4k 1 1 "$fio_size"
 run_selected_case randread-4k-qd32-j1 randread 4k 32 1 "$fio_size"
 run_selected_case randread-4k-qd32-j4 randread 4k 32 4 "$fio_size"
+run_selected_case randread-4k-qd32-j16 randread 4k 32 16 "$fio_size"
 
 for result in "${fio_results[@]}"; do
     jq -r '(.jobs[0].jobname) + " iops=" + (.jobs[0].read.iops|tostring) +

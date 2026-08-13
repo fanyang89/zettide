@@ -21,6 +21,7 @@ member_count=$((physical_device_count * 3))
 confirmation=${ZETTIDE_SCHEDULED_POOL_NVMF_FIO_CONFIRM:-}
 target=${ZETTIDE_SCHEDULED_POOL_NVMF_TARGET:?ZETTIDE_SCHEDULED_POOL_NVMF_TARGET is required}
 read_policy=${ZETTIDE_SCHEDULED_POOL_NVMF_READ_POLICY:-first_available}
+expected_pool_id=${ZETTIDE_SCHEDULED_POOL_NVMF_EXPECTED_POOL_ID:-}
 log_dir=${ZETTIDE_TEST_LOG_DIR:?ZETTIDE_TEST_LOG_DIR is required}
 canonical_devices=()
 physical_ids=()
@@ -743,11 +744,17 @@ reuse_pool=false
 ready_to_create=false
 if ((physical_device_count == 2)); then
     if inspect_scheduled_pool "$log_dir/scheduled-inspect-reuse.log"; then
-        record_event "pool-reuse-rejected reason=dual-device-slot-geometry-unverifiable physical_devices=2 members=6"
+        if [[ $expected_pool_id =~ ^[0-9a-f]{32}$ && $pool_id == "$expected_pool_id" ]]; then
+            reuse_pool=true
+        else
+            record_event "pool-reuse-refused reason=dual-device-pool-id-unconfirmed pool=$pool_id physical_devices=2 members=6"
+            echo "refusing to destroy unconfirmed dual-device Pool: $pool_id" >&2
+            exit 1
+        fi
     else
         record_event "pool-reuse-rejected reason=dual-device-reuse-disabled-inspect-failed physical_devices=2 members=6"
     fi
-    if plan_scheduled_pool; then
+    if [[ $reuse_pool == false ]] && plan_scheduled_pool; then
         ready_to_create=true
         record_event "pool-create-ready reason=devices-already-empty physical_devices=2 members=6"
     fi
@@ -756,7 +763,7 @@ elif inspect_scheduled_pool "$log_dir/scheduled-inspect-reuse.log"; then
 fi
 
 if [[ $reuse_pool == true ]]; then
-    record_event "pool-reused pool=$pool_id profile=scheduled-replicated physical_devices=1 members=3"
+    record_event "pool-reused pool=$pool_id profile=scheduled-replicated physical_devices=$physical_device_count members=$member_count"
 elif [[ $ready_to_create == true ]]; then
     create_scheduled_pool
     record_event "pool-created pool=$pool_id profile=scheduled-replicated physical_devices=$physical_device_count members=$member_count"

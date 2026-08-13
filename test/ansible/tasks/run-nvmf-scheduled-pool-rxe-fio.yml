@@ -24,7 +24,8 @@
       - >-
         zettide_nvmf_scheduled_pool_fio_case in
         ['', 'seq-read-1m-qd32-j1', 'seq-read-128k-qd1-j1',
-        'randread-4k-qd1-j1', 'randread-4k-qd32-j1', 'randread-4k-qd32-j4']
+        'randread-4k-qd1-j1', 'randread-4k-qd32-j1', 'randread-4k-qd32-j4',
+        'randread-4k-qd32-j16']
       - >-
         ansible_facts.processor_vcpus is not defined or
         zettide_nvmf_scheduled_pool_reactor_count | int <= ansible_facts.processor_vcpus | int
@@ -79,6 +80,14 @@
     fail_msg: >-
       Pass -e zettide_scheduled_pool_nvmf_fio_confirm={{
       zettide_scheduled_pool_nvmf_expected_confirmation }}.
+
+- name: Validate optional scheduled Pool reuse identity | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        zettide_nvmf_scheduled_pool_expected_pool_id | default('') == '' or
+        zettide_nvmf_scheduled_pool_expected_pool_id is match('^[0-9a-f]{32}$')
+    fail_msg: "Expected scheduled Pool ID must be 32 lowercase hexadecimal characters."
 
 - name: Create scheduled Pool NVMe-oF result directory | {{ zettide_optimize }}
   ansible.builtin.file:
@@ -180,6 +189,7 @@
     ZETTIDE_SCHEDULED_POOL_NVMF_FIO_CONFIRM: "{{ zettide_scheduled_pool_nvmf_fio_confirm }}"
     ZETTIDE_SCHEDULED_POOL_NVMF_TARGET: "{{ zettide_remote_workspace.path }}/test/spdk-pool-data-nvmf-benchmark"
     ZETTIDE_SCHEDULED_POOL_NVMF_READ_POLICY: "{{ zettide_nvmf_scheduled_pool_read_policy }}"
+    ZETTIDE_SCHEDULED_POOL_NVMF_EXPECTED_POOL_ID: "{{ zettide_nvmf_scheduled_pool_expected_pool_id | default('') }}"
     ZETTIDE_NVMF_TRANSPORT: rdma
     ZETTIDE_NVMF_TARGET_ADDR: 192.0.2.2
     ZETTIDE_NVMF_TARGET_PORT: "44220"
