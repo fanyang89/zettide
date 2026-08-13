@@ -140,6 +140,7 @@ fn run(socket_directory: [*:0]const u8) !void {
             .bdev_name = "ZettideRollback",
             .controller_name = "zettide-export-1",
             .cpumask = "0x1",
+            .readonly = true,
         },
     );
     try second.close();

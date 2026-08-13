@@ -124,6 +124,19 @@ main(int argc, char **argv)
 		status = -EIO;
 		goto cleanup;
 	}
+	controller_opts.name = "zettide-vhost-readonly";
+	controller_opts.readonly = true;
+	status = zettide_spdk_vhost_blk_controller_create(runtime, &controller_opts, &controller);
+	if (status != 0) {
+		fprintf(stderr, "readonly controller create failed: %d\n", status);
+		goto cleanup;
+	}
+	status = zettide_spdk_vhost_blk_controller_remove(controller);
+	if (status != 0) {
+		fprintf(stderr, "readonly controller remove failed: %d\n", status);
+		goto cleanup;
+	}
+	controller = NULL;
 
 cleanup:
 	if (controller != NULL) {
