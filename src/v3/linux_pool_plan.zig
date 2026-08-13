@@ -87,6 +87,7 @@ pub fn inspect(
     return plan;
 }
 
+/// The allocator must be thread-safe.
 pub fn acquireCurrent(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -115,8 +116,7 @@ pub fn acquireCurrent(
         storages[index] = opened.storage;
         acquired += 1;
     }
-    for (storages, 0..) |*storage, index|
-        contains_data[index] = try linux_block.hasData(storage, io, allocator);
+    try scanStorages(storages, contains_data, io, allocator);
 
     return .{
         .plan = .{
@@ -129,6 +129,42 @@ pub fn acquireCurrent(
         },
         .storages = storages,
         .io = io,
+    };
+}
+
+fn scanStorages(
+    storages: []storage_api.Storage,
+    contains_data: []bool,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) !void {
+    std.debug.assert(storages.len == contains_data.len);
+    const errors = try allocator.alloc(?anyerror, storages.len);
+    defer allocator.free(errors);
+    @memset(errors, null);
+
+    var group: std.Io.Group = .init;
+    defer group.cancel(io);
+    for (storages, contains_data, errors) |*storage, *result, *scan_error| {
+        group.concurrent(io, scanStorage, .{ storage, result, scan_error, io, allocator }) catch {
+            scanStorage(storage, result, scan_error, io, allocator);
+            if (scan_error.* != null) break;
+        };
+    }
+    try group.await(io);
+    for (errors) |scan_error| if (scan_error) |err| return err;
+}
+
+fn scanStorage(
+    storage: *storage_api.Storage,
+    result: *bool,
+    scan_error: *?anyerror,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+) void {
+    result.* = linux_block.hasData(storage, io, allocator) catch |err| {
+        scan_error.* = err;
+        return;
     };
 }
 
