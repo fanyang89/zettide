@@ -1,0 +1,250 @@
+---
+- name: Initialize scheduled Pool vhost configuration | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_scheduled_pool_vhost_config: "{{ zettide_raw_device | default({}) }}"
+
+- name: Validate primary scheduled Pool disk configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_scheduled_pool_vhost_config is mapping
+      - zettide_scheduled_pool_vhost_config.path is defined
+      - zettide_scheduled_pool_vhost_config.serial is defined
+      - zettide_scheduled_pool_vhost_config.path is string
+      - zettide_scheduled_pool_vhost_config.serial is string
+      - zettide_scheduled_pool_vhost_config.path is match('^[^:\x00-\x1f\x7f]+$')
+      - zettide_scheduled_pool_vhost_config.serial is match('^[^:\x00-\x1f\x7f]+$')
+      - >-
+        zettide_scheduled_pool_vhost_config.secondary is not defined or
+        zettide_scheduled_pool_vhost_config.secondary is mapping
+      - ansible_play_hosts_all | length == 1
+      - zettide_vhost_scheduled_pool_read_policy in ['first_available', 'quorum']
+      - zettide_vhost_scheduled_pool_reactor_count | string is match('^[0-9]+$')
+      - zettide_vhost_scheduled_pool_reactor_count | int >= 1
+      - zettide_vhost_scheduled_pool_reactor_count | int <= 16
+      - zettide_vhost_scheduled_pool_guest_vcpus | string is match('^[0-9]+$')
+      - zettide_vhost_scheduled_pool_guest_vcpus | int >= 1
+      - zettide_vhost_scheduled_pool_queues | string is match('^[0-9]+$')
+      - zettide_vhost_scheduled_pool_queues | int >= 1
+      - zettide_vhost_scheduled_pool_queues | int <= zettide_vhost_scheduled_pool_guest_vcpus | int
+      - >-
+        zettide_vhost_scheduled_pool_fio_case in
+        ['', 'seq-read-1m-qd32-j1', 'seq-read-128k-qd1-j1',
+        'randread-4k-qd1-j1', 'randread-4k-qd32-j1', 'randread-4k-qd32-j4',
+        'randread-4k-qd32-j16']
+      - >-
+        ansible_facts.processor_vcpus is not defined or
+        zettide_vhost_scheduled_pool_reactor_count | int <= ansible_facts.processor_vcpus | int
+    fail_msg: >-
+      Configure zettide_raw_device.path and serial, with an optional secondary
+      path and serial mapping.
+
+- name: Detect secondary scheduled Pool disk | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_scheduled_pool_vhost_secondary_enabled: >-
+      {{ zettide_scheduled_pool_vhost_config.secondary is defined }}
+
+- name: Validate secondary scheduled Pool disk configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_scheduled_pool_vhost_config.secondary.path is defined
+      - zettide_scheduled_pool_vhost_config.secondary.serial is defined
+      - zettide_scheduled_pool_vhost_config.secondary.path is string
+      - zettide_scheduled_pool_vhost_config.secondary.serial is string
+      - zettide_scheduled_pool_vhost_config.secondary.path is match('^[^:\x00-\x1f\x7f]+$')
+      - zettide_scheduled_pool_vhost_config.secondary.serial is match('^[^:\x00-\x1f\x7f]+$')
+      - >-
+        zettide_scheduled_pool_vhost_config.secondary.path !=
+        zettide_scheduled_pool_vhost_config.path
+      - >-
+        zettide_scheduled_pool_vhost_config.secondary.serial !=
+        zettide_scheduled_pool_vhost_config.serial
+    fail_msg: "Configure secondary.path and secondary.serial as a distinct device."
+  when: zettide_scheduled_pool_vhost_secondary_enabled
+
+- name: Normalize scheduled Pool disk arguments | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_scheduled_pool_vhost_device_args: >-
+      {{ [zettide_scheduled_pool_vhost_config.path,
+          zettide_scheduled_pool_vhost_config.serial] +
+         ([zettide_scheduled_pool_vhost_config.secondary.path,
+           zettide_scheduled_pool_vhost_config.secondary.serial]
+          if zettide_scheduled_pool_vhost_secondary_enabled else []) }}
+    zettide_scheduled_pool_vhost_expected_confirmation: >-
+      {{ 'DESTROY:' ~ zettide_scheduled_pool_vhost_config.path ~ ':' ~
+         zettide_scheduled_pool_vhost_config.serial ~
+         (':' ~ zettide_scheduled_pool_vhost_config.secondary.path ~ ':' ~
+          zettide_scheduled_pool_vhost_config.secondary.serial
+          if zettide_scheduled_pool_vhost_secondary_enabled else '') }}
+
+- name: Require exact scheduled Pool destruction confirmation | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        zettide_scheduled_pool_nvmf_fio_confirm | default('') ==
+        zettide_scheduled_pool_vhost_expected_confirmation
+    fail_msg: >-
+      Pass -e zettide_scheduled_pool_nvmf_fio_confirm={{
+      zettide_scheduled_pool_vhost_expected_confirmation }}.
+
+- name: Validate optional scheduled Pool reuse identity | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        zettide_nvmf_scheduled_pool_expected_pool_id | default('') == '' or
+        zettide_nvmf_scheduled_pool_expected_pool_id is match('^[0-9a-f]{32}$')
+    fail_msg: "Expected scheduled Pool ID must be 32 lowercase hexadecimal characters."
+
+- name: Create scheduled Pool vhost result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/vhost-scheduled-pool-fio"
+    state: directory
+    mode: "0755"
+
+- name: Download the verified Fedora guest image | {{ zettide_optimize }}
+  ansible.builtin.get_url:
+    url: "{{ zettide_vhost_scheduled_pool_image_url }}"
+    dest: "{{ zettide_remote_workspace.path }}/fedora-cloud-base.qcow2"
+    checksum: "sha256:{{ zettide_vhost_scheduled_pool_image_sha256 }}"
+    mode: "0644"
+
+- name: Extract SPDK source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
+    dest: "{{ zettide_remote_workspace.path }}"
+
+- name: Configure shared SPDK without RDMA | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - ./configure
+      - --with-shared
+      - --without-rdma
+      - --without-uring
+      - --disable-tests
+      - --disable-unit-tests
+      - --disable-examples
+      - --disable-apps
+      - --without-nvme-cuse
+      - --without-fsdev
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}/spdk"
+  changed_when: true
+
+- name: Build SPDK | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv: [make, "-j{{ ansible_facts.processor_vcpus | default(2) }}"]
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}/spdk"
+  changed_when: true
+
+- name: Build scheduled Pool target library | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Dspdk=true
+      - -Doptimize=ReleaseSafe
+      - build-nvmf-pool-data-benchmark
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
+  changed_when: true
+
+- name: Build Zettide CLI | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize=ReleaseSafe
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: true
+
+- name: Link scheduled Pool vhost target | {{ zettide_optimize }}
+  ansible.builtin.shell:
+    cmd: >-
+      cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
+      -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_provider.c
+      src/spdk/nvmf_tcp_export.c src/spdk/vhost_blk_controller.c
+      test/spdk_runtime.c test/spdk_pool_data_nvmf_benchmark_main.c
+      zig-out/lib/libzettide-spdk-pool-data-nvmf-benchmark.a
+      -o test/spdk-pool-data-vhost-benchmark -pthread -lstdc++ -Wl,--no-as-needed
+      $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
+      spdk_event spdk_event_bdev spdk_vhost spdk_event_vhost_blk spdk_event_nvmf
+      spdk_bdev_modules spdk_env_dpdk spdk_nvmf spdk_sock_modules spdk_syslibs)
+      -Wl,--as-needed
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: true
+
+- name: Discover SPDK shared library paths | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - pkg-config
+      - --libs-only-L
+      - spdk_event
+      - spdk_event_bdev
+      - spdk_vhost
+      - spdk_event_vhost_blk
+      - spdk_event_nvmf
+      - spdk_bdev_modules
+      - spdk_env_dpdk
+      - spdk_nvmf
+      - spdk_sock_modules
+      - spdk_syslibs
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
+  changed_when: false
+  register: zettide_scheduled_pool_vhost_spdk_library_flags
+
+- name: Run destructive scheduled Pool vhost lifecycle | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv: >-
+      {{ ['flock', '--nonblock', '/var/lock/zettide-raw-device.lock',
+          'bash', 'test/scheduled-pool-nvmf-fio.sh',
+          zettide_remote_workspace.path ~ '/zig-out/bin/zettide'] +
+         zettide_scheduled_pool_vhost_device_args }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    LD_LIBRARY_PATH: >-
+      {{ zettide_scheduled_pool_vhost_spdk_library_flags.stdout.split()
+         | map('regex_replace', '^-L', '') | join(':') }}
+    ZETTIDE_SCHEDULED_POOL_NVMF_FIO_CONFIRM: "{{ zettide_scheduled_pool_nvmf_fio_confirm }}"
+    ZETTIDE_SCHEDULED_POOL_NVMF_TARGET: "{{ zettide_remote_workspace.path }}/test/spdk-pool-data-vhost-benchmark"
+    ZETTIDE_SCHEDULED_POOL_NVMF_READ_POLICY: "{{ zettide_vhost_scheduled_pool_read_policy }}"
+    ZETTIDE_SCHEDULED_POOL_NVMF_EXPECTED_POOL_ID: "{{ zettide_nvmf_scheduled_pool_expected_pool_id | default('') }}"
+    ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER: test/spdk-vhost-user-blk-fio.sh
+    ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME: vhost
+    ZETTIDE_SCHEDULED_POOL_PROFILE: vhost-scheduled-pool-fio
+    ZETTIDE_NVMF_REACTOR_COUNT: "{{ zettide_vhost_scheduled_pool_reactor_count }}"
+    ZETTIDE_VHOST_BASE_IMAGE: "{{ zettide_remote_workspace.path }}/fedora-cloud-base.qcow2"
+    ZETTIDE_VHOST_GUEST_VCPUS: "{{ zettide_vhost_scheduled_pool_guest_vcpus }}"
+    ZETTIDE_VHOST_QUEUES: "{{ zettide_vhost_scheduled_pool_queues }}"
+    ZETTIDE_VHOST_FIO_SIZE: "{{ zettide_vhost_scheduled_pool_fio_size }}"
+    ZETTIDE_VHOST_FIO_CASE: "{{ zettide_vhost_scheduled_pool_fio_case }}"
+    ZETTIDE_VHOST_FIO_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
+    ZETTIDE_VHOST_FIO_RAMP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
+    ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/vhost-scheduled-pool-fio"
+  async: "{{ zettide_raw_timeout }}"
+  poll: 15
+  changed_when: true
+  failed_when: false
+  register: zettide_scheduled_pool_vhost_result
+
+- name: Record scheduled Pool vhost lifecycle | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_scheduled_pool_vhost_result.rc | default(1) }}
+      {{ zettide_scheduled_pool_vhost_result.stdout | default('') }}
+      {{ zettide_scheduled_pool_vhost_result.stderr | default(zettide_scheduled_pool_vhost_result.msg | default('')) }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/vhost-scheduled-pool-fio/ansible.log"
+    mode: "0644"
+
+- name: Require scheduled Pool vhost lifecycle | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_scheduled_pool_vhost_result.rc | default(1) == 0
+    fail_msg: "Scheduled Pool vhost fio failed; inspect the fetched logs."

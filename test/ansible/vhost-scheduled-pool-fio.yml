@@ -1,0 +1,7 @@
+---
+- name: Benchmark scheduled Pool data through vhost-user-blk
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: vhost-scheduled-pool-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe
