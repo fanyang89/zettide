@@ -57,6 +57,7 @@ pub const AcquiredPlan = struct {
     }
 };
 
+/// The allocator must be thread-safe.
 pub fn inspect(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -69,13 +70,38 @@ pub fn inspect(
     errdefer allocator.free(devices);
     const contains_data = try allocator.alloc(bool, paths.len);
     errdefer allocator.free(contains_data);
+    const storages = try allocator.alloc(storage_api.Storage, paths.len);
+    var acquired: usize = 0;
+    var storages_owned = true;
+    errdefer if (storages_owned) {
+        for (storages[0..acquired]) |*storage| storage.close(io) catch {};
+        allocator.free(storages);
+    };
+
     for (paths, 0..) |path, index| {
-        devices[index] = try linux_block.inspect(io, allocator, path);
+        var opened = try linux_block.openStorage(io, allocator, path, false);
+        errdefer opened.storage.close(io) catch {};
+        devices[index] = opened.info;
         for (devices[0..index]) |previous| {
             if (linux_block.DeviceId.eql(devices[index].id, previous.id)) return error.DuplicateDevice;
         }
-        contains_data[index] = try linux_block.pathHasData(io, allocator, path);
+        storages[index] = opened.storage;
+        acquired += 1;
     }
+    var scan_error: ?anyerror = null;
+    scanStorages(storages, contains_data, io, allocator) catch |err| {
+        scan_error = err;
+    };
+
+    var close_error: ?anyerror = null;
+    for (storages) |*storage| storage.close(io) catch |err| if (close_error == null) {
+        close_error = err;
+    };
+    allocator.free(storages);
+    storages_owned = false;
+    if (scan_error) |err| return err;
+    if (close_error) |err| return err;
+
     const plan: Plan = .{
         .allocator = allocator,
         .paths = paths,
