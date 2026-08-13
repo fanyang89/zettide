@@ -674,6 +674,23 @@ inspect_scheduled_pool() {
     done
 }
 
+plan_scheduled_pool() {
+    local loop label=synthetic-single-device-scheduled-nvmf
+    local -a device_args=()
+    if ((physical_device_count == 2)); then
+        label=synthetic-dual-device-scheduled-nvmf
+    fi
+    for loop in "${loops[@]}"; do device_args+=(--device "$loop"); done
+    validate_all_loop_members || return 1
+    check_all_frozen_identities || return 1
+    "$cli" pool plan-create "${device_args[@]}" --profile scheduled-replicated \
+        --name-profile portable-v1 --label "$label" >"$log_dir/scheduled-plan.log" || return 1
+    grep -q '^Profile: scheduled-replicated$' "$log_dir/scheduled-plan.log" || return 1
+    grep -q "^Devices: $member_count$" "$log_dir/scheduled-plan.log" || return 1
+    grep -q '^Data mode: blob$' "$log_dir/scheduled-plan.log" || return 1
+    grep -q '^Plan: ready$' "$log_dir/scheduled-plan.log" || return 1
+}
+
 create_scheduled_pool() {
     local token loop label=synthetic-single-device-scheduled-nvmf
     local -a device_args=()
@@ -683,12 +700,7 @@ create_scheduled_pool() {
     for loop in "${loops[@]}"; do device_args+=(--device "$loop"); done
     validate_all_loop_members
     check_all_frozen_identities
-    "$cli" pool plan-create "${device_args[@]}" --profile scheduled-replicated \
-        --name-profile portable-v1 --label "$label" >"$log_dir/scheduled-plan.log"
-    grep -q '^Profile: scheduled-replicated$' "$log_dir/scheduled-plan.log"
-    grep -q "^Devices: $member_count$" "$log_dir/scheduled-plan.log"
-    grep -q '^Data mode: blob$' "$log_dir/scheduled-plan.log"
-    grep -q '^Plan: ready$' "$log_dir/scheduled-plan.log"
+    plan_scheduled_pool
     token=$(grep '^Confirm token: ' "$log_dir/scheduled-plan.log")
     token=${token#Confirm token: }
     [[ $token =~ ^[0-9a-f]{64}$ ]]
@@ -728,11 +740,16 @@ attach_slices
 validate_all_loop_members
 check_all_frozen_identities
 reuse_pool=false
+ready_to_create=false
 if ((physical_device_count == 2)); then
     if inspect_scheduled_pool "$log_dir/scheduled-inspect-reuse.log"; then
         record_event "pool-reuse-rejected reason=dual-device-slot-geometry-unverifiable physical_devices=2 members=6"
     else
         record_event "pool-reuse-rejected reason=dual-device-reuse-disabled-inspect-failed physical_devices=2 members=6"
+    fi
+    if plan_scheduled_pool; then
+        ready_to_create=true
+        record_event "pool-create-ready reason=devices-already-empty physical_devices=2 members=6"
     fi
 elif inspect_scheduled_pool "$log_dir/scheduled-inspect-reuse.log"; then
     reuse_pool=true
@@ -740,6 +757,9 @@ fi
 
 if [[ $reuse_pool == true ]]; then
     record_event "pool-reused pool=$pool_id profile=scheduled-replicated physical_devices=1 members=3"
+elif [[ $ready_to_create == true ]]; then
+    create_scheduled_pool
+    record_event "pool-created pool=$pool_id profile=scheduled-replicated physical_devices=$physical_device_count members=$member_count"
 else
     if ((physical_device_count == 1)); then
         record_event "pool-reuse-rejected reason=inspect-or-geometry-mismatch physical_devices=1 members=3"
