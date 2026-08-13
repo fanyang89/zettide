@@ -381,7 +381,7 @@ read_loop_identity() {
     if ! read_backing=$(losetup --noheadings --raw --output BACK-FILE "$loop") ||
         ! read_offset=$(losetup --noheadings --raw --output OFFSET "$loop") ||
         ! read_limit=$(losetup --noheadings --raw --output SIZELIMIT "$loop") ||
-        ! read_id=$(lsblk --nodeps --noheadings --output MAJ:MIN "$loop"); then
+        ! read_id=$(lsblk --nodeps --noheadings --output MAJ:MIN "$loop" | tr -d '[:space:]'); then
         return 1
     fi
     if ! canonical_backing=$(readlink -f -- "$read_backing"); then
