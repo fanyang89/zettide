@@ -3,18 +3,20 @@
   ansible.builtin.set_fact:
     zettide_scheduled_pool_nvmf_config: "{{ zettide_raw_device | default({}) }}"
 
-- name: Require dedicated scheduled Pool disk configuration | {{ zettide_optimize }}
+- name: Validate primary scheduled Pool disk configuration | {{ zettide_optimize }}
   ansible.builtin.assert:
     that:
+      - zettide_scheduled_pool_nvmf_config is mapping
       - zettide_scheduled_pool_nvmf_config.path is defined
       - zettide_scheduled_pool_nvmf_config.serial is defined
-      - zettide_scheduled_pool_nvmf_config.path | length > 0
-      - zettide_scheduled_pool_nvmf_config.serial | length > 0
-      - ansible_play_hosts_all | length == 1
+      - zettide_scheduled_pool_nvmf_config.path is string
+      - zettide_scheduled_pool_nvmf_config.serial is string
+      - zettide_scheduled_pool_nvmf_config.path is match('^[^:\x00-\x1f\x7f]+$')
+      - zettide_scheduled_pool_nvmf_config.serial is match('^[^:\x00-\x1f\x7f]+$')
       - >-
-        zettide_scheduled_pool_nvmf_fio_confirm | default('') ==
-        'DESTROY:' ~ zettide_scheduled_pool_nvmf_config.path ~ ':' ~
-        zettide_scheduled_pool_nvmf_config.serial
+        zettide_scheduled_pool_nvmf_config.secondary is not defined or
+        zettide_scheduled_pool_nvmf_config.secondary is mapping
+      - ansible_play_hosts_all | length == 1
       - zettide_nvmf_scheduled_pool_read_policy in ['first_available', 'quorum']
       - zettide_nvmf_scheduled_pool_reactor_count | string is match('^[0-9]+$')
       - zettide_nvmf_scheduled_pool_reactor_count | int >= 1
@@ -27,8 +29,56 @@
         ansible_facts.processor_vcpus is not defined or
         zettide_nvmf_scheduled_pool_reactor_count | int <= ansible_facts.processor_vcpus | int
     fail_msg: >-
-      Configure raw device path and serial, then pass
-      -e zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:<path>:<serial>.
+      Configure zettide_raw_device.path and serial, with an optional secondary
+      path and serial mapping.
+
+- name: Detect secondary scheduled Pool disk | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_scheduled_pool_nvmf_secondary_enabled: >-
+      {{ zettide_scheduled_pool_nvmf_config.secondary is defined }}
+
+- name: Validate secondary scheduled Pool disk configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_scheduled_pool_nvmf_config.secondary.path is defined
+      - zettide_scheduled_pool_nvmf_config.secondary.serial is defined
+      - zettide_scheduled_pool_nvmf_config.secondary.path is string
+      - zettide_scheduled_pool_nvmf_config.secondary.serial is string
+      - zettide_scheduled_pool_nvmf_config.secondary.path is match('^[^:\x00-\x1f\x7f]+$')
+      - zettide_scheduled_pool_nvmf_config.secondary.serial is match('^[^:\x00-\x1f\x7f]+$')
+      - >-
+        zettide_scheduled_pool_nvmf_config.secondary.path !=
+        zettide_scheduled_pool_nvmf_config.path
+      - >-
+        zettide_scheduled_pool_nvmf_config.secondary.serial !=
+        zettide_scheduled_pool_nvmf_config.serial
+    fail_msg: "Configure secondary.path and secondary.serial as a distinct device."
+  when: zettide_scheduled_pool_nvmf_secondary_enabled
+
+- name: Normalize scheduled Pool disk arguments | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_scheduled_pool_nvmf_device_args: >-
+      {{ [zettide_scheduled_pool_nvmf_config.path,
+          zettide_scheduled_pool_nvmf_config.serial] +
+         ([zettide_scheduled_pool_nvmf_config.secondary.path,
+           zettide_scheduled_pool_nvmf_config.secondary.serial]
+          if zettide_scheduled_pool_nvmf_secondary_enabled else []) }}
+    zettide_scheduled_pool_nvmf_expected_confirmation: >-
+      {{ 'DESTROY:' ~ zettide_scheduled_pool_nvmf_config.path ~ ':' ~
+         zettide_scheduled_pool_nvmf_config.serial ~
+         (':' ~ zettide_scheduled_pool_nvmf_config.secondary.path ~ ':' ~
+          zettide_scheduled_pool_nvmf_config.secondary.serial
+          if zettide_scheduled_pool_nvmf_secondary_enabled else '') }}
+
+- name: Require exact scheduled Pool destruction confirmation | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        zettide_scheduled_pool_nvmf_fio_confirm | default('') ==
+        zettide_scheduled_pool_nvmf_expected_confirmation
+    fail_msg: >-
+      Pass -e zettide_scheduled_pool_nvmf_fio_confirm={{
+      zettide_scheduled_pool_nvmf_expected_confirmation }}.
 
 - name: Create scheduled Pool NVMe-oF result directory | {{ zettide_optimize }}
   ansible.builtin.file:
@@ -116,15 +166,11 @@
 
 - name: Run destructive scheduled Pool NVMe-oF lifecycle | {{ zettide_optimize }}
   ansible.builtin.command:
-    argv:
-      - flock
-      - --nonblock
-      - /var/lock/zettide-raw-device.lock
-      - bash
-      - test/scheduled-pool-nvmf-fio.sh
-      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
-      - "{{ zettide_scheduled_pool_nvmf_config.path }}"
-      - "{{ zettide_scheduled_pool_nvmf_config.serial }}"
+    argv: >-
+      {{ ['flock', '--nonblock', '/var/lock/zettide-raw-device.lock',
+          'bash', 'test/scheduled-pool-nvmf-fio.sh',
+          zettide_remote_workspace.path ~ '/zig-out/bin/zettide'] +
+         zettide_scheduled_pool_nvmf_device_args }}
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
   environment:

@@ -1,0 +1,6 @@
+[submodule "vendor/grpc-lite"]
+	path = vendor/grpc-lite
+	url = https://github.com/fanyang89/grpc-lite.git
+[submodule "vendor/zettide-node-protocol"]
+	path = vendor/zettide-node-protocol
+	url = https://github.com/fanyang89/zettide-node-protocol.git
