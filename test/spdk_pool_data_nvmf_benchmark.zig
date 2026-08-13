@@ -42,8 +42,7 @@ const Worker = struct {
     };
 
     const Queued = struct {
-        slot: *Slot,
-        position: usize,
+        request: Request,
     };
 
     const ReadGroup = struct {
@@ -194,12 +193,10 @@ const Worker = struct {
         const position = self.dequeue_position;
         const slot = &self.slots[position % queue_capacity];
         if (slot.sequence.load(.acquire) != position + 1) return null;
+        const request = slot.request;
         self.dequeue_position = position + 1;
-        return .{ .slot = slot, .position = position };
-    }
-
-    fn release(queued: Queued) void {
-        queued.slot.sequence.store(queued.position + queue_capacity, .release);
+        slot.sequence.store(position + queue_capacity, .release);
+        return .{ .request = request };
     }
 
     fn next(self: *Worker) ?Queued {
@@ -218,7 +215,7 @@ const Worker = struct {
         var pending: ?Queued = null;
         while (pending orelse self.next()) |queued| {
             pending = null;
-            if (queued.slot.request.operation != c.ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
+            if (queued.request.operation != c.ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
                 groups.await(self.io) catch unreachable;
                 self.completeQueued(queued, 0);
                 continue;
@@ -227,10 +224,10 @@ const Worker = struct {
             var batch: ReadGroup = .{};
             batch.queued[0] = queued;
             batch.count = 1;
-            var total_bytes = queued.slot.request.length;
+            var total_bytes = queued.request.length;
             while (batch.count < max_batch_requests) {
                 const candidate = self.dequeue() orelse break;
-                const request = candidate.slot.request;
+                const request = candidate.request;
                 if (request.operation != c.ZETTIDE_SPDK_BDEV_PROVIDER_READ or
                     total_bytes + request.length > max_batch_bytes)
                 {
@@ -261,7 +258,7 @@ const Worker = struct {
         var reads: [max_batch_requests]zettide.v3.storage.Read = undefined;
         var results: [max_batch_requests]zettide.v3.storage.ReadResult = undefined;
         for (batch.queued[0..batch.count], reads[0..batch.count]) |queued, *read| {
-            const request = queued.slot.request;
+            const request = queued.request;
             read.* = .{
                 .buffer = if (request.length == 0)
                     @as([]u8, &.{})
@@ -278,7 +275,7 @@ const Worker = struct {
         for (batch.queued[0..batch.count], results[0..batch.count]) |queued, result| {
             const status = if (result.failure) |err|
                 errorStatus(err)
-            else if (result.amount != queued.slot.request.length)
+            else if (result.amount != queued.request.length)
                 -c.EIO
             else
                 0;
@@ -287,11 +284,9 @@ const Worker = struct {
     }
 
     fn completeQueued(self: *Worker, queued: Queued, status: c_int) void {
-        const request = queued.slot.request;
-        request.complete.?(request.complete_context, status);
+        queued.request.complete.?(queued.request.complete_context, status);
         _ = self.current_occupancy.fetchSub(1, .monotonic);
         _ = self.completed_requests.fetchAdd(1, .monotonic);
-        release(queued);
     }
 };
 
