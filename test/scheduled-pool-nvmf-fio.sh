@@ -23,6 +23,9 @@ target=${ZETTIDE_SCHEDULED_POOL_NVMF_TARGET:?ZETTIDE_SCHEDULED_POOL_NVMF_TARGET 
 read_policy=${ZETTIDE_SCHEDULED_POOL_NVMF_READ_POLICY:-first_available}
 expected_pool_id=${ZETTIDE_SCHEDULED_POOL_NVMF_EXPECTED_POOL_ID:-}
 log_dir=${ZETTIDE_TEST_LOG_DIR:?ZETTIDE_TEST_LOG_DIR is required}
+benchmark_driver=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER:-test/spdk-nvmf-fio.sh}
+benchmark_log_name=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME:-nvmf}
+lifecycle_profile=${ZETTIDE_SCHEDULED_POOL_PROFILE:-nvmf-scheduled-pool-rxe-fio}
 canonical_devices=()
 physical_ids=()
 frozen_serials=()
@@ -56,6 +59,14 @@ done
     echo "CLI or target is unavailable" >&2
     exit 2
 }
+if [[ $benchmark_driver != test/* || $benchmark_driver == *..* || ! -x $benchmark_driver ]]; then
+    echo "benchmark driver must be an executable repository-relative test/ path without .." >&2
+    exit 2
+fi
+if [[ ! $benchmark_log_name =~ ^[a-z0-9-]+$ ]]; then
+    echo "benchmark log name must contain only lowercase letters, digits, and hyphens" >&2
+    exit 2
+fi
 for physical_index in "${!physical_devices[@]}"; do
     if [[ -z ${physical_devices[$physical_index]} || -z ${expected_serials[$physical_index]} ]] ||
         contains_forbidden_identity_character "${physical_devices[$physical_index]}" ||
@@ -489,7 +500,7 @@ finish() {
     set +e
     detach_loops || cleanup_rc=1
     {
-        echo "profile=nvmf-scheduled-pool-rxe-fio"
+        echo "profile=$lifecycle_profile"
         echo "physical_devices=$physical_device_count"
         echo "members=$member_count"
         echo "device=${physical_devices[0]}"
@@ -805,7 +816,7 @@ fi
 
 validate_all_loop_members
 check_all_frozen_identities
-bash test/spdk-nvmf-fio.sh "$target" "$log_dir/nvmf-ready" "$log_dir/nvmf" \
+bash "$benchmark_driver" "$target" "$log_dir/$benchmark_log_name-ready" "$log_dir/$benchmark_log_name" \
     "$pool_id" "$read_policy" "${loops[@]}"
 test_succeeded=true
 record_event "benchmark-passed pool=$pool_id physical_devices=$physical_device_count members=$member_count"

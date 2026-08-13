@@ -9,6 +9,7 @@ const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
 const max_concurrent_groups = 8;
 const queue_capacity = 1024;
+const Frontend = enum { nvmf, vhost };
 const runtime_config =
     \\{"subsystems":[
     \\{"subsystem":"bdev","config":[
@@ -328,13 +329,27 @@ fn run(
         .quorum => .quorum,
     };
     const expected_pool_id = try args.parsePoolId(expected_pool_id_text);
-    const transport_text = if (c.getenv("ZETTIDE_NVMF_TRANSPORT")) |value| std.mem.span(value) else "tcp";
-    const transport: zettide.spdk_nvmf_tcp_export.Transport = if (std.mem.eql(u8, transport_text, "tcp"))
-        .tcp
-    else if (std.mem.eql(u8, transport_text, "rdma"))
-        .rdma
+    const frontend_text = if (c.getenv("ZETTIDE_POOL_DATA_FRONTEND")) |value| std.mem.span(value) else "nvmf";
+    const frontend: Frontend = if (std.mem.eql(u8, frontend_text, "nvmf"))
+        .nvmf
+    else if (std.mem.eql(u8, frontend_text, "vhost"))
+        .vhost
     else
-        return error.InvalidNvmfTransport;
+        return error.InvalidPoolDataFrontend;
+    const vhost_socket_directory: ?[]const u8 = if (frontend == .vhost)
+        if (c.getenv("ZETTIDE_VHOST_SOCKET_DIR")) |value| std.mem.span(value) else return error.MissingVhostSocketDirectory
+    else
+        null;
+    const transport_text = if (c.getenv("ZETTIDE_NVMF_TRANSPORT")) |value| std.mem.span(value) else "tcp";
+    const transport: ?zettide.spdk_nvmf_tcp_export.Transport = if (frontend == .nvmf)
+        if (std.mem.eql(u8, transport_text, "tcp"))
+            .tcp
+        else if (std.mem.eql(u8, transport_text, "rdma"))
+            .rdma
+        else
+            return error.InvalidNvmfTransport
+    else
+        null;
     const traddr = if (c.getenv("ZETTIDE_NVMF_TARGET_ADDR")) |value| std.mem.span(value) else "127.0.0.1";
     const trsvcid = if (c.getenv("ZETTIDE_NVMF_TARGET_PORT")) |value| std.mem.span(value) else "44220";
     const reactor_count = try args.parseReactorCount(if (c.getenv("ZETTIDE_NVMF_REACTOR_COUNT")) |value|
@@ -400,7 +415,11 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    std.debug.print("target-stage runtime start reactor_mask={s}\n", .{reactor_mask});
+    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s}\n", .{
+        frontend_text,
+        vhost_socket_directory orelse "none",
+        reactor_mask,
+    });
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_pool_data_nvmf_benchmark",
         .reactor_mask = reactor_mask,
@@ -409,6 +428,7 @@ fn run(
         .no_pci = true,
         .no_huge = true,
         .disable_cpumask_locks = true,
+        .vhost_socket_path = vhost_socket_directory,
     });
     defer runtime.deinit();
     const runtime_handle: *anyopaque = @ptrCast(runtime.handle orelse return error.RuntimeStopped);
@@ -417,44 +437,69 @@ fn run(
     const worker = try Worker.create(io, &pool_storage);
     defer worker.close();
     std.debug.print("target-stage worker ready\n", .{});
-    std.debug.print("target-stage provider start\n", .{});
-    var provider = try zettide.spdk_provider_bdev.ProviderBdev.create(
-        allocator,
-        runtime_handle,
-        .{
-            .context = worker,
-            .submit = submit_callback,
-            .block_count = pool_storage.capacity() / block_size,
-            .max_io_blocks = max_batch_bytes / block_size,
+    const backend: zettide.spdk_vhost_block_export.Backend = .{
+        .context = worker,
+        .submit = submit_callback,
+        .block_count = pool_storage.capacity() / block_size,
+        .max_io_blocks = max_batch_bytes / block_size,
+    };
+    switch (frontend) {
+        .nvmf => {
+            std.debug.print("target-stage provider start\n", .{});
+            var provider = try zettide.spdk_provider_bdev.ProviderBdev.create(
+                allocator,
+                runtime_handle,
+                backend,
+                "ZettideScheduledPoolData0",
+            );
+            defer provider.close() catch @panic("failed to unregister Pool data provider bdev");
+            std.debug.print("target-stage provider ready\n", .{});
+            std.debug.print("target-stage export start frontend=nvmf transport={s} traddr={s} trsvcid={s}\n", .{ transport_text, traddr, trsvcid });
+            var export_handle = try zettide.spdk_nvmf_tcp_export.NvmfTcpExport.create(
+                allocator,
+                runtime_handle,
+                .{
+                    .bdev_name = "ZettideScheduledPoolData0",
+                    .nqn = "nqn.2026-08.io.zettide:benchmark",
+                    .serial_number = "ZETTIDEBENCH000001",
+                    .model_number = "Zettide Scheduled Pool Data",
+                    .traddr = traddr,
+                    .trsvcid = trsvcid,
+                    .allow_any_host = true,
+                    .transport = transport.?,
+                },
+            );
+            defer export_handle.close() catch @panic("failed to close Pool data NVMe-oF export");
+            std.debug.print("target-stage export ready frontend=nvmf socket=none\n", .{});
+            try publishReadyAndWait(io, ready_path, &signals);
         },
-        "ZettideScheduledPoolData0",
-    );
-    defer provider.close() catch @panic("failed to unregister Pool data provider bdev");
-    std.debug.print("target-stage provider ready\n", .{});
-    std.debug.print("target-stage export start transport={s} traddr={s} trsvcid={s}\n", .{ transport_text, traddr, trsvcid });
-    var export_handle = try zettide.spdk_nvmf_tcp_export.NvmfTcpExport.create(
-        allocator,
-        runtime_handle,
-        .{
-            .bdev_name = "ZettideScheduledPoolData0",
-            .nqn = "nqn.2026-08.io.zettide:benchmark",
-            .serial_number = "ZETTIDEBENCH000001",
-            .model_number = "Zettide Scheduled Pool Data",
-            .traddr = traddr,
-            .trsvcid = trsvcid,
-            .allow_any_host = true,
-            .transport = transport,
+        .vhost => {
+            std.debug.print("target-stage export start frontend=vhost socket_directory={s}\n", .{vhost_socket_directory.?});
+            var export_handle = try zettide.spdk_vhost_block_export.VhostBlockExport.create(
+                allocator,
+                runtime_handle,
+                backend,
+                .{
+                    .bdev_name = "ZettideScheduledPoolData0",
+                    .controller_name = "zettide-scheduled-pool-data-0",
+                    .cpumask = reactor_mask,
+                    .readonly = true,
+                },
+            );
+            defer export_handle.close() catch @panic("failed to close Pool data vhost export");
+            std.debug.print("target-stage export ready frontend=vhost socket={s}\n", .{export_handle.socketPath()});
+            try publishReadyAndWait(io, ready_path, &signals);
         },
-    );
-    defer export_handle.close() catch @panic("failed to close Pool data NVMe-oF export");
-    std.debug.print("target-stage export ready\n", .{});
+    }
+}
 
+fn publishReadyAndWait(io: std.Io, ready_path: []const u8, signals: *const c.sigset_t) !void {
     std.debug.print("target-stage ready publish path={s}\n", .{ready_path});
     const ready = try std.Io.Dir.createFileAbsolute(io, ready_path, .{ .exclusive = true });
     ready.close(io);
     std.debug.print("target-stage ready published\n", .{});
     var signal_number: c_int = undefined;
-    if (c.sigwait(&signals, &signal_number) != 0) return error.SignalWaitFailed;
+    if (c.sigwait(signals, &signal_number) != 0) return error.SignalWaitFailed;
 }
 
 fn errorStatus(err: anyerror) c_int {
