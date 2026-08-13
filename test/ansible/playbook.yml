@@ -308,12 +308,14 @@
         - pciutils
         - qemu-img
         - qemu-system-x86-core
+        - sysstat
       Debian:
         - cloud-image-utils
         - openssh-client
         - pciutils
         - qemu-system-x86
         - qemu-utils
+        - sysstat
 
   pre_tasks:
     - name: Read the source revision

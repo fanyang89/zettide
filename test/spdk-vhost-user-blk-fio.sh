@@ -31,6 +31,7 @@ benchmark_completed=false
 work_dir=""
 socket_dir=""
 socket_path=""
+monitor_pids=()
 
 case $fio_case in
     "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16) ;;
@@ -76,7 +77,7 @@ else
     echo "qemu-system-x86_64 or qemu-kvm is required" >&2
     exit 2
 fi
-for command_name in qemu-img cloud-localds ssh scp ssh-keygen jq; do
+for command_name in qemu-img cloud-localds ssh scp ssh-keygen jq pidstat mpstat iostat; do
     command -v "$command_name" >/dev/null || {
         echo "$command_name is required" >&2
         exit 2
@@ -122,12 +123,37 @@ stop_process() {
     wait "$pid" 2>/dev/null || true
 }
 
+stop_monitors() {
+    local pid
+
+    for pid in "${monitor_pids[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    for pid in "${monitor_pids[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    monitor_pids=()
+}
+
+start_monitors() {
+    local name=$1
+
+    cp /proc/softirqs "$log_dir/host-softirqs-$name-before.txt"
+    pidstat -t -u -r -w -p "$target_pid,$qemu_pid" 1 >"$log_dir/host-pidstat-$name.log" &
+    monitor_pids+=("$!")
+    mpstat -P ALL 1 >"$log_dir/host-mpstat-$name.log" &
+    monitor_pids+=("$!")
+    iostat -dx -y 1 >"$log_dir/host-iostat-$name.log" &
+    monitor_pids+=("$!")
+}
+
 cleanup() {
     local result=$?
     local deadline
     trap - EXIT INT TERM
     set +e
 
+    stop_monitors
     if [[ -n $qemu_pid ]] && process_running "$qemu_pid"; then
         if [[ $guest_ready == true ]]; then
             ssh "${ssh_options[@]}" zettide@127.0.0.1 sudo poweroff >/dev/null 2>&1 || true
@@ -365,6 +391,7 @@ run_case() {
     local size=$6
     local job_file=$work_dir/fio.job
     local result=$log_dir/fio-$name.json
+    local status
 
     cat >"$job_file" <<EOF
 [global]
@@ -390,8 +417,15 @@ percentile_list=50:95:99:99.9
 [$name]
 EOF
     scp "${scp_options[@]}" "$job_file" zettide@127.0.0.1:/tmp/zettide-fio.job
+    start_monitors "$name"
+    set +e
     ssh "${ssh_options[@]}" zettide@127.0.0.1 \
         'sudo fio --eta=never --output-format=json /tmp/zettide-fio.job' >"$result"
+    status=$?
+    set -e
+    stop_monitors
+    cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
+    ((status == 0)) || return "$status"
     jq -e '.jobs | length > 0 and all(.error == 0)' "$result" >/dev/null
     jq -r '(.jobs[0].jobname) + " iops=" + (.jobs[0].read.iops|tostring) +
         " bw_bytes=" + (.jobs[0].read.bw_bytes|tostring) +
