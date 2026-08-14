@@ -246,6 +246,7 @@
         - automake
         - elfutils-libelf-devel
         - fio
+        - fuse3-devel
         - gcc
         - gcc-c++
         - jq
@@ -267,6 +268,7 @@
         - automake
         - build-essential
         - fio
+        - libfuse3-dev
         - jq
         - kmod
         - libaio-dev
