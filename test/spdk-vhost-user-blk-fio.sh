@@ -405,7 +405,6 @@ ioengine=io_uring
 iodepth=$depth
 numjobs=$jobs
 direct=1
-readonly=1
 invalidate=1
 group_reporting=1
 time_based=1
@@ -421,7 +420,7 @@ EOF
     start_monitors "$name"
     set +e
     ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-        'sudo fio --eta=never --output-format=json /tmp/zettide-fio.job' >"$result"
+        'sudo fio --readonly --eta=never --output-format=json /tmp/zettide-fio.job' >"$result"
     status=$?
     set -e
     stop_monitors
