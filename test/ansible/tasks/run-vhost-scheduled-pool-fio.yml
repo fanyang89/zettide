@@ -100,10 +100,16 @@
     state: directory
     mode: "0755"
 
+- name: Create the vhost image cache | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: /var/cache/zettide
+    state: directory
+    mode: "0755"
+
 - name: Download the verified Fedora guest image | {{ zettide_optimize }}
   ansible.builtin.get_url:
     url: "{{ zettide_vhost_scheduled_pool_image_url }}"
-    dest: "{{ zettide_remote_workspace.path }}/fedora-cloud-base.qcow2"
+    dest: /var/cache/zettide/fedora-cloud-base.qcow2
     checksum: "sha256:{{ zettide_vhost_scheduled_pool_image_sha256 }}"
     mode: "0644"
 
@@ -220,7 +226,7 @@
     ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME: vhost
     ZETTIDE_SCHEDULED_POOL_PROFILE: vhost-scheduled-pool-fio
     ZETTIDE_NVMF_REACTOR_COUNT: "{{ zettide_vhost_scheduled_pool_reactor_count }}"
-    ZETTIDE_VHOST_BASE_IMAGE: "{{ zettide_remote_workspace.path }}/fedora-cloud-base.qcow2"
+    ZETTIDE_VHOST_BASE_IMAGE: /var/cache/zettide/fedora-cloud-base.qcow2
     ZETTIDE_VHOST_GUEST_VCPUS: "{{ zettide_vhost_scheduled_pool_guest_vcpus }}"
     ZETTIDE_VHOST_QUEUES: "{{ zettide_vhost_scheduled_pool_queues }}"
     ZETTIDE_VHOST_FIO_SIZE: "{{ zettide_vhost_scheduled_pool_fio_size }}"
