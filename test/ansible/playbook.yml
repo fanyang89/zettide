@@ -250,6 +250,7 @@
         - gcc-c++
         - jq
         - kmod
+        - libaio-devel
         - libtool
         - libuuid-devel
         - make
@@ -268,6 +269,7 @@
         - fio
         - jq
         - kmod
+        - libaio-dev
         - libelf-dev
         - libtool
         - libnuma-dev
