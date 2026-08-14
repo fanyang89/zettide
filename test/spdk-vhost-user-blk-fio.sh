@@ -356,6 +356,7 @@ mapfile -t root_disks < <(lsblk --inverse -n -r -o KNAME,TYPE "$root_source" |
 }
 mapfile -t data_disks < <(lsblk -dn -r -o KNAME,TYPE | while read -r name type; do
     [[ $type == disk ]] || continue
+    [[ $name != zram* ]] || continue
     is_root=false
     for root_disk in "${root_disks[@]}"; do
         [[ $name == "$root_disk" ]] && is_root=true
