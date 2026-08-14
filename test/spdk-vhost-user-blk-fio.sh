@@ -244,13 +244,8 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - $public_key
-packages:
-  - fio
-  - jq
-  - pciutils
 runcmd:
-  - [sh, -c, "dnf config-manager setopt fedora.enabled=0 updates.enabled=0 || true"]
-  - [sh, -c, "install -o zettide -g zettide -m 0644 /dev/null /home/zettide/.zettide-fio-ready"]
+  - [sh, -c, "dnf config-manager setopt fedora.enabled=0 updates.enabled=0 && dnf install -y fio jq pciutils && install -o zettide -g zettide -m 0644 /dev/null /home/zettide/.zettide-fio-ready"]
 EOF
 cat >"$meta_data" <<'EOF'
 instance-id: zettide-vhost-fio
