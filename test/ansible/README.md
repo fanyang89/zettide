@@ -295,7 +295,7 @@ their exact identities and the existing Pool ID:
 ```sh
 uv run ansible-playbook test/ansible/vhost-scheduled-pool-fio.yml \
   --limit zettide-tier1 \
-  -e 'zettide_raw_device={"path":"/dev/nvme1n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}' \
+  -e '{"zettide_raw_device":{"path":"/dev/nvme1n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
   -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:/dev/nvme1n1:PHMB747600DE280CGN:/dev/nvme0n1:PHMB746600SS280CGN' \
   -e zettide_nvmf_scheduled_pool_expected_pool_id=0dc67e4cdded2d37fc13e49f5544ba37
 ```
@@ -316,7 +316,7 @@ least 256 free 2 MiB hugepages before running:
 sudo sysctl -w vm.nr_hugepages=256
 uv run ansible-playbook test/ansible/vhost-scheduled-pool-fio.yml \
   --limit zettide-tier1 \
-  -e 'zettide_raw_device={"path":"/dev/nvme2n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}' \
+  -e '{"zettide_raw_device":{"path":"/dev/nvme2n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
   -e zettide_vhost_scheduled_pool_storage_transport=spdk_nvme_pcie \
   -e '{"zettide_vhost_scheduled_pool_pcie_namespaces":["0000:07:00.0/1","0000:03:00.0/1"]}' \
   -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:spdk_nvme_pcie:/dev/nvme2n1:PHMB747600DE280CGN:0000:07:00.0/1:/dev/nvme0n1:PHMB746600SS280CGN:0000:03:00.0/1' \
