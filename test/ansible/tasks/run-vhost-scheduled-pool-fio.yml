@@ -28,6 +28,7 @@
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | string is match('^[0-9]+$')
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | int >= 1
       - zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') | string is match('^$|^[0-9]+$')
+      - zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') | string is match('^$|^[0-9]+$')
       - zettide_vhost_scheduled_pool_guest_vcpus | string is match('^[0-9]+$')
       - zettide_vhost_scheduled_pool_guest_vcpus | int >= 1
       - zettide_vhost_scheduled_pool_queues | string is match('^[0-9]+$')
@@ -239,6 +240,7 @@
     ZETTIDE_VHOST_PERF_CASE: "{{ zettide_vhost_scheduled_pool_perf_case | default('') }}"
     ZETTIDE_VHOST_PERF_FREQUENCY: "{{ zettide_vhost_scheduled_pool_perf_frequency | default(199) }}"
     ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE: "{{ zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') }}"
+    ZETTIDE_VHOST_VCPU_CPU_BASE: "{{ zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') }}"
     ZETTIDE_VHOST_BASE_IMAGE: /var/cache/zettide/fedora-cloud-base.qcow2
     ZETTIDE_VHOST_GUEST_VCPUS: "{{ zettide_vhost_scheduled_pool_guest_vcpus }}"
     ZETTIDE_VHOST_QUEUES: "{{ zettide_vhost_scheduled_pool_queues }}"

@@ -25,6 +25,7 @@ reactor_count=${ZETTIDE_NVMF_REACTOR_COUNT:-1}
 controller_count=${ZETTIDE_VHOST_CONTROLLER_COUNT:-$reactor_count}
 perf_case=${ZETTIDE_VHOST_PERF_CASE:-}
 perf_frequency=${ZETTIDE_VHOST_PERF_FREQUENCY:-199}
+vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
 target_pid=""
 qemu_pid=""
@@ -69,6 +70,7 @@ fi
 [[ $reactor_count =~ ^[1-9][0-9]*$ ]] || { echo "invalid reactor count: $reactor_count" >&2; exit 2; }
 [[ $controller_count =~ ^[1-9][0-9]*$ ]] || { echo "invalid vhost controller count: $controller_count" >&2; exit 2; }
 [[ $perf_frequency =~ ^[1-9][0-9]*$ ]] || { echo "invalid perf frequency: $perf_frequency" >&2; exit 2; }
+[[ -z $vcpu_cpu_base || $vcpu_cpu_base =~ ^[0-9]+$ ]] || { echo "invalid vCPU CPU base: $vcpu_cpu_base" >&2; exit 2; }
 if [[ -n $perf_case && $perf_case != "$fio_case" ]]; then
     echo "perf case must match the selected fio case" >&2
     exit 2
@@ -101,6 +103,16 @@ done
 if [[ -n $perf_case ]]; then
     command -v perf >/dev/null || {
         echo "perf is required when a perf case is selected" >&2
+        exit 2
+    }
+fi
+if [[ -n $vcpu_cpu_base ]]; then
+    command -v taskset >/dev/null || {
+        echo "taskset is required when vCPU affinity is selected" >&2
+        exit 2
+    }
+    ((vcpu_cpu_base + guest_vcpus <= $(nproc))) || {
+        echo "vCPU affinity exceeds the host CPU count" >&2
         exit 2
     }
 fi
@@ -361,6 +373,29 @@ done
     -no-reboot \
     >"$log_dir/qemu-serial.log" 2>&1 &
 qemu_pid=$!
+if [[ -n $vcpu_cpu_base ]]; then
+    : >"$log_dir/qemu-vcpu-affinity.txt"
+    for ((index = 0; index < guest_vcpus; index++)); do
+        vcpu_tid=""
+        for ((attempt = 0; attempt < 1000; attempt++)); do
+            for task_path in /proc/$qemu_pid/task/*; do
+                read -r task_name <"$task_path/comm" || continue
+                if [[ $task_name == "CPU $index/KVM" ]]; then
+                    vcpu_tid=${task_path##*/}
+                    break 2
+                fi
+            done
+            process_running "$qemu_pid" || break
+            sleep 0.01
+        done
+        [[ -n $vcpu_tid ]] || {
+            echo "failed to find QEMU vCPU thread $index" >&2
+            exit 1
+        }
+        host_cpu=$((vcpu_cpu_base + index))
+        taskset --cpu-list --pid "$host_cpu" "$vcpu_tid" >>"$log_dir/qemu-vcpu-affinity.txt"
+    done
+fi
 
 deadline=$((SECONDS + 180))
 while ((SECONDS < deadline)); do
