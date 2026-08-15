@@ -413,6 +413,9 @@ fn run(
     const threaded_concurrency = try args.parseThreadedConcurrency(
         if (c.getenv("ZETTIDE_POOL_DATA_THREADED_CONCURRENCY")) |value| std.mem.span(value) else null,
     );
+    const vhost_inline_batches = (try args.parseOptionalFlag(
+        if (c.getenv("ZETTIDE_VHOST_INLINE_BATCHES")) |value| std.mem.span(value) else null,
+    )) orelse (vhost_worker_count > 1);
     var window_specs_buffer: [zettide.v3.pool_member_set.max_member_count]args.WindowSpec = undefined;
     const window_specs = try args.parseWindowSpecs(
         if (c.getenv("ZETTIDE_POOL_DATA_MEMBER_WINDOWS")) |value| std.mem.span(value) else null,
@@ -511,12 +514,13 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
+    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
         frontend_text,
         vhost_socket_directory orelse "none",
         reactor_mask,
         vhost_controller_count,
         vhost_worker_count,
+        vhost_inline_batches,
         concurrent_group_count,
         @tagName(raw_storage_mode),
         sqpoll_cpu_base,
@@ -583,7 +587,7 @@ fn run(
                 workers[worker_count].close();
             };
             while (worker_count < vhost_worker_count) : (worker_count += 1)
-                workers[worker_count] = try Worker.create(io, &pool_storage, concurrent_group_count, vhost_worker_count > 1);
+                workers[worker_count] = try Worker.create(io, &pool_storage, concurrent_group_count, vhost_inline_batches);
             var exports: [args.max_vhost_controller_count]zettide.spdk_vhost_block_export.VhostBlockExport = undefined;
             var export_count: usize = 0;
             defer while (export_count > 0) {

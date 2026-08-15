@@ -80,6 +80,14 @@ pub fn parseThreadedConcurrency(text: ?[]const u8) !?usize {
     return count;
 }
 
+pub fn parseOptionalFlag(text: ?[]const u8) !?bool {
+    const value = text orelse return null;
+    if (value.len == 0) return null;
+    if (std.mem.eql(u8, value, "0")) return false;
+    if (std.mem.eql(u8, value, "1")) return true;
+    return error.InvalidFlag;
+}
+
 pub fn reactorMaskAt(mask: []const u8, index: usize, buffer: []u8) ![]const u8 {
     if (mask.len < 3 or mask[0] != '[' or mask[mask.len - 1] != ']')
         return error.InvalidReactorMask;
@@ -188,6 +196,14 @@ test "threaded concurrency is optional and bounded" {
     for ([_][]const u8{ "0", "257", "+1", "x" }) |value| {
         try std.testing.expectError(error.InvalidThreadedConcurrency, parseThreadedConcurrency(value));
     }
+}
+
+test "optional flag accepts only zero and one" {
+    try std.testing.expectEqual(@as(?bool, null), try parseOptionalFlag(null));
+    try std.testing.expectEqual(@as(?bool, null), try parseOptionalFlag(""));
+    try std.testing.expectEqual(@as(?bool, false), try parseOptionalFlag("0"));
+    try std.testing.expectEqual(@as(?bool, true), try parseOptionalFlag("1"));
+    try std.testing.expectError(error.InvalidFlag, parseOptionalFlag("true"));
 }
 
 test "reactor mask selects one core" {
