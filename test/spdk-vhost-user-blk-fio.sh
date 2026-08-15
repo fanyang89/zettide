@@ -361,7 +361,7 @@ qemu_vhost_args=()
 for ((index = 0; index < controller_count; index++)); do
     qemu_vhost_args+=(
         -chardev "socket,id=vhost-char-$index,path=${socket_paths[index]}"
-        -device "vhost-user-blk-pci,chardev=vhost-char-$index,num-queues=$queues_per_controller,queue-size=256,packed=on"
+        -device "vhost-user-blk-pci,chardev=vhost-char-$index,num-queues=$queues_per_controller,queue-size=256"
     )
 done
 
