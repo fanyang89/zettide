@@ -6,11 +6,6 @@ pub const max_vhost_controller_count = 4;
 pub const default_concurrent_group_count = 8;
 pub const max_concurrent_group_count = 64;
 
-pub const IoBackend = enum {
-    threaded,
-    uring,
-};
-
 pub const WindowSpec = struct {
     device_index: usize,
     offset: u64,
@@ -69,11 +64,12 @@ pub fn parseOptionalCpuBase(text: ?[]const u8) !?u32 {
     return parseDecimal(u32, value) catch error.InvalidCpuBase;
 }
 
-pub fn parseIoBackend(text: ?[]const u8) !IoBackend {
-    const value = text orelse return .threaded;
-    if (std.mem.eql(u8, value, "threaded")) return .threaded;
-    if (std.mem.eql(u8, value, "uring")) return .uring;
-    return error.InvalidIoBackend;
+pub fn parseThreadedConcurrency(text: ?[]const u8) !?usize {
+    const value = text orelse return null;
+    if (value.len == 0) return null;
+    const count = parseDecimal(usize, value) catch return error.InvalidThreadedConcurrency;
+    if (count == 0 or count > 256) return error.InvalidThreadedConcurrency;
+    return count;
 }
 
 pub fn reactorMaskAt(mask: []const u8, index: usize, buffer: []u8) ![]const u8 {
@@ -169,11 +165,13 @@ test "optional CPU base accepts strict decimal values" {
     }
 }
 
-test "IO backend defaults to threaded and stays strict" {
-    try std.testing.expectEqual(IoBackend.threaded, try parseIoBackend(null));
-    try std.testing.expectEqual(IoBackend.threaded, try parseIoBackend("threaded"));
-    try std.testing.expectEqual(IoBackend.uring, try parseIoBackend("uring"));
-    try std.testing.expectError(error.InvalidIoBackend, parseIoBackend("io_uring"));
+test "threaded concurrency is optional and bounded" {
+    try std.testing.expectEqual(@as(?usize, null), try parseThreadedConcurrency(null));
+    try std.testing.expectEqual(@as(?usize, null), try parseThreadedConcurrency(""));
+    try std.testing.expectEqual(@as(?usize, 16), try parseThreadedConcurrency("16"));
+    for ([_][]const u8{ "0", "257", "+1", "x" }) |value| {
+        try std.testing.expectError(error.InvalidThreadedConcurrency, parseThreadedConcurrency(value));
+    }
 }
 
 test "reactor mask selects one core" {
