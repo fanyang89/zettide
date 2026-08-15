@@ -151,6 +151,20 @@
     chdir: "{{ zettide_remote_workspace.path }}/spdk"
   changed_when: true
 
+- name: Patch Zig 0.16 io_uring directory-open error mapping | {{ zettide_optimize }}
+  ansible.builtin.lineinfile:
+    path: /usr/lib/zig/std/Io/Uring.zig
+    insertafter: '^            error\.OperationUnsupported => return errnoBug\(\.OPNOTSUPP\), // No TMPFILE, no locks\.$'
+    line: '            error.ReadOnlyFileSystem => return errnoBug(.ROFS), // Opening read-only cannot hit ROFS.'
+  when: zettide_vhost_scheduled_pool_io_backend | default('threaded') == 'uring'
+
+- name: Patch Zig 0.16 io_uring realpath error mapping | {{ zettide_optimize }}
+  ansible.builtin.lineinfile:
+    path: /usr/lib/zig/std/Io/Uring.zig
+    insertafter: '^        error\.OperationUnsupported => return errnoBug\(\.OPNOTSUPP\), // Not asking for locks\.$'
+    line: '        error.ReadOnlyFileSystem => return errnoBug(.ROFS), // O_PATH cannot modify the filesystem.'
+  when: zettide_vhost_scheduled_pool_io_backend | default('threaded') == 'uring'
+
 - name: Build scheduled Pool target library | {{ zettide_optimize }}
   ansible.builtin.command:
     argv:
