@@ -2,7 +2,7 @@
     .name = .zettide,
     .version = "0.1.0",
     .fingerprint = 0x1e0d74edc2740ecd,
-    .minimum_zig_version = "0.17.0-dev.1640+2597da025",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .crc32c = .{
             .url = "https://codeload.github.com/google/crc32c/tar.gz/2bbb3be42e20a0e6c0f7b39dc07dc863d9ffbc07",
