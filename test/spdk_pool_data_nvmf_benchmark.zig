@@ -534,6 +534,8 @@ fn run(
             try publishReadyAndWait(io, ready_path, &signals);
         },
         .vhost => {
+            const worker = try Worker.create(io, &pool_storage, concurrent_group_count);
+            defer worker.close();
             var exports: [args.max_vhost_controller_count]zettide.spdk_vhost_block_export.VhostBlockExport = undefined;
             var export_count: usize = 0;
             defer while (export_count > 0) {
@@ -541,8 +543,6 @@ fn run(
                 closeVhostExport(io, &exports[export_count]);
             };
 
-            const worker = try Worker.create(io, &pool_storage, concurrent_group_count);
-            defer worker.close();
             const backend: zettide.spdk_vhost_block_export.Backend = .{
                 .context = worker,
                 .submit = submit_callback,
