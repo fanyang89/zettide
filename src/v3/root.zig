@@ -35,6 +35,7 @@ pub const pool_topology = @import("pool_topology.zig");
 pub const replica_endpoint = @import("replica_endpoint.zig");
 pub const replicated_journal = @import("replicated_journal.zig");
 pub const storage = @import("storage.zig");
+pub const storage_window = @import("storage_window.zig");
 pub const topology = @import("topology.zig");
 
 test {
@@ -75,5 +76,6 @@ test {
     _ = replica_endpoint;
     _ = replicated_journal;
     _ = storage;
+    _ = storage_window;
     _ = topology;
 }

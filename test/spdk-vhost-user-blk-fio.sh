@@ -286,6 +286,7 @@ scp_options=(
 
 rm -f "$ready_file"
 env ZETTIDE_POOL_DATA_FRONTEND=vhost \
+    ZETTIDE_POOL_DATA_MEMBER_WINDOWS="${ZETTIDE_POOL_DATA_MEMBER_WINDOWS:-}" \
     ZETTIDE_VHOST_SOCKET_DIR="$socket_dir" \
     ZETTIDE_VHOST_CONTROLLER_COUNT="$controller_count" \
     ZETTIDE_NVMF_REACTOR_COUNT="$reactor_count" \

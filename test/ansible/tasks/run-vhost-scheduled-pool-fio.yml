@@ -225,6 +225,7 @@
     ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER: test/spdk-vhost-user-blk-fio.sh
     ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME: vhost
     ZETTIDE_SCHEDULED_POOL_PROFILE: vhost-scheduled-pool-fio
+    ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS: "1"
     ZETTIDE_NVMF_REACTOR_COUNT: "{{ zettide_vhost_scheduled_pool_reactor_count }}"
     ZETTIDE_VHOST_BASE_IMAGE: /var/cache/zettide/fedora-cloud-base.qcow2
     ZETTIDE_VHOST_GUEST_VCPUS: "{{ zettide_vhost_scheduled_pool_guest_vcpus }}"

@@ -26,6 +26,7 @@ log_dir=${ZETTIDE_TEST_LOG_DIR:?ZETTIDE_TEST_LOG_DIR is required}
 benchmark_driver=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER:-test/spdk-nvmf-fio.sh}
 benchmark_log_name=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME:-nvmf}
 lifecycle_profile=${ZETTIDE_SCHEDULED_POOL_PROFILE:-nvmf-scheduled-pool-rxe-fio}
+raw_windows=${ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS:-0}
 canonical_devices=()
 physical_ids=()
 frozen_serials=()
@@ -50,6 +51,10 @@ contains_forbidden_identity_character() {
 [[ $EUID -eq 0 ]] || { echo "scheduled Pool NVMe-oF fio requires root" >&2; exit 2; }
 [[ $read_policy == first_available || $read_policy == quorum ]] || {
     echo "read policy must be first_available or quorum" >&2
+    exit 2
+}
+[[ $raw_windows == 0 || $raw_windows == 1 ]] || {
+    echo "raw window mode must be 0 or 1" >&2
     exit 2
 }
 for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink tr udevadm umount wipefs; do
@@ -816,7 +821,22 @@ fi
 
 validate_all_loop_members
 check_all_frozen_identities
+benchmark_devices=("${loops[@]}")
+unset ZETTIDE_POOL_DATA_MEMBER_WINDOWS
+if [[ $raw_windows == 1 ]]; then
+    raw_window_specs=""
+    for member_index in "${!member_physical_indexes[@]}"; do
+        [[ -z $raw_window_specs ]] || raw_window_specs+=,
+        raw_window_specs+="${member_physical_indexes[$member_index]}:${loop_offsets[$member_index]}:${loop_sizes[$member_index]}"
+    done
+    detach_loops
+    check_all_frozen_identities
+    require_all_idle
+    benchmark_devices=("${canonical_devices[@]}")
+    export ZETTIDE_POOL_DATA_MEMBER_WINDOWS=$raw_window_specs
+    record_event "raw-window-ready physical_devices=$physical_device_count members=$member_count specs=$raw_window_specs"
+fi
 bash "$benchmark_driver" "$target" "$log_dir/$benchmark_log_name-ready" "$log_dir/$benchmark_log_name" \
-    "$pool_id" "$read_policy" "${loops[@]}"
+    "$pool_id" "$read_policy" "${benchmark_devices[@]}"
 test_succeeded=true
 record_event "benchmark-passed pool=$pool_id physical_devices=$physical_device_count members=$member_count"

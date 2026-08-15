@@ -4,6 +4,12 @@ pub const ReadPolicy = enum { first_available, quorum };
 pub const max_reactor_count = 16;
 pub const max_vhost_controller_count = 4;
 
+pub const WindowSpec = struct {
+    device_index: usize,
+    offset: u64,
+    length: u64,
+};
+
 pub fn parseReadPolicy(raw: c_int) !ReadPolicy {
     return switch (raw) {
         0 => .first_available,
@@ -54,6 +60,37 @@ pub fn reactorMaskAt(mask: []const u8, index: usize, buffer: []u8) ![]const u8 {
     return error.InvalidReactorMask;
 }
 
+pub fn parseWindowSpecs(text: ?[]const u8, output: []WindowSpec) ![]const WindowSpec {
+    const value = text orelse return output[0..0];
+    if (value.len == 0) return output[0..0];
+    var specs = std.mem.splitScalar(u8, value, ',');
+    var count: usize = 0;
+    while (specs.next()) |spec| {
+        if (count == output.len) return error.TooManyStorageWindows;
+        var fields = std.mem.splitScalar(u8, spec, ':');
+        const device_index = try parseDecimal(usize, fields.next() orelse return error.InvalidStorageWindow);
+        const offset = try parseDecimal(u64, fields.next() orelse return error.InvalidStorageWindow);
+        const length = try parseDecimal(u64, fields.next() orelse return error.InvalidStorageWindow);
+        if (fields.next() != null or length == 0)
+            return error.InvalidStorageWindow;
+        _ = std.math.add(u64, offset, length) catch return error.InvalidStorageWindow;
+        output[count] = .{ .device_index = device_index, .offset = offset, .length = length };
+        count += 1;
+    }
+    return output[0..count];
+}
+
+fn parseDecimal(comptime T: type, text: []const u8) !T {
+    if (text.len == 0) return error.InvalidStorageWindow;
+    var result: T = 0;
+    for (text) |digit| {
+        if (digit < '0' or digit > '9') return error.InvalidStorageWindow;
+        result = std.math.mul(T, result, 10) catch return error.InvalidStorageWindow;
+        result = std.math.add(T, result, digit - '0') catch return error.InvalidStorageWindow;
+    }
+    return result;
+}
+
 test "read policy accepts only supported values" {
     try std.testing.expectEqual(ReadPolicy.first_available, try parseReadPolicy(0));
     try std.testing.expectEqual(ReadPolicy.quorum, try parseReadPolicy(1));
@@ -94,4 +131,16 @@ test "reactor mask selects one core" {
     try std.testing.expectError(error.InvalidReactorMask, reactorMaskAt("[0,2]", 2, &buffer));
     try std.testing.expectError(error.InvalidReactorMask, reactorMaskAt("0,2", 0, &buffer));
     try std.testing.expectError(error.InvalidReactorMask, reactorMaskAt("[0,,2]", 2, &buffer));
+}
+
+test "storage window specs parse strict device ranges" {
+    var output: [4]WindowSpec = undefined;
+    const specs = try parseWindowSpecs("0:0:1024,1:1024:2048", &output);
+    try std.testing.expectEqual(@as(usize, 2), specs.len);
+    try std.testing.expectEqualDeep(WindowSpec{ .device_index = 0, .offset = 0, .length = 1024 }, specs[0]);
+    try std.testing.expectEqualDeep(WindowSpec{ .device_index = 1, .offset = 1024, .length = 2048 }, specs[1]);
+    try std.testing.expectEqual(@as(usize, 0), (try parseWindowSpecs(null, &output)).len);
+    for ([_][]const u8{ "0:0", "0:0:0", "0:0:1:", "0::1", "+0:0:1", "0:18446744073709551615:2", "0:0:1," }) |value| {
+        try std.testing.expectError(error.InvalidStorageWindow, parseWindowSpecs(value, &output));
+    }
 }

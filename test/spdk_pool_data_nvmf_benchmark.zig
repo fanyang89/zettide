@@ -378,30 +378,62 @@ fn run(
             null, reactor_count)
     else
         0;
+    var window_specs_buffer: [zettide.v3.pool_member_set.max_member_count]args.WindowSpec = undefined;
+    const window_specs = try args.parseWindowSpecs(
+        if (c.getenv("ZETTIDE_POOL_DATA_MEMBER_WINDOWS")) |value| std.mem.span(value) else null,
+        &window_specs_buffer,
+    );
+    try validateWindowSpecs(window_specs, device_count);
 
     var threaded: std.Io.Threaded = .init(allocator, .{ .environ = .empty });
     defer threaded.deinit();
     const io = threaded.io();
-    var storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
-    var opened_count: usize = 0;
-    errdefer zettide.v3.storage.closeAll(storages[0..opened_count], io) catch {};
-    for (device_paths[0..device_count], storages[0..device_count]) |device_path_z, *storage| {
-        const opened = try zettide.v3.linux_block_device.openStorageOptions(
-            io,
-            allocator,
-            std.mem.span(device_path_z),
-            false,
-            true,
-        );
-        storage.* = opened.storage;
-        opened_count += 1;
+    var physical_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
+    var physical_count: usize = 0;
+    defer zettide.v3.storage.closeAll(physical_storages[0..physical_count], io) catch @panic("failed to close physical Pool storage");
+    var member_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
+    var member_count: usize = 0;
+    errdefer zettide.v3.storage.closeAll(member_storages[0..member_count], io) catch {};
+    if (window_specs.len == 0) {
+        for (device_paths[0..device_count], member_storages[0..device_count]) |device_path_z, *storage| {
+            const opened = try zettide.v3.linux_block_device.openStorageOptions(
+                io,
+                allocator,
+                std.mem.span(device_path_z),
+                false,
+                true,
+            );
+            storage.* = opened.storage;
+            member_count += 1;
+        }
+    } else {
+        for (device_paths[0..device_count], physical_storages[0..device_count]) |device_path_z, *storage| {
+            const opened = try zettide.v3.linux_block_device.openStorageOptions(
+                io,
+                allocator,
+                std.mem.span(device_path_z),
+                false,
+                true,
+            );
+            storage.* = opened.storage;
+            physical_count += 1;
+        }
+        for (window_specs, member_storages[0..window_specs.len]) |spec, *storage| {
+            storage.* = try zettide.v3.storage_window.create(
+                allocator,
+                &physical_storages[spec.device_index],
+                spec.offset,
+                spec.length,
+            );
+            member_count += 1;
+        }
     }
-    const storage_slice = storages[0..opened_count];
-    opened_count = 0;
+    const transferring_count = member_count;
+    member_count = 0;
     var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
         io,
         allocator,
-        storage_slice,
+        member_storages[0..transferring_count],
         .read_only,
     );
     errdefer set.deinit();
@@ -536,6 +568,19 @@ fn run(
             }
             try publishReadyAndWait(io, ready_path, &signals);
         },
+    }
+}
+
+fn validateWindowSpecs(specs: []const args.WindowSpec, device_count: usize) !void {
+    for (specs, 0..) |spec, index| {
+        if (spec.device_index >= device_count) return error.InvalidStorageWindow;
+        const end = std.math.add(u64, spec.offset, spec.length) catch return error.InvalidStorageWindow;
+        for (specs[0..index]) |previous| {
+            if (previous.device_index != spec.device_index) continue;
+            const previous_end = std.math.add(u64, previous.offset, previous.length) catch return error.InvalidStorageWindow;
+            if (spec.offset < previous_end and previous.offset < end)
+                return error.OverlappingStorageWindows;
+        }
     }
 }
 
