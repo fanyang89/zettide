@@ -393,12 +393,12 @@ pub const Engine = struct {
 
     fn copyCompletion(self: *Engine) !linux.io_uring_cqe {
         for (0..self.completion_spin_count) |_| {
-            var completions: [1]linux.io_uring_cqe = undefined;
-            const count = self.ring.copy_cqes(&completions, 0) catch |err| switch (err) {
-                error.SignalInterrupt => continue,
-                else => return err,
-            };
-            if (count != 0) return self.recordCompletion(completions[0]);
+            if (self.ring.cq_ready() != 0) {
+                var completions: [1]linux.io_uring_cqe = undefined;
+                const count = try self.ring.copy_cqes(&completions, 0);
+                std.debug.assert(count == 1);
+                return self.recordCompletion(completions[0]);
+            }
             std.atomic.spinLoopHint();
         }
         while (true) {
