@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const ReadPolicy = enum { first_available, quorum };
 pub const max_reactor_count = 16;
+pub const max_vhost_controller_count = 4;
 
 pub fn parseReadPolicy(raw: c_int) !ReadPolicy {
     return switch (raw) {
@@ -31,6 +32,28 @@ pub fn parseReactorCount(text: ?[]const u8) !usize {
     return count;
 }
 
+pub fn parseVhostControllerCount(text: ?[]const u8, reactor_count: usize) !usize {
+    const count = if (text) |value|
+        parseReactorCount(value) catch return error.InvalidVhostControllerCount
+    else
+        reactor_count;
+    if (count == 0 or count > max_vhost_controller_count or count > reactor_count)
+        return error.InvalidVhostControllerCount;
+    return count;
+}
+
+pub fn reactorMaskAt(mask: []const u8, index: usize, buffer: []u8) ![]const u8 {
+    if (mask.len < 3 or mask[0] != '[' or mask[mask.len - 1] != ']')
+        return error.InvalidReactorMask;
+    var cores = std.mem.splitScalar(u8, mask[1 .. mask.len - 1], ',');
+    var current: usize = 0;
+    while (cores.next()) |core| : (current += 1) {
+        if (core.len == 0) return error.InvalidReactorMask;
+        if (current == index) return std.fmt.bufPrint(buffer, "[{s}]", .{core});
+    }
+    return error.InvalidReactorMask;
+}
+
 test "read policy accepts only supported values" {
     try std.testing.expectEqual(ReadPolicy.first_available, try parseReadPolicy(0));
     try std.testing.expectEqual(ReadPolicy.quorum, try parseReadPolicy(1));
@@ -53,4 +76,22 @@ test "reactor count rejects invalid values" {
     for ([_][]const u8{ "", "0", "17", "+1", " 1", "1 ", "1x" }) |value| {
         try std.testing.expectError(error.InvalidReactorCount, parseReactorCount(value));
     }
+}
+
+test "vhost controller count defaults to reactors and stays bounded" {
+    try std.testing.expectEqual(@as(usize, 4), try parseVhostControllerCount(null, 4));
+    try std.testing.expectEqual(@as(usize, 2), try parseVhostControllerCount("2", 4));
+    for ([_][]const u8{ "", "0", "5", "+1", "x" }) |value| {
+        try std.testing.expectError(error.InvalidVhostControllerCount, parseVhostControllerCount(value, 4));
+    }
+    try std.testing.expectError(error.InvalidVhostControllerCount, parseVhostControllerCount("4", 2));
+}
+
+test "reactor mask selects one core" {
+    var buffer: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("[0]", try reactorMaskAt("[0,2,7,9]", 0, &buffer));
+    try std.testing.expectEqualStrings("[7]", try reactorMaskAt("[0,2,7,9]", 2, &buffer));
+    try std.testing.expectError(error.InvalidReactorMask, reactorMaskAt("[0,2]", 2, &buffer));
+    try std.testing.expectError(error.InvalidReactorMask, reactorMaskAt("0,2", 0, &buffer));
+    try std.testing.expectError(error.InvalidReactorMask, reactorMaskAt("[0,,2]", 2, &buffer));
 }

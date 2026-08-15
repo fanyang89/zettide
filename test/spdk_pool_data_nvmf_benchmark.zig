@@ -356,6 +356,13 @@ fn run(
         std.mem.span(value)
     else
         null);
+    const vhost_controller_count = if (frontend == .vhost)
+        try args.parseVhostControllerCount(if (c.getenv("ZETTIDE_VHOST_CONTROLLER_COUNT")) |value|
+            std.mem.span(value)
+        else
+            null, reactor_count)
+    else
+        0;
 
     var threaded: std.Io.Threaded = .init(allocator, .{ .environ = .empty });
     defer threaded.deinit();
@@ -415,10 +422,11 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s}\n", .{
+    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d}\n", .{
         frontend_text,
         vhost_socket_directory orelse "none",
         reactor_mask,
+        vhost_controller_count,
     });
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_pool_data_nvmf_benchmark",
@@ -433,18 +441,18 @@ fn run(
     defer runtime.deinit();
     const runtime_handle: *anyopaque = @ptrCast(runtime.handle orelse return error.RuntimeStopped);
     std.debug.print("target-stage runtime ready\n", .{});
-    std.debug.print("target-stage worker start\n", .{});
-    const worker = try Worker.create(io, &pool_storage);
-    defer worker.close();
-    std.debug.print("target-stage worker ready\n", .{});
-    const backend: zettide.spdk_vhost_block_export.Backend = .{
-        .context = worker,
-        .submit = submit_callback,
-        .block_count = pool_storage.capacity() / block_size,
-        .max_io_blocks = max_batch_bytes / block_size,
-    };
     switch (frontend) {
         .nvmf => {
+            std.debug.print("target-stage worker start\n", .{});
+            const worker = try Worker.create(io, &pool_storage);
+            defer worker.close();
+            const backend: zettide.spdk_vhost_block_export.Backend = .{
+                .context = worker,
+                .submit = submit_callback,
+                .block_count = pool_storage.capacity() / block_size,
+                .max_io_blocks = max_batch_bytes / block_size,
+            };
+            std.debug.print("target-stage worker ready\n", .{});
             std.debug.print("target-stage provider start\n", .{});
             var provider = try zettide.spdk_provider_bdev.ProviderBdev.create(
                 allocator,
@@ -474,23 +482,60 @@ fn run(
             try publishReadyAndWait(io, ready_path, &signals);
         },
         .vhost => {
-            std.debug.print("target-stage export start frontend=vhost socket_directory={s}\n", .{vhost_socket_directory.?});
-            var export_handle = try zettide.spdk_vhost_block_export.VhostBlockExport.create(
-                allocator,
-                runtime_handle,
-                backend,
-                .{
-                    .bdev_name = "ZettideScheduledPoolData0",
-                    .controller_name = "zettide-scheduled-pool-data-0",
-                    .cpumask = reactor_mask,
-                    .readonly = true,
-                },
-            );
-            defer export_handle.close() catch @panic("failed to close Pool data vhost export");
-            std.debug.print("target-stage export ready frontend=vhost socket={s}\n", .{export_handle.socketPath()});
+            var exports: [args.max_vhost_controller_count]zettide.spdk_vhost_block_export.VhostBlockExport = undefined;
+            var export_count: usize = 0;
+            defer while (export_count > 0) {
+                export_count -= 1;
+                closeVhostExport(io, &exports[export_count]);
+            };
+
+            const worker = try Worker.create(io, &pool_storage);
+            defer worker.close();
+            const backend: zettide.spdk_vhost_block_export.Backend = .{
+                .context = worker,
+                .submit = submit_callback,
+                .block_count = pool_storage.capacity() / block_size,
+                .max_io_blocks = max_batch_bytes / block_size,
+            };
+            std.debug.print("target-stage export start frontend=vhost socket_directory={s} controllers={d}\n", .{ vhost_socket_directory.?, vhost_controller_count });
+            for (0..vhost_controller_count) |index| {
+                var bdev_name_buffer: [64]u8 = undefined;
+                const bdev_name = try std.fmt.bufPrint(&bdev_name_buffer, "ZettideScheduledPoolData{d}", .{index});
+                var controller_name_buffer: [64]u8 = undefined;
+                const controller_name = try std.fmt.bufPrint(&controller_name_buffer, "zettide-scheduled-pool-data-{d}", .{index});
+                var controller_mask_buffer: [32]u8 = undefined;
+                const controller_mask = try args.reactorMaskAt(reactor_mask, index, &controller_mask_buffer);
+                exports[index] = try zettide.spdk_vhost_block_export.VhostBlockExport.create(
+                    allocator,
+                    runtime_handle,
+                    backend,
+                    .{
+                        .bdev_name = bdev_name,
+                        .controller_name = controller_name,
+                        .cpumask = controller_mask,
+                        .readonly = true,
+                    },
+                );
+                export_count += 1;
+                std.debug.print("target-stage export ready frontend=vhost index={d} cpumask={s} socket={s}\n", .{ index, controller_mask, exports[index].socketPath() });
+            }
             try publishReadyAndWait(io, ready_path, &signals);
         },
     }
+}
+
+fn closeVhostExport(io: std.Io, export_handle: *zettide.spdk_vhost_block_export.VhostBlockExport) void {
+    for (0..1000) |_| {
+        export_handle.close() catch |err| switch (err) {
+            error.ExportBusy => {
+                io.sleep(.fromMilliseconds(10), .awake) catch @panic("failed to wait for vhost export shutdown");
+                continue;
+            },
+            else => @panic("failed to close Pool data vhost export"),
+        };
+        return;
+    }
+    @panic("timed out closing Pool data vhost export");
 }
 
 fn publishReadyAndWait(io: std.Io, ready_path: []const u8, signals: *const c.sigset_t) !void {

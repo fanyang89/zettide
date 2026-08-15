@@ -22,15 +22,15 @@ guest_vcpus=${ZETTIDE_VHOST_GUEST_VCPUS:-4}
 queues=${ZETTIDE_VHOST_QUEUES:-1}
 ssh_port=${ZETTIDE_VHOST_SSH_PORT:-10022}
 reactor_count=${ZETTIDE_NVMF_REACTOR_COUNT:-1}
+controller_count=${ZETTIDE_VHOST_CONTROLLER_COUNT:-$reactor_count}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
-socket_name=zettide-scheduled-pool-data-0
 target_pid=""
 qemu_pid=""
 guest_ready=false
 benchmark_completed=false
 work_dir=""
 socket_dir=""
-socket_path=""
+socket_paths=()
 monitor_pids=()
 
 case $fio_case in
@@ -63,10 +63,16 @@ if [[ ! $ssh_port =~ ^[0-9]+$ ]] || ((ssh_port < 1 || ssh_port > 65535)); then
     exit 2
 fi
 [[ $reactor_count =~ ^[1-9][0-9]*$ ]] || { echo "invalid reactor count: $reactor_count" >&2; exit 2; }
+[[ $controller_count =~ ^[1-9][0-9]*$ ]] || { echo "invalid vhost controller count: $controller_count" >&2; exit 2; }
 ((queues <= guest_vcpus)) || {
     echo "vhost queue count must not exceed guest vCPU count" >&2
     exit 2
 }
+((controller_count <= reactor_count && controller_count <= queues && queues % controller_count == 0)) || {
+    echo "vhost controller count must divide the queue count and not exceed reactors or queues" >&2
+    exit 2
+}
+queues_per_controller=$((queues / controller_count))
 
 qemu_command=""
 if command -v qemu-system-x86_64 >/dev/null; then
@@ -182,10 +188,12 @@ cleanup() {
             result=1
         fi
     fi
-    if [[ -n $socket_path && -e $socket_path ]]; then
-        echo "vhost socket remains after target shutdown: $socket_path" >&2
-        result=1
-    fi
+    for socket_path in "${socket_paths[@]}"; do
+        if [[ -e $socket_path ]]; then
+            echo "vhost socket remains after target shutdown: $socket_path" >&2
+            result=1
+        fi
+    done
     if [[ -n $work_dir ]] && ! rm -rf -- "$work_dir"; then
         echo "failed to remove work directory: $work_dir" >&2
         result=1
@@ -202,7 +210,9 @@ trap 'exit 130' INT TERM
 mkdir -p "$log_dir"
 work_dir=$(mktemp -d "$log_dir/vhost-fio.XXXXXX")
 socket_dir=$(mktemp -d /tmp/zettide-vhost.XXXXXX)
-socket_path=$socket_dir/$socket_name
+for ((index = 0; index < controller_count; index++)); do
+    socket_paths+=("$socket_dir/zettide-scheduled-pool-data-$index")
+done
 overlay=$work_dir/guest.qcow2
 seed=$work_dir/seed.img
 ssh_key=$work_dir/id_ed25519
@@ -277,12 +287,17 @@ scp_options=(
 rm -f "$ready_file"
 env ZETTIDE_POOL_DATA_FRONTEND=vhost \
     ZETTIDE_VHOST_SOCKET_DIR="$socket_dir" \
+    ZETTIDE_VHOST_CONTROLLER_COUNT="$controller_count" \
     ZETTIDE_NVMF_REACTOR_COUNT="$reactor_count" \
     "$target" "$ready_file" "$pool_id" "$read_policy" "${devices[@]}" \
     >"$log_dir/target.log" 2>&1 &
 target_pid=$!
 for ((attempt = 0; attempt < 1000; attempt++)); do
-    [[ -f $ready_file && -S $socket_path ]] && break
+    sockets_ready=true
+    for socket_path in "${socket_paths[@]}"; do
+        [[ -S $socket_path ]] || sockets_ready=false
+    done
+    [[ -f $ready_file && $sockets_ready == true ]] && break
     if ! process_running "$target_pid"; then
         wait "$target_pid" || true
         echo "vhost target exited before becoming ready; see $log_dir/target.log" >&2
@@ -290,10 +305,20 @@ for ((attempt = 0; attempt < 1000; attempt++)); do
     fi
     sleep 0.01
 done
-[[ -f $ready_file && -S $socket_path ]] || {
-    echo "vhost target did not create the expected socket after 10 seconds: $socket_path" >&2
-    exit 1
-}
+for socket_path in "${socket_paths[@]}"; do
+    [[ -f $ready_file && -S $socket_path ]] || {
+        echo "vhost target did not create the expected socket after 10 seconds: $socket_path" >&2
+        exit 1
+    }
+done
+
+qemu_vhost_args=()
+for ((index = 0; index < controller_count; index++)); do
+    qemu_vhost_args+=(
+        -chardev "socket,id=vhost-char-$index,path=${socket_paths[index]}"
+        -device "vhost-user-blk-pci,chardev=vhost-char-$index,num-queues=$queues_per_controller,queue-size=256"
+    )
+done
 
 "$qemu_command" \
     -name zettide-vhost-fio \
@@ -307,8 +332,7 @@ done
     -drive file="$seed",if=none,id=seed,format=raw,readonly=on \
     -device virtio-scsi-pci,id=seed-scsi \
     -device scsi-cd,drive=seed \
-    -chardev socket,id=vhost-char,path="$socket_path" \
-    -device vhost-user-blk-pci,chardev=vhost-char,num-queues="$queues",queue-size=256 \
+    "${qemu_vhost_args[@]}" \
     -netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$ssh_port"-:22 \
     -device virtio-net-pci,netdev=net0 \
     -display none \
@@ -339,6 +363,7 @@ done
 cat >"$work_dir/guest-identify.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+expected_count=$1
 root_source=$(findmnt -n -o SOURCE /)
 root_source=${root_source%%\[*}
 mapfile -t root_disks < <(lsblk --inverse -n -r -o KNAME,TYPE "$root_source" |
@@ -358,20 +383,24 @@ mapfile -t data_disks < <(lsblk -dn -r -o KNAME,TYPE | while read -r name type; 
     done
     [[ $is_root == false ]] && printf '%s\n' "$name"
 done)
-[[ ${#data_disks[@]} -eq 1 ]] || {
-    echo "expected exactly one non-root whole disk, found ${#data_disks[@]}: ${data_disks[*]-}" >&2
+[[ ${#data_disks[@]} -eq $expected_count ]] || {
+    echo "expected $expected_count non-root whole disks, found ${#data_disks[@]}: ${data_disks[*]-}" >&2
     exit 1
 }
-device=/dev/${data_disks[0]}
-[[ $(blockdev --getro "$device") == 1 ]] || {
-    echo "vhost data disk is not read-only: $device" >&2
-    exit 1
-}
-printf '%s\n' "$device"
+devices=()
+for data_disk in "${data_disks[@]}"; do
+    device=/dev/$data_disk
+    [[ $(blockdev --getro "$device") == 1 ]] || {
+        echo "vhost data disk is not read-only: $device" >&2
+        exit 1
+    }
+    devices+=("$device")
+done
+(IFS=:; printf '%s\n' "${devices[*]}")
 EOF
 chmod 0755 "$work_dir/guest-identify.sh"
 scp "${scp_options[@]}" "$work_dir/guest-identify.sh" zettide@127.0.0.1:/tmp/guest-identify.sh
-guest_device=$(ssh "${ssh_options[@]}" zettide@127.0.0.1 sudo /tmp/guest-identify.sh)
+guest_device=$(ssh "${ssh_options[@]}" zettide@127.0.0.1 sudo /tmp/guest-identify.sh "$controller_count")
 
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'lsblk -o NAME,KNAME,TYPE,SIZE,RO,MODEL,SERIAL' >"$log_dir/guest-lsblk.txt"
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'lspci -nn' >"$log_dir/guest-lspci.txt"
