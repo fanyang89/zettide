@@ -315,7 +315,7 @@ pub fn initOwnedOptions(
                 .sq_poll = true,
                 .sq_thread_cpu = options.sq_thread_cpu_base,
                 .completion_spin_count = 512,
-                .dynamic_fixed_buffer_count = 4096,
+                .dynamic_fixed_buffer_count = 1024,
             }),
             .auto => EnginePool.init(file.handle, .{}) catch |err|
                 if (shouldFallback(mode, err)) null else return err,

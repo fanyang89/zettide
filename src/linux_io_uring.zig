@@ -4,9 +4,7 @@ const IoUring = std.os.linux.IoUring;
 const linux = std.os.linux;
 
 pub const queue_entries = 32;
-const max_dynamic_fixed_buffers = 4096;
-const fixed_buffer_lookup_size = max_dynamic_fixed_buffers * 2;
-const no_fixed_buffer = std.math.maxInt(u16);
+const max_dynamic_fixed_buffers = 1024;
 const max_request_len = std.math.maxInt(u32);
 
 pub const SyncMode = enum {
@@ -84,11 +82,6 @@ fn stableBuffer(read: anytype) bool {
     return if (@hasField(@TypeOf(read), "stable_buffer")) read.stable_buffer else false;
 }
 
-fn fixedBufferHash(base: usize) usize {
-    const mixed = (base >> 12) *% 0x9e3779b97f4a7c15;
-    return mixed & (fixed_buffer_lookup_size - 1);
-}
-
 pub const Engine = struct {
     ring: IoUring,
     mutex: std.Io.Mutex = .init,
@@ -101,7 +94,6 @@ pub const Engine = struct {
     sq_poll: bool,
     completion_spin_count: u32,
     fixed_buffers: [max_dynamic_fixed_buffers]FixedBuffer = undefined,
-    fixed_buffer_lookup: [fixed_buffer_lookup_size]u16 = @splat(no_fixed_buffer),
     fixed_buffer_count: u16 = 0,
     fixed_buffer_capacity: u16 = 0,
     buffers_registered: bool = false,
@@ -444,12 +436,10 @@ pub const Engine = struct {
     fn fixedBufferIndex(self: *Engine, buffer: []u8) ?u16 {
         if (!self.buffers_registered or buffer.len == 0) return null;
         const start = @intFromPtr(buffer.ptr);
-        var lookup_index = fixedBufferHash(start);
-        while (self.fixed_buffer_lookup[lookup_index] != no_fixed_buffer) {
-            const buffer_index = self.fixed_buffer_lookup[lookup_index];
-            const registered = self.fixed_buffers[buffer_index];
-            if (registered.base == start and buffer.len <= registered.len) return buffer_index;
-            lookup_index = (lookup_index + 1) & (fixed_buffer_lookup_size - 1);
+        const end = std.math.add(usize, start, buffer.len) catch return null;
+        for (self.fixed_buffers[0..self.fixed_buffer_count], 0..) |registered, index| {
+            const registered_end = std.math.add(usize, registered.base, registered.len) catch continue;
+            if (start >= registered.base and end <= registered_end) return @intCast(index);
         }
         if (self.fixed_buffer_count == self.fixed_buffer_capacity) return null;
         const index = self.fixed_buffer_count;
@@ -460,7 +450,6 @@ pub const Engine = struct {
             return null;
         }
         self.fixed_buffers[index] = .{ .base = start, .len = buffer.len };
-        self.fixed_buffer_lookup[lookup_index] = index;
         self.fixed_buffer_count += 1;
         self.stats.fixed_buffer_registrations += 1;
         return index;
