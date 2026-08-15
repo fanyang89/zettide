@@ -450,6 +450,15 @@ fn claimedReadDataMany(
     try claimedReplicaContext(context_ptr).member.readMany(.data, reads, results);
 }
 
+fn claimedSubmitReadDataMany(
+    context_ptr: *anyopaque,
+    reads: []const storage_api.Read,
+    results: []storage_api.ReadResult,
+    completion: storage_api.AsyncReadCompletion,
+) !storage_api.AsyncReadSubmit {
+    return claimedReplicaContext(context_ptr).member.submitReadMany(.data, reads, results, completion);
+}
+
 fn claimedWriteData(context_ptr: *anyopaque, offset: u64, bytes: []const u8) !void {
     const claim = claimedReplicaContext(context_ptr).data_claim orelse return error.ReadOnlyPoolData;
     try claim.write(offset, bytes);
@@ -473,6 +482,7 @@ const claimed_replica_vtable: ReplicaEndpoint.VTable = .{
     .read_metadata = claimedReadMetadata,
     .read_data = claimedReadData,
     .read_data_many = claimedReadDataMany,
+    .submit_read_data_many = claimedSubmitReadDataMany,
     .write_data = claimedWriteData,
     .write_data_many = claimedWriteDataMany,
     .write_metadata_durable = claimedWriteMetadataDurable,

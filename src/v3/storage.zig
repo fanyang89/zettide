@@ -20,6 +20,16 @@ pub const ReadResult = struct {
     failure: ?anyerror = null,
 };
 
+pub const AsyncReadSubmit = enum {
+    submitted,
+    unsupported,
+};
+
+pub const AsyncReadCompletion = struct {
+    context: *anyopaque,
+    complete: *const fn (context: *anyopaque, failure: ?anyerror) void,
+};
+
 pub const Write = struct {
     bytes: []const u8,
     offset: u64,
@@ -38,6 +48,9 @@ pub const TransportStats = struct {
     completions: u64 = 0,
     current_inflight: u64 = 0,
     max_inflight: u64 = 0,
+    async_submissions: u64 = 0,
+    async_completions: u64 = 0,
+    async_queue_full: u64 = 0,
 };
 
 /// Owned durable random-access storage used by a v3 member.
@@ -51,6 +64,13 @@ pub const Storage = struct {
         same_identity: *const fn (context: *anyopaque, other_context: *anyopaque) bool,
         read_at: *const fn (context: *anyopaque, io: Io, buffer: []u8, offset: u64) anyerror!usize,
         read_many_at: ?*const fn (context: *anyopaque, io: Io, reads: []const Read, results: []ReadResult) anyerror!void = null,
+        submit_read_many_at: ?*const fn (
+            context: *anyopaque,
+            io: Io,
+            reads: []const Read,
+            results: []ReadResult,
+            completion: AsyncReadCompletion,
+        ) anyerror!AsyncReadSubmit = null,
         write_all_at: *const fn (context: *anyopaque, io: Io, bytes: []const u8, offset: u64) anyerror!void,
         write_all_many_at: ?*const fn (context: *anyopaque, io: Io, writes: []const Write) anyerror!void = null,
         sync_data: ?*const fn (context: *anyopaque, io: Io) anyerror!void = null,
@@ -244,6 +264,24 @@ pub const Storage = struct {
                 continue;
             };
         }
+    }
+
+    /// On .submitted, completion is called exactly once and the caller must keep
+    /// buffers, results, and completion context alive until then.
+    pub fn submitReadManyAt(
+        self: *Storage,
+        io: Io,
+        reads: []const Read,
+        results: []ReadResult,
+        completion: AsyncReadCompletion,
+    ) !AsyncReadSubmit {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        if (self.backend == .custom) {
+            const backend = self.backend.custom;
+            if (backend.vtable.submit_read_many_at) |submit|
+                return submit(backend.context, io, reads, results, completion);
+        }
+        return .unsupported;
     }
 
     pub fn writeAllAt(self: *Storage, io: Io, bytes: []const u8, offset: u64) !void {

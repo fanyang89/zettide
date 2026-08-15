@@ -4,6 +4,8 @@ const storage_api = @import("storage.zig");
 
 const File = std.Io.File;
 const max_engine_lanes = 2;
+const async_queue_capacity = 128;
+const async_max_reads = linux_io_uring.queue_entries;
 
 pub const Mode = enum {
     auto,
@@ -56,6 +58,191 @@ const EnginePool = struct {
     }
 };
 
+const AsyncReadTask = struct {
+    reads: [async_max_reads]storage_api.Read = undefined,
+    read_count: usize,
+    results: []storage_api.ReadResult,
+    completion: storage_api.AsyncReadCompletion,
+};
+
+const AsyncSlot = struct {
+    sequence: std.atomic.Value(usize),
+    task: AsyncReadTask = undefined,
+};
+
+const AsyncStats = struct {
+    submissions: std.atomic.Value(u64) = .init(0),
+    completions: std.atomic.Value(u64) = .init(0),
+    queue_full: std.atomic.Value(u64) = .init(0),
+};
+
+const AsyncLane = struct {
+    io: std.Io,
+    engine: *linux_io_uring.Engine,
+    stats: *AsyncStats,
+    slots: [async_queue_capacity]AsyncSlot,
+    enqueue_position: std.atomic.Value(usize) = .init(0),
+    dequeue_position: usize = 0,
+    wake: std.Io.Event = .unset,
+    stopping: std.atomic.Value(bool) = .init(false),
+    thread: std.Thread,
+
+    fn init(self: *AsyncLane, io: std.Io, engine: *linux_io_uring.Engine, stats: *AsyncStats) !void {
+        self.io = io;
+        self.engine = engine;
+        self.stats = stats;
+        for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
+        self.enqueue_position = .init(0);
+        self.dequeue_position = 0;
+        self.wake = .unset;
+        self.stopping = .init(false);
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn stop(self: *AsyncLane) void {
+        self.stopping.store(true, .release);
+        self.wake.set(self.io);
+        self.thread.join();
+    }
+
+    fn submit(self: *AsyncLane, task: AsyncReadTask) bool {
+        var position = self.enqueue_position.load(.monotonic);
+        while (true) {
+            const slot = &self.slots[position % async_queue_capacity];
+            const sequence = slot.sequence.load(.acquire);
+            const difference = sequenceDifference(sequence, position);
+            if (difference == 0) {
+                if (self.enqueue_position.cmpxchgWeak(
+                    position,
+                    position +% 1,
+                    .monotonic,
+                    .monotonic,
+                )) |observed| {
+                    position = observed;
+                    continue;
+                }
+                slot.task = task;
+                slot.sequence.store(position +% 1, .release);
+                self.wake.set(self.io);
+                return true;
+            }
+            if (difference < 0) return false;
+            position = self.enqueue_position.load(.monotonic);
+        }
+    }
+
+    fn dequeue(self: *AsyncLane) ?AsyncReadTask {
+        const position = self.dequeue_position;
+        const slot = &self.slots[position % async_queue_capacity];
+        if (slot.sequence.load(.acquire) != position +% 1) return null;
+        const task = slot.task;
+        self.dequeue_position = position +% 1;
+        slot.sequence.store(position +% async_queue_capacity, .release);
+        return task;
+    }
+
+    fn run(self: *AsyncLane) void {
+        while (true) {
+            if (self.dequeue()) |task| {
+                self.execute(task);
+                continue;
+            }
+            self.wake.reset();
+            if (self.dequeue()) |task| {
+                self.execute(task);
+                continue;
+            }
+            if (self.stopping.load(.acquire)) return;
+            self.wake.waitUncancelable(self.io);
+        }
+    }
+
+    fn execute(self: *AsyncLane, task: AsyncReadTask) void {
+        var failure: ?anyerror = null;
+        for (task.results) |*result| result.* = .{};
+        self.engine.readManyAt(
+            self.io,
+            task.reads[0..task.read_count],
+            task.results,
+        ) catch |err| {
+            failure = mapOperationError(err);
+        };
+        for (task.results) |*result| {
+            if (result.failure) |err| result.failure = mapOperationError(err);
+        }
+        _ = self.stats.completions.fetchAdd(1, .monotonic);
+        task.completion.complete(task.completion.context, failure);
+    }
+};
+
+fn sequenceDifference(sequence: usize, position: usize) isize {
+    return @bitCast(sequence -% position);
+}
+
+const AsyncReadExecutor = struct {
+    lanes: [max_engine_lanes]AsyncLane = undefined,
+    count: usize = 0,
+    next_lane: std.atomic.Value(u64) = .init(0),
+    accepting: std.atomic.Value(bool) = .init(false),
+    stats: AsyncStats = .{},
+
+    fn init(self: *AsyncReadExecutor, io: std.Io, pool: *EnginePool) !void {
+        self.count = 0;
+        self.next_lane = .init(0);
+        self.accepting = .init(false);
+        self.stats = .{};
+        errdefer while (self.count != 0) {
+            self.count -= 1;
+            self.lanes[self.count].stop();
+        };
+        while (self.count < pool.count) : (self.count += 1)
+            try self.lanes[self.count].init(io, &pool.engines[self.count], &self.stats);
+        self.accepting.store(true, .release);
+    }
+
+    fn stop(self: *AsyncReadExecutor) void {
+        self.accepting.store(false, .release);
+        for (self.lanes[0..self.count]) |*lane| lane.stop();
+        self.count = 0;
+    }
+
+    fn submit(
+        self: *AsyncReadExecutor,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+        completion: storage_api.AsyncReadCompletion,
+    ) storage_api.AsyncReadSubmit {
+        if (!self.accepting.load(.acquire) or reads.len > async_max_reads) return .unsupported;
+        var task: AsyncReadTask = .{
+            .read_count = reads.len,
+            .results = results,
+            .completion = completion,
+        };
+        @memcpy(task.reads[0..reads.len], reads);
+        const first: usize = @intCast(self.next_lane.fetchAdd(1, .monotonic) % self.count);
+        for (0..self.count) |attempt| {
+            if (self.lanes[(first + attempt) % self.count].submit(task)) {
+                _ = self.stats.submissions.fetchAdd(1, .monotonic);
+                return .submitted;
+            }
+        }
+        _ = self.stats.queue_full.fetchAdd(1, .monotonic);
+        return .unsupported;
+    }
+
+    fn addStats(self: *const AsyncReadExecutor, result: *storage_api.TransportStats) void {
+        result.async_submissions +|= self.stats.submissions.load(.monotonic);
+        result.async_completions +|= self.stats.completions.load(.monotonic);
+        result.async_queue_full +|= self.stats.queue_full.load(.monotonic);
+    }
+
+    fn resetStats(self: *AsyncReadExecutor) void {
+        self.stats.submissions.store(0, .monotonic);
+        self.stats.completions.store(0, .monotonic);
+        self.stats.queue_full.store(0, .monotonic);
+    }
+};
+
 const Context = struct {
     allocator: std.mem.Allocator,
     file: File,
@@ -64,12 +251,15 @@ const Context = struct {
     writable: bool,
     polling: bool,
     engine_pool: ?EnginePool,
+    async_executor: AsyncReadExecutor = .{},
+    async_executor_active: bool = false,
     read_lane: std.atomic.Value(u64) = .init(0),
     mutex: std.Io.RwLock = .init,
 };
 
 pub fn initOwned(
     allocator: std.mem.Allocator,
+    io: std.Io,
     file: File,
     capacity_bytes: u64,
     minimum_io_size: u32,
@@ -79,6 +269,7 @@ pub fn initOwned(
 ) !storage_api.Storage {
     return initOwnedOptions(
         allocator,
+        io,
         file,
         capacity_bytes,
         minimum_io_size,
@@ -95,6 +286,7 @@ pub const InitOptions = struct {
 
 pub fn initOwnedOptions(
     allocator: std.mem.Allocator,
+    io: std.Io,
     file: File,
     capacity_bytes: u64,
     minimum_io_size: u32,
@@ -127,6 +319,11 @@ pub fn initOwnedOptions(
                 if (shouldFallback(mode, err)) null else return err,
         },
     };
+    errdefer if (context.engine_pool) |*pool| pool.deinit();
+    if (context.engine_pool != null and !writable) {
+        try context.async_executor.init(io, &context.engine_pool.?);
+        context.async_executor_active = true;
+    }
     return storage_api.Storage.initBackend(
         context,
         &storage_vtable,
@@ -204,6 +401,20 @@ fn readManyAt(
     }
 }
 
+fn submitReadManyAt(
+    context_ptr: *anyopaque,
+    _: std.Io,
+    reads: []const storage_api.Read,
+    results: []storage_api.ReadResult,
+    completion: storage_api.AsyncReadCompletion,
+) !storage_api.AsyncReadSubmit {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    if (reads.len != results.len) return error.InvalidReadBatch;
+    for (reads) |read| try validateRange(context, read.offset, read.buffer.len);
+    if (!context.async_executor_active) return .unsupported;
+    return context.async_executor.submit(reads, results, completion);
+}
+
 fn writeAllAt(context_ptr: *anyopaque, io: std.Io, bytes: []const u8, offset: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.mutex.lock(io) catch |err| return mapOperationError(err);
@@ -267,6 +478,7 @@ fn transportStats(context_ptr: *anyopaque, io: std.Io) storage_api.TransportStat
     const pool = if (context.engine_pool) |*value| value else return .{};
     var total: storage_api.TransportStats = .{};
     for (pool.initialized()) |*engine| addTransportStats(&total, engine.getStats(io));
+    if (context.async_executor_active) context.async_executor.addStats(&total);
     return total;
 }
 
@@ -276,10 +488,15 @@ fn resetTransportStats(context_ptr: *anyopaque, io: std.Io) void {
     defer context.mutex.unlock(io);
     if (context.engine_pool) |*pool|
         for (pool.initialized()) |*engine| engine.resetStats(io);
+    if (context.async_executor_active) context.async_executor.resetStats();
 }
 
 fn close(context_ptr: *anyopaque, io: std.Io) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
+    if (context.async_executor_active) {
+        context.async_executor.stop();
+        context.async_executor_active = false;
+    }
     context.mutex.lockUncancelable(io);
     if (context.engine_pool) |*pool| pool.deinit();
     context.file.close(io);
@@ -337,6 +554,7 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .same_identity = sameIdentity,
     .read_at = readAt,
     .read_many_at = readManyAt,
+    .submit_read_many_at = submitReadManyAt,
     .write_all_at = writeAllAt,
     .write_all_many_at = writeAllManyAt,
     .sync_data = syncData,
@@ -378,6 +596,7 @@ test "polling raw storage is read only" {
         error.PollModeRequiresReadOnly,
         initOwned(
             std.testing.allocator,
+            std.testing.io,
             file,
             4096,
             512,
@@ -398,6 +617,12 @@ test "raw io_uring read lanes round robin across counter overflow" {
     try std.testing.expectEqual(@as(usize, 1), nextReadLane(&sequence, 2));
     try std.testing.expectEqual(@as(usize, 0), nextReadLane(&sequence, 2));
     try std.testing.expectEqual(@as(usize, 1), nextReadLane(&sequence, 2));
+}
+
+test "async queue sequence comparison handles counter overflow" {
+    try std.testing.expectEqual(@as(isize, 0), sequenceDifference(0, 0));
+    try std.testing.expect(sequenceDifference(std.math.maxInt(usize), 0) < 0);
+    try std.testing.expect(sequenceDifference(0, std.math.maxInt(usize)) > 0);
 }
 
 test "raw io_uring transport stats aggregate with saturation" {
@@ -427,7 +652,7 @@ test "forced POSIX raw storage preserves identity and bounds" {
     try file.setLength(std.testing.io, 4096);
 
     const identity: Identity = .{ .major = 1, .minor = 2, .disk_sequence = 3 };
-    var storage = try initOwned(std.testing.allocator, file, 4096, 512, identity, true, .posix);
+    var storage = try initOwned(std.testing.allocator, std.testing.io, file, 4096, 512, identity, true, .posix);
     storage_owns_file = true;
     var storage_open = true;
     defer if (storage_open) storage.close(std.testing.io) catch {};
@@ -435,7 +660,7 @@ test "forced POSIX raw storage preserves identity and bounds" {
     const alias_file = try tmp.dir.openFile(std.testing.io, "posix-raw-storage", .{ .mode = .read_only });
     var alias_owns_file = false;
     defer if (!alias_owns_file) alias_file.close(std.testing.io);
-    var alias = try initOwned(std.testing.allocator, alias_file, 4096, 512, identity, false, .posix);
+    var alias = try initOwned(std.testing.allocator, std.testing.io, alias_file, 4096, 512, identity, false, .posix);
     alias_owns_file = true;
     defer alias.close(std.testing.io) catch {};
     try std.testing.expect(storage.sameIdentity(&alias));
@@ -466,6 +691,7 @@ test "forced io_uring raw storage uses positional singleton reads and engine bat
 
     var storage = initOwned(
         std.testing.allocator,
+        std.testing.io,
         file,
         4096,
         512,
@@ -518,6 +744,68 @@ test "forced io_uring raw storage uses positional singleton reads and engine bat
     defer reopened.close(std.testing.io);
     @memset(&actual, 0);
     try std.testing.expectEqual(actual.len, try reopened.readPositionalAll(std.testing.io, &actual, 512));
+    try std.testing.expectEqualStrings(expected, &actual);
+}
+
+test "read-only io_uring raw storage completes submitted batches" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const expected = "asynchronous raw storage";
+    const writable = try tmp.dir.createFile(std.testing.io, "async-uring-raw-storage", .{ .read = true });
+    try writable.setLength(std.testing.io, 4096);
+    try writable.writePositionalAll(std.testing.io, expected, 512);
+    writable.close(std.testing.io);
+    const file = try tmp.dir.openFile(std.testing.io, "async-uring-raw-storage", .{ .mode = .read_only });
+    var storage_owns_file = false;
+    defer if (!storage_owns_file) file.close(std.testing.io);
+    var storage = initOwned(
+        std.testing.allocator,
+        std.testing.io,
+        file,
+        4096,
+        512,
+        .{ .major = 1, .minor = 2, .disk_sequence = 3 },
+        false,
+        .io_uring,
+    ) catch |err| switch (err) {
+        error.ArgumentsInvalid,
+        error.PermissionDenied,
+        error.SystemOutdated,
+        error.UnsupportedIoUringOperations,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+    storage_owns_file = true;
+    defer storage.close(std.testing.io) catch {};
+
+    const Completion = struct {
+        io: std.Io,
+        event: std.Io.Event = .unset,
+        failure: ?anyerror = null,
+
+        fn complete(context: *anyopaque, failure: ?anyerror) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.failure = failure;
+            self.event.set(self.io);
+        }
+    };
+    var actual: [expected.len]u8 = undefined;
+    const reads = [_]storage_api.Read{.{ .buffer = &actual, .offset = 512 }};
+    var results: [1]storage_api.ReadResult = undefined;
+    var completion: Completion = .{ .io = std.testing.io };
+    try std.testing.expectEqual(
+        storage_api.AsyncReadSubmit.submitted,
+        try storage.submitReadManyAt(
+            std.testing.io,
+            &reads,
+            &results,
+            .{ .context = &completion, .complete = Completion.complete },
+        ),
+    );
+    completion.event.waitUncancelable(std.testing.io);
+    try std.testing.expectEqual(@as(?anyerror, null), completion.failure);
+    try std.testing.expectEqual(@as(?anyerror, null), results[0].failure);
+    try std.testing.expectEqual(expected.len, results[0].amount);
     try std.testing.expectEqualStrings(expected, &actual);
 }
 

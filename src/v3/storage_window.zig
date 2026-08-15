@@ -75,6 +75,24 @@ fn readManyAt(
     }
 }
 
+fn submitReadManyAt(
+    context_raw: *anyopaque,
+    io: std.Io,
+    reads: []const storage_api.Read,
+    results: []storage_api.ReadResult,
+    completion: storage_api.AsyncReadCompletion,
+) !storage_api.AsyncReadSubmit {
+    const context: *Context = @ptrCast(@alignCast(context_raw));
+    if (reads.len != results.len) return error.InvalidReadBatch;
+    if (reads.len > max_batch_size) return .unsupported;
+    var translated: [max_batch_size]storage_api.Read = undefined;
+    for (reads, translated[0..reads.len]) |read, *output| output.* = .{
+        .buffer = read.buffer,
+        .offset = try translate(context, read.offset, read.buffer.len),
+    };
+    return context.backing.submitReadManyAt(io, translated[0..reads.len], results, completion);
+}
+
 fn writeAllAt(context_raw: *anyopaque, io: std.Io, bytes: []const u8, offset: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_raw));
     try context.backing.writeAllAt(io, bytes, try translate(context, offset, bytes.len));
@@ -129,6 +147,7 @@ const vtable: storage_api.Storage.VTable = .{
     .same_identity = sameIdentity,
     .read_at = readAt,
     .read_many_at = readManyAt,
+    .submit_read_many_at = submitReadManyAt,
     .write_all_at = writeAllAt,
     .write_all_many_at = writeAllManyAt,
     .sync_data = syncData,

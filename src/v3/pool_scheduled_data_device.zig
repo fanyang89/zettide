@@ -440,7 +440,7 @@ pub const Device = struct {
                     } else if (endpoint_result.failure) |err| {
                         last_errors[request_index] = err;
                     } else if (endpoint_result.amount != reads[request_index].buffer.len) {
-                        last_errors[request_index] = error.ShortRead;
+                        last_errors[request_index] = error.TruncatedMember;
                     } else {
                         resolved[request_index] = true;
                         results[request_index].amount = endpoint_result.amount;
@@ -682,6 +682,21 @@ pub const Device = struct {
             runOperation(self.members[member_indexes[0]].endpoint, operations[0], &errors[0]);
             return;
         }
+        var all_reads = true;
+        for (operations) |operation| switch (operation) {
+            .read, .read_many => {},
+            else => all_reads = false,
+        };
+        if (all_reads) return self.runReadOperations(operations, member_indexes, errors);
+        return self.runConcurrentOperations(operations, member_indexes, errors);
+    }
+
+    fn runConcurrentOperations(
+        self: *Device,
+        operations: []const Operation,
+        member_indexes: []const usize,
+        errors: []?anyerror,
+    ) !void {
         var group: std.Io.Group = .init;
         defer group.cancel(self.io);
         var first_spawn_error: ?anyerror = null;
@@ -696,6 +711,108 @@ pub const Device = struct {
             first_spawn_error = err;
         };
         if (first_spawn_error) |err| return err;
+    }
+
+    fn runReadOperations(
+        self: *Device,
+        operations: []const Operation,
+        member_indexes: []const usize,
+        errors: []?anyerror,
+    ) !void {
+        const State = struct {
+            io: std.Io,
+            event: std.Io.Event = .unset,
+            failure: ?anyerror = null,
+            submitted: bool = false,
+            singleton_read: [1]storage_api.Read = undefined,
+            singleton_result: [1]storage_api.ReadResult = undefined,
+
+            fn complete(context: *anyopaque, failure: ?anyerror) void {
+                const state: *@This() = @ptrCast(@alignCast(context));
+                state.failure = failure;
+                state.event.set(state.io);
+            }
+        };
+        std.debug.assert(operations.len <= pool_blob_schedule.max_member_count);
+        var states: [pool_blob_schedule.max_member_count]State = undefined;
+        var fallback: [pool_blob_schedule.max_member_count]bool = @splat(false);
+        for (operations, member_indexes, errors, states[0..operations.len], fallback[0..operations.len]) |
+            operation,
+            member_index,
+            *result,
+            *state,
+            *use_fallback,
+        | {
+            result.* = null;
+            state.* = .{ .io = self.io };
+            const endpoint = self.members[member_index].endpoint;
+            const submit = switch (operation) {
+                .read => |read| submit: {
+                    state.singleton_read[0] = .{ .buffer = read.buffer, .offset = read.offset };
+                    state.singleton_result[0] = .{};
+                    break :submit endpoint.submitReadDataMany(
+                        &state.singleton_read,
+                        &state.singleton_result,
+                        .{ .context = state, .complete = State.complete },
+                    );
+                },
+                .read_many => |batch| endpoint.submitReadDataMany(
+                    batch.reads,
+                    batch.results,
+                    .{ .context = state, .complete = State.complete },
+                ),
+                else => unreachable,
+            } catch |err| {
+                result.* = err;
+                continue;
+            };
+            if (submit == .submitted) {
+                state.submitted = true;
+            } else {
+                use_fallback.* = true;
+            }
+        }
+
+        var fallback_operations: [pool_blob_schedule.max_member_count]Operation = undefined;
+        var fallback_members: [pool_blob_schedule.max_member_count]usize = undefined;
+        var fallback_errors: [pool_blob_schedule.max_member_count]?anyerror = @splat(null);
+        var fallback_indexes: [pool_blob_schedule.max_member_count]usize = undefined;
+        var fallback_count: usize = 0;
+        for (operations, member_indexes, fallback[0..operations.len], 0..) |operation, member_index, use_fallback, index| {
+            if (!use_fallback) continue;
+            fallback_operations[fallback_count] = operation;
+            fallback_members[fallback_count] = member_index;
+            fallback_indexes[fallback_count] = index;
+            fallback_count += 1;
+        }
+        if (fallback_count != 0) {
+            try self.runConcurrentOperations(
+                fallback_operations[0..fallback_count],
+                fallback_members[0..fallback_count],
+                fallback_errors[0..fallback_count],
+            );
+            for (fallback_indexes[0..fallback_count], fallback_errors[0..fallback_count]) |index, failure|
+                errors[index] = failure;
+        }
+        for (operations, errors, states[0..operations.len]) |operation, *result, *state| {
+            if (!state.submitted) continue;
+            state.event.waitUncancelable(self.io);
+            if (state.failure) |err| {
+                result.* = err;
+                continue;
+            }
+            switch (operation) {
+                .read => |read| {
+                    const read_result = state.singleton_result[0];
+                    result.* = read_result.failure orelse if (read_result.amount != read.buffer.len)
+                        error.TruncatedMember
+                    else
+                        null;
+                },
+                .read_many => {},
+                else => unreachable,
+            }
+        }
     }
 
     fn freezeWrites(self: *Device) void {
@@ -725,6 +842,7 @@ const TestEndpoint = struct {
     read_calls: std.atomic.Value(usize) = .init(0),
     read_batch_calls: std.atomic.Value(usize) = .init(0),
     read_batch_items: std.atomic.Value(usize) = .init(0),
+    async_submit_calls: std.atomic.Value(usize) = .init(0),
     write_calls: std.atomic.Value(usize) = .init(0),
     write_batch_calls: std.atomic.Value(usize) = .init(0),
     sync_calls: std.atomic.Value(usize) = .init(0),
@@ -735,6 +853,7 @@ const TestEndpoint = struct {
     short_read_offset: ?u64 = null,
     fail_write: bool = false,
     fail_sync: bool = false,
+    supports_async_reads: bool = false,
 
     fn readMetadata(_: *anyopaque, _: u64, _: []u8) !void {}
 
@@ -779,6 +898,23 @@ const TestEndpoint = struct {
         }
     }
 
+    fn submitReadDataMany(
+        context: *anyopaque,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+        completion: storage_api.AsyncReadCompletion,
+    ) !storage_api.AsyncReadSubmit {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (!self.supports_async_reads) return .unsupported;
+        _ = self.async_submit_calls.fetchAdd(1, .monotonic);
+        var failure: ?anyerror = null;
+        readDataMany(context, reads, results) catch |err| {
+            failure = err;
+        };
+        completion.complete(completion.context, failure);
+        return .submitted;
+    }
+
     fn writeData(context: *anyopaque, offset: u64, bytes: []const u8) !void {
         const self: *@This() = @ptrCast(@alignCast(context));
         _ = self.write_calls.fetchAdd(1, .monotonic);
@@ -810,6 +946,7 @@ const TestEndpoint = struct {
         .read_metadata = readMetadata,
         .read_data = readData,
         .read_data_many = readDataMany,
+        .submit_read_data_many = submitReadDataMany,
         .write_data = writeData,
         .write_data_many = writeDataMany,
         .write_metadata_durable = writeMetadataDurable,
@@ -850,11 +987,38 @@ fn resetTestReads(contexts: []TestEndpoint) void {
         context.read_calls.store(0, .monotonic);
         context.read_batch_calls.store(0, .monotonic);
         context.read_batch_items.store(0, .monotonic);
+        context.async_submit_calls.store(0, .monotonic);
         context.fail_read = false;
         context.fail_read_batch = false;
         context.fail_read_offset = null;
         context.short_read = false;
         context.short_read_offset = null;
+    }
+}
+
+test "scheduled reads submit member batches asynchronously" {
+    const plan = try testPlan(12, 4096, 4);
+    var contexts: [12]TestEndpoint = undefined;
+    var endpoints: [12]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    for (&contexts) |*context| context.supports_async_reads = true;
+    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+
+    var buffers: [12][4096]u8 = undefined;
+    var reads: [buffers.len]storage_api.Read = undefined;
+    var results: [buffers.len]storage_api.ReadResult = undefined;
+    for (&reads, &buffers, 0..) |*read, *buffer, index| read.* = .{
+        .buffer = buffer,
+        .offset = index * 4096,
+    };
+    try device.readManyAt(&reads, &results);
+    var submit_count: usize = 0;
+    for (&contexts) |*context| submit_count += context.async_submit_calls.load(.monotonic);
+    try std.testing.expect(submit_count > 1);
+    for (results) |result| {
+        try std.testing.expectEqual(@as(?anyerror, null), result.failure);
+        try std.testing.expectEqual(@as(usize, 4096), result.amount);
     }
 }
 

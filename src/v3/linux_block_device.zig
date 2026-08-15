@@ -152,6 +152,7 @@ pub fn openStorageOptionsModeAffinity(
 
     const storage = try linux_raw_storage.initOwnedOptions(
         allocator,
+        io,
         file,
         opened.capacity_bytes,
         opened.logical_sector_size,

@@ -496,6 +496,13 @@ fn run(
         .{ .read_policy = read_policy },
     );
     defer pool_storage.close(io) catch @panic("failed to close Pool data storage");
+    defer {
+        const stats = pool_storage.transportStats(io);
+        std.debug.print(
+            "pool_async_metrics submissions={d} completions={d} queue_full={d}\n",
+            .{ stats.async_submissions, stats.async_completions, stats.async_queue_full },
+        );
+    }
     if (pool_storage.capacity() == 0 or pool_storage.capacity() % block_size != 0)
         return error.InvalidPoolDataCapacity;
 

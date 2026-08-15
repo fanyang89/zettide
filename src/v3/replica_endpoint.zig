@@ -14,6 +14,12 @@ pub const ReplicaEndpoint = struct {
         read_metadata: *const fn (*anyopaque, u64, []u8) anyerror!void,
         read_data: *const fn (*anyopaque, u64, []u8) anyerror!void,
         read_data_many: ?*const fn (*anyopaque, []const storage_api.Read, []storage_api.ReadResult) anyerror!void = null,
+        submit_read_data_many: ?*const fn (
+            *anyopaque,
+            []const storage_api.Read,
+            []storage_api.ReadResult,
+            storage_api.AsyncReadCompletion,
+        ) anyerror!storage_api.AsyncReadSubmit = null,
         write_data: *const fn (*anyopaque, u64, []const u8) anyerror!void,
         write_data_many: ?*const fn (*anyopaque, []const storage_api.Write) anyerror!void = null,
         write_metadata_durable: *const fn (*anyopaque, u64, []const u8) anyerror!void,
@@ -52,6 +58,17 @@ pub const ReplicaEndpoint = struct {
             };
             result.amount = read.buffer.len;
         }
+    }
+
+    pub fn submitReadDataMany(
+        self: ReplicaEndpoint,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+        completion: storage_api.AsyncReadCompletion,
+    ) anyerror!storage_api.AsyncReadSubmit {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        const submit = self.vtable.submit_read_data_many orelse return .unsupported;
+        return submit(self.context, reads, results, completion);
     }
 
     pub fn writeData(self: ReplicaEndpoint, offset: u64, data: []const u8) anyerror!void {

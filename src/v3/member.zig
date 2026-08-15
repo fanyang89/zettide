@@ -514,6 +514,26 @@ pub const Member = struct {
         }
     }
 
+    pub fn submitReadMany(
+        self: *Member,
+        kind: RegionKind,
+        reads: []const storage_api.Read,
+        results: []storage_api.ReadResult,
+        completion: storage_api.AsyncReadCompletion,
+    ) !storage_api.AsyncReadSubmit {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        if (reads.len > 32 or self.open_mode == .writable) return .unsupported;
+        try self.mutex.lockShared(self.io);
+        defer self.mutex.unlockShared(self.io);
+        if (self.isClosed()) return error.MemberClosed;
+        var absolute: [32]storage_api.Read = undefined;
+        for (reads, absolute[0..reads.len]) |request, *item| item.* = .{
+            .buffer = request.buffer,
+            .offset = try self.position(kind, request.offset, request.buffer.len),
+        };
+        return self.storage.submitReadManyAt(self.io, absolute[0..reads.len], results, completion);
+    }
+
     pub fn write(self: *Member, kind: RegionKind, offset: u64, bytes: []const u8) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -907,6 +927,7 @@ const member_replica_vtable: ReplicaEndpoint.VTable = .{
     .read_metadata = replicaReadMetadata,
     .read_data = replicaReadData,
     .read_data_many = replicaReadDataMany,
+    .submit_read_data_many = replicaSubmitReadDataMany,
     .write_data = replicaWriteData,
     .write_metadata_durable = replicaWriteMetadataDurable,
     .sync = replicaSync,
@@ -930,6 +951,15 @@ fn replicaReadDataMany(
     results: []storage_api.ReadResult,
 ) anyerror!void {
     return replicaMember(context).readMany(.data, reads, results);
+}
+
+fn replicaSubmitReadDataMany(
+    context: *anyopaque,
+    reads: []const storage_api.Read,
+    results: []storage_api.ReadResult,
+    completion: storage_api.AsyncReadCompletion,
+) anyerror!storage_api.AsyncReadSubmit {
+    return replicaMember(context).submitReadMany(.data, reads, results, completion);
 }
 
 fn replicaWriteData(context: *anyopaque, offset: u64, data: []const u8) anyerror!void {
