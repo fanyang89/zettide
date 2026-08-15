@@ -497,10 +497,18 @@ fn run(
     );
     defer pool_storage.close(io) catch @panic("failed to close Pool data storage");
     defer {
-        const stats = pool_storage.transportStats(io);
+        var submissions: u64 = 0;
+        var completions: u64 = 0;
+        var queue_full: u64 = 0;
+        for (physical_storages[0..physical_count]) |*storage| {
+            const stats = storage.transportStats(io);
+            submissions +|= stats.async_submissions;
+            completions +|= stats.async_completions;
+            queue_full +|= stats.async_queue_full;
+        }
         std.debug.print(
             "pool_async_metrics submissions={d} completions={d} queue_full={d}\n",
-            .{ stats.async_submissions, stats.async_completions, stats.async_queue_full },
+            .{ submissions, completions, queue_full },
         );
     }
     if (pool_storage.capacity() == 0 or pool_storage.capacity() % block_size != 0)
