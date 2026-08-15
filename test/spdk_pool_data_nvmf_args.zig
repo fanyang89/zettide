@@ -3,6 +3,8 @@ const std = @import("std");
 pub const ReadPolicy = enum { first_available, quorum };
 pub const max_reactor_count = 16;
 pub const max_vhost_controller_count = 4;
+pub const default_concurrent_group_count = 8;
+pub const max_concurrent_group_count = 64;
 
 pub const WindowSpec = struct {
     device_index: usize,
@@ -45,6 +47,14 @@ pub fn parseVhostControllerCount(text: ?[]const u8, reactor_count: usize) !usize
         reactor_count;
     if (count == 0 or count > max_vhost_controller_count or count > reactor_count)
         return error.InvalidVhostControllerCount;
+    return count;
+}
+
+pub fn parseConcurrentGroupCount(text: ?[]const u8) !usize {
+    const value = text orelse return default_concurrent_group_count;
+    const count = parseDecimal(usize, value) catch return error.InvalidConcurrentGroupCount;
+    if (count == 0 or count > max_concurrent_group_count)
+        return error.InvalidConcurrentGroupCount;
     return count;
 }
 
@@ -122,6 +132,14 @@ test "vhost controller count defaults to reactors and stays bounded" {
         try std.testing.expectError(error.InvalidVhostControllerCount, parseVhostControllerCount(value, 4));
     }
     try std.testing.expectError(error.InvalidVhostControllerCount, parseVhostControllerCount("4", 2));
+}
+
+test "concurrent group count is strict and bounded" {
+    try std.testing.expectEqual(default_concurrent_group_count, try parseConcurrentGroupCount(null));
+    try std.testing.expectEqual(@as(usize, 16), try parseConcurrentGroupCount("16"));
+    for ([_][]const u8{ "", "0", "65", "+1", "x" }) |value| {
+        try std.testing.expectError(error.InvalidConcurrentGroupCount, parseConcurrentGroupCount(value));
+    }
 }
 
 test "reactor mask selects one core" {

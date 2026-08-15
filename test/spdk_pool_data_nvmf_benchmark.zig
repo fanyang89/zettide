@@ -7,7 +7,6 @@ const c = @import("spdk_c");
 const block_size = 4096;
 const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
-const max_concurrent_groups = 8;
 const queue_capacity = 1024;
 const Frontend = enum { nvmf, vhost };
 const runtime_config =
@@ -53,6 +52,7 @@ const Worker = struct {
 
     io: std.Io,
     storage: *zettide.v3.storage.Storage,
+    concurrent_group_count: usize,
     slots: [queue_capacity]Slot,
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
@@ -69,12 +69,13 @@ const Worker = struct {
     completed_requests: std.atomic.Value(u64) = .init(0),
     thread: std.Thread,
 
-    fn create(io: std.Io, storage: *zettide.v3.storage.Storage) !*Worker {
+    fn create(io: std.Io, storage: *zettide.v3.storage.Storage, concurrent_group_count: usize) !*Worker {
         const self = try std.heap.c_allocator.create(Worker);
         errdefer std.heap.c_allocator.destroy(self);
         self.* = undefined;
         self.io = io;
         self.storage = storage;
+        self.concurrent_group_count = concurrent_group_count;
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
@@ -212,7 +213,7 @@ const Worker = struct {
 
     fn run(self: *Worker) void {
         var groups: std.Io.Group = .init;
-        var permits: std.Io.Semaphore = .{ .permits = max_concurrent_groups };
+        var permits: std.Io.Semaphore = .{ .permits = self.concurrent_group_count };
         var pending: ?Queued = null;
         while (pending orelse self.next()) |queued| {
             pending = null;
@@ -378,6 +379,9 @@ fn run(
             null, reactor_count)
     else
         0;
+    const concurrent_group_count = try args.parseConcurrentGroupCount(
+        if (c.getenv("ZETTIDE_POOL_DATA_CONCURRENT_GROUPS")) |value| std.mem.span(value) else null,
+    );
     var window_specs_buffer: [zettide.v3.pool_member_set.max_member_count]args.WindowSpec = undefined;
     const window_specs = try args.parseWindowSpecs(
         if (c.getenv("ZETTIDE_POOL_DATA_MEMBER_WINDOWS")) |value| std.mem.span(value) else null,
@@ -469,11 +473,12 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d}\n", .{
+    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} concurrent_groups={d}\n", .{
         frontend_text,
         vhost_socket_directory orelse "none",
         reactor_mask,
         vhost_controller_count,
+        concurrent_group_count,
     });
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_pool_data_nvmf_benchmark",
@@ -491,7 +496,7 @@ fn run(
     switch (frontend) {
         .nvmf => {
             std.debug.print("target-stage worker start\n", .{});
-            const worker = try Worker.create(io, &pool_storage);
+            const worker = try Worker.create(io, &pool_storage, concurrent_group_count);
             defer worker.close();
             const backend: zettide.spdk_vhost_block_export.Backend = .{
                 .context = worker,
@@ -536,7 +541,7 @@ fn run(
                 closeVhostExport(io, &exports[export_count]);
             };
 
-            const worker = try Worker.create(io, &pool_storage);
+            const worker = try Worker.create(io, &pool_storage, concurrent_group_count);
             defer worker.close();
             const backend: zettide.spdk_vhost_block_export.Backend = .{
                 .context = worker,
