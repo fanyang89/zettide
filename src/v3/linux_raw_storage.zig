@@ -9,6 +9,15 @@ pub const Mode = enum {
     auto,
     posix,
     io_uring,
+    io_uring_poll,
+
+    pub fn parse(value: []const u8) !Mode {
+        if (std.mem.eql(u8, value, "auto")) return .auto;
+        if (std.mem.eql(u8, value, "posix")) return .posix;
+        if (std.mem.eql(u8, value, "io_uring")) return .io_uring;
+        if (std.mem.eql(u8, value, "io_uring_poll")) return .io_uring_poll;
+        return error.InvalidRawStorageMode;
+    }
 };
 
 pub const Identity = struct {
@@ -21,12 +30,12 @@ const EnginePool = struct {
     engines: [max_engine_lanes]linux_io_uring.Engine = undefined,
     count: usize,
 
-    fn init(fd: std.os.linux.fd_t) !EnginePool {
+    fn init(fd: std.os.linux.fd_t, options: linux_io_uring.Options) !EnginePool {
         var pool: EnginePool = .{ .count = 0 };
-        pool.engines[0] = try .init(fd);
+        pool.engines[0] = try .initOptions(fd, options);
         pool.count = 1;
         while (pool.count < pool.engines.len) {
-            pool.engines[pool.count] = linux_io_uring.Engine.init(fd) catch break;
+            pool.engines[pool.count] = linux_io_uring.Engine.initOptions(fd, options) catch break;
             pool.count += 1;
         }
         return pool;
@@ -48,6 +57,7 @@ const Context = struct {
     capacity_bytes: u64,
     identity: Identity,
     writable: bool,
+    polling: bool,
     engine_pool: ?EnginePool,
     read_lane: std.atomic.Value(u64) = .init(0),
     mutex: std.Io.RwLock = .init,
@@ -62,6 +72,7 @@ pub fn initOwned(
     writable: bool,
     mode: Mode,
 ) !storage_api.Storage {
+    if (mode == .io_uring_poll and writable) return error.PollModeRequiresReadOnly;
     const context = try allocator.create(Context);
     errdefer allocator.destroy(context);
     context.* = .{
@@ -70,10 +81,12 @@ pub fn initOwned(
         .capacity_bytes = capacity_bytes,
         .identity = identity,
         .writable = writable,
+        .polling = mode == .io_uring_poll,
         .engine_pool = switch (mode) {
             .posix => null,
-            .io_uring => try .init(file.handle),
-            .auto => EnginePool.init(file.handle) catch |err|
+            .io_uring => try .init(file.handle, .{}),
+            .io_uring_poll => try .init(file.handle, .{ .io_poll = true, .sq_poll = true }),
+            .auto => EnginePool.init(file.handle, .{}) catch |err|
                 if (shouldFallback(mode, err)) null else return err,
         },
     };
@@ -114,6 +127,10 @@ fn readAt(context_ptr: *anyopaque, io: std.Io, buffer: []u8, offset: u64) !usize
     context.mutex.lockShared(io) catch |err| return mapOperationError(err);
     defer context.mutex.unlockShared(io);
     try validateRange(context, offset, buffer.len);
+    if (context.polling) {
+        const pool = &context.engine_pool.?;
+        return pool.engines[0].readAt(io, buffer, offset) catch |err| return mapOperationError(err);
+    }
     return context.file.readPositionalAll(io, buffer, offset) catch |err| return mapOperationError(err);
 }
 
@@ -127,7 +144,7 @@ fn readManyAt(
     if (reads.len != results.len) return error.InvalidReadBatch;
     for (reads) |read| try validateRange(context, read.offset, read.buffer.len);
 
-    if (context.engine_pool != null and reads.len > 1) {
+    if (context.engine_pool != null and (context.polling or reads.len > 1)) {
         context.mutex.lockShared(io) catch |err| return mapOperationError(err);
         defer context.mutex.unlockShared(io);
         const pool = &context.engine_pool.?;
@@ -179,6 +196,7 @@ fn writeAllManyAt(context_ptr: *anyopaque, io: std.Io, writes: []const storage_a
 
 fn syncData(context_ptr: *anyopaque, io: std.Io) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
+    if (context.polling) return;
     context.mutex.lock(io) catch |err| return mapOperationError(err);
     defer context.mutex.unlock(io);
 
@@ -190,6 +208,7 @@ fn syncData(context_ptr: *anyopaque, io: std.Io) !void {
 
 fn sync(context_ptr: *anyopaque, io: std.Io) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
+    if (context.polling) return;
     context.mutex.lock(io) catch |err| return mapOperationError(err);
     defer context.mutex.unlock(io);
 
@@ -302,6 +321,33 @@ test "automatic raw transport only falls back when io_uring is unavailable" {
     try std.testing.expect(!shouldFallback(.auto, error.ProcessFdQuotaExceeded));
     try std.testing.expect(!shouldFallback(.auto, error.StorageIo));
     try std.testing.expect(!shouldFallback(.auto, error.InvalidStorageCompletion));
+}
+
+test "raw storage mode parsing is strict" {
+    try std.testing.expectEqual(Mode.auto, try Mode.parse("auto"));
+    try std.testing.expectEqual(Mode.posix, try Mode.parse("posix"));
+    try std.testing.expectEqual(Mode.io_uring, try Mode.parse("io_uring"));
+    try std.testing.expectEqual(Mode.io_uring_poll, try Mode.parse("io_uring_poll"));
+    try std.testing.expectError(error.InvalidRawStorageMode, Mode.parse("poll"));
+}
+
+test "polling raw storage is read only" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "polling-read-only", .{ .read = true });
+    defer file.close(std.testing.io);
+    try std.testing.expectError(
+        error.PollModeRequiresReadOnly,
+        initOwned(
+            std.testing.allocator,
+            file,
+            4096,
+            512,
+            .{ .major = 1, .minor = 2, .disk_sequence = 3 },
+            true,
+            .io_uring_poll,
+        ),
+    );
 }
 
 test "raw io_uring read lanes round robin across counter overflow" {

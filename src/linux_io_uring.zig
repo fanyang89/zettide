@@ -11,6 +11,11 @@ pub const SyncMode = enum {
     full,
 };
 
+pub const Options = struct {
+    io_poll: bool = false,
+    sq_poll: bool = false,
+};
+
 pub const Write = struct {
     bytes: []const u8,
     offset: u64,
@@ -34,10 +39,18 @@ pub const Engine = struct {
     active: bool = true,
     file_registered: bool = true,
     writev_supported: bool,
+    sq_poll: bool,
 
     /// Initializes an engine that borrows fd; the caller retains ownership.
     pub fn init(fd: linux.fd_t) !Engine {
-        var ring = try IoUring.init(queue_entries, 0);
+        return initOptions(fd, .{});
+    }
+
+    /// Initializes an engine that borrows fd; the caller retains ownership.
+    pub fn initOptions(fd: linux.fd_t, options: Options) !Engine {
+        const flags = (if (options.io_poll) @as(u32, linux.IORING_SETUP_IOPOLL) else 0) |
+            (if (options.sq_poll) @as(u32, linux.IORING_SETUP_SQPOLL) else 0);
+        var ring = try IoUring.init(queue_entries, flags);
         errdefer ring.deinit();
         const probe = try ring.get_probe();
         if (!probe.is_supported(.READ) or
@@ -51,6 +64,7 @@ pub const Engine = struct {
         return .{
             .ring = ring,
             .writev_supported = probe.is_supported(.WRITEV),
+            .sq_poll = options.sq_poll,
         };
     }
 
@@ -317,11 +331,28 @@ pub const Engine = struct {
             return err;
         };
         if (completion.user_data != token) return self.invalidCompletion();
-        if (completion.res < 0) return completionError(@fromBackingInt(@intCast(-completion.res)));
+        if (completion.res < 0) return completionError(@enumFromInt(@as(u16, @intCast(-completion.res))));
         return @intCast(completion.res);
     }
 
     fn submitBatch(self: *Engine, count: usize) !void {
+        if (self.sq_poll) {
+            self.stats.submit_calls += 1;
+            while (true) {
+                _ = self.ring.submit() catch |err| switch (err) {
+                    error.SignalInterrupt => continue,
+                    else => {
+                        self.failAfterDrain();
+                        return err;
+                    },
+                };
+                break;
+            }
+            self.stats.submitted_sqes += count;
+            self.current_inflight += count;
+            self.stats.max_inflight = @max(self.stats.max_inflight, self.current_inflight);
+            return;
+        }
         var submitted: u32 = 0;
         const expected: u32 = @intCast(count);
         var flushed = false;
@@ -426,7 +457,7 @@ pub const Engine = struct {
         };
         if (completion.user_data != token) return self.invalidCompletion();
         if (completion.res < 0) {
-            const err: linux.E = @fromBackingInt(@intCast(-completion.res));
+            const err: linux.E = @enumFromInt(@as(u16, @intCast(-completion.res)));
             if (err == .OPNOTSUPP) return error.WritevNotSupported;
             return completionError(err);
         }
@@ -473,7 +504,7 @@ const BatchTracker = struct {
         if (self.seen[completion_index]) return error.InvalidIoUringCompletion;
         self.seen[completion_index] = true;
         if (completion.res < 0) {
-            self.errors[completion_index] = completionError(@fromBackingInt(@intCast(-completion.res)));
+            self.errors[completion_index] = completionError(@enumFromInt(@as(u16, @intCast(-completion.res))));
         } else {
             const amount: usize = @intCast(completion.res);
             if (amount > self.lengths[completion_index]) return error.InvalidIoUringCompletion;
@@ -538,7 +569,7 @@ test "io_uring batch tracker accepts deterministic out-of-order completions" {
     };
     try tracker.record(.{ .user_data = 13, .res = 6, .flags = 0 });
     try tracker.record(.{ .user_data = 11, .res = 4, .flags = 0 });
-    try tracker.record(.{ .user_data = 12, .res = -@as(i32, @backingInt(linux.E.INTR)), .flags = 0 });
+    try tracker.record(.{ .user_data = 12, .res = -@as(i32, @intFromEnum(linux.E.INTR)), .flags = 0 });
     try std.testing.expectEqualSlices(usize, &.{ 4, 0, 6 }, &amounts);
     try std.testing.expectEqual(error.OperationInterrupted, errors[1].?);
     try std.testing.expectError(
