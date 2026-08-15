@@ -23,6 +23,8 @@ queues=${ZETTIDE_VHOST_QUEUES:-1}
 ssh_port=${ZETTIDE_VHOST_SSH_PORT:-10022}
 reactor_count=${ZETTIDE_NVMF_REACTOR_COUNT:-1}
 controller_count=${ZETTIDE_VHOST_CONTROLLER_COUNT:-$reactor_count}
+perf_case=${ZETTIDE_VHOST_PERF_CASE:-}
+perf_frequency=${ZETTIDE_VHOST_PERF_FREQUENCY:-199}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
 target_pid=""
 qemu_pid=""
@@ -32,6 +34,8 @@ work_dir=""
 socket_dir=""
 socket_paths=()
 monitor_pids=()
+perf_pid=""
+perf_data=""
 
 case $fio_case in
     "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16) ;;
@@ -64,6 +68,11 @@ if [[ ! $ssh_port =~ ^[0-9]+$ ]] || ((ssh_port < 1 || ssh_port > 65535)); then
 fi
 [[ $reactor_count =~ ^[1-9][0-9]*$ ]] || { echo "invalid reactor count: $reactor_count" >&2; exit 2; }
 [[ $controller_count =~ ^[1-9][0-9]*$ ]] || { echo "invalid vhost controller count: $controller_count" >&2; exit 2; }
+[[ $perf_frequency =~ ^[1-9][0-9]*$ ]] || { echo "invalid perf frequency: $perf_frequency" >&2; exit 2; }
+if [[ -n $perf_case && $perf_case != "$fio_case" ]]; then
+    echo "perf case must match the selected fio case" >&2
+    exit 2
+fi
 ((queues <= guest_vcpus)) || {
     echo "vhost queue count must not exceed guest vCPU count" >&2
     exit 2
@@ -89,6 +98,12 @@ for command_name in qemu-img cloud-localds ssh scp ssh-keygen jq pidstat mpstat 
         exit 2
     }
 done
+if [[ -n $perf_case ]]; then
+    command -v perf >/dev/null || {
+        echo "perf is required when a perf case is selected" >&2
+        exit 2
+    }
+fi
 
 process_running() {
     local pid=$1
@@ -160,6 +175,11 @@ cleanup() {
     set +e
 
     stop_monitors
+    if [[ -n $perf_pid ]]; then
+        kill -INT "$perf_pid" 2>/dev/null || true
+        wait "$perf_pid" 2>/dev/null || true
+        perf_pid=""
+    fi
     if [[ -n $qemu_pid ]] && process_running "$qemu_pid"; then
         if [[ $guest_ready == true ]]; then
             ssh "${ssh_options[@]}" zettide@127.0.0.1 sudo poweroff >/dev/null 2>&1 || true
@@ -443,11 +463,26 @@ percentile_list=50:95:99:99.9
 EOF
     scp "${scp_options[@]}" "$job_file" zettide@127.0.0.1:/tmp/zettide-fio.job
     start_monitors "$name"
+    if [[ -n $perf_case && $name == "$perf_case" ]]; then
+        perf_data=$log_dir/perf-$name.data
+        perf record --quiet --freq "$perf_frequency" --call-graph fp \
+            --pid "$target_pid,$qemu_pid" --output "$perf_data" &
+        perf_pid=$!
+    fi
     set +e
     ssh "${ssh_options[@]}" zettide@127.0.0.1 \
         'sudo fio --readonly --eta=never --output-format=json /tmp/zettide-fio.job' >"$result"
     status=$?
     set -e
+    if [[ -n $perf_pid ]]; then
+        kill -INT "$perf_pid" 2>/dev/null || true
+        wait "$perf_pid" 2>/dev/null || true
+        perf_pid=""
+        perf report --stdio --no-children --call-graph none --percent-limit 0.1 \
+            --sort=comm,dso,symbol --input "$perf_data" >"$log_dir/perf-$name-self.txt"
+        perf report --stdio --percent-limit 0.1 \
+            --sort=comm,dso,symbol --input "$perf_data" >"$log_dir/perf-$name-inclusive.txt"
+    fi
     stop_monitors
     cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
     ((status == 0)) || return "$status"
