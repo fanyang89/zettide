@@ -68,6 +68,7 @@ fn readManyAt(
             output.* = .{
                 .buffer = read.buffer,
                 .offset = try translate(context, read.offset, read.buffer.len),
+                .stable_buffer = read.stable_buffer,
             };
         }
         try context.backing.readManyAt(io, translated[0..count], results[first..][0..count]);
@@ -89,6 +90,7 @@ fn submitReadManyAt(
     for (reads, translated[0..reads.len]) |read, *output| output.* = .{
         .buffer = read.buffer,
         .offset = try translate(context, read.offset, read.buffer.len),
+        .stable_buffer = read.stable_buffer,
     };
     return context.backing.submitReadManyAt(io, translated[0..reads.len], results, completion);
 }

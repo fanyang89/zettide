@@ -32,6 +32,7 @@ const Worker = struct {
         offset: u64 = 0,
         buffer: ?*anyopaque = null,
         length: usize = 0,
+        stable_buffer: bool = false,
         complete: c.zettide_spdk_bdev_provider_complete = null,
         complete_context: ?*anyopaque = null,
     };
@@ -54,6 +55,7 @@ const Worker = struct {
     storage: *zettide.v3.storage.Storage,
     concurrent_group_count: usize,
     inline_batches: bool,
+    stable_buffer_hints: bool,
     slots: [queue_capacity]Slot,
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
@@ -75,6 +77,7 @@ const Worker = struct {
         storage: *zettide.v3.storage.Storage,
         concurrent_group_count: usize,
         inline_batches: bool,
+        stable_buffer_hints: bool,
     ) !*Worker {
         const self = try std.heap.c_allocator.create(Worker);
         errdefer std.heap.c_allocator.destroy(self);
@@ -83,6 +86,7 @@ const Worker = struct {
         self.storage = storage;
         self.concurrent_group_count = concurrent_group_count;
         self.inline_batches = inline_batches;
+        self.stable_buffer_hints = stable_buffer_hints;
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
@@ -129,6 +133,7 @@ const Worker = struct {
         offset: u64,
         buffer: ?*anyopaque,
         length_raw: u64,
+        stable_buffer: bool,
         complete: c.zettide_spdk_bdev_provider_complete,
         complete_context: ?*anyopaque,
     ) callconv(.c) c_int {
@@ -166,6 +171,7 @@ const Worker = struct {
                     .offset = offset,
                     .buffer = buffer,
                     .length = length,
+                    .stable_buffer = stable_buffer and self.stable_buffer_hints,
                     .complete = complete,
                     .complete_context = complete_context,
                 };
@@ -283,6 +289,7 @@ const Worker = struct {
                 else
                     @as([*]u8, @ptrCast(request.buffer.?))[0..request.length],
                 .offset = request.offset,
+                .stable_buffer = request.stable_buffer,
             };
         }
         self.storage.readManyAt(self.io, reads[0..batch.count], results[0..batch.count]) catch |err| {
@@ -500,15 +507,27 @@ fn run(
         var submissions: u64 = 0;
         var completions: u64 = 0;
         var queue_full: u64 = 0;
+        var fixed_reads: u64 = 0;
+        var fallback_reads: u64 = 0;
+        var fixed_registrations: u64 = 0;
+        var fixed_registration_failures: u64 = 0;
         for (physical_storages[0..physical_count]) |*storage| {
             const stats = storage.transportStats(io);
             submissions +|= stats.async_submissions;
             completions +|= stats.async_completions;
             queue_full +|= stats.async_queue_full;
+            fixed_reads +|= stats.fixed_reads;
+            fallback_reads +|= stats.fallback_reads;
+            fixed_registrations +|= stats.fixed_buffer_registrations;
+            fixed_registration_failures +|= stats.fixed_buffer_registration_failures;
         }
         std.debug.print(
             "pool_async_metrics submissions={d} completions={d} queue_full={d}\n",
             .{ submissions, completions, queue_full },
+        );
+        std.debug.print(
+            "pool_fixed_buffer_metrics reads={d} fallbacks={d} registrations={d} registration_failures={d}\n",
+            .{ fixed_reads, fallback_reads, fixed_registrations, fixed_registration_failures },
         );
     }
     if (pool_storage.capacity() == 0 or pool_storage.capacity() % block_size != 0)
@@ -557,7 +576,7 @@ fn run(
     switch (frontend) {
         .nvmf => {
             std.debug.print("target-stage worker start\n", .{});
-            const worker = try Worker.create(io, &pool_storage, concurrent_group_count, false);
+            const worker = try Worker.create(io, &pool_storage, concurrent_group_count, false, false);
             defer worker.close();
             const backend: zettide.spdk_vhost_block_export.Backend = .{
                 .context = worker,
@@ -602,7 +621,13 @@ fn run(
                 workers[worker_count].close();
             };
             while (worker_count < vhost_worker_count) : (worker_count += 1)
-                workers[worker_count] = try Worker.create(io, &pool_storage, concurrent_group_count, vhost_inline_batches);
+                workers[worker_count] = try Worker.create(
+                    io,
+                    &pool_storage,
+                    concurrent_group_count,
+                    vhost_inline_batches,
+                    true,
+                );
             var exports: [args.max_vhost_controller_count]zettide.spdk_vhost_block_export.VhostBlockExport = undefined;
             var export_count: usize = 0;
             defer while (export_count > 0) {

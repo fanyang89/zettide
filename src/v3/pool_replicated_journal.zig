@@ -2565,6 +2565,7 @@ test "mapped extents are durable before catalog publication" {
                         0,
                         @ptrCast(&replacement),
                         replacement.len,
+                        false,
                         ProviderCompletion.callback,
                         &completion,
                     ));
@@ -2575,6 +2576,7 @@ test "mapped extents are durable before catalog publication" {
                         0,
                         null,
                         0,
+                        false,
                         ProviderCompletion.callback,
                         &completion,
                     ));
@@ -2586,6 +2588,7 @@ test "mapped extents are durable before catalog publication" {
                         0,
                         @ptrCast(&worker_actual),
                         worker_actual.len,
+                        false,
                         ProviderCompletion.callback,
                         &completion,
                     ));
@@ -2597,6 +2600,7 @@ test "mapped extents are durable before catalog publication" {
                         extent_size,
                         @ptrCast(&replacement),
                         replacement.len,
+                        false,
                         ProviderCompletion.callback,
                         &completion,
                     ));

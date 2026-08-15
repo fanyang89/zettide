@@ -13,6 +13,8 @@ pub const Kind = enum {
 pub const Read = struct {
     buffer: []u8,
     offset: u64,
+    /// The backing mapping keeps the same page identity while this storage is serving I/O.
+    stable_buffer: bool = false,
 };
 
 pub const ReadResult = struct {
@@ -51,6 +53,10 @@ pub const TransportStats = struct {
     async_submissions: u64 = 0,
     async_completions: u64 = 0,
     async_queue_full: u64 = 0,
+    fixed_reads: u64 = 0,
+    fallback_reads: u64 = 0,
+    fixed_buffer_registrations: u64 = 0,
+    fixed_buffer_registration_failures: u64 = 0,
 };
 
 /// Owned durable random-access storage used by a v3 member.
