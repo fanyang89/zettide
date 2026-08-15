@@ -26,6 +26,7 @@ controller_count=${ZETTIDE_VHOST_CONTROLLER_COUNT:-$reactor_count}
 perf_case=${ZETTIDE_VHOST_PERF_CASE:-}
 perf_frequency=${ZETTIDE_VHOST_PERF_FREQUENCY:-199}
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
+target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
 target_pid=""
 qemu_pid=""
@@ -71,6 +72,7 @@ fi
 [[ $controller_count =~ ^[1-9][0-9]*$ ]] || { echo "invalid vhost controller count: $controller_count" >&2; exit 2; }
 [[ $perf_frequency =~ ^[1-9][0-9]*$ ]] || { echo "invalid perf frequency: $perf_frequency" >&2; exit 2; }
 [[ -z $vcpu_cpu_base || $vcpu_cpu_base =~ ^[0-9]+$ ]] || { echo "invalid vCPU CPU base: $vcpu_cpu_base" >&2; exit 2; }
+[[ $target_gdb == 0 || $target_gdb == 1 ]] || { echo "invalid target gdb mode: $target_gdb" >&2; exit 2; }
 if [[ -n $perf_case && $perf_case != "$fio_case" ]]; then
     echo "perf case must match the selected fio case" >&2
     exit 2
@@ -113,6 +115,12 @@ if [[ -n $vcpu_cpu_base ]]; then
     }
     ((vcpu_cpu_base + guest_vcpus <= $(nproc))) || {
         echo "vCPU affinity exceeds the host CPU count" >&2
+        exit 2
+    }
+fi
+if [[ $target_gdb == 1 ]]; then
+    command -v gdb >/dev/null || {
+        echo "gdb is required when target debugging is enabled" >&2
         exit 2
     }
 fi
@@ -317,12 +325,16 @@ scp_options=(
 )
 
 rm -f "$ready_file"
+target_command=("$target" "$ready_file" "$pool_id" "$read_policy" "${devices[@]}")
+if [[ $target_gdb == 1 ]]; then
+    target_command=(gdb --batch --return-child-result -ex run -ex "thread apply all bt full" --args "${target_command[@]}")
+fi
 env ZETTIDE_POOL_DATA_FRONTEND=vhost \
     ZETTIDE_POOL_DATA_MEMBER_WINDOWS="${ZETTIDE_POOL_DATA_MEMBER_WINDOWS:-}" \
     ZETTIDE_VHOST_SOCKET_DIR="$socket_dir" \
     ZETTIDE_VHOST_CONTROLLER_COUNT="$controller_count" \
     ZETTIDE_NVMF_REACTOR_COUNT="$reactor_count" \
-    "$target" "$ready_file" "$pool_id" "$read_policy" "${devices[@]}" \
+    "${target_command[@]}" \
     >"$log_dir/target.log" 2>&1 &
 target_pid=$!
 for ((attempt = 0; attempt < 1000; attempt++)); do
