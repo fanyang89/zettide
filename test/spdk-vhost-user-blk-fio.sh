@@ -27,6 +27,7 @@ perf_case=${ZETTIDE_VHOST_PERF_CASE:-}
 perf_frequency=${ZETTIDE_VHOST_PERF_FREQUENCY:-199}
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
 target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
+storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
 target_pid=""
 qemu_pid=""
@@ -38,6 +39,7 @@ socket_paths=()
 monitor_pids=()
 perf_pid=""
 perf_data=""
+deferred_signal=0
 
 case $fio_case in
     "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16) ;;
@@ -164,6 +166,27 @@ stop_process() {
     wait "$pid" 2>/dev/null || true
 }
 
+restore_signal_traps() {
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+begin_deferred_signals() {
+    deferred_signal=0
+    trap 'deferred_signal=129' HUP
+    trap 'deferred_signal=130' INT
+    trap 'deferred_signal=143' TERM
+}
+
+end_deferred_signals() {
+    local signal
+    restore_signal_traps
+    signal=$deferred_signal
+    deferred_signal=0
+    ((signal == 0)) || exit "$signal"
+}
+
 stop_monitors() {
     local pid
 
@@ -180,18 +203,20 @@ start_monitors() {
     local name=$1
 
     cp /proc/softirqs "$log_dir/host-softirqs-$name-before.txt"
+    begin_deferred_signals
     pidstat -t -u -r -w -p "$target_pid,$qemu_pid" 1 >"$log_dir/host-pidstat-$name.log" &
     monitor_pids+=("$!")
     mpstat -P ALL 1 >"$log_dir/host-mpstat-$name.log" &
     monitor_pids+=("$!")
     iostat -dx -y 1 >"$log_dir/host-iostat-$name.log" &
     monitor_pids+=("$!")
+    end_deferred_signals
 }
 
 cleanup() {
     local result=$?
     local deadline
-    trap - EXIT INT TERM
+    trap - EXIT HUP INT TERM
     set +e
 
     stop_monitors
@@ -245,7 +270,7 @@ cleanup() {
     exit "$result"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+restore_signal_traps
 
 mkdir -p "$log_dir"
 work_dir=$(mktemp -d "$log_dir/vhost-fio.XXXXXX")
@@ -329,6 +354,11 @@ target_command=("$target" "$ready_file" "$pool_id" "$read_policy" "${devices[@]}
 if [[ $target_gdb == 1 ]]; then
     target_command=(gdb --batch --return-child-result -ex run -ex "thread apply all bt full" --args "${target_command[@]}")
 fi
+if [[ $storage_transport == spdk_nvme_pcie ]]; then
+    command -v prlimit >/dev/null || { echo "prlimit is required for SPDK NVMe PCIe" >&2; exit 2; }
+    target_command=(prlimit --memlock=unlimited:unlimited -- "${target_command[@]}")
+fi
+begin_deferred_signals
 env ZETTIDE_POOL_DATA_FRONTEND=vhost \
     ZETTIDE_POOL_DATA_MEMBER_WINDOWS="${ZETTIDE_POOL_DATA_MEMBER_WINDOWS:-}" \
     ZETTIDE_VHOST_SOCKET_DIR="$socket_dir" \
@@ -337,6 +367,7 @@ env ZETTIDE_POOL_DATA_FRONTEND=vhost \
     "${target_command[@]}" \
     >"$log_dir/target.log" 2>&1 &
 target_pid=$!
+end_deferred_signals
 for ((attempt = 0; attempt < 1000; attempt++)); do
     sockets_ready=true
     for socket_path in "${socket_paths[@]}"; do
@@ -365,6 +396,7 @@ for ((index = 0; index < controller_count; index++)); do
     )
 done
 
+begin_deferred_signals
 "$qemu_command" \
     -name zettide-vhost-fio,debug-threads=on \
     -machine q35,accel=kvm \
@@ -385,6 +417,7 @@ done
     -no-reboot \
     >"$log_dir/qemu-serial.log" 2>&1 &
 qemu_pid=$!
+end_deferred_signals
 if [[ -n $vcpu_cpu_base ]]; then
     : >"$log_dir/qemu-vcpu-affinity.txt"
     for ((index = 0; index < guest_vcpus; index++)); do
@@ -512,9 +545,11 @@ EOF
     start_monitors "$name"
     if [[ -n $perf_case && $name == "$perf_case" ]]; then
         perf_data=$log_dir/perf-$name.data
+        begin_deferred_signals
         perf record --quiet --freq "$perf_frequency" --call-graph fp \
             --pid "$target_pid,$qemu_pid" --output "$perf_data" &
         perf_pid=$!
+        end_deferred_signals
     fi
     set +e
     ssh "${ssh_options[@]}" zettide@127.0.0.1 \

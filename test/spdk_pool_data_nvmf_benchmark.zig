@@ -26,6 +26,26 @@ const rdma_runtime_config =
     \\{"method":"nvmf_create_transport","params":{"trtype":"RDMA","max_queue_depth":128,"max_io_size":131072,"max_srq_depth":1024,"iobuf_small_cache_size":128,"iobuf_large_cache_size":32}}]}]}
 ;
 
+fn pcieRuntimeConfig(
+    allocator: std.mem.Allocator,
+    namespaces: []const args.PcieNamespace,
+) ![]u8 {
+    if (namespaces.len != 2) return error.PcieRequiresTwoNamespaces;
+    if (namespaces[0].nsid != 1 or namespaces[1].nsid != 1)
+        return error.UnsupportedPcieNamespaceId;
+    if (std.mem.eql(u8, namespaces[0].bdf, namespaces[1].bdf))
+        return error.DuplicatePcieController;
+    return std.fmt.allocPrint(allocator,
+        \\{{"subsystems":[
+        \\{{"subsystem":"bdev","config":[
+        \\{{"method":"bdev_set_options","params":{{"bdev_io_pool_size":16384,"bdev_io_cache_size":256}}}},
+        \\{{"method":"bdev_nvme_attach_controller","params":{{"name":"ZettidePhysical0","trtype":"PCIe","traddr":"{s}"}}}},
+        \\{{"method":"bdev_nvme_attach_controller","params":{{"name":"ZettidePhysical1","trtype":"PCIe","traddr":"{s}"}}}}]}},
+        \\{{"subsystem":"nvmf","config":[
+        \\{{"method":"nvmf_create_transport","params":{{"trtype":"TCP","max_queue_depth":256,"max_io_size":1048576}}}}]}}]}}
+    , .{ namespaces[0].bdf, namespaces[1].bdf });
+}
+
 const Worker = struct {
     const Request = struct {
         operation: c.enum_zettide_spdk_bdev_provider_operation = undefined,
@@ -404,6 +424,9 @@ fn run(
     const concurrent_group_count = try args.parseConcurrentGroupCount(
         if (c.getenv("ZETTIDE_POOL_DATA_CONCURRENT_GROUPS")) |value| std.mem.span(value) else null,
     );
+    const storage_transport = try args.parseStorageTransport(
+        if (c.getenv("ZETTIDE_POOL_DATA_STORAGE_TRANSPORT")) |value| std.mem.span(value) else null,
+    );
     const raw_storage_mode = try zettide.v3.linux_block_device.TransportMode.parse(
         if (c.getenv("ZETTIDE_POOL_DATA_RAW_TRANSPORT")) |value| std.mem.span(value) else "auto",
     );
@@ -416,12 +439,27 @@ fn run(
     const vhost_inline_batches = (try args.parseOptionalFlag(
         if (c.getenv("ZETTIDE_VHOST_INLINE_BATCHES")) |value| std.mem.span(value) else null,
     )) orelse (vhost_worker_count > 1);
+    const pcie_probe = (try args.parseOptionalFlag(
+        if (c.getenv("ZETTIDE_POOL_DATA_PCIE_PROBE")) |value| std.mem.span(value) else null,
+    )) orelse false;
+    if (pcie_probe and storage_transport != .spdk_nvme_pcie)
+        return error.InvalidPcieProbeConfiguration;
     var window_specs_buffer: [zettide.v3.pool_member_set.max_member_count]args.WindowSpec = undefined;
     const window_specs = try args.parseWindowSpecs(
         if (c.getenv("ZETTIDE_POOL_DATA_MEMBER_WINDOWS")) |value| std.mem.span(value) else null,
         &window_specs_buffer,
     );
     try validateWindowSpecs(window_specs, device_count);
+    var pcie_namespaces: [2]args.PcieNamespace = undefined;
+    if (storage_transport == .spdk_nvme_pcie) {
+        if (frontend != .vhost or device_count != pcie_namespaces.len or
+            (!pcie_probe and window_specs.len == 0))
+            return error.InvalidPcieStorageConfiguration;
+        if (raw_storage_mode != .auto or sqpoll_cpu_base != null)
+            return error.PcieStorageRejectsLinuxTransportOptions;
+        for (device_paths[0..device_count], &pcie_namespaces) |device_path_z, *namespace|
+            namespace.* = try args.parsePcieNamespace(std.mem.span(device_path_z));
+    }
 
     var threaded: std.Io.Threaded = .init(allocator, .{
         .environ = .empty,
@@ -429,9 +467,68 @@ fn run(
     });
     defer threaded.deinit();
     const io = threaded.io();
+    var reactor_mask_buffer: [128]u8 = undefined;
+    if (c.zettide_spdk_test_reactor_mask_count(
+        &reactor_mask_buffer,
+        reactor_mask_buffer.len,
+        reactor_count,
+    ) != 0)
+        return error.ReactorMaskUnavailable;
+    const reactor_mask = std.mem.sliceTo(&reactor_mask_buffer, 0);
+    var signals: c.sigset_t = undefined;
+    if (!pcie_probe) {
+        if (c.sigemptyset(&signals) != 0 or
+            c.sigaddset(&signals, c.SIGINT) != 0 or
+            c.sigaddset(&signals, c.SIGTERM) != 0 or
+            c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
+            return error.SignalSetupFailed;
+    }
+    const owned_runtime_config = if (storage_transport == .spdk_nvme_pcie)
+        try pcieRuntimeConfig(allocator, &pcie_namespaces)
+    else
+        null;
+    defer if (owned_runtime_config) |config| allocator.free(config);
+    const selected_runtime_config = owned_runtime_config orelse
+        if (transport == .rdma) rdma_runtime_config else runtime_config;
+    std.debug.print("target-stage runtime start frontend={s} storage_transport={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
+        frontend_text,
+        @tagName(storage_transport),
+        vhost_socket_directory orelse "none",
+        reactor_mask,
+        vhost_controller_count,
+        vhost_worker_count,
+        vhost_inline_batches,
+        concurrent_group_count,
+        @tagName(raw_storage_mode),
+        sqpoll_cpu_base,
+        threaded_concurrency,
+    });
+    var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
+        .name = "zettide_spdk_pool_data_nvmf_benchmark",
+        .reactor_mask = reactor_mask,
+        .json_data = selected_runtime_config,
+        .mem_size_mb = 512,
+        .no_pci = storage_transport == .linux,
+        .no_huge = storage_transport == .linux,
+        .disable_cpumask_locks = true,
+        .vhost_socket_path = vhost_socket_directory,
+    });
+    defer runtime.deinit();
+    const runtime_handle: *anyopaque = @ptrCast(runtime.handle orelse return error.RuntimeStopped);
+    std.debug.print("target-stage runtime ready\n", .{});
     var physical_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
     var physical_count: usize = 0;
     defer zettide.v3.storage.closeAll(physical_storages[0..physical_count], io) catch @panic("failed to close physical Pool storage");
+    if (pcie_probe) {
+        for (physical_storages[0..device_count], 0..) |*storage, index| {
+            var name_buffer: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
+            storage.* = try runtime.openStorage(allocator, name, false);
+            physical_count += 1;
+        }
+        std.debug.print("target-stage PCIe probe ready namespaces={d}\n", .{physical_count});
+        return;
+    }
     var member_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
     var member_count: usize = 0;
     errdefer zettide.v3.storage.closeAll(member_storages[0..member_count], io) catch {};
@@ -451,16 +548,22 @@ fn run(
         }
     } else {
         for (device_paths[0..device_count], physical_storages[0..device_count], 0..) |device_path_z, *storage, index| {
-            const opened = try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
-                io,
-                allocator,
-                std.mem.span(device_path_z),
-                false,
-                true,
-                raw_storage_mode,
-                if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
-            );
-            storage.* = opened.storage;
+            storage.* = switch (storage_transport) {
+                .linux => (try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
+                    io,
+                    allocator,
+                    std.mem.span(device_path_z),
+                    false,
+                    true,
+                    raw_storage_mode,
+                    if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
+                )).storage,
+                .spdk_nvme_pcie => open: {
+                    var name_buffer: [32]u8 = undefined;
+                    const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
+                    break :open try runtime.openStorage(allocator, name, false);
+                },
+            };
             physical_count += 1;
         }
         for (window_specs, member_storages[0..window_specs.len]) |spec, *storage| {
@@ -514,46 +617,6 @@ fn run(
     if (pool_storage.capacity() == 0 or pool_storage.capacity() % block_size != 0)
         return error.InvalidPoolDataCapacity;
 
-    var reactor_mask_buffer: [128]u8 = undefined;
-    if (c.zettide_spdk_test_reactor_mask_count(
-        &reactor_mask_buffer,
-        reactor_mask_buffer.len,
-        reactor_count,
-    ) != 0)
-        return error.ReactorMaskUnavailable;
-    const reactor_mask = std.mem.sliceTo(&reactor_mask_buffer, 0);
-    var signals: c.sigset_t = undefined;
-    if (c.sigemptyset(&signals) != 0 or
-        c.sigaddset(&signals, c.SIGINT) != 0 or
-        c.sigaddset(&signals, c.SIGTERM) != 0 or
-        c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
-        return error.SignalSetupFailed;
-
-    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
-        frontend_text,
-        vhost_socket_directory orelse "none",
-        reactor_mask,
-        vhost_controller_count,
-        vhost_worker_count,
-        vhost_inline_batches,
-        concurrent_group_count,
-        @tagName(raw_storage_mode),
-        sqpoll_cpu_base,
-        threaded_concurrency,
-    });
-    var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
-        .name = "zettide_spdk_pool_data_nvmf_benchmark",
-        .reactor_mask = reactor_mask,
-        .json_data = if (transport == .rdma) rdma_runtime_config else runtime_config,
-        .mem_size_mb = 512,
-        .no_pci = true,
-        .no_huge = true,
-        .disable_cpumask_locks = true,
-        .vhost_socket_path = vhost_socket_directory,
-    });
-    defer runtime.deinit();
-    const runtime_handle: *anyopaque = @ptrCast(runtime.handle orelse return error.RuntimeStopped);
-    std.debug.print("target-stage runtime ready\n", .{});
     switch (frontend) {
         .nvmf => {
             std.debug.print("target-stage worker start\n", .{});

@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const ReadPolicy = enum { first_available, quorum };
+pub const StorageTransport = enum { linux, spdk_nvme_pcie };
 pub const max_reactor_count = 16;
 pub const max_vhost_controller_count = 4;
 pub const default_concurrent_group_count = 8;
@@ -11,6 +12,36 @@ pub const WindowSpec = struct {
     offset: u64,
     length: u64,
 };
+
+pub const PcieNamespace = struct {
+    bdf: []const u8,
+    nsid: u32,
+};
+
+pub fn parseStorageTransport(text: ?[]const u8) !StorageTransport {
+    const value = text orelse return .linux;
+    if (std.mem.eql(u8, value, "linux")) return .linux;
+    if (std.mem.eql(u8, value, "spdk_nvme_pcie")) return .spdk_nvme_pcie;
+    return error.InvalidStorageTransport;
+}
+
+pub fn parsePcieNamespace(text: []const u8) !PcieNamespace {
+    if (text.len < 14 or text[12] != '/' or std.mem.indexOfScalarPos(u8, text, 13, '/') != null)
+        return error.InvalidPcieNamespace;
+    const bdf = text[0..12];
+    if (bdf[4] != ':' or bdf[7] != ':' or bdf[10] != '.' or
+        !allLowerHex(bdf[0..4]) or !allLowerHex(bdf[5..7]) or
+        !allLowerHex(bdf[8..10]) or bdf[11] < '0' or bdf[11] > '7')
+        return error.InvalidPcieNamespace;
+    const nsid = parseDecimal(u32, text[13..]) catch return error.InvalidPcieNamespace;
+    if (nsid == 0) return error.InvalidPcieNamespace;
+    return .{ .bdf = bdf, .nsid = nsid };
+}
+
+fn allLowerHex(text: []const u8) bool {
+    for (text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
+    return true;
+}
 
 pub fn parseReadPolicy(raw: c_int) !ReadPolicy {
     return switch (raw) {
@@ -135,6 +166,32 @@ test "read policy accepts only supported values" {
     try std.testing.expectEqual(ReadPolicy.first_available, try parseReadPolicy(0));
     try std.testing.expectEqual(ReadPolicy.quorum, try parseReadPolicy(1));
     try std.testing.expectError(error.InvalidReadPolicy, parseReadPolicy(2));
+}
+
+test "storage transport defaults to Linux and accepts PCIe" {
+    try std.testing.expectEqual(StorageTransport.linux, try parseStorageTransport(null));
+    try std.testing.expectEqual(StorageTransport.linux, try parseStorageTransport("linux"));
+    try std.testing.expectEqual(StorageTransport.spdk_nvme_pcie, try parseStorageTransport("spdk_nvme_pcie"));
+    for ([_][]const u8{ "", "pcie", "SPDK_NVME_PCIE" }) |value|
+        try std.testing.expectError(error.InvalidStorageTransport, parseStorageTransport(value));
+}
+
+test "PCIe namespaces require canonical BDF and nonzero NSID" {
+    try std.testing.expectEqualDeep(
+        PcieNamespace{ .bdf = "0000:07:00.0", .nsid = 1 },
+        try parsePcieNamespace("0000:07:00.0/1"),
+    );
+    try std.testing.expectEqual(std.math.maxInt(u32), (try parsePcieNamespace("ffff:ff:ff.7/4294967295")).nsid);
+    for ([_][]const u8{
+        "0000:07:00.0",
+        "0000:07:00.0/0",
+        "0000:07:00.0/1/2",
+        "0000:7:00.0/1",
+        "0000:07:00.8/1",
+        "0000:0A:00.0/1",
+        "0000:07:00.0/+1",
+        "0000:07:00.0/4294967296",
+    }) |value| try std.testing.expectError(error.InvalidPcieNamespace, parsePcieNamespace(value));
 }
 
 test "Pool ID requires 16 hexadecimal bytes" {

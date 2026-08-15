@@ -152,7 +152,8 @@
   ansible.builtin.shell:
     cmd: >-
       cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
-      -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_provider.c
+      -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_endpoint.c
+      src/spdk/bdev_dispatcher.c src/spdk/bdev_provider.c
       src/spdk/nvmf_tcp_export.c test/spdk_runtime.c test/spdk_pool_data_nvmf_benchmark_main.c
       zig-out/lib/libzettide-spdk-pool-data-nvmf-benchmark.a
       -o test/spdk-pool-data-nvmf-benchmark -pthread -lstdc++ -Wl,--no-as-needed

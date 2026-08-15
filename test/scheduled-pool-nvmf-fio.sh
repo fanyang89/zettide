@@ -27,6 +27,8 @@ benchmark_driver=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER:-test/spdk-nvmf-fio.s
 benchmark_log_name=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME:-nvmf}
 lifecycle_profile=${ZETTIDE_SCHEDULED_POOL_PROFILE:-nvmf-scheduled-pool-rxe-fio}
 raw_windows=${ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS:-0}
+storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
+pcie_namespace_text=${ZETTIDE_POOL_DATA_PCIE_NAMESPACES:-}
 canonical_devices=()
 physical_ids=()
 frozen_serials=()
@@ -43,6 +45,11 @@ pool_id=""
 loops_detached=true
 test_succeeded=false
 deferred_signal=0
+pcie_namespaces=()
+pcie_bdfs=()
+pcie_original_drivers=()
+pcie_restore_needed=()
+benchmark_pid=""
 
 contains_forbidden_identity_character() {
     [[ $1 =~ :|[[:cntrl:]] ]]
@@ -57,7 +64,34 @@ contains_forbidden_identity_character() {
     echo "raw window mode must be 0 or 1" >&2
     exit 2
 }
-for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink tr udevadm umount wipefs; do
+[[ $storage_transport == linux || $storage_transport == spdk_nvme_pcie ]] || {
+    echo "storage transport must be linux or spdk_nvme_pcie" >&2
+    exit 2
+}
+if [[ $storage_transport == spdk_nvme_pcie ]]; then
+    [[ $physical_device_count -eq 2 && $raw_windows == 1 ]] || {
+        echo "SPDK NVMe PCIe requires two physical devices and raw windows" >&2
+        exit 2
+    }
+    IFS=, read -r -a pcie_namespaces <<<"$pcie_namespace_text"
+    [[ ${#pcie_namespaces[@]} -eq 2 ]] || {
+        echo "SPDK NVMe PCIe requires exactly two BDF/NSID values" >&2
+        exit 2
+    }
+    for namespace in "${pcie_namespaces[@]}"; do
+        [[ $namespace =~ ^([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])/1$ ]] || {
+            echo "PCIe namespace must use canonical BDF/1 syntax: $namespace" >&2
+            exit 2
+        }
+        pcie_bdfs+=("${BASH_REMATCH[1]}")
+        pcie_restore_needed+=(0)
+    done
+    [[ ${pcie_bdfs[0]} != "${pcie_bdfs[1]}" ]] || {
+        echo "PCIe controller BDFs must be distinct" >&2
+        exit 2
+    }
+fi
+for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink sleep tr udevadm umount wipefs; do
     command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 2; }
 done
 [[ -x $cli && -x $target ]] || {
@@ -85,9 +119,13 @@ if ((physical_device_count == 2)) && [[ ${expected_serials[0]} == "${expected_se
     exit 2
 fi
 
-expected_confirmation="DESTROY:${physical_devices[0]}:${expected_serials[0]}"
-if ((physical_device_count == 2)); then
-    expected_confirmation+=":${physical_devices[1]}:${expected_serials[1]}"
+if [[ $storage_transport == spdk_nvme_pcie ]]; then
+    expected_confirmation="DESTROY:spdk_nvme_pcie:${physical_devices[0]}:${expected_serials[0]}:${pcie_namespaces[0]}:${physical_devices[1]}:${expected_serials[1]}:${pcie_namespaces[1]}"
+else
+    expected_confirmation="DESTROY:${physical_devices[0]}:${expected_serials[0]}"
+    if ((physical_device_count == 2)); then
+        expected_confirmation+=":${physical_devices[1]}:${expected_serials[1]}"
+    fi
 fi
 [[ $confirmation == "$expected_confirmation" ]] || {
     echo "scheduled Pool destructive confirmation mismatch" >&2
@@ -193,6 +231,179 @@ check_all_frozen_identities() {
     for physical_index in "${!physical_devices[@]}"; do
         check_frozen_identity "$physical_index"
     done
+}
+
+validate_pcie_devices() {
+    local physical_index bdf pci_path block_path group_path group_device group_bdf
+    local hugepages_free hugepage_size nsid namespace_count controller_path namespace_path driver_override
+    local block_class_path
+    [[ $storage_transport == spdk_nvme_pcie ]] || return 0
+    hugepages_free=$(awk '/^HugePages_Free:/ { print $2 }' /proc/meminfo)
+    hugepage_size=$(awk '/^Hugepagesize:/ { print $2 }' /proc/meminfo)
+    [[ $hugepage_size == 2048 && $hugepages_free =~ ^[0-9]+$ && $hugepages_free -ge 256 ]] || {
+        echo "SPDK NVMe PCIe requires at least 256 free 2 MiB hugepages" >&2
+        return 1
+    }
+    for physical_index in "${!pcie_bdfs[@]}"; do
+        bdf=${pcie_bdfs[$physical_index]}
+        pci_path=$(readlink -f -- "/sys/bus/pci/devices/$bdf") || return 1
+        block_class_path=/sys/class/block/$(basename "${canonical_devices[$physical_index]}")
+        block_path=$(readlink -f -- "$block_class_path/device") || return 1
+        [[ $block_path == "$pci_path"/* ]] || {
+            echo "block device does not belong directly to configured PCIe controller (native NVMe multipath heads are unsupported): ${canonical_devices[$physical_index]} $bdf" >&2
+            return 1
+        }
+        nsid=$(<"$block_class_path/nsid") || return 1
+        [[ $nsid == 1 ]] || {
+            echo "configured block device is not namespace ID 1: ${canonical_devices[$physical_index]} nsid=$nsid" >&2
+            return 1
+        }
+        namespace_count=0
+        for controller_path in "$pci_path"/nvme/nvme*; do
+            [[ -d $controller_path ]] || continue
+            for namespace_path in "$controller_path"/nvme*n*; do
+                [[ -d $namespace_path ]] || continue
+                namespace_count=$((namespace_count + 1))
+                [[ $(basename "$namespace_path") == "$(basename "${canonical_devices[$physical_index]}")" ]] || {
+                    echo "PCIe controller exposes an additional namespace: $bdf $(basename "$namespace_path")" >&2
+                    return 1
+                }
+            done
+        done
+        [[ $namespace_count -eq 1 ]] || {
+            echo "PCIe controller must expose exactly one namespace: $bdf" >&2
+            return 1
+        }
+        group_path=$(readlink -f -- "$pci_path/iommu_group") || {
+            echo "PCIe controller has no IOMMU group: $bdf" >&2
+            return 1
+        }
+        for group_device in "$group_path"/devices/*; do
+            group_bdf=$(basename "$group_device")
+            [[ $group_bdf == "$bdf" ]] || {
+                echo "IOMMU group contains an unapproved device: $bdf group=$(basename "$group_path") member=$group_bdf" >&2
+                return 1
+            }
+        done
+        [[ -L $pci_path/driver ]] || {
+            echo "PCIe controller has no bound driver: $bdf" >&2
+            return 1
+        }
+        pcie_original_drivers[physical_index]=$(basename "$(readlink -f -- "$pci_path/driver")")
+        [[ ${pcie_original_drivers[$physical_index]} == nvme ]] || {
+            echo "PCIe controller must initially use the nvme driver: $bdf" >&2
+            return 1
+        }
+        driver_override=$(<"$pci_path/driver_override") || return 1
+        [[ $driver_override == "(null)" ]] || {
+            echo "PCIe controller must not have a driver override: $bdf override=$driver_override" >&2
+            return 1
+        }
+    done
+}
+
+bind_pcie_devices() {
+    local physical_index bdf pci_path
+    [[ $storage_transport == spdk_nvme_pcie ]] || return 0
+    validate_pcie_devices
+    modprobe vfio-pci
+    for physical_index in "${!pcie_bdfs[@]}"; do
+        bdf=${pcie_bdfs[$physical_index]}
+        pci_path=/sys/bus/pci/devices/$bdf
+        pcie_restore_needed[physical_index]=1
+        printf '%s\n' vfio-pci >"$pci_path/driver_override"
+        printf '%s' "$bdf" >"$pci_path/driver/unbind"
+        printf '%s' "$bdf" >/sys/bus/pci/drivers_probe
+        [[ $(basename "$(readlink -f -- "$pci_path/driver")") == vfio-pci ]] || {
+            echo "failed to bind PCIe controller to vfio-pci: $bdf" >&2
+            return 1
+        }
+        record_event "vfio-bound physical_index=$physical_index bdf=$bdf"
+    done
+}
+
+refresh_pcie_identity() {
+    local physical_index=$1 bdf=${pcie_bdfs[$1]} expected_serial=${frozen_serials[$1]}
+    local identity_json canonical physical_id pci_path block_path
+    identity_json=$(lsblk --nodeps --json --paths --output PATH,TYPE,SERIAL,MAJ:MIN)
+    canonical=$(jq --exit-status --raw-output --arg serial "$expected_serial" '
+        [.blockdevices[] | select(.type == "disk" and .serial == $serial)] |
+        select(length == 1) | .[0].path
+    ' <<<"$identity_json") || return 1
+    physical_id=$(jq --exit-status --raw-output --arg path "$canonical" '
+        .blockdevices[] | select(.path == $path) | .["maj:min"]
+    ' <<<"$identity_json") || return 1
+    pci_path=$(readlink -f -- "/sys/bus/pci/devices/$bdf") || return 1
+    block_path=$(readlink -f -- "/sys/class/block/$(basename "$canonical")/device") || return 1
+    [[ $block_path == "$pci_path"/* ]] || return 1
+    canonical_devices[physical_index]=$canonical
+    physical_ids[physical_index]=$physical_id
+}
+
+restore_pcie_devices() {
+    local physical_index bdf pci_path current_driver original_driver driver_override status=0
+    [[ $storage_transport == spdk_nvme_pcie ]] || return 0
+    for ((physical_index=${#pcie_bdfs[@]} - 1; physical_index >= 0; physical_index--)); do
+        [[ ${pcie_restore_needed[$physical_index]:-0} == 1 ]] || continue
+        bdf=${pcie_bdfs[$physical_index]}
+        pci_path=/sys/bus/pci/devices/$bdf
+        original_driver=${pcie_original_drivers[$physical_index]}
+        current_driver=""
+        [[ -L $pci_path/driver ]] && current_driver=$(basename "$(readlink -f -- "$pci_path/driver")")
+        if [[ $current_driver != "$original_driver" ]]; then
+            printf '%s\n' "$original_driver" >"$pci_path/driver_override" || status=1
+            if [[ -n $current_driver ]]; then
+                printf '%s' "$bdf" >"/sys/bus/pci/drivers/$current_driver/unbind" || status=1
+            fi
+            printf '%s' "$bdf" >/sys/bus/pci/drivers_probe || status=1
+        fi
+        printf '\n' >"$pci_path/driver_override" || status=1
+        driver_override=$(<"$pci_path/driver_override") || {
+            driver_override=unreadable
+            status=1
+        }
+        if [[ -L $pci_path/driver &&
+            $(basename "$(readlink -f -- "$pci_path/driver")") == "$original_driver" &&
+            $driver_override == "(null)" ]]; then
+            pcie_restore_needed[physical_index]=0
+            record_event "vfio-restored physical_index=$physical_index bdf=$bdf driver=$original_driver"
+        else
+            status=1
+            record_event "vfio-restore-incomplete physical_index=$physical_index bdf=$bdf"
+        fi
+    done
+    udevadm settle --timeout=10 || status=1
+    for physical_index in "${!pcie_bdfs[@]}"; do
+        refresh_pcie_identity "$physical_index" || status=1
+    done
+    return "$status"
+}
+
+probe_pcie_devices() {
+    local probe_socket_dir probe_status=0 restore_status=0
+    [[ $storage_transport == spdk_nvme_pcie ]] || return 0
+    probe_socket_dir=$(mktemp -d "$log_dir/.spdk-pcie-probe.XXXXXX")
+    bind_pcie_devices
+    begin_attach_deferred_signals
+    env ZETTIDE_POOL_DATA_FRONTEND=vhost \
+        ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=spdk_nvme_pcie \
+        ZETTIDE_POOL_DATA_PCIE_PROBE=1 \
+        ZETTIDE_VHOST_SOCKET_DIR="$probe_socket_dir" \
+        prlimit --memlock=unlimited:unlimited -- \
+        "$target" "$log_dir/spdk-pcie-probe-ready" 00000000000000000000000000000000 \
+        "$read_policy" "${pcie_namespaces[@]}" >"$log_dir/spdk-pcie-probe.log" 2>&1 &
+    benchmark_pid=$!
+    end_attach_deferred_signals
+    wait "$benchmark_pid" || probe_status=$?
+    benchmark_pid=""
+    restore_pcie_devices || restore_status=$?
+    if ((probe_status != 0 || restore_status != 0)); then
+        echo "SPDK NVMe PCIe probe failed; inspect $log_dir/spdk-pcie-probe.log" >&2
+        return 1
+    fi
+    check_all_frozen_identities
+    require_all_idle
+    record_event "spdk-pcie-probe-passed namespaces=$pcie_namespace_text"
 }
 
 enumerate_device_tree() {
@@ -499,10 +710,18 @@ detach_loops() {
 }
 
 finish() {
-    local command_rc=$? cleanup_rc=0 physical_index
+    local command_rc=$? cleanup_rc=0 physical_index restore_attempt restore_rc=1
     trap - EXIT
     trap '' HUP INT TERM
     set +e
+    for restore_attempt in 1 2 3; do
+        if restore_pcie_devices; then
+            restore_rc=0
+            break
+        fi
+        sleep 1
+    done
+    ((restore_rc == 0)) || cleanup_rc=1
     detach_loops || cleanup_rc=1
     {
         echo "profile=$lifecycle_profile"
@@ -518,6 +737,8 @@ finish() {
         done
         echo "pool_id=$pool_id"
         echo "slice_size=$slice_size"
+        echo "storage_transport=$storage_transport"
+        echo "pcie_namespaces=$pcie_namespace_text"
         echo "loops_detached=$loops_detached"
         echo "test_succeeded=$test_succeeded"
         echo "command_rc=$command_rc"
@@ -536,15 +757,33 @@ if ((physical_device_count == 2)) &&
     echo "physical devices must be distinct whole disks" >&2
     exit 2
 fi
+if [[ $storage_transport == spdk_nvme_pcie ]]; then
+    command -v modprobe >/dev/null || { echo "modprobe is required for SPDK NVMe PCIe" >&2; exit 2; }
+    command -v prlimit >/dev/null || { echo "prlimit is required for SPDK NVMe PCIe" >&2; exit 2; }
+    modprobe vfio-pci
+    validate_pcie_devices
+fi
+
+handle_signal() {
+    local status=$1
+    trap '' HUP INT TERM
+    if [[ -n $benchmark_pid ]] && kill -0 "$benchmark_pid" 2>/dev/null; then
+        kill -TERM "$benchmark_pid" 2>/dev/null || true
+        wait "$benchmark_pid" 2>/dev/null || true
+        benchmark_pid=""
+    fi
+    exit "$status"
+}
+
 trap finish EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 restore_signal_traps() {
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'handle_signal 129' HUP
+    trap 'handle_signal 130' INT
+    trap 'handle_signal 143' TERM
 }
 
 defer_signal() {
@@ -563,9 +802,7 @@ end_attach_deferred_signals() {
     restore_signal_traps
     signal=$deferred_signal
     deferred_signal=0
-    if ((signal != 0)); then
-        exit "$signal"
-    fi
+    ((signal == 0)) || handle_signal "$signal"
 }
 
 prepare_member_geometry() {
@@ -735,6 +972,7 @@ for physical_index in "${!physical_devices[@]}"; do
 done
 check_all_frozen_identities
 require_all_idle
+probe_pcie_devices
 
 minimum_capacity=0
 for physical_index in "${!physical_devices[@]}"; do
@@ -836,7 +1074,26 @@ if [[ $raw_windows == 1 ]]; then
     export ZETTIDE_POOL_DATA_MEMBER_WINDOWS=$raw_window_specs
     record_event "raw-window-ready physical_devices=$physical_device_count members=$member_count specs=$raw_window_specs"
 fi
+export ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=$storage_transport
+if [[ $storage_transport == spdk_nvme_pcie ]]; then
+    check_all_frozen_identities
+    require_all_idle
+    bind_pcie_devices
+    benchmark_devices=("${pcie_namespaces[@]}")
+    record_event "spdk-pcie-ready namespaces=$pcie_namespace_text"
+fi
+begin_attach_deferred_signals
 bash "$benchmark_driver" "$target" "$log_dir/$benchmark_log_name-ready" "$log_dir/$benchmark_log_name" \
-    "$pool_id" "$read_policy" "${benchmark_devices[@]}"
+    "$pool_id" "$read_policy" "${benchmark_devices[@]}" &
+benchmark_pid=$!
+end_attach_deferred_signals
+benchmark_status=0
+wait "$benchmark_pid" || benchmark_status=$?
+benchmark_pid=""
+((benchmark_status == 0)) || exit "$benchmark_status"
+if [[ $storage_transport == spdk_nvme_pcie ]]; then
+    restore_pcie_devices
+    check_all_frozen_identities
+fi
 test_succeeded=true
 record_event "benchmark-passed pool=$pool_id physical_devices=$physical_device_count members=$member_count"

@@ -25,6 +25,7 @@
       - zettide_vhost_scheduled_pool_concurrent_groups | default(8) | int >= 1
       - zettide_vhost_scheduled_pool_concurrent_groups | default(8) | int <= 64
       - zettide_vhost_scheduled_pool_raw_transport | default('auto') in ['auto', 'posix', 'io_uring', 'io_uring_iopoll', 'io_uring_iopoll_sqpoll']
+      - zettide_vhost_scheduled_pool_storage_transport | default('linux') in ['linux', 'spdk_nvme_pcie']
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | string is match('^[0-9]+$')
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | int >= 1
       - zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') | string is match('^$|^[0-9]+$')
@@ -74,6 +75,23 @@
     fail_msg: "Configure secondary.path and secondary.serial as a distinct device."
   when: zettide_scheduled_pool_vhost_secondary_enabled
 
+- name: Validate SPDK PCIe namespace configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_scheduled_pool_vhost_secondary_enabled
+      - zettide_vhost_scheduled_pool_pcie_namespaces | default([]) is sequence
+      - zettide_vhost_scheduled_pool_pcie_namespaces | default([]) | length == 2
+      - zettide_vhost_scheduled_pool_pcie_namespaces[0] is match('^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]/1$')
+      - zettide_vhost_scheduled_pool_pcie_namespaces[1] is match('^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]/1$')
+      - zettide_vhost_scheduled_pool_pcie_namespaces[0] != zettide_vhost_scheduled_pool_pcie_namespaces[1]
+      - zettide_vhost_scheduled_pool_raw_transport | default('auto') == 'auto'
+      - zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') == ''
+      - zettide_raw_timeout | int >= 300
+    fail_msg: >-
+      SPDK PCIe requires two distinct canonical BDF/1 namespaces, Linux raw
+      transport auto, and no SQPOLL CPU base.
+  when: zettide_vhost_scheduled_pool_storage_transport | default('linux') == 'spdk_nvme_pcie'
+
 - name: Normalize scheduled Pool disk arguments | {{ zettide_optimize }}
   ansible.builtin.set_fact:
     zettide_scheduled_pool_vhost_device_args: >-
@@ -83,11 +101,18 @@
            zettide_scheduled_pool_vhost_config.secondary.serial]
           if zettide_scheduled_pool_vhost_secondary_enabled else []) }}
     zettide_scheduled_pool_vhost_expected_confirmation: >-
-      {{ 'DESTROY:' ~ zettide_scheduled_pool_vhost_config.path ~ ':' ~
-         zettide_scheduled_pool_vhost_config.serial ~
-         (':' ~ zettide_scheduled_pool_vhost_config.secondary.path ~ ':' ~
-          zettide_scheduled_pool_vhost_config.secondary.serial
-          if zettide_scheduled_pool_vhost_secondary_enabled else '') }}
+      {{ ('DESTROY:spdk_nvme_pcie:' ~ zettide_scheduled_pool_vhost_config.path ~ ':' ~
+          zettide_scheduled_pool_vhost_config.serial ~ ':' ~
+          zettide_vhost_scheduled_pool_pcie_namespaces[0] ~ ':' ~
+          zettide_scheduled_pool_vhost_config.secondary.path ~ ':' ~
+          zettide_scheduled_pool_vhost_config.secondary.serial ~ ':' ~
+          zettide_vhost_scheduled_pool_pcie_namespaces[1])
+         if zettide_vhost_scheduled_pool_storage_transport | default('linux') == 'spdk_nvme_pcie'
+         else ('DESTROY:' ~ zettide_scheduled_pool_vhost_config.path ~ ':' ~
+          zettide_scheduled_pool_vhost_config.serial ~
+          (':' ~ zettide_scheduled_pool_vhost_config.secondary.path ~ ':' ~
+           zettide_scheduled_pool_vhost_config.secondary.serial
+           if zettide_scheduled_pool_vhost_secondary_enabled else '')) }}
 
 - name: Require exact scheduled Pool destruction confirmation | {{ zettide_optimize }}
   ansible.builtin.assert:
@@ -183,7 +208,8 @@
   ansible.builtin.shell:
     cmd: >-
       cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
-      -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_provider.c
+      -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_endpoint.c
+      src/spdk/bdev_dispatcher.c src/spdk/bdev_provider.c
       src/spdk/nvmf_tcp_export.c src/spdk/vhost_blk_controller.c
       test/spdk_runtime.c test/spdk_pool_data_nvmf_benchmark_main.c
       zig-out/lib/libzettide-spdk-pool-data-nvmf-benchmark.a
@@ -221,8 +247,12 @@
 - name: Run destructive scheduled Pool vhost lifecycle | {{ zettide_optimize }}
   ansible.builtin.command:
     argv: >-
-      {{ ['flock', '--nonblock', '/var/lock/zettide-raw-device.lock',
-          'bash', 'test/scheduled-pool-nvmf-fio.sh',
+      {{ ['flock', '--no-fork', '--nonblock', '/var/lock/zettide-raw-device.lock'] +
+         (['timeout', '--signal=TERM', '--kill-after=90s',
+           (((zettide_raw_timeout | int) - 120) | string) ~ 's']
+          if zettide_vhost_scheduled_pool_storage_transport | default('linux') == 'spdk_nvme_pcie'
+          else []) +
+         ['bash', 'test/scheduled-pool-nvmf-fio.sh',
           zettide_remote_workspace.path ~ '/zig-out/bin/zettide'] +
          zettide_scheduled_pool_vhost_device_args }}
   args:
@@ -242,6 +272,8 @@
     ZETTIDE_NVMF_REACTOR_COUNT: "{{ zettide_vhost_scheduled_pool_reactor_count }}"
     ZETTIDE_POOL_DATA_CONCURRENT_GROUPS: "{{ zettide_vhost_scheduled_pool_concurrent_groups | default(8) }}"
     ZETTIDE_POOL_DATA_RAW_TRANSPORT: "{{ zettide_vhost_scheduled_pool_raw_transport | default('auto') }}"
+    ZETTIDE_POOL_DATA_STORAGE_TRANSPORT: "{{ zettide_vhost_scheduled_pool_storage_transport | default('linux') }}"
+    ZETTIDE_POOL_DATA_PCIE_NAMESPACES: "{{ zettide_vhost_scheduled_pool_pcie_namespaces | default([]) | join(',') }}"
     ZETTIDE_VHOST_PERF_CASE: "{{ zettide_vhost_scheduled_pool_perf_case | default('') }}"
     ZETTIDE_VHOST_PERF_FREQUENCY: "{{ zettide_vhost_scheduled_pool_perf_frequency | default(199) }}"
     ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE: "{{ zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') }}"

@@ -307,6 +307,26 @@ per-thread target/QEMU `pidstat`, per-CPU `mpstat`, block-device `iostat`, host
 softirq snapshots, guest topology, and provider worker metrics. A completed run
 fails if provider queue-full rejections are nonzero.
 
+To use SPDK NVMe PCIe instead of the Linux block backend, both data controllers
+must be in IOMMU groups containing no other devices. Only namespace ID 1 is
+currently supported; native NVMe multipath heads are not supported. Reserve at
+least 256 free 2 MiB hugepages before running:
+
+```sh
+sudo sysctl -w vm.nr_hugepages=256
+uv run ansible-playbook test/ansible/vhost-scheduled-pool-fio.yml \
+  --limit zettide-tier1 \
+  -e 'zettide_raw_device={"path":"/dev/nvme2n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}' \
+  -e zettide_vhost_scheduled_pool_storage_transport=spdk_nvme_pcie \
+  -e '{"zettide_vhost_scheduled_pool_pcie_namespaces":["0000:07:00.0/1","0000:03:00.0/1"]}' \
+  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:spdk_nvme_pcie:/dev/nvme2n1:PHMB747600DE280CGN:0000:07:00.0/1:/dev/nvme0n1:PHMB746600SS280CGN:0000:03:00.0/1' \
+  -e zettide_nvmf_scheduled_pool_expected_pool_id=0dc67e4cdded2d37fc13e49f5544ba37
+```
+
+The lifecycle verifies each block-device serial against its BDF, rejects mixed
+IOMMU groups, binds only the configured controllers to `vfio-pci`, and restores
+the original `nvme` driver on success, failure, or interruption.
+
 The Catalog profile uses the same cases and export identity, but reads a real
 64 GiB thin Catalog Volume from an 8 MiB temporary file-backed Pool. Unmapped
 extents read as zero, so this isolates Catalog lookup, worker scheduling, and
