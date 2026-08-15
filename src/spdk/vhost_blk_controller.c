@@ -24,6 +24,7 @@ struct zettide_spdk_vhost_blk_controller {
 	char *cpumask;
 	char *socket_path;
 	bool readonly;
+	bool packed_ring;
 };
 
 struct controller_command {
@@ -54,9 +55,11 @@ run_create(void *context)
 	struct controller_command *command = context;
 	struct zettide_spdk_vhost_blk_controller *controller = command->controller;
 	struct spdk_json_val params[] = {
-		{ .len = 2, .type = SPDK_JSON_VAL_OBJECT_BEGIN },
+		{ .len = 4, .type = SPDK_JSON_VAL_OBJECT_BEGIN },
 		{ .start = "readonly", .len = sizeof("readonly") - 1, .type = SPDK_JSON_VAL_NAME },
 		{ .type = controller->readonly ? SPDK_JSON_VAL_TRUE : SPDK_JSON_VAL_FALSE },
+		{ .start = "packed_ring", .len = sizeof("packed_ring") - 1, .type = SPDK_JSON_VAL_NAME },
+		{ .type = controller->packed_ring ? SPDK_JSON_VAL_TRUE : SPDK_JSON_VAL_FALSE },
 		{ .type = SPDK_JSON_VAL_OBJECT_END },
 	};
 
@@ -205,6 +208,7 @@ create_controller(struct zettide_spdk_runtime *runtime,
 	controller->bdev_name = strdup(opts->bdev_name);
 	controller->cpumask = opts->cpumask == NULL ? NULL : strdup(opts->cpumask);
 	controller->readonly = opts->readonly;
+	controller->packed_ring = opts->packed_ring;
 	controller->socket_path = malloc(PATH_MAX);
 	if (controller->name == NULL || controller->bdev_name == NULL ||
 		(opts->cpumask != NULL && controller->cpumask == NULL) ||

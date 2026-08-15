@@ -632,6 +632,7 @@ fn run(
                         .controller_name = controller_name,
                         .cpumask = controller_mask,
                         .readonly = true,
+                        .packed_ring = true,
                     },
                 );
                 export_count += 1;

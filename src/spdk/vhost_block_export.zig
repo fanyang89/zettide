@@ -10,6 +10,7 @@ pub const Options = struct {
     controller_name: []const u8,
     cpumask: ?[]const u8 = null,
     readonly: bool = false,
+    packed_ring: bool = false,
 };
 
 /// Owns an SPDK provider bdev and the vhost-blk controller consuming it. Backend
@@ -53,6 +54,7 @@ pub const VhostBlockExport = struct {
         controller_options.bdev_name = bdev_name.ptr;
         controller_options.cpumask = if (cpumask) |value| value.ptr else null;
         controller_options.readonly = options.readonly;
+        controller_options.packed_ring = options.packed_ring;
         var controller: ?*c.struct_zettide_spdk_vhost_blk_controller = null;
         const create_status = c.zettide_spdk_vhost_blk_controller_create(
             @ptrCast(runtime),

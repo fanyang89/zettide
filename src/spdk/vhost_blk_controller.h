@@ -18,6 +18,7 @@ struct zettide_spdk_vhost_blk_controller_opts {
 	const char *bdev_name;
 	const char *cpumask;
 	bool readonly;
+	bool packed_ring;
 };
 
 /* Calls that operate on the same controller must be externally serialized. */
