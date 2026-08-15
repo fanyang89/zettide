@@ -50,6 +50,14 @@ pub fn parseVhostControllerCount(text: ?[]const u8, reactor_count: usize) !usize
     return count;
 }
 
+pub fn parseVhostWorkerCount(text: ?[]const u8, controller_count: usize) !usize {
+    const value = text orelse return 1;
+    const count = parseDecimal(usize, value) catch return error.InvalidVhostWorkerCount;
+    if (count == 0 or count > controller_count)
+        return error.InvalidVhostWorkerCount;
+    return count;
+}
+
 pub fn parseConcurrentGroupCount(text: ?[]const u8) !usize {
     const value = text orelse return default_concurrent_group_count;
     const count = parseDecimal(usize, value) catch return error.InvalidConcurrentGroupCount;
@@ -146,6 +154,14 @@ test "vhost controller count defaults to reactors and stays bounded" {
         try std.testing.expectError(error.InvalidVhostControllerCount, parseVhostControllerCount(value, 4));
     }
     try std.testing.expectError(error.InvalidVhostControllerCount, parseVhostControllerCount("4", 2));
+}
+
+test "vhost worker count defaults to one and cannot exceed controllers" {
+    try std.testing.expectEqual(@as(usize, 1), try parseVhostWorkerCount(null, 4));
+    try std.testing.expectEqual(@as(usize, 4), try parseVhostWorkerCount("4", 4));
+    for ([_][]const u8{ "", "0", "5", "+1", "x" }) |value| {
+        try std.testing.expectError(error.InvalidVhostWorkerCount, parseVhostWorkerCount(value, 4));
+    }
 }
 
 test "concurrent group count is strict and bounded" {

@@ -53,6 +53,7 @@ const Worker = struct {
     io: std.Io,
     storage: *zettide.v3.storage.Storage,
     concurrent_group_count: usize,
+    inline_batches: bool,
     slots: [queue_capacity]Slot,
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
@@ -73,6 +74,7 @@ const Worker = struct {
         io: std.Io,
         storage: *zettide.v3.storage.Storage,
         concurrent_group_count: usize,
+        inline_batches: bool,
     ) !*Worker {
         const self = try std.heap.c_allocator.create(Worker);
         errdefer std.heap.c_allocator.destroy(self);
@@ -80,6 +82,7 @@ const Worker = struct {
         self.io = io;
         self.storage = storage;
         self.concurrent_group_count = concurrent_group_count;
+        self.inline_batches = inline_batches;
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
@@ -247,6 +250,10 @@ const Worker = struct {
             _ = self.read_group_count.fetchAdd(1, .monotonic);
             _ = self.grouped_request_count.fetchAdd(batch.count, .monotonic);
             _ = self.grouped_bytes.fetchAdd(total_bytes, .monotonic);
+            if (self.inline_batches) {
+                self.executeReadBatch(batch);
+                continue;
+            }
             permits.waitUncancelable(self.io);
             groups.concurrent(self.io, executeReadGroup, .{ self, &permits, batch }) catch {
                 executeReadGroup(self, &permits, batch) catch {};
@@ -261,6 +268,10 @@ const Worker = struct {
         batch: ReadGroup,
     ) std.Io.Cancelable!void {
         defer permits.post(self.io);
+        self.executeReadBatch(batch);
+    }
+
+    fn executeReadBatch(self: *Worker, batch: ReadGroup) void {
         var reads: [max_batch_requests]zettide.v3.storage.Read = undefined;
         var results: [max_batch_requests]zettide.v3.storage.ReadResult = undefined;
         var statuses: [max_batch_requests]c_int = undefined;
@@ -383,6 +394,13 @@ fn run(
             null, reactor_count)
     else
         0;
+    const vhost_worker_count = if (frontend == .vhost)
+        try args.parseVhostWorkerCount(
+            if (c.getenv("ZETTIDE_VHOST_WORKER_COUNT")) |value| std.mem.span(value) else null,
+            vhost_controller_count,
+        )
+    else
+        1;
     const concurrent_group_count = try args.parseConcurrentGroupCount(
         if (c.getenv("ZETTIDE_POOL_DATA_CONCURRENT_GROUPS")) |value| std.mem.span(value) else null,
     );
@@ -493,11 +511,12 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
+    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
         frontend_text,
         vhost_socket_directory orelse "none",
         reactor_mask,
         vhost_controller_count,
+        vhost_worker_count,
         concurrent_group_count,
         @tagName(raw_storage_mode),
         sqpoll_cpu_base,
@@ -519,7 +538,7 @@ fn run(
     switch (frontend) {
         .nvmf => {
             std.debug.print("target-stage worker start\n", .{});
-            const worker = try Worker.create(io, &pool_storage, concurrent_group_count);
+            const worker = try Worker.create(io, &pool_storage, concurrent_group_count, false);
             defer worker.close();
             const backend: zettide.spdk_vhost_block_export.Backend = .{
                 .context = worker,
@@ -557,23 +576,28 @@ fn run(
             try publishReadyAndWait(io, ready_path, &signals);
         },
         .vhost => {
-            const worker = try Worker.create(io, &pool_storage, concurrent_group_count);
-            defer worker.close();
+            var workers: [args.max_vhost_controller_count]*Worker = undefined;
+            var worker_count: usize = 0;
+            defer while (worker_count > 0) {
+                worker_count -= 1;
+                workers[worker_count].close();
+            };
+            while (worker_count < vhost_worker_count) : (worker_count += 1)
+                workers[worker_count] = try Worker.create(io, &pool_storage, concurrent_group_count, vhost_worker_count > 1);
             var exports: [args.max_vhost_controller_count]zettide.spdk_vhost_block_export.VhostBlockExport = undefined;
             var export_count: usize = 0;
             defer while (export_count > 0) {
                 export_count -= 1;
                 closeVhostExport(io, &exports[export_count]);
             };
-
-            const backend: zettide.spdk_vhost_block_export.Backend = .{
-                .context = worker,
-                .submit = submit_callback,
-                .block_count = pool_storage.capacity() / block_size,
-                .max_io_blocks = max_batch_bytes / block_size,
-            };
             std.debug.print("target-stage export start frontend=vhost socket_directory={s} controllers={d}\n", .{ vhost_socket_directory.?, vhost_controller_count });
             for (0..vhost_controller_count) |index| {
+                const backend: zettide.spdk_vhost_block_export.Backend = .{
+                    .context = workers[index % worker_count],
+                    .submit = submit_callback,
+                    .block_count = pool_storage.capacity() / block_size,
+                    .max_io_blocks = max_batch_bytes / block_size,
+                };
                 var bdev_name_buffer: [64]u8 = undefined;
                 const bdev_name = try std.fmt.bufPrint(&bdev_name_buffer, "ZettideScheduledPoolData{d}", .{index});
                 var controller_name_buffer: [64]u8 = undefined;
