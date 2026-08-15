@@ -34,10 +34,13 @@ const EnginePool = struct {
 
     fn init(fd: std.os.linux.fd_t, options: linux_io_uring.Options) !EnginePool {
         var pool: EnginePool = .{ .count = 0 };
-        pool.engines[0] = try .initOptions(fd, options);
+        var lane_options = options;
+        pool.engines[0] = try .initOptions(fd, lane_options);
         pool.count = 1;
         while (pool.count < pool.engines.len) {
-            pool.engines[pool.count] = linux_io_uring.Engine.initOptions(fd, options) catch break;
+            if (options.sq_thread_cpu) |base_cpu|
+                lane_options.sq_thread_cpu = std.math.add(u32, base_cpu, @intCast(pool.count)) catch break;
+            pool.engines[pool.count] = linux_io_uring.Engine.initOptions(fd, lane_options) catch break;
             pool.count += 1;
         }
         return pool;
@@ -74,6 +77,32 @@ pub fn initOwned(
     writable: bool,
     mode: Mode,
 ) !storage_api.Storage {
+    return initOwnedOptions(
+        allocator,
+        file,
+        capacity_bytes,
+        minimum_io_size,
+        identity,
+        writable,
+        .{ .mode = mode },
+    );
+}
+
+pub const InitOptions = struct {
+    mode: Mode = .auto,
+    sq_thread_cpu_base: ?u32 = null,
+};
+
+pub fn initOwnedOptions(
+    allocator: std.mem.Allocator,
+    file: File,
+    capacity_bytes: u64,
+    minimum_io_size: u32,
+    identity: Identity,
+    writable: bool,
+    options: InitOptions,
+) !storage_api.Storage {
+    const mode = options.mode;
     const polling = mode == .io_uring_iopoll or mode == .io_uring_iopoll_sqpoll;
     if (polling and writable) return error.PollModeRequiresReadOnly;
     const context = try allocator.create(Context);
@@ -89,7 +118,11 @@ pub fn initOwned(
             .posix => null,
             .io_uring => try .init(file.handle, .{}),
             .io_uring_iopoll => try .init(file.handle, .{ .io_poll = true }),
-            .io_uring_iopoll_sqpoll => try .init(file.handle, .{ .io_poll = true, .sq_poll = true }),
+            .io_uring_iopoll_sqpoll => try .init(file.handle, .{
+                .io_poll = true,
+                .sq_poll = true,
+                .sq_thread_cpu = options.sq_thread_cpu_base,
+            }),
             .auto => EnginePool.init(file.handle, .{}) catch |err|
                 if (shouldFallback(mode, err)) null else return err,
         },

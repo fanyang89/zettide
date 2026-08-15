@@ -107,6 +107,18 @@ pub fn openStorageOptionsMode(
     exclusive: bool,
     transport: TransportMode,
 ) !OpenedStorage {
+    return openStorageOptionsModeAffinity(io, allocator, path, writable, exclusive, transport, null);
+}
+
+pub fn openStorageOptionsModeAffinity(
+    io: Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    writable: bool,
+    exclusive: bool,
+    transport: TransportMode,
+    sq_thread_cpu_base: ?u32,
+) !OpenedStorage {
     const inspected = try inspect(io, allocator, path);
     if ((writable and !inspected.preflightEligible()) or
         (!writable and exclusive and !inspected.preflightReadable())) return error.DeviceNotEligible;
@@ -138,7 +150,7 @@ pub fn openStorageOptionsMode(
     if ((writable and !opened.preflightEligible()) or
         (!writable and exclusive and !opened.preflightReadable())) return error.DeviceNotEligible;
 
-    const storage = try linux_raw_storage.initOwned(
+    const storage = try linux_raw_storage.initOwnedOptions(
         allocator,
         file,
         opened.capacity_bytes,
@@ -149,7 +161,7 @@ pub fn openStorageOptionsMode(
             .disk_sequence = opened.disk_sequence,
         },
         writable,
-        transport,
+        .{ .mode = transport, .sq_thread_cpu_base = sq_thread_cpu_base },
     );
     return .{
         .storage = storage,

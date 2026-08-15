@@ -385,6 +385,9 @@ fn run(
     const raw_storage_mode = try zettide.v3.linux_block_device.TransportMode.parse(
         if (c.getenv("ZETTIDE_POOL_DATA_RAW_TRANSPORT")) |value| std.mem.span(value) else "auto",
     );
+    const sqpoll_cpu_base = try args.parseOptionalCpuBase(
+        if (c.getenv("ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE")) |value| std.mem.span(value) else null,
+    );
     var window_specs_buffer: [zettide.v3.pool_member_set.max_member_count]args.WindowSpec = undefined;
     const window_specs = try args.parseWindowSpecs(
         if (c.getenv("ZETTIDE_POOL_DATA_MEMBER_WINDOWS")) |value| std.mem.span(value) else null,
@@ -402,27 +405,29 @@ fn run(
     var member_count: usize = 0;
     errdefer zettide.v3.storage.closeAll(member_storages[0..member_count], io) catch {};
     if (window_specs.len == 0) {
-        for (device_paths[0..device_count], member_storages[0..device_count]) |device_path_z, *storage| {
-            const opened = try zettide.v3.linux_block_device.openStorageOptionsMode(
+        for (device_paths[0..device_count], member_storages[0..device_count], 0..) |device_path_z, *storage, index| {
+            const opened = try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
                 io,
                 allocator,
                 std.mem.span(device_path_z),
                 false,
                 true,
                 raw_storage_mode,
+                if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
             );
             storage.* = opened.storage;
             member_count += 1;
         }
     } else {
-        for (device_paths[0..device_count], physical_storages[0..device_count]) |device_path_z, *storage| {
-            const opened = try zettide.v3.linux_block_device.openStorageOptionsMode(
+        for (device_paths[0..device_count], physical_storages[0..device_count], 0..) |device_path_z, *storage, index| {
+            const opened = try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
                 io,
                 allocator,
                 std.mem.span(device_path_z),
                 false,
                 true,
                 raw_storage_mode,
+                if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
             );
             storage.* = opened.storage;
             physical_count += 1;
@@ -478,13 +483,14 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} concurrent_groups={d} raw_transport={s}\n", .{
+    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d}\n", .{
         frontend_text,
         vhost_socket_directory orelse "none",
         reactor_mask,
         vhost_controller_count,
         concurrent_group_count,
         @tagName(raw_storage_mode),
+        sqpoll_cpu_base,
     });
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_pool_data_nvmf_benchmark",

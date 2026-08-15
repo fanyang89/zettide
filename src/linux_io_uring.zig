@@ -14,6 +14,7 @@ pub const SyncMode = enum {
 pub const Options = struct {
     io_poll: bool = false,
     sq_poll: bool = false,
+    sq_thread_cpu: ?u32 = null,
 };
 
 pub const Write = struct {
@@ -48,9 +49,17 @@ pub const Engine = struct {
 
     /// Initializes an engine that borrows fd; the caller retains ownership.
     pub fn initOptions(fd: linux.fd_t, options: Options) !Engine {
+        if (options.sq_thread_cpu != null and !options.sq_poll)
+            return error.SqAffinityRequiresSqPoll;
         const flags = (if (options.io_poll) @as(u32, linux.IORING_SETUP_IOPOLL) else 0) |
-            (if (options.sq_poll) @as(u32, linux.IORING_SETUP_SQPOLL) else 0);
-        var ring = try IoUring.init(queue_entries, flags);
+            (if (options.sq_poll) @as(u32, linux.IORING_SETUP_SQPOLL) else 0) |
+            (if (options.sq_thread_cpu != null) @as(u32, linux.IORING_SETUP_SQ_AFF) else 0);
+        var params = std.mem.zeroInit(linux.io_uring_params, .{
+            .flags = flags,
+            .sq_thread_idle = 1000,
+            .sq_thread_cpu = options.sq_thread_cpu orelse 0,
+        });
+        var ring = try IoUring.init_params(queue_entries, &params);
         errdefer ring.deinit();
         const probe = try ring.get_probe();
         if (!probe.is_supported(.READ) or

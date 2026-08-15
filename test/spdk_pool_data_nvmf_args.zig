@@ -58,6 +58,12 @@ pub fn parseConcurrentGroupCount(text: ?[]const u8) !usize {
     return count;
 }
 
+pub fn parseOptionalCpuBase(text: ?[]const u8) !?u32 {
+    const value = text orelse return null;
+    if (value.len == 0) return null;
+    return parseDecimal(u32, value) catch error.InvalidCpuBase;
+}
+
 pub fn reactorMaskAt(mask: []const u8, index: usize, buffer: []u8) ![]const u8 {
     if (mask.len < 3 or mask[0] != '[' or mask[mask.len - 1] != ']')
         return error.InvalidReactorMask;
@@ -139,6 +145,15 @@ test "concurrent group count is strict and bounded" {
     try std.testing.expectEqual(@as(usize, 16), try parseConcurrentGroupCount("16"));
     for ([_][]const u8{ "", "0", "65", "+1", "x" }) |value| {
         try std.testing.expectError(error.InvalidConcurrentGroupCount, parseConcurrentGroupCount(value));
+    }
+}
+
+test "optional CPU base accepts strict decimal values" {
+    try std.testing.expectEqual(@as(?u32, null), try parseOptionalCpuBase(null));
+    try std.testing.expectEqual(@as(?u32, null), try parseOptionalCpuBase(""));
+    try std.testing.expectEqual(@as(?u32, 4), try parseOptionalCpuBase("4"));
+    for ([_][]const u8{ "+1", "-1", "x" }) |value| {
+        try std.testing.expectError(error.InvalidCpuBase, parseOptionalCpuBase(value));
     }
 }
 
