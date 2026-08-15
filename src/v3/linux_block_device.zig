@@ -116,7 +116,7 @@ pub fn openStorageOptionsMode(
         .ACCMODE = if (writable) .RDWR else .RDONLY,
         .EXCL = exclusive,
         .CLOEXEC = true,
-        .DIRECT = transport == .io_uring_poll,
+        .DIRECT = transport == .io_uring_iopoll or transport == .io_uring_iopoll_sqpoll,
     }, 0);
     const fd: linux.fd_t = switch (linux.errno(rc)) {
         .SUCCESS => @intCast(rc),

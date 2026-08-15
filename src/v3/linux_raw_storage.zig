@@ -9,13 +9,15 @@ pub const Mode = enum {
     auto,
     posix,
     io_uring,
-    io_uring_poll,
+    io_uring_iopoll,
+    io_uring_iopoll_sqpoll,
 
     pub fn parse(value: []const u8) !Mode {
         if (std.mem.eql(u8, value, "auto")) return .auto;
         if (std.mem.eql(u8, value, "posix")) return .posix;
         if (std.mem.eql(u8, value, "io_uring")) return .io_uring;
-        if (std.mem.eql(u8, value, "io_uring_poll")) return .io_uring_poll;
+        if (std.mem.eql(u8, value, "io_uring_iopoll")) return .io_uring_iopoll;
+        if (std.mem.eql(u8, value, "io_uring_iopoll_sqpoll")) return .io_uring_iopoll_sqpoll;
         return error.InvalidRawStorageMode;
     }
 };
@@ -72,7 +74,8 @@ pub fn initOwned(
     writable: bool,
     mode: Mode,
 ) !storage_api.Storage {
-    if (mode == .io_uring_poll and writable) return error.PollModeRequiresReadOnly;
+    const polling = mode == .io_uring_iopoll or mode == .io_uring_iopoll_sqpoll;
+    if (polling and writable) return error.PollModeRequiresReadOnly;
     const context = try allocator.create(Context);
     errdefer allocator.destroy(context);
     context.* = .{
@@ -81,11 +84,12 @@ pub fn initOwned(
         .capacity_bytes = capacity_bytes,
         .identity = identity,
         .writable = writable,
-        .polling = mode == .io_uring_poll,
+        .polling = polling,
         .engine_pool = switch (mode) {
             .posix => null,
             .io_uring => try .init(file.handle, .{}),
-            .io_uring_poll => try .init(file.handle, .{ .io_poll = true, .sq_poll = true }),
+            .io_uring_iopoll => try .init(file.handle, .{ .io_poll = true }),
+            .io_uring_iopoll_sqpoll => try .init(file.handle, .{ .io_poll = true, .sq_poll = true }),
             .auto => EnginePool.init(file.handle, .{}) catch |err|
                 if (shouldFallback(mode, err)) null else return err,
         },
@@ -327,7 +331,8 @@ test "raw storage mode parsing is strict" {
     try std.testing.expectEqual(Mode.auto, try Mode.parse("auto"));
     try std.testing.expectEqual(Mode.posix, try Mode.parse("posix"));
     try std.testing.expectEqual(Mode.io_uring, try Mode.parse("io_uring"));
-    try std.testing.expectEqual(Mode.io_uring_poll, try Mode.parse("io_uring_poll"));
+    try std.testing.expectEqual(Mode.io_uring_iopoll, try Mode.parse("io_uring_iopoll"));
+    try std.testing.expectEqual(Mode.io_uring_iopoll_sqpoll, try Mode.parse("io_uring_iopoll_sqpoll"));
     try std.testing.expectError(error.InvalidRawStorageMode, Mode.parse("poll"));
 }
 
@@ -345,7 +350,7 @@ test "polling raw storage is read only" {
             512,
             .{ .major = 1, .minor = 2, .disk_sequence = 3 },
             true,
-            .io_uring_poll,
+            .io_uring_iopoll,
         ),
     );
 }

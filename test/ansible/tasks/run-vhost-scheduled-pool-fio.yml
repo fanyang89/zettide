@@ -24,7 +24,7 @@
       - zettide_vhost_scheduled_pool_concurrent_groups | default(8) | string is match('^[0-9]+$')
       - zettide_vhost_scheduled_pool_concurrent_groups | default(8) | int >= 1
       - zettide_vhost_scheduled_pool_concurrent_groups | default(8) | int <= 64
-      - zettide_vhost_scheduled_pool_raw_transport | default('auto') in ['auto', 'posix', 'io_uring', 'io_uring_poll']
+      - zettide_vhost_scheduled_pool_raw_transport | default('auto') in ['auto', 'posix', 'io_uring', 'io_uring_iopoll', 'io_uring_iopoll_sqpoll']
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | string is match('^[0-9]+$')
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | int >= 1
       - zettide_vhost_scheduled_pool_guest_vcpus | string is match('^[0-9]+$')
