@@ -315,7 +315,6 @@ pub fn initOwnedOptions(
                 .sq_poll = true,
                 .sq_thread_cpu = options.sq_thread_cpu_base,
                 .completion_spin_count = 512,
-                .dynamic_fixed_buffer_count = 1024,
             }),
             .auto => EnginePool.init(file.handle, .{}) catch |err|
                 if (shouldFallback(mode, err)) null else return err,
@@ -519,10 +518,6 @@ fn addTransportStats(total: *storage_api.TransportStats, stats: linux_io_uring.S
     total.completions +|= stats.completions;
     total.current_inflight +|= stats.current_inflight;
     total.max_inflight +|= stats.max_inflight;
-    total.fixed_reads +|= stats.fixed_reads;
-    total.fallback_reads +|= stats.fallback_reads;
-    total.fixed_buffer_registrations +|= stats.fixed_buffer_registrations;
-    total.fixed_buffer_registration_failures +|= stats.fixed_buffer_registration_failures;
 }
 
 fn validateRange(context: *const Context, offset: u64, len: usize) !void {

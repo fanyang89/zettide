@@ -30,7 +30,7 @@ const Member = struct {
 };
 
 const Operation = union(enum) {
-    read: struct { offset: u64, buffer: []u8, stable_buffer: bool = false },
+    read: struct { offset: u64, buffer: []u8 },
     read_many: struct { reads: []const storage_api.Read, results: []storage_api.ReadResult },
     write_many: []const storage_api.Write,
     sync,
@@ -396,7 +396,6 @@ pub const Device = struct {
                 member_reads[member_index][member_read_index] = .{
                     .buffer = read.buffer,
                     .offset = try self.physicalOffset(location, read.offset % self.plan.stripe_size),
-                    .stable_buffer = read.stable_buffer,
                 };
                 member_results[member_index][member_read_index] = .{};
                 member_targets[member_index][member_read_index] = .{ .request = @intCast(request_index) };
@@ -749,11 +748,7 @@ pub const Device = struct {
             const endpoint = self.members[member_index].endpoint;
             const submit = switch (operation) {
                 .read => |read| submit: {
-                    state.singleton_read[0] = .{
-                        .buffer = read.buffer,
-                        .offset = read.offset,
-                        .stable_buffer = read.stable_buffer,
-                    };
+                    state.singleton_read[0] = .{ .buffer = read.buffer, .offset = read.offset };
                     state.singleton_result[0] = .{};
                     break :submit endpoint.submitReadDataMany(
                         &state.singleton_read,

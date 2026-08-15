@@ -4,7 +4,6 @@
 #include "runtime.h"
 
 #include <stddef.h>
-#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -39,7 +38,6 @@ typedef int (*zettide_spdk_bdev_provider_submit)(
 		uint64_t offset,
 		void *buffer,
 		uint64_t length,
-		bool stable_buffer,
 		zettide_spdk_bdev_provider_complete complete,
 		void *complete_context);
 

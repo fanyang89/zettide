@@ -310,7 +310,7 @@ submit_provider_io(struct spdk_bdev_io *bdev_io,
 		return;
 	}
 	status = provider->submit(provider->backend_context, operation, offset,
-			io->buffer, length, !io->owns_buffer, provider_backend_complete, io);
+			io->buffer, length, provider_backend_complete, io);
 	if (status != 0) {
 		provider_backend_complete(io, status);
 	}

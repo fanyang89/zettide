@@ -4,7 +4,6 @@ const IoUring = std.os.linux.IoUring;
 const linux = std.os.linux;
 
 pub const queue_entries = 32;
-const max_dynamic_fixed_buffers = 1024;
 const max_request_len = std.math.maxInt(u32);
 
 pub const SyncMode = enum {
@@ -17,7 +16,6 @@ pub const Options = struct {
     sq_poll: bool = false,
     sq_thread_cpu: ?u32 = null,
     completion_spin_count: u32 = 0,
-    dynamic_fixed_buffer_count: u16 = 0,
 };
 
 pub const Write = struct {
@@ -32,55 +30,7 @@ pub const Stats = struct {
     completions: u64 = 0,
     current_inflight: u64 = 0,
     max_inflight: u64 = 0,
-    fixed_reads: u64 = 0,
-    fallback_reads: u64 = 0,
-    fixed_buffer_registrations: u64 = 0,
-    fixed_buffer_registration_failures: u64 = 0,
 };
-
-const FixedBuffer = struct {
-    base: usize,
-    len: usize,
-};
-
-fn registerSparseBuffers(ring: *IoUring, count: u16) bool {
-    const registration: linux.io_uring_rsrc_register = .{
-        .nr = count,
-        .flags = linux.IORING_RSRC_REGISTER_SPARSE,
-        .resv2 = 0,
-        .data = 0,
-        .tags = 0,
-    };
-    const result = linux.io_uring_register(
-        ring.fd,
-        .REGISTER_BUFFERS2,
-        &registration,
-        @sizeOf(linux.io_uring_rsrc_register),
-    );
-    return linux.errno(result) == .SUCCESS;
-}
-
-fn updateBuffer(ring: *IoUring, index: u16, iovec: *const std.posix.iovec) bool {
-    const update: linux.io_uring_rsrc_update2 = .{
-        .offset = index,
-        .resv = 0,
-        .data = @intFromPtr(iovec),
-        .tags = 0,
-        .nr = 1,
-        .resv2 = 0,
-    };
-    const result = linux.io_uring_register(
-        ring.fd,
-        .REGISTER_BUFFERS_UPDATE,
-        &update,
-        @sizeOf(linux.io_uring_rsrc_update2),
-    );
-    return linux.errno(result) == .SUCCESS and result == 1;
-}
-
-fn stableBuffer(read: anytype) bool {
-    return if (@hasField(@TypeOf(read), "stable_buffer")) read.stable_buffer else false;
-}
 
 pub const Engine = struct {
     ring: IoUring,
@@ -93,10 +43,6 @@ pub const Engine = struct {
     writev_supported: bool,
     sq_poll: bool,
     completion_spin_count: u32,
-    fixed_buffers: [max_dynamic_fixed_buffers]FixedBuffer = undefined,
-    fixed_buffer_count: u16 = 0,
-    fixed_buffer_capacity: u16 = 0,
-    buffers_registered: bool = false,
 
     /// Initializes an engine that borrows fd; the caller retains ownership.
     pub fn init(fd: linux.fd_t) !Engine {
@@ -107,8 +53,6 @@ pub const Engine = struct {
     pub fn initOptions(fd: linux.fd_t, options: Options) !Engine {
         if (options.sq_thread_cpu != null and !options.sq_poll)
             return error.SqAffinityRequiresSqPoll;
-        if (options.dynamic_fixed_buffer_count > max_dynamic_fixed_buffers)
-            return error.TooManyFixedBuffers;
         const flags = (if (options.io_poll) @as(u32, linux.IORING_SETUP_IOPOLL) else 0) |
             (if (options.sq_poll) @as(u32, linux.IORING_SETUP_SQPOLL) else 0) |
             (if (options.sq_thread_cpu != null) @as(u32, linux.IORING_SETUP_SQ_AFF) else 0);
@@ -128,23 +72,11 @@ pub const Engine = struct {
         var files = [_]linux.fd_t{fd};
         try ring.register_files(&files);
         errdefer ring.unregister_files() catch {};
-        const buffers_registered = options.dynamic_fixed_buffer_count != 0 and
-            probe.is_supported(.READ_FIXED) and
-            registerSparseBuffers(&ring, options.dynamic_fixed_buffer_count);
         return .{
             .ring = ring,
             .writev_supported = probe.is_supported(.WRITEV),
             .sq_poll = options.sq_poll,
             .completion_spin_count = options.completion_spin_count,
-            .stats = .{
-                .fixed_buffer_registration_failures = @intFromBool(
-                    options.dynamic_fixed_buffer_count != 0 and
-                        probe.is_supported(.READ_FIXED) and
-                        !buffers_registered,
-                ),
-            },
-            .fixed_buffer_capacity = if (buffers_registered) options.dynamic_fixed_buffer_count else 0,
-            .buffers_registered = buffers_registered,
         };
     }
 
@@ -184,10 +116,11 @@ pub const Engine = struct {
             for (reads[index..][0..count], 0..) |read, batch_index| {
                 try self.requireActive();
                 const token = self.nextToken();
-                _ = self.queueRead(token, read.buffer, read.offset, stableBuffer(read)) catch |err| {
+                const sqe = self.ring.read(token, 0, .{ .buffer = read.buffer }, read.offset) catch |err| {
                     self.fail();
                     return err;
                 };
+                sqe.flags |= linux.IOSQE_FIXED_FILE;
                 tokens[batch_index] = token;
                 lengths[batch_index] = read.buffer.len;
             }
@@ -236,15 +169,16 @@ pub const Engine = struct {
             try self.requireActive();
             const request_len = @min(buffer.len - index, max_request_len);
             const token = self.nextToken();
-            _ = self.queueRead(
+            const sqe = self.ring.read(
                 token,
-                buffer[index..][0..request_len],
+                0,
+                .{ .buffer = buffer[index..][0..request_len] },
                 offset + index,
-                false,
             ) catch |err| {
                 self.fail();
                 return err;
             };
+            sqe.flags |= linux.IOSQE_FIXED_FILE;
             const amount = self.complete(token) catch |err| switch (err) {
                 error.OperationInterrupted => continue,
                 else => return err,
@@ -384,10 +318,6 @@ pub const Engine = struct {
 
     fn fail(self: *Engine) void {
         if (!self.active) return;
-        if (self.buffers_registered) {
-            self.ring.unregister_buffers() catch {};
-            self.buffers_registered = false;
-        }
         if (self.file_registered) {
             self.ring.unregister_files() catch {};
             self.file_registered = false;
@@ -415,44 +345,6 @@ pub const Engine = struct {
         if (completion.user_data != token) return self.invalidCompletion();
         if (completion.res < 0) return completionError(@enumFromInt(@as(u16, @intCast(-completion.res))));
         return @intCast(completion.res);
-    }
-
-    fn queueRead(self: *Engine, token: u64, buffer: []u8, offset: u64, stable_buffer: bool) !*linux.io_uring_sqe {
-        const sqe = if (stable_buffer) self.fixedBufferIndex(buffer) else null;
-        if (sqe) |buffer_index| {
-            var iovec: std.posix.iovec = .{ .base = buffer.ptr, .len = buffer.len };
-            const read_sqe = try self.ring.read_fixed(token, 0, &iovec, offset, buffer_index);
-            self.stats.fixed_reads += 1;
-            read_sqe.flags |= linux.IOSQE_FIXED_FILE;
-            return read_sqe;
-        } else {
-            const read_sqe = try self.ring.read(token, 0, .{ .buffer = buffer }, offset);
-            self.stats.fallback_reads += 1;
-            read_sqe.flags |= linux.IOSQE_FIXED_FILE;
-            return read_sqe;
-        }
-    }
-
-    fn fixedBufferIndex(self: *Engine, buffer: []u8) ?u16 {
-        if (!self.buffers_registered or buffer.len == 0) return null;
-        const start = @intFromPtr(buffer.ptr);
-        const end = std.math.add(usize, start, buffer.len) catch return null;
-        for (self.fixed_buffers[0..self.fixed_buffer_count], 0..) |registered, index| {
-            const registered_end = std.math.add(usize, registered.base, registered.len) catch continue;
-            if (start >= registered.base and end <= registered_end) return @intCast(index);
-        }
-        if (self.fixed_buffer_count == self.fixed_buffer_capacity) return null;
-        const index = self.fixed_buffer_count;
-        var iovec: std.posix.iovec = .{ .base = buffer.ptr, .len = buffer.len };
-        if (!updateBuffer(&self.ring, index, &iovec)) {
-            self.stats.fixed_buffer_registration_failures += 1;
-            self.fixed_buffer_capacity = self.fixed_buffer_count;
-            return null;
-        }
-        self.fixed_buffers[index] = .{ .base = start, .len = buffer.len };
-        self.fixed_buffer_count += 1;
-        self.stats.fixed_buffer_registrations += 1;
-        return index;
     }
 
     fn submitBatch(self: *Engine, count: usize) !void {
@@ -799,41 +691,4 @@ test "borrowed-fd engine supports partial and exact reads and metrics reset" {
     const gapped_stats = engine.getStats(std.testing.io);
     try std.testing.expectEqual(@as(u64, writes.len), gapped_stats.submitted_sqes);
     try std.testing.expectEqual(@as(u64, writes.len), gapped_stats.max_inflight);
-}
-
-test "engine dynamically registers and reuses fixed read buffers" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "uring-fixed-buffer", .{ .read = true });
-    defer file.close(std.testing.io);
-    try file.writePositionalAll(std.testing.io, "fixed", 0);
-
-    var engine = Engine.initOptions(file.handle, .{ .dynamic_fixed_buffer_count = 4 }) catch |err| switch (err) {
-        error.ArgumentsInvalid,
-        error.PermissionDenied,
-        error.SystemOutdated,
-        error.UnsupportedIoUringOperations,
-        => return error.SkipZigTest,
-        else => return err,
-    };
-    defer engine.deinit();
-    if (!engine.buffers_registered) return error.SkipZigTest;
-
-    var buffer: [5]u8 = undefined;
-    const Read = struct { buffer: []u8, offset: u64, stable_buffer: bool };
-    const Result = struct { amount: usize = 0, failure: ?anyerror = null };
-    const reads = [_]Read{.{ .buffer = &buffer, .offset = 0, .stable_buffer = true }};
-    var results: [1]Result = undefined;
-    try engine.readManyAt(std.testing.io, &reads, &results);
-    try std.testing.expectEqual(@as(?anyerror, null), results[0].failure);
-    try std.testing.expectEqualStrings("fixed", &buffer);
-    @memset(&buffer, 0);
-    try engine.readManyAt(std.testing.io, &reads, &results);
-    try std.testing.expectEqual(@as(?anyerror, null), results[0].failure);
-    try std.testing.expectEqualStrings("fixed", &buffer);
-    const stats = engine.getStats(std.testing.io);
-    try std.testing.expectEqual(@as(u64, 2), stats.fixed_reads);
-    try std.testing.expectEqual(@as(u64, 0), stats.fallback_reads);
-    try std.testing.expectEqual(@as(u64, 1), stats.fixed_buffer_registrations);
-    try std.testing.expectEqual(@as(u64, 0), stats.fixed_buffer_registration_failures);
 }

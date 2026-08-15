@@ -111,7 +111,6 @@ pub const Worker = struct {
         offset: u64,
         buffer: ?*anyopaque,
         length_raw: u64,
-        _: bool,
         complete: c.zettide_spdk_bdev_provider_complete,
         complete_context: ?*anyopaque,
     ) callconv(.c) c_int {

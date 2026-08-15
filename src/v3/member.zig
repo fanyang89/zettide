@@ -504,7 +504,6 @@ pub const Member = struct {
             for (reads[index..][0..count], absolute[0..count]) |request, *item| item.* = .{
                 .buffer = request.buffer,
                 .offset = try self.position(kind, request.offset, request.buffer.len),
-                .stable_buffer = request.stable_buffer,
             };
             try self.storage.readManyAt(self.io, absolute[0..count], results[index..][0..count]);
             for (reads[index..][0..count], results[index..][0..count]) |request, *result| {
@@ -531,7 +530,6 @@ pub const Member = struct {
         for (reads, absolute[0..reads.len]) |request, *item| item.* = .{
             .buffer = request.buffer,
             .offset = try self.position(kind, request.offset, request.buffer.len),
-            .stable_buffer = request.stable_buffer,
         };
         return self.storage.submitReadManyAt(self.io, absolute[0..reads.len], results, completion);
     }
