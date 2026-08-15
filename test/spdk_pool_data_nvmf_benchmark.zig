@@ -67,15 +67,23 @@ const Worker = struct {
     grouped_request_count: std.atomic.Value(u64) = .init(0),
     grouped_bytes: std.atomic.Value(u64) = .init(0),
     completed_requests: std.atomic.Value(u64) = .init(0),
-    thread: std.Thread,
+    run_group: std.Io.Group,
+    evented_io: bool,
 
-    fn create(io: std.Io, storage: *zettide.v3.storage.Storage, concurrent_group_count: usize) !*Worker {
+    fn create(
+        io: std.Io,
+        storage: *zettide.v3.storage.Storage,
+        concurrent_group_count: usize,
+        evented_io: bool,
+    ) !*Worker {
         const self = try std.heap.c_allocator.create(Worker);
         errdefer std.heap.c_allocator.destroy(self);
         self.* = undefined;
         self.io = io;
         self.storage = storage;
         self.concurrent_group_count = concurrent_group_count;
+        self.run_group = .init;
+        self.evented_io = evented_io;
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
@@ -90,15 +98,15 @@ const Worker = struct {
         self.grouped_request_count = .init(0);
         self.grouped_bytes = .init(0);
         self.completed_requests = .init(0);
-        self.thread = try std.Thread.spawn(.{}, Worker.run, .{self});
+        try self.run_group.concurrent(io, Worker.run, .{self});
         return self;
     }
 
     /// Call only after the provider has been unregistered.
     fn close(self: *Worker) void {
         self.stopping.store(true, .release);
-        self.wake.set(self.io);
-        self.thread.join();
+        self.signal();
+        self.run_group.await(self.io) catch unreachable;
         std.debug.print(
             "provider_worker_metrics submit_attempts={d} accepted={d} queue_full_rejects={d} current_occupancy={d} high_water={d} read_group_count={d} grouped_request_count={d} grouped_bytes={d} completed_requests={d}\n",
             .{
@@ -164,7 +172,7 @@ const Worker = struct {
                 };
                 self.recordAccepted();
                 slot.sequence.store(position + 1, .release);
-                self.wake.set(self.io);
+                self.signal();
                 return 0;
             }
             if (sequence < position) {
@@ -172,6 +180,22 @@ const Worker = struct {
                 return -c.EAGAIN;
             }
             position = self.enqueue_position.load(.monotonic);
+        }
+    }
+
+    fn signal(self: *Worker) void {
+        if (!self.evented_io) {
+            self.wake.set(self.io);
+            return;
+        }
+        switch (@atomicRmw(std.Io.Event, &self.wake, .Xchg, .is_set, .release)) {
+            .unset, .is_set => {},
+            .waiting => _ = std.os.linux.futex2_wake(
+                &self.wake,
+                std.math.maxInt(usize),
+                std.math.maxInt(i32),
+                .{ .size = .U32, .private = true },
+            ),
         }
     }
 
@@ -525,7 +549,7 @@ fn run(
     switch (frontend) {
         .nvmf => {
             std.debug.print("target-stage worker start\n", .{});
-            const worker = try Worker.create(io, &pool_storage, concurrent_group_count);
+            const worker = try Worker.create(io, &pool_storage, concurrent_group_count, io_backend == .uring);
             defer worker.close();
             const backend: zettide.spdk_vhost_block_export.Backend = .{
                 .context = worker,
@@ -563,7 +587,7 @@ fn run(
             try publishReadyAndWait(io, ready_path, &signals);
         },
         .vhost => {
-            const worker = try Worker.create(io, &pool_storage, concurrent_group_count);
+            const worker = try Worker.create(io, &pool_storage, concurrent_group_count, io_backend == .uring);
             defer worker.close();
             var exports: [args.max_vhost_controller_count]zettide.spdk_vhost_block_export.VhostBlockExport = undefined;
             var export_count: usize = 0;
