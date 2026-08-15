@@ -67,7 +67,7 @@ pub const Header = struct {
         codec.putInt(u16, &bytes, 10, 0);
         codec.putInt(u32, &bytes, 12, encoded_size);
         codec.putInt(u64, &bytes, 16, self.sequence);
-        bytes[24] = @backingInt(self.state);
+        bytes[24] = @intFromEnum(self.state);
         codec.putInt(u32, &bytes, 28, 1);
         @memcpy(bytes[32..48], &self.uuid);
         codec.putInt(i64, &bytes, 48, self.created_ns);

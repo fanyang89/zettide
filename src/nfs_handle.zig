@@ -16,7 +16,7 @@ pub fn encode(volume_uuid: [16]u8, handle: Handle) [encoded_size]u8 {
     var bytes: [encoded_size]u8 = @splat(0);
     @memcpy(bytes[0..magic.len], &magic);
     bytes[4] = version;
-    bytes[5] = @backingInt(handle.kind);
+    bytes[5] = @intFromEnum(handle.kind);
     @memcpy(bytes[8..24], &volume_uuid);
     @memcpy(bytes[24..40], &handle.identity);
     std.mem.writeInt(u32, bytes[40..44], crc32c.value(bytes[0..40]), .little);
@@ -43,7 +43,7 @@ test "NFS file handles have a stable canonical encoding" {
     const bytes = encode(volume_uuid, .{ .kind = .directory, .identity = identity });
     try std.testing.expectEqualSlices(u8, &magic, bytes[0..4]);
     try std.testing.expectEqual(version, bytes[4]);
-    try std.testing.expectEqual(@backingInt(metadata.Kind.directory), bytes[5]);
+    try std.testing.expectEqual(@intFromEnum(metadata.Kind.directory), bytes[5]);
     try std.testing.expectEqualSlices(u8, &volume_uuid, bytes[8..24]);
     try std.testing.expectEqualSlices(u8, &identity, bytes[24..40]);
     const decoded = try decode(volume_uuid, &bytes);

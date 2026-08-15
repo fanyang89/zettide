@@ -137,7 +137,7 @@ pub fn encode(layout: Layout) ![encoded_size]u8 {
         @memcpy(bytes[0x000..0x008], &legacy_magic);
         codec.putInt(u16, &bytes, 0x008, legacy_format_version);
     }
-    codec.putInt(u16, &bytes, 0x00a, @backingInt(layout.kind));
+    codec.putInt(u16, &bytes, 0x00a, @intFromEnum(layout.kind));
     codec.putInt(u32, &bytes, 0x00c, encoded_size);
     codec.putInt(u64, &bytes, 0x010, layout.layout_epoch);
     codec.putInt(u64, &bytes, 0x018, layout.topology_epoch);

@@ -225,7 +225,7 @@ fn validateLeafEntry(entry: LeafEntry) !void {
 fn finishPage(bytes: *[page_size]u8, header: Header, cells_start: usize) void {
     @memcpy(bytes[0..8], &magic);
     std.mem.writeInt(u16, bytes[8..10], version, .little);
-    bytes[10] = @backingInt(header.kind);
+    bytes[10] = @intFromEnum(header.kind);
     bytes[11] = header.level;
     std.mem.writeInt(u16, bytes[12..14], header.count, .little);
     std.mem.writeInt(u64, bytes[16..24], header.generation, .little);

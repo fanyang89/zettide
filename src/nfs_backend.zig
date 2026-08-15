@@ -740,7 +740,7 @@ fn fillResult(self: *Export, info: filesystem_api.NodeInfo, handle: *Handle, att
 
 fn attributes(info: filesystem_api.NodeInfo) Attributes {
     return .{
-        .kind = @backingInt(info.metadata.kind),
+        .kind = @intFromEnum(info.metadata.kind),
         .reserved = @splat(0),
         .mode = info.metadata.mode,
         .uid = info.metadata.uid,
@@ -760,7 +760,7 @@ fn node(handle: nfs_handle.Handle) filesystem_api.Node {
 }
 
 fn status(value: Status) c_int {
-    return @backingInt(value);
+    return @intFromEnum(value);
 }
 
 fn statusFor(err: anyerror, stale_context: bool) c_int {
@@ -832,7 +832,7 @@ test "direct NFS backend resolves and reads stable handles" {
     var root_handle: Handle = undefined;
     var root_attributes: Attributes = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &root_handle, &root_attributes));
-    try std.testing.expectEqual(@backingInt(zettide.metadata.Kind.directory), root_attributes.kind);
+    try std.testing.expectEqual(@intFromEnum(zettide.metadata.Kind.directory), root_attributes.kind);
     var filesystem_info: FilesystemInfo = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_statfs(export_handle, &filesystem_info));
     try std.testing.expect(filesystem_info.total_bytes > 0);
@@ -1095,7 +1095,7 @@ test "direct NFS backend exports standalone BlobFilesystem" {
     var root_handle: Handle = undefined;
     var root_attributes: Attributes = undefined;
     try std.testing.expectEqual(status(.ok), zettide_nfs_root(export_handle, &root_handle, &root_attributes));
-    try std.testing.expectEqual(@backingInt(zettide.metadata.Kind.directory), root_attributes.kind);
+    try std.testing.expectEqual(@intFromEnum(zettide.metadata.Kind.directory), root_attributes.kind);
 
     var file_handle: Handle = undefined;
     var file_attributes: Attributes = undefined;
