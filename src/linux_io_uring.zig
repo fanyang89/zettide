@@ -15,6 +15,7 @@ pub const Options = struct {
     io_poll: bool = false,
     sq_poll: bool = false,
     sq_thread_cpu: ?u32 = null,
+    completion_spin_count: u32 = 0,
 };
 
 pub const Write = struct {
@@ -41,6 +42,7 @@ pub const Engine = struct {
     file_registered: bool = true,
     writev_supported: bool,
     sq_poll: bool,
+    completion_spin_count: u32,
 
     /// Initializes an engine that borrows fd; the caller retains ownership.
     pub fn init(fd: linux.fd_t) !Engine {
@@ -74,6 +76,7 @@ pub const Engine = struct {
             .ring = ring,
             .writev_supported = probe.is_supported(.WRITEV),
             .sq_poll = options.sq_poll,
+            .completion_spin_count = options.completion_spin_count,
         };
     }
 
@@ -389,16 +392,29 @@ pub const Engine = struct {
     }
 
     fn copyCompletion(self: *Engine) !linux.io_uring_cqe {
+        for (0..self.completion_spin_count) |_| {
+            var completions: [1]linux.io_uring_cqe = undefined;
+            const count = self.ring.copy_cqes(&completions, 0) catch |err| switch (err) {
+                error.SignalInterrupt => continue,
+                else => return err,
+            };
+            if (count != 0) return self.recordCompletion(completions[0]);
+            std.atomic.spinLoopHint();
+        }
         while (true) {
             const completion = self.ring.copy_cqe() catch |err| switch (err) {
                 error.SignalInterrupt => continue,
                 else => return err,
             };
-            std.debug.assert(self.current_inflight != 0);
-            self.current_inflight -= 1;
-            self.stats.completions += 1;
-            return completion;
+            return self.recordCompletion(completion);
         }
+    }
+
+    fn recordCompletion(self: *Engine, completion: linux.io_uring_cqe) linux.io_uring_cqe {
+        std.debug.assert(self.current_inflight != 0);
+        self.current_inflight -= 1;
+        self.stats.completions += 1;
+        return completion;
     }
 
     fn writeAllLocked(self: *Engine, bytes: []const u8, offset: u64) !void {
