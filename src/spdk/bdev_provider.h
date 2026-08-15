@@ -22,6 +22,11 @@ enum zettide_spdk_bdev_provider_operation {
 typedef void (*zettide_spdk_bdev_provider_complete)(void *context, int status);
 typedef void (*zettide_spdk_bdev_provider_delete_complete)(void *context, int status);
 
+struct zettide_spdk_bdev_provider_completion {
+	void *context;
+	int status;
+};
+
 /*
  * Submit must not block. A zero return transfers completion ownership to the
  * backend, which may invoke complete from any thread. A nonzero return means
@@ -35,6 +40,15 @@ typedef int (*zettide_spdk_bdev_provider_submit)(
 		uint64_t length,
 		zettide_spdk_bdev_provider_complete complete,
 		void *complete_context);
+
+/*
+ * Completes provider requests in groups on their original SPDK submit threads.
+ * Every context must be an outstanding context supplied to the backend's
+ * complete callback and may appear exactly once.
+ */
+void zettide_spdk_bdev_provider_complete_batch(
+		const struct zettide_spdk_bdev_provider_completion *completions,
+		size_t count);
 
 struct zettide_spdk_bdev_provider_opts {
 	size_t opts_size;

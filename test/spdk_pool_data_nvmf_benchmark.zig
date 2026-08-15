@@ -258,6 +258,7 @@ const Worker = struct {
         defer permits.post(self.io);
         var reads: [max_batch_requests]zettide.v3.storage.Read = undefined;
         var results: [max_batch_requests]zettide.v3.storage.ReadResult = undefined;
+        var statuses: [max_batch_requests]c_int = undefined;
         for (batch.queued[0..batch.count], reads[0..batch.count]) |queued, *read| {
             const request = queued.request;
             read.* = .{
@@ -270,18 +271,32 @@ const Worker = struct {
         }
         self.storage.readManyAt(self.io, reads[0..batch.count], results[0..batch.count]) catch |err| {
             const status = errorStatus(err);
-            for (batch.queued[0..batch.count]) |queued| self.completeQueued(queued, status);
+            @memset(statuses[0..batch.count], status);
+            self.completeReadBatch(batch, statuses[0..batch.count]);
             return;
         };
-        for (batch.queued[0..batch.count], results[0..batch.count]) |queued, result| {
-            const status = if (result.failure) |err|
+        for (batch.queued[0..batch.count], results[0..batch.count], statuses[0..batch.count]) |queued, result, *status| {
+            status.* = if (result.failure) |err|
                 errorStatus(err)
             else if (result.amount != queued.request.length)
                 -c.EIO
             else
                 0;
-            self.completeQueued(queued, status);
         }
+        self.completeReadBatch(batch, statuses[0..batch.count]);
+    }
+
+    fn completeReadBatch(self: *Worker, batch: ReadGroup, statuses: []const c_int) void {
+        var completions: [max_batch_requests]c.struct_zettide_spdk_bdev_provider_completion = undefined;
+        for (batch.queued[0..batch.count], statuses, completions[0..batch.count]) |queued, status, *completion| {
+            completion.* = .{
+                .context = queued.request.complete_context,
+                .status = status,
+            };
+        }
+        c.zettide_spdk_bdev_provider_complete_batch(&completions, batch.count);
+        _ = self.current_occupancy.fetchSub(batch.count, .monotonic);
+        _ = self.completed_requests.fetchAdd(batch.count, .monotonic);
     }
 
     fn completeQueued(self: *Worker, queued: Queued, status: c_int) void {

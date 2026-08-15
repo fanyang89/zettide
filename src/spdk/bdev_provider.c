@@ -25,6 +25,8 @@ struct zettide_spdk_bdev_provider {
 struct provider_io {
 	struct spdk_bdev_io *bdev_io;
 	struct spdk_thread *submit_thread;
+	struct provider_io *next_complete;
+	struct provider_io *next_complete_group;
 	void *buffer;
 	uint64_t length;
 	int status;
@@ -169,9 +171,8 @@ single_iov_buffer(struct spdk_bdev_io *bdev_io, uint64_t length)
 }
 
 static void
-complete_provider_io(void *context)
+complete_provider_io(struct provider_io *io)
 {
-	struct provider_io *io = context;
 	bool copied = true;
 
 	assert(spdk_get_thread() == io->submit_thread);
@@ -189,18 +190,71 @@ complete_provider_io(void *context)
 }
 
 static void
-provider_backend_complete(void *context, int status)
+complete_provider_io_batch(void *context)
 {
 	struct provider_io *io = context;
-	int rc;
 
-	io->status = status;
-	if (spdk_get_thread() == io->submit_thread) {
+	while (io != NULL) {
+		struct provider_io *next = io->next_complete;
+
 		complete_provider_io(io);
-		return;
+		io = next;
 	}
-	rc = spdk_thread_send_msg(io->submit_thread, complete_provider_io, io);
-	assert(rc == 0);
+}
+
+void
+zettide_spdk_bdev_provider_complete_batch(
+		const struct zettide_spdk_bdev_provider_completion *completions,
+		size_t count)
+{
+	struct provider_io *groups = NULL;
+	size_t index;
+
+	assert(completions != NULL || count == 0);
+	for (index = 0; index < count; index++) {
+		struct provider_io *io = completions[index].context;
+		struct provider_io *head;
+
+		assert(io != NULL);
+		io->status = completions[index].status;
+		io->next_complete = NULL;
+		io->next_complete_group = NULL;
+		for (head = groups; head != NULL; head = head->next_complete_group) {
+			if (head->submit_thread == io->submit_thread) {
+				io->next_complete = head->next_complete;
+				head->next_complete = io;
+				break;
+			}
+		}
+		if (head == NULL) {
+			io->next_complete_group = groups;
+			groups = io;
+		}
+	}
+	while (groups != NULL) {
+		struct provider_io *head = groups;
+		int rc;
+
+		groups = head->next_complete_group;
+		if (spdk_get_thread() == head->submit_thread) {
+			complete_provider_io_batch(head);
+			continue;
+		}
+		rc = spdk_thread_send_msg(head->submit_thread,
+				complete_provider_io_batch, head);
+		assert(rc == 0);
+	}
+}
+
+static void
+provider_backend_complete(void *context, int status)
+{
+	const struct zettide_spdk_bdev_provider_completion completion = {
+		.context = context,
+		.status = status,
+	};
+
+	zettide_spdk_bdev_provider_complete_batch(&completion, 1);
 }
 
 static void
@@ -229,6 +283,8 @@ submit_provider_io(struct spdk_bdev_io *bdev_io,
 	io = (struct provider_io *)bdev_io->driver_ctx;
 	io->bdev_io = bdev_io;
 	io->submit_thread = spdk_bdev_io_get_thread(bdev_io);
+	io->next_complete = NULL;
+	io->next_complete_group = NULL;
 	io->buffer = NULL;
 	io->length = length;
 	io->status = 0;

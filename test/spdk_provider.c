@@ -122,7 +122,14 @@ run_backend(void *context)
 			status = execute_request(backend, request->operation, request->offset,
 					request->buffer, request->length);
 		}
-		request->complete(request->complete_context, status);
+		{
+			const struct zettide_spdk_bdev_provider_completion completion = {
+				.context = request->complete_context,
+				.status = status,
+			};
+
+			zettide_spdk_bdev_provider_complete_batch(&completion, 1);
+		}
 		free(request);
 	}
 }
