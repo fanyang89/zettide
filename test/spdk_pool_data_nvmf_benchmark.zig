@@ -499,18 +499,16 @@ fn run(
     defer {
         var submissions: u64 = 0;
         var completions: u64 = 0;
-        var batches: u64 = 0;
         var queue_full: u64 = 0;
         for (physical_storages[0..physical_count]) |*storage| {
             const stats = storage.transportStats(io);
             submissions +|= stats.async_submissions;
             completions +|= stats.async_completions;
-            batches +|= stats.async_batches;
             queue_full +|= stats.async_queue_full;
         }
         std.debug.print(
-            "pool_async_metrics submissions={d} completions={d} batches={d} queue_full={d}\n",
-            .{ submissions, completions, batches, queue_full },
+            "pool_async_metrics submissions={d} completions={d} queue_full={d}\n",
+            .{ submissions, completions, queue_full },
         );
     }
     if (pool_storage.capacity() == 0 or pool_storage.capacity() % block_size != 0)

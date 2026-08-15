@@ -73,7 +73,6 @@ const AsyncSlot = struct {
 const AsyncStats = struct {
     submissions: std.atomic.Value(u64) = .init(0),
     completions: std.atomic.Value(u64) = .init(0),
-    batches: std.atomic.Value(u64) = .init(0),
     queue_full: std.atomic.Value(u64) = .init(0),
 };
 
@@ -84,7 +83,6 @@ const AsyncLane = struct {
     slots: [async_queue_capacity]AsyncSlot,
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
-    pending: ?AsyncReadTask = null,
     wake: std.Io.Event = .unset,
     stopping: std.atomic.Value(bool) = .init(false),
     thread: std.Thread,
@@ -96,7 +94,6 @@ const AsyncLane = struct {
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
-        self.pending = null;
         self.wake = .unset;
         self.stopping = .init(false);
         self.thread = try std.Thread.spawn(.{}, run, .{self});
@@ -146,13 +143,13 @@ const AsyncLane = struct {
 
     fn run(self: *AsyncLane) void {
         while (true) {
-            if (self.nextTask()) |task| {
-                self.executeBatch(task);
+            if (self.dequeue()) |task| {
+                self.execute(task);
                 continue;
             }
             self.wake.reset();
-            if (self.nextTask()) |task| {
-                self.executeBatch(task);
+            if (self.dequeue()) |task| {
+                self.execute(task);
                 continue;
             }
             if (self.stopping.load(.acquire)) return;
@@ -160,55 +157,21 @@ const AsyncLane = struct {
         }
     }
 
-    fn nextTask(self: *AsyncLane) ?AsyncReadTask {
-        if (self.pending) |task| {
-            self.pending = null;
-            return task;
-        }
-        return self.dequeue();
-    }
-
-    fn executeBatch(self: *AsyncLane, first: AsyncReadTask) void {
-        var tasks: [async_max_reads]AsyncReadTask = undefined;
-        var starts: [async_max_reads]usize = undefined;
-        tasks[0] = first;
-        starts[0] = 0;
-        var task_count: usize = 1;
-        var read_count = first.read_count;
-        while (task_count < tasks.len and read_count < async_max_reads) {
-            const task = self.dequeue() orelse break;
-            if (task.read_count > async_max_reads - read_count) {
-                self.pending = task;
-                break;
-            }
-            starts[task_count] = read_count;
-            tasks[task_count] = task;
-            task_count += 1;
-            read_count += task.read_count;
-        }
-
-        var reads: [async_max_reads]storage_api.Read = undefined;
-        var results: [async_max_reads]storage_api.ReadResult = undefined;
-        for (tasks[0..task_count], starts[0..task_count]) |task, start|
-            @memcpy(reads[start..][0..task.read_count], task.reads[0..task.read_count]);
-        for (results[0..read_count]) |*result| result.* = .{};
+    fn execute(self: *AsyncLane, task: AsyncReadTask) void {
         var failure: ?anyerror = null;
+        for (task.results) |*result| result.* = .{};
         self.engine.readManyAt(
             self.io,
-            reads[0..read_count],
-            results[0..read_count],
+            task.reads[0..task.read_count],
+            task.results,
         ) catch |err| {
             failure = mapOperationError(err);
         };
-        _ = self.stats.batches.fetchAdd(1, .monotonic);
-        for (tasks[0..task_count], starts[0..task_count]) |task, start| {
-            for (task.results, results[start..][0..task.read_count]) |*result, combined| {
-                result.* = combined;
-                if (result.failure) |err| result.failure = mapOperationError(err);
-            }
-            _ = self.stats.completions.fetchAdd(1, .monotonic);
-            task.completion.complete(task.completion.context, failure);
+        for (task.results) |*result| {
+            if (result.failure) |err| result.failure = mapOperationError(err);
         }
+        _ = self.stats.completions.fetchAdd(1, .monotonic);
+        task.completion.complete(task.completion.context, failure);
     }
 };
 
@@ -270,14 +233,12 @@ const AsyncReadExecutor = struct {
     fn addStats(self: *const AsyncReadExecutor, result: *storage_api.TransportStats) void {
         result.async_submissions +|= self.stats.submissions.load(.monotonic);
         result.async_completions +|= self.stats.completions.load(.monotonic);
-        result.async_batches +|= self.stats.batches.load(.monotonic);
         result.async_queue_full +|= self.stats.queue_full.load(.monotonic);
     }
 
     fn resetStats(self: *AsyncReadExecutor) void {
         self.stats.submissions.store(0, .monotonic);
         self.stats.completions.store(0, .monotonic);
-        self.stats.batches.store(0, .monotonic);
         self.stats.queue_full.store(0, .monotonic);
     }
 };

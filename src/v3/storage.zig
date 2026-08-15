@@ -50,7 +50,6 @@ pub const TransportStats = struct {
     max_inflight: u64 = 0,
     async_submissions: u64 = 0,
     async_completions: u64 = 0,
-    async_batches: u64 = 0,
     async_queue_full: u64 = 0,
 };
 
