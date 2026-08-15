@@ -354,7 +354,7 @@ for ((index = 0; index < controller_count; index++)); do
 done
 
 "$qemu_command" \
-    -name zettide-vhost-fio \
+    -name zettide-vhost-fio,debug-threads=on \
     -machine q35,accel=kvm \
     -cpu host \
     -smp "$guest_vcpus" \
