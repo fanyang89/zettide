@@ -684,18 +684,11 @@ pub const Device = struct {
         }
         var group: std.Io.Group = .init;
         defer group.cancel(self.io);
-        var first_spawn_error: ?anyerror = null;
         for (operations, member_indexes, errors) |operation, member_index, *result| {
             const endpoint = self.members[member_index].endpoint;
-            group.concurrent(self.io, runOperation, .{ endpoint, operation, result }) catch |err| {
-                if (first_spawn_error == null) first_spawn_error = err;
-                runOperation(endpoint, operation, result);
-            };
+            group.async(self.io, runOperation, .{ endpoint, operation, result });
         }
-        group.await(self.io) catch |err| if (first_spawn_error == null) {
-            first_spawn_error = err;
-        };
-        if (first_spawn_error) |err| return err;
+        try group.await(self.io);
     }
 
     fn freezeWrites(self: *Device) void {
