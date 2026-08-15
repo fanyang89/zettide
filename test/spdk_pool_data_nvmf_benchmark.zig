@@ -388,6 +388,9 @@ fn run(
     const sqpoll_cpu_base = try args.parseOptionalCpuBase(
         if (c.getenv("ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE")) |value| std.mem.span(value) else null,
     );
+    const io_backend = try args.parseIoBackend(
+        if (c.getenv("ZETTIDE_POOL_DATA_IO_BACKEND")) |value| std.mem.span(value) else null,
+    );
     var window_specs_buffer: [zettide.v3.pool_member_set.max_member_count]args.WindowSpec = undefined;
     const window_specs = try args.parseWindowSpecs(
         if (c.getenv("ZETTIDE_POOL_DATA_MEMBER_WINDOWS")) |value| std.mem.span(value) else null,
@@ -395,9 +398,22 @@ fn run(
     );
     try validateWindowSpecs(window_specs, device_count);
 
-    var threaded: std.Io.Threaded = .init(allocator, .{ .environ = .empty });
-    defer threaded.deinit();
-    const io = threaded.io();
+    var threaded: std.Io.Threaded = undefined;
+    var uring: std.Io.Uring = undefined;
+    const io = switch (io_backend) {
+        .threaded => io: {
+            threaded = .init(allocator, .{ .environ = .empty });
+            break :io threaded.io();
+        },
+        .uring => io: {
+            try uring.init(allocator, .{ .environ = .empty, .log2_ring_entries = 8 });
+            break :io uring.io();
+        },
+    };
+    defer switch (io_backend) {
+        .threaded => threaded.deinit(),
+        .uring => uring.deinit(),
+    };
     var physical_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
     var physical_count: usize = 0;
     defer zettide.v3.storage.closeAll(physical_storages[0..physical_count], io) catch @panic("failed to close physical Pool storage");
@@ -483,7 +499,7 @@ fn run(
         c.pthread_sigmask(c.SIG_BLOCK, &signals, null) != 0)
         return error.SignalSetupFailed;
 
-    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d}\n", .{
+    std.debug.print("target-stage runtime start frontend={s} socket={s} reactor_mask={s} vhost_controllers={d} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} io_backend={s}\n", .{
         frontend_text,
         vhost_socket_directory orelse "none",
         reactor_mask,
@@ -491,6 +507,7 @@ fn run(
         concurrent_group_count,
         @tagName(raw_storage_mode),
         sqpoll_cpu_base,
+        @tagName(io_backend),
     });
     var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_pool_data_nvmf_benchmark",

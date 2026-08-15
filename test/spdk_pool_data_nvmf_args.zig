@@ -6,6 +6,11 @@ pub const max_vhost_controller_count = 4;
 pub const default_concurrent_group_count = 8;
 pub const max_concurrent_group_count = 64;
 
+pub const IoBackend = enum {
+    threaded,
+    uring,
+};
+
 pub const WindowSpec = struct {
     device_index: usize,
     offset: u64,
@@ -62,6 +67,13 @@ pub fn parseOptionalCpuBase(text: ?[]const u8) !?u32 {
     const value = text orelse return null;
     if (value.len == 0) return null;
     return parseDecimal(u32, value) catch error.InvalidCpuBase;
+}
+
+pub fn parseIoBackend(text: ?[]const u8) !IoBackend {
+    const value = text orelse return .threaded;
+    if (std.mem.eql(u8, value, "threaded")) return .threaded;
+    if (std.mem.eql(u8, value, "uring")) return .uring;
+    return error.InvalidIoBackend;
 }
 
 pub fn reactorMaskAt(mask: []const u8, index: usize, buffer: []u8) ![]const u8 {
@@ -155,6 +167,13 @@ test "optional CPU base accepts strict decimal values" {
     for ([_][]const u8{ "+1", "-1", "x" }) |value| {
         try std.testing.expectError(error.InvalidCpuBase, parseOptionalCpuBase(value));
     }
+}
+
+test "IO backend defaults to threaded and stays strict" {
+    try std.testing.expectEqual(IoBackend.threaded, try parseIoBackend(null));
+    try std.testing.expectEqual(IoBackend.threaded, try parseIoBackend("threaded"));
+    try std.testing.expectEqual(IoBackend.uring, try parseIoBackend("uring"));
+    try std.testing.expectError(error.InvalidIoBackend, parseIoBackend("io_uring"));
 }
 
 test "reactor mask selects one core" {
