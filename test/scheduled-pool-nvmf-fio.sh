@@ -274,8 +274,13 @@ validate_pcie_devices() {
             echo "PCIe controller must expose exactly one namespace: $bdf" >&2
             return 1
         }
-        group_path=$(readlink -f -- "$pci_path/iommu_group") || {
+        [[ -L $pci_path/iommu_group ]] || {
             echo "PCIe controller has no IOMMU group: $bdf" >&2
+            return 1
+        }
+        group_path=$(readlink -f -- "$pci_path/iommu_group") || return 1
+        [[ -d $group_path/devices ]] || {
+            echo "PCIe controller has an invalid IOMMU group: $bdf" >&2
             return 1
         }
         for group_device in "$group_path"/devices/*; do
