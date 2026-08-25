@@ -150,6 +150,11 @@
     dest: /var/cache/zettide/fedora-cloud-base.qcow2
     checksum: "sha256:{{ zettide_vhost_scheduled_pool_image_sha256 }}"
     mode: "0644"
+  environment: >-
+    {{ {'http_proxy': zettide_vhost_scheduled_pool_download_proxy,
+        'https_proxy': zettide_vhost_scheduled_pool_download_proxy}
+       if zettide_vhost_scheduled_pool_download_proxy | default('') | length > 0
+       else {} }}
 
 - name: Extract SPDK source | {{ zettide_optimize }}
   ansible.builtin.unarchive:
