@@ -367,6 +367,7 @@
           - --exclude=.venv
           - --exclude=.zig-cache
           - --exclude=zig-out
+          - --exclude=core.*
           - --exclude=test/external/.prepared
           - --exclude=test-results
           - --exclude=test/ansible/inventory.ini
