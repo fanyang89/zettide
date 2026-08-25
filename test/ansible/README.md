@@ -314,10 +314,12 @@ dependencies.
 To use SPDK NVMe PCIe instead of the Linux block backend, both data controllers
 must be in IOMMU groups containing no other devices. Only namespace ID 1 is
 currently supported; native NVMe multipath heads are not supported. Reserve at
-least 256 free 2 MiB hugepages before running:
+least 2304 free 2 MiB hugepages before running. The SPDK target uses 512 MiB,
+and the shared 4 GiB guest memory uses hugetlbfs to avoid expensive per-page
+VFIO mappings:
 
 ```sh
-sudo sysctl -w vm.nr_hugepages=256
+sudo sysctl -w vm.nr_hugepages=2304
 uv run ansible-playbook test/ansible/vhost-scheduled-pool-fio.yml \
   --limit zettide-tier1 \
   -e '{"zettide_raw_device":{"path":"/dev/nvme2n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
@@ -329,7 +331,11 @@ uv run ansible-playbook test/ansible/vhost-scheduled-pool-fio.yml \
 
 The lifecycle verifies each block-device serial against its BDF, rejects mixed
 IOMMU groups, binds only the configured controllers to `vfio-pci`, and restores
-the original `nvme` driver on success, failure, or interruption.
+the original `nvme` driver on success, failure, or interruption. PCIe mode
+creates the six-member Pool directly on SPDK bdev windows without loop devices.
+It creates a new Pool by default; set
+`zettide_vhost_scheduled_pool_pcie_preparation_mode=validate` with the expected
+Pool ID to reuse and validate an existing Pool without rewriting it.
 
 The Catalog profile uses the same cases and export identity, but reads a real
 64 GiB thin Catalog Volume from an 8 MiB temporary file-backed Pool. Unmapped

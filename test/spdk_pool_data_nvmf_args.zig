@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const ReadPolicy = enum { first_available, quorum };
 pub const StorageTransport = enum { linux, spdk_nvme_pcie };
+pub const PreparationMode = enum { none, create, validate };
 pub const max_reactor_count = 16;
 pub const max_vhost_controller_count = 4;
 pub const default_concurrent_group_count = 8;
@@ -23,6 +24,14 @@ pub fn parseStorageTransport(text: ?[]const u8) !StorageTransport {
     if (std.mem.eql(u8, value, "linux")) return .linux;
     if (std.mem.eql(u8, value, "spdk_nvme_pcie")) return .spdk_nvme_pcie;
     return error.InvalidStorageTransport;
+}
+
+pub fn parsePreparationMode(text: ?[]const u8) !PreparationMode {
+    const value = text orelse return .none;
+    if (std.mem.eql(u8, value, "none")) return .none;
+    if (std.mem.eql(u8, value, "create")) return .create;
+    if (std.mem.eql(u8, value, "validate")) return .validate;
+    return error.InvalidPreparationMode;
 }
 
 pub fn parsePcieNamespace(text: []const u8) !PcieNamespace {
@@ -174,6 +183,18 @@ test "storage transport defaults to Linux and accepts PCIe" {
     try std.testing.expectEqual(StorageTransport.spdk_nvme_pcie, try parseStorageTransport("spdk_nvme_pcie"));
     for ([_][]const u8{ "", "pcie", "SPDK_NVME_PCIE" }) |value|
         try std.testing.expectError(error.InvalidStorageTransport, parseStorageTransport(value));
+}
+
+test "preparation mode defaults to none and accepts supported modes" {
+    try std.testing.expectEqual(PreparationMode.none, try parsePreparationMode(null));
+    try std.testing.expectEqual(PreparationMode.none, try parsePreparationMode("none"));
+    try std.testing.expectEqual(PreparationMode.create, try parsePreparationMode("create"));
+    try std.testing.expectEqual(PreparationMode.validate, try parsePreparationMode("validate"));
+}
+
+test "preparation mode rejects empty and unknown values" {
+    for ([_][]const u8{ "", "CREATE", "check", " create" }) |value|
+        try std.testing.expectError(error.InvalidPreparationMode, parsePreparationMode(value));
 }
 
 test "PCIe namespaces require canonical BDF and nonzero NSID" {

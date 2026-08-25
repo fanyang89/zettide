@@ -98,7 +98,7 @@ else
     echo "qemu-system-x86_64 or qemu-kvm is required" >&2
     exit 2
 fi
-for command_name in qemu-img cloud-localds ssh scp ssh-keygen jq pidstat mpstat iostat; do
+for command_name in qemu-img cloud-localds ssh scp ssh-keygen jq pidstat mpstat iostat findmnt; do
     command -v "$command_name" >/dev/null || {
         echo "$command_name is required" >&2
         exit 2
@@ -396,6 +396,32 @@ for ((index = 0; index < controller_count; index++)); do
     )
 done
 
+qemu_memory_backend=(
+    -object "memory-backend-memfd,id=mem,size=4G,share=on"
+)
+if [[ $storage_transport == spdk_nvme_pcie ]]; then
+    hugepage_path=/dev/hugepages
+    [[ $(findmnt -n -o FSTYPE --target "$hugepage_path") == hugetlbfs ]] || {
+        echo "$hugepage_path must be a hugetlbfs mount for SPDK NVMe PCIe" >&2
+        exit 1
+    }
+    hugepage_size_kib=0
+    hugepage_free=0
+    while read -r key value _; do
+        case $key in
+            Hugepagesize:) hugepage_size_kib=$value ;;
+            HugePages_Free:) hugepage_free=$value ;;
+        esac
+    done </proc/meminfo
+    if ((hugepage_size_kib * hugepage_free < 4 * 1024 * 1024)); then
+        echo "at least 4 GiB of free hugepages is required for SPDK NVMe PCIe guest memory" >&2
+        exit 1
+    fi
+    qemu_memory_backend=(
+        -object "memory-backend-file,id=mem,size=4G,mem-path=$hugepage_path,share=on,prealloc=on"
+    )
+fi
+
 begin_deferred_signals
 "$qemu_command" \
     -name zettide-vhost-fio,debug-threads=on \
@@ -403,7 +429,7 @@ begin_deferred_signals
     -cpu host \
     -smp "$guest_vcpus" \
     -m 4G \
-    -object memory-backend-memfd,id=mem,size=4G,share=on \
+    "${qemu_memory_backend[@]}" \
     -numa node,memdev=mem \
     -drive file="$overlay",if=virtio,format=qcow2,cache=none \
     -drive file="$seed",if=none,id=seed,format=raw,readonly=on \

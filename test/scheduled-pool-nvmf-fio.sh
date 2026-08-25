@@ -29,6 +29,7 @@ lifecycle_profile=${ZETTIDE_SCHEDULED_POOL_PROFILE:-nvmf-scheduled-pool-rxe-fio}
 raw_windows=${ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS:-0}
 storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
 pcie_namespace_text=${ZETTIDE_POOL_DATA_PCIE_NAMESPACES:-}
+pcie_preparation_mode=${ZETTIDE_POOL_DATA_PCIE_PREPARATION_MODE:-create}
 canonical_devices=()
 physical_ids=()
 frozen_serials=()
@@ -90,6 +91,14 @@ if [[ $storage_transport == spdk_nvme_pcie ]]; then
         echo "PCIe controller BDFs must be distinct" >&2
         exit 2
     }
+    [[ $pcie_preparation_mode == create || $pcie_preparation_mode == validate ]] || {
+        echo "SPDK NVMe PCIe preparation mode must be create or validate" >&2
+        exit 2
+    }
+    if [[ $pcie_preparation_mode == validate && ! $expected_pool_id =~ ^[0-9a-f]{32}$ ]]; then
+        echo "SPDK NVMe PCIe validation requires an expected Pool ID" >&2
+        exit 2
+    fi
 fi
 for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink sleep tr udevadm umount wipefs; do
     command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 2; }
@@ -384,31 +393,40 @@ restore_pcie_devices() {
     return "$status"
 }
 
-probe_pcie_devices() {
-    local probe_socket_dir probe_status=0 restore_status=0
-    [[ $storage_transport == spdk_nvme_pcie ]] || return 0
-    probe_socket_dir=$(mktemp -d "$log_dir/.spdk-pcie-probe.XXXXXX")
-    bind_pcie_devices
+prepare_pcie_pool() {
+    local result_path=$log_dir/spdk-pcie-pool-id expected_id=00000000000000000000000000000000 prepare_status=0
+    local -a prepared_ids=()
+    [[ ! -e $result_path ]]
+    if [[ $pcie_preparation_mode == validate ]]; then
+        expected_id=$expected_pool_id
+    fi
     begin_attach_deferred_signals
-    env ZETTIDE_POOL_DATA_FRONTEND=vhost \
+    env -u ZETTIDE_POOL_DATA_PCIE_PROBE \
         ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=spdk_nvme_pcie \
-        ZETTIDE_POOL_DATA_PCIE_PROBE=1 \
-        ZETTIDE_VHOST_SOCKET_DIR="$probe_socket_dir" \
+        ZETTIDE_POOL_DATA_PREPARATION_MODE="$pcie_preparation_mode" \
+        ZETTIDE_POOL_DATA_MEMBER_WINDOWS="$raw_window_specs" \
         prlimit --memlock=unlimited:unlimited -- \
-        "$target" "$log_dir/spdk-pcie-probe-ready" 00000000000000000000000000000000 \
-        "$read_policy" "${pcie_namespaces[@]}" >"$log_dir/spdk-pcie-probe.log" 2>&1 &
+        "$target" "$result_path" "$expected_id" "$read_policy" \
+        "${pcie_namespaces[@]}" >"$log_dir/spdk-pcie-prepare.log" 2>&1 &
     benchmark_pid=$!
     end_attach_deferred_signals
-    wait "$benchmark_pid" || probe_status=$?
+    wait "$benchmark_pid" || prepare_status=$?
     benchmark_pid=""
-    restore_pcie_devices || restore_status=$?
-    if ((probe_status != 0 || restore_status != 0)); then
-        echo "SPDK NVMe PCIe probe failed; inspect $log_dir/spdk-pcie-probe.log" >&2
+    if ((prepare_status != 0)); then
+        echo "SPDK NVMe PCIe Pool preparation failed; inspect $log_dir/spdk-pcie-prepare.log" >&2
         return 1
     fi
-    check_all_frozen_identities
-    require_all_idle
-    record_event "spdk-pcie-probe-passed namespaces=$pcie_namespace_text"
+    mapfile -t prepared_ids <"$result_path"
+    if ((${#prepared_ids[@]} != 1)) || [[ ! ${prepared_ids[0]} =~ ^[0-9a-f]{32}$ ]]; then
+        echo "SPDK NVMe PCIe Pool preparation returned an invalid Pool ID" >&2
+        return 1
+    fi
+    pool_id=${prepared_ids[0]}
+    if [[ $pcie_preparation_mode == validate && $pool_id != "$expected_pool_id" ]]; then
+        echo "SPDK NVMe PCIe Pool ID does not match the expected identity" >&2
+        return 1
+    fi
+    record_event "spdk-pcie-pool-prepared mode=$pcie_preparation_mode pool=$pool_id namespaces=$pcie_namespace_text"
 }
 
 enumerate_device_tree() {
@@ -977,7 +995,6 @@ for physical_index in "${!physical_devices[@]}"; do
 done
 check_all_frozen_identities
 require_all_idle
-probe_pcie_devices
 
 minimum_capacity=0
 for physical_index in "${!physical_devices[@]}"; do
@@ -996,7 +1013,22 @@ for physical_index in "${!physical_devices[@]}"; do
     ((slice_size * 3 <= capacities[physical_index]))
 done
 
-attach_slices
+prepare_member_geometry
+raw_window_specs=""
+for member_index in "${!member_physical_indexes[@]}"; do
+    [[ -z $raw_window_specs ]] || raw_window_specs+=,
+    raw_window_specs+="${member_physical_indexes[$member_index]}:${loop_offsets[$member_index]}:${loop_sizes[$member_index]}"
+done
+
+if [[ $storage_transport == spdk_nvme_pcie ]]; then
+    export ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=$storage_transport
+    export ZETTIDE_POOL_DATA_MEMBER_WINDOWS=$raw_window_specs
+    bind_pcie_devices
+    prepare_pcie_pool
+    benchmark_devices=("${pcie_namespaces[@]}")
+    record_event "spdk-pcie-ready pool=$pool_id namespaces=$pcie_namespace_text specs=$raw_window_specs"
+else
+    attach_slices
 validate_all_loop_members
 check_all_frozen_identities
 reuse_pool=false
@@ -1067,11 +1099,6 @@ check_all_frozen_identities
 benchmark_devices=("${loops[@]}")
 unset ZETTIDE_POOL_DATA_MEMBER_WINDOWS
 if [[ $raw_windows == 1 ]]; then
-    raw_window_specs=""
-    for member_index in "${!member_physical_indexes[@]}"; do
-        [[ -z $raw_window_specs ]] || raw_window_specs+=,
-        raw_window_specs+="${member_physical_indexes[$member_index]}:${loop_offsets[$member_index]}:${loop_sizes[$member_index]}"
-    done
     detach_loops
     check_all_frozen_identities
     require_all_idle
@@ -1079,14 +1106,8 @@ if [[ $raw_windows == 1 ]]; then
     export ZETTIDE_POOL_DATA_MEMBER_WINDOWS=$raw_window_specs
     record_event "raw-window-ready physical_devices=$physical_device_count members=$member_count specs=$raw_window_specs"
 fi
-export ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=$storage_transport
-if [[ $storage_transport == spdk_nvme_pcie ]]; then
-    check_all_frozen_identities
-    require_all_idle
-    bind_pcie_devices
-    benchmark_devices=("${pcie_namespaces[@]}")
-    record_event "spdk-pcie-ready namespaces=$pcie_namespace_text"
 fi
+export ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=$storage_transport
 begin_attach_deferred_signals
 bash "$benchmark_driver" "$target" "$log_dir/$benchmark_log_name-ready" "$log_dir/$benchmark_log_name" \
     "$pool_id" "$read_policy" "${benchmark_devices[@]}" &

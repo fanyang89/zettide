@@ -86,6 +86,7 @@
       - zettide_vhost_scheduled_pool_pcie_namespaces[0] != zettide_vhost_scheduled_pool_pcie_namespaces[1]
       - zettide_vhost_scheduled_pool_raw_transport | default('auto') == 'auto'
       - zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') == ''
+      - zettide_vhost_scheduled_pool_pcie_preparation_mode | default('create') in ['create', 'validate']
       - zettide_raw_timeout | int >= 300
     fail_msg: >-
       SPDK PCIe requires two distinct canonical BDF/1 namespaces, Linux raw
@@ -284,6 +285,7 @@
     ZETTIDE_POOL_DATA_RAW_TRANSPORT: "{{ zettide_vhost_scheduled_pool_raw_transport | default('auto') }}"
     ZETTIDE_POOL_DATA_STORAGE_TRANSPORT: "{{ zettide_vhost_scheduled_pool_storage_transport | default('linux') }}"
     ZETTIDE_POOL_DATA_PCIE_NAMESPACES: "{{ zettide_vhost_scheduled_pool_pcie_namespaces | default([]) | join(',') }}"
+    ZETTIDE_POOL_DATA_PCIE_PREPARATION_MODE: "{{ zettide_vhost_scheduled_pool_pcie_preparation_mode | default('create') }}"
     ZETTIDE_VHOST_PERF_CASE: "{{ zettide_vhost_scheduled_pool_perf_case | default('') }}"
     ZETTIDE_VHOST_PERF_FREQUENCY: "{{ zettide_vhost_scheduled_pool_perf_frequency | default(199) }}"
     ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE: "{{ zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') }}"

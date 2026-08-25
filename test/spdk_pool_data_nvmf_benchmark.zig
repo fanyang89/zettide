@@ -427,6 +427,9 @@ fn run(
     const storage_transport = try args.parseStorageTransport(
         if (c.getenv("ZETTIDE_POOL_DATA_STORAGE_TRANSPORT")) |value| std.mem.span(value) else null,
     );
+    const preparation_mode = try args.parsePreparationMode(
+        if (c.getenv("ZETTIDE_POOL_DATA_PREPARATION_MODE")) |value| std.mem.span(value) else null,
+    );
     const raw_storage_mode = try zettide.v3.linux_block_device.TransportMode.parse(
         if (c.getenv("ZETTIDE_POOL_DATA_RAW_TRANSPORT")) |value| std.mem.span(value) else "auto",
     );
@@ -450,15 +453,27 @@ fn run(
         &window_specs_buffer,
     );
     try validateWindowSpecs(window_specs, device_count);
+    if (preparation_mode != .none) {
+        if (storage_transport != .spdk_nvme_pcie or device_count != 2 or
+            window_specs.len != 6 or pcie_probe)
+            return error.InvalidPreparationConfiguration;
+        const expected_is_zero = std.mem.allEqual(u8, &expected_pool_id, 0);
+        if ((preparation_mode == .create) != expected_is_zero)
+            return error.InvalidPreparationPoolId;
+        try validatePreparationWindowSpecs(window_specs);
+    }
     var pcie_namespaces: [2]args.PcieNamespace = undefined;
     if (storage_transport == .spdk_nvme_pcie) {
-        if (frontend != .vhost or device_count != pcie_namespaces.len or
+        if ((preparation_mode == .none and frontend != .vhost) or device_count != pcie_namespaces.len or
             (!pcie_probe and window_specs.len == 0))
             return error.InvalidPcieStorageConfiguration;
         if (raw_storage_mode != .auto or sqpoll_cpu_base != null)
             return error.PcieStorageRejectsLinuxTransportOptions;
         for (device_paths[0..device_count], &pcie_namespaces) |device_path_z, *namespace|
             namespace.* = try args.parsePcieNamespace(std.mem.span(device_path_z));
+        if (preparation_mode != .none and
+            (pcie_namespaces[0].nsid != 1 or pcie_namespaces[1].nsid != 1))
+            return error.InvalidPreparationNamespace;
     }
 
     var threaded: std.Io.Threaded = .init(allocator, .{
@@ -476,7 +491,7 @@ fn run(
         return error.ReactorMaskUnavailable;
     const reactor_mask = std.mem.sliceTo(&reactor_mask_buffer, 0);
     var signals: c.sigset_t = undefined;
-    if (!pcie_probe) {
+    if (!pcie_probe and preparation_mode == .none) {
         if (c.sigemptyset(&signals) != 0 or
             c.sigaddset(&signals, c.SIGINT) != 0 or
             c.sigaddset(&signals, c.SIGTERM) != 0 or
@@ -561,7 +576,7 @@ fn run(
                 .spdk_nvme_pcie => open: {
                     var name_buffer: [32]u8 = undefined;
                     const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
-                    break :open try runtime.openStorage(allocator, name, false);
+                    break :open try runtime.openStorage(allocator, name, preparation_mode != .none);
                 },
             };
             physical_count += 1;
@@ -578,6 +593,17 @@ fn run(
     }
     const transferring_count = member_count;
     member_count = 0;
+    if (preparation_mode != .none) {
+        const pool_id = try preparePool(
+            io,
+            allocator,
+            member_storages[0..transferring_count],
+            preparation_mode,
+            expected_pool_id,
+        );
+        try publishPreparedPoolId(io, ready_path, pool_id);
+        return;
+    }
     var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
         io,
         allocator,
@@ -705,6 +731,78 @@ fn run(
     }
 }
 
+fn preparePool(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    storages: []zettide.v3.storage.Storage,
+    mode: args.PreparationMode,
+    expected_pool_id: [16]u8,
+) ![16]u8 {
+    const set = try allocator.create(zettide.v3.pool_member_set.PoolMemberSet);
+    defer allocator.destroy(set);
+    switch (mode) {
+        .none => unreachable,
+        .create => {
+            const outcome = try zettide.v3.pool_provision.create(io, allocator, storages, .{
+                .protection = .replicated,
+                .data_mode = .blob,
+                .scheduled_blob = true,
+                .label = "synthetic-dual-device-scheduled-nvmf",
+            });
+            var provisioned = switch (outcome) {
+                .complete => |value| value,
+                .partial => |partial| {
+                    std.debug.print(
+                        "Partial Pool creation id={x} completed_members={d} failed_member={d} cause={s}\n",
+                        .{ partial.set_id, partial.completed_member_count, partial.failed_member_index, @errorName(partial.cause) },
+                    );
+                    return error.PartialPoolCreation;
+                },
+            };
+            defer provisioned.deinit();
+            set.* = try provisioned.intoMemberSet();
+        },
+        .validate => try zettide.v3.pool_member_set.PoolMemberSet.openStoragesInto(
+            set,
+            io,
+            allocator,
+            storages,
+            .writable,
+        ),
+    }
+    defer set.deinit();
+    if (set.suppliedCount() != 6) return error.IncompletePreparedPool;
+    for (0..set.suppliedCount()) |index| {
+        if (try set.memberAt(index) == null) return error.IncompletePreparedPool;
+        switch (try set.statusAt(index)) {
+            .authority, .active_voter => {},
+            else => return error.IncompletePreparedPool,
+        }
+    }
+    const authority = set.authority() orelse return error.MissingAuthority;
+    if (authority.topology.member_count != 6 or authority.layout.kind != .replicated or
+        authority.layout.scheduled_blob == null or authority.layout.scheduled_blob.?.member_count != 6 or
+        try set.dataMode() != .blob)
+        return error.InvalidPreparedPool;
+    if (set.dataAccess() != .read_write) return error.PreparedPoolNotWritable;
+    if (mode == .validate and !std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
+        return error.UnexpectedPoolId;
+    return authority.topology.set_id;
+}
+
+fn publishPreparedPoolId(io: std.Io, ready_path: []const u8, pool_id: [16]u8) !void {
+    const hex = "0123456789abcdef";
+    var contents: [33]u8 = undefined;
+    for (pool_id, 0..) |byte, index| {
+        contents[index * 2] = hex[byte >> 4];
+        contents[index * 2 + 1] = hex[byte & 0xf];
+    }
+    contents[32] = '\n';
+    const ready = try std.Io.Dir.createFileAbsolute(io, ready_path, .{ .exclusive = true });
+    defer ready.close(io);
+    try ready.writeStreamingAll(io, &contents);
+}
+
 fn validateWindowSpecs(specs: []const args.WindowSpec, device_count: usize) !void {
     for (specs, 0..) |spec, index| {
         if (spec.device_index >= device_count) return error.InvalidStorageWindow;
@@ -715,6 +813,19 @@ fn validateWindowSpecs(specs: []const args.WindowSpec, device_count: usize) !voi
             if (spec.offset < previous_end and previous.offset < end)
                 return error.OverlappingStorageWindows;
         }
+    }
+}
+
+fn validatePreparationWindowSpecs(specs: []const args.WindowSpec) !void {
+    if (specs.len != 6 or specs[0].length == 0 or specs[0].length % (1024 * 1024) != 0)
+        return error.InvalidPreparationWindows;
+    const length = specs[0].length;
+    const expected_devices = [_]usize{ 0, 1, 1, 0, 0, 1 };
+    const expected_slices = [_]u64{ 0, 0, 1, 1, 2, 2 };
+    for (specs, expected_devices, expected_slices) |spec, device_index, slice_index| {
+        if (spec.device_index != device_index or spec.length != length or
+            spec.offset != (std.math.mul(u64, length, slice_index) catch return error.InvalidPreparationWindows))
+            return error.InvalidPreparationWindows;
     }
 }
 
