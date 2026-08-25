@@ -1048,7 +1048,7 @@ else
         check_frozen_identity "$physical_index"
         require_idle_device "$physical_index"
         record_event "blkdiscard-started physical_device=${canonical_devices[$physical_index]}"
-        blkdiscard --zeroout "${canonical_devices[$physical_index]}"
+        blkdiscard "${canonical_devices[$physical_index]}"
         blockdev --rereadpt "${canonical_devices[$physical_index]}"
         record_event "blkdiscard-completed physical_device=${canonical_devices[$physical_index]}"
     done
