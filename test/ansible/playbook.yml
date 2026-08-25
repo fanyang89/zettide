@@ -310,11 +310,13 @@
         - cloud-utils
         - openssh-clients
         - pciutils
+        - perf
         - qemu-img
         - qemu-system-x86-core
         - sysstat
       Debian:
         - cloud-image-utils
+        - linux-perf
         - openssh-client
         - pciutils
         - qemu-system-x86
