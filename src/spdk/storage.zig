@@ -8,6 +8,27 @@ const Context = struct {
     dispatcher: *c.struct_zettide_spdk_bdev_dispatcher,
     geometry: c.struct_zettide_spdk_bdev_geometry,
     canonical_name: [*:0]u8,
+    async_submissions: std.atomic.Value(u64) = .init(0),
+    async_completions: std.atomic.Value(u64) = .init(0),
+    async_state: std.atomic.Value(u64) = .init(0),
+    async_drained: std.Io.Event = .unset,
+};
+
+const max_async_reads = 32;
+const async_closing: u64 = 1 << 63;
+const async_count_mask = async_closing - 1;
+
+const AsyncReadTask = struct {
+    context: *Context,
+    io: std.Io,
+    results: []storage_api.ReadResult,
+    completion: storage_api.AsyncReadCompletion,
+    submitted_count: usize = 0,
+    descriptors: [max_async_reads]c.struct_zettide_spdk_bdev_dispatcher_read = undefined,
+    statuses: [max_async_reads]c_int = undefined,
+    destinations: [max_async_reads][]u8 = undefined,
+    dma_buffers: [max_async_reads]*anyopaque = undefined,
+    result_indexes: [max_async_reads]u8 = undefined,
 };
 
 pub fn open(
@@ -96,6 +117,108 @@ fn readAt(context_ptr: *anyopaque, _: std.Io, buffer: []u8, offset: u64) !usize 
     return buffer.len;
 }
 
+fn submitReadManyAt(
+    context_ptr: *anyopaque,
+    io: std.Io,
+    reads: []const storage_api.Read,
+    results: []storage_api.ReadResult,
+    completion: storage_api.AsyncReadCompletion,
+) !storage_api.AsyncReadSubmit {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    if (reads.len != results.len) return error.InvalidReadBatch;
+    if (reads.len > max_async_reads) return .unsupported;
+    if (!acquireAsync(context)) return .unsupported;
+    var completion_ref_owned = true;
+    defer {
+        releaseAsync(context, io);
+        if (completion_ref_owned) releaseAsync(context, io);
+    }
+    for (results) |*result| result.* = .{};
+    for (reads) |read| {
+        if (read.buffer.len != 0)
+            try validateIo(context, read.offset, read.buffer.len, context.geometry.logical_block_size);
+    }
+
+    const task = try std.heap.c_allocator.create(AsyncReadTask);
+    errdefer std.heap.c_allocator.destroy(task);
+    task.* = .{
+        .context = context,
+        .io = io,
+        .results = results,
+        .completion = completion,
+    };
+    errdefer for (task.dma_buffers[0..task.submitted_count]) |buffer|
+        c.zettide_spdk_dma_free(buffer);
+
+    for (reads, 0..) |read, result_index| {
+        if (read.buffer.len == 0) continue;
+        const dma_buffer = c.zettide_spdk_dma_zmalloc(
+            read.buffer.len,
+            context.geometry.buffer_alignment,
+        ) orelse return error.OutOfMemory;
+        const index = task.submitted_count;
+        task.dma_buffers[index] = dma_buffer;
+        task.destinations[index] = read.buffer;
+        task.result_indexes[index] = @intCast(result_index);
+        task.descriptors[index] = .{
+            .buffer = dma_buffer,
+            .offset = read.offset,
+            .length = read.buffer.len,
+        };
+        task.submitted_count += 1;
+    }
+    if (task.submitted_count == 0) {
+        const callback = task.completion;
+        std.heap.c_allocator.destroy(task);
+        _ = context.async_submissions.fetchAdd(1, .monotonic);
+        _ = context.async_completions.fetchAdd(1, .monotonic);
+        callback.complete(callback.context, null);
+        return .submitted;
+    }
+    _ = context.async_submissions.fetchAdd(1, .monotonic);
+    const status = c.zettide_spdk_bdev_dispatcher_submit_read_many(
+        context.dispatcher,
+        &task.descriptors,
+        task.submitted_count,
+        &task.statuses,
+        asyncReadComplete,
+        task,
+    );
+    if (status != 0) {
+        _ = context.async_submissions.fetchSub(1, .monotonic);
+        try statusError(status);
+    }
+    completion_ref_owned = false;
+    return .submitted;
+}
+
+fn asyncReadComplete(context_ptr: ?*anyopaque) callconv(.c) void {
+    const task: *AsyncReadTask = @ptrCast(@alignCast(context_ptr.?));
+    const context = task.context;
+    const io = task.io;
+    const completion = task.completion;
+    for (
+        task.statuses[0..task.submitted_count],
+        task.destinations[0..task.submitted_count],
+        task.dma_buffers[0..task.submitted_count],
+        task.result_indexes[0..task.submitted_count],
+    ) |status, destination, dma_buffer, result_index| {
+        const result = &task.results[result_index];
+        if (status == 0) {
+            const dma_bytes: [*]const u8 = @ptrCast(dma_buffer);
+            @memcpy(destination, dma_bytes[0..destination.len]);
+            result.amount = destination.len;
+        } else {
+            result.failure = statusErrorValue(status);
+        }
+        c.zettide_spdk_dma_free(dma_buffer);
+    }
+    std.heap.c_allocator.destroy(task);
+    _ = context.async_completions.fetchAdd(1, .monotonic);
+    completion.complete(completion.context, null);
+    releaseAsync(context, io);
+}
+
 fn writeAllAt(context_ptr: *anyopaque, _: std.Io, bytes: []const u8, offset: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     if (bytes.len == 0) return;
@@ -128,8 +251,14 @@ fn sync(context_ptr: *anyopaque, _: std.Io) !void {
     ));
 }
 
-fn close(context_ptr: *anyopaque, _: std.Io) !void {
+fn close(context_ptr: *anyopaque, io: std.Io) !void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
+    const active = context.async_state.fetchOr(async_closing, .acq_rel) & async_count_mask;
+    if (active != 0) {
+        context.async_drained.waitUncancelable(io);
+        while (context.async_state.load(.acquire) & async_count_mask != 0)
+            std.atomic.spinLoopHint();
+    }
     const close_error = statusError(c.zettide_spdk_bdev_dispatcher_close(context.dispatcher));
     c.free(context.canonical_name);
     const allocator = context.allocator;
@@ -139,6 +268,47 @@ fn close(context_ptr: *anyopaque, _: std.Io) !void {
         // dispatcher and its runtime references are intentionally abandoned here.
         return err;
     };
+}
+
+fn acquireAsync(context: *Context) bool {
+    var state = context.async_state.load(.monotonic);
+    while (state & async_closing == 0) {
+        if (state & async_count_mask > async_count_mask - 2) return false;
+        if (context.async_state.cmpxchgWeak(state, state + 2, .acquire, .monotonic)) |observed| {
+            state = observed;
+        } else return true;
+    }
+    return false;
+}
+
+fn releaseAsync(context: *Context, io: std.Io) void {
+    var state = context.async_state.load(.monotonic);
+    while (true) {
+        std.debug.assert(state & async_count_mask != 0);
+        if (state == async_closing | 1) {
+            // Complete the wake before publishing zero so close cannot destroy the event early.
+            context.async_drained.set(io);
+            context.async_state.store(async_closing, .release);
+            return;
+        }
+        if (context.async_state.cmpxchgWeak(state, state - 1, .release, .monotonic)) |observed| {
+            state = observed;
+        } else return;
+    }
+}
+
+fn transportStats(context_ptr: *anyopaque, _: std.Io) storage_api.TransportStats {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    return .{
+        .async_submissions = context.async_submissions.load(.monotonic),
+        .async_completions = context.async_completions.load(.monotonic),
+    };
+}
+
+fn resetTransportStats(context_ptr: *anyopaque, _: std.Io) void {
+    const context: *Context = @ptrCast(@alignCast(context_ptr));
+    context.async_submissions.store(0, .monotonic);
+    context.async_completions.store(0, .monotonic);
 }
 
 fn validateIo(context: *const Context, offset: u64, len: usize, alignment: u32) !void {
@@ -169,10 +339,18 @@ fn statusError(status: c_int) !void {
     };
 }
 
+fn statusErrorValue(status: c_int) anyerror {
+    statusError(status) catch |err| return err;
+    return error.UnexpectedSpdkStatus;
+}
+
 const storage_vtable: storage_api.Storage.VTable = .{
     .same_identity = sameIdentity,
     .read_at = readAt,
+    .submit_read_many_at = submitReadManyAt,
     .write_all_at = writeAllAt,
     .sync = sync,
     .close = close,
+    .transport_stats = transportStats,
+    .reset_transport_stats = resetTransportStats,
 };

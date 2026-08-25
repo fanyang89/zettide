@@ -53,6 +53,23 @@ struct dispatcher_command {
 	} arguments;
 };
 
+struct dispatcher_read_batch;
+
+struct dispatcher_read_item {
+	struct dispatcher_read_batch *batch;
+	struct zettide_spdk_bdev_dispatcher_read read;
+};
+
+struct dispatcher_read_batch {
+	struct zettide_spdk_bdev_dispatcher *dispatcher;
+	size_t remaining;
+	bool submitting;
+	int *statuses;
+	zettide_spdk_bdev_dispatcher_batch_cb callback;
+	void *callback_context;
+	struct dispatcher_read_item items[];
+};
+
 static void
 complete_command(struct dispatcher_command *command, int status)
 {
@@ -91,6 +108,55 @@ static void
 io_complete(void *context, int status)
 {
 	complete_command(context, status);
+}
+
+static void
+finish_read_batch(struct dispatcher_read_batch *batch)
+{
+	zettide_spdk_bdev_dispatcher_batch_cb callback = batch->callback;
+	void *callback_context = batch->callback_context;
+
+	free(batch);
+	callback(callback_context);
+}
+
+static void
+read_batch_item_complete(void *context, int status)
+{
+	struct dispatcher_read_item *item = context;
+	struct dispatcher_read_batch *batch = item->batch;
+	size_t index = (size_t)(item - batch->items);
+
+	assert(batch->remaining > 0);
+	batch->statuses[index] = status;
+	batch->remaining--;
+	if (batch->remaining == 0 && !batch->submitting) {
+		finish_read_batch(batch);
+	}
+}
+
+static void
+run_read_batch(void *context)
+{
+	struct dispatcher_read_batch *batch = context;
+	size_t read_count = batch->remaining;
+	size_t index;
+	int status;
+
+	for (index = 0; index < read_count; index++) {
+		struct dispatcher_read_item *item = &batch->items[index];
+
+		status = zettide_spdk_bdev_read(batch->dispatcher->endpoint,
+				item->read.buffer, item->read.offset, item->read.length,
+				read_batch_item_complete, item);
+		if (status != 0) {
+			read_batch_item_complete(item, status);
+		}
+	}
+	batch->submitting = false;
+	if (batch->remaining == 0) {
+		finish_read_batch(batch);
+	}
 }
 
 static void
@@ -341,6 +407,50 @@ zettide_spdk_bdev_dispatcher_read(struct zettide_spdk_bdev_dispatcher *dispatche
 		void *buffer, uint64_t offset, uint64_t length)
 {
 	return dispatch_io(dispatcher, DISPATCHER_READ, buffer, offset, length);
+}
+
+int
+zettide_spdk_bdev_dispatcher_submit_read_many(
+		struct zettide_spdk_bdev_dispatcher *dispatcher,
+		const struct zettide_spdk_bdev_dispatcher_read *reads, size_t read_count,
+		int *statuses, zettide_spdk_bdev_dispatcher_batch_cb callback,
+		void *callback_context)
+{
+	struct dispatcher_read_batch *batch;
+	size_t allocation_size;
+	size_t index;
+	int status;
+
+	if (dispatcher == NULL || reads == NULL || read_count == 0 || statuses == NULL ||
+		callback == NULL) {
+		return -EINVAL;
+	}
+	if (spdk_get_thread() != NULL) {
+		return -EDEADLK;
+	}
+	if (read_count > (SIZE_MAX - sizeof(*batch)) / sizeof(*batch->items)) {
+		return -EOVERFLOW;
+	}
+	allocation_size = sizeof(*batch) + read_count * sizeof(*batch->items);
+	batch = calloc(1, allocation_size);
+	if (batch == NULL) {
+		return -ENOMEM;
+	}
+	batch->dispatcher = dispatcher;
+	batch->remaining = read_count;
+	batch->submitting = true;
+	batch->statuses = statuses;
+	batch->callback = callback;
+	batch->callback_context = callback_context;
+	for (index = 0; index < read_count; index++) {
+		batch->items[index].batch = batch;
+		batch->items[index].read = reads[index];
+	}
+	status = spdk_thread_send_msg(dispatcher->owner, run_read_batch, batch);
+	if (status != 0) {
+		free(batch);
+	}
+	return status;
 }
 
 int

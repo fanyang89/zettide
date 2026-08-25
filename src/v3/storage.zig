@@ -266,8 +266,10 @@ pub const Storage = struct {
         }
     }
 
-    /// On .submitted, completion is called exactly once and the caller must keep
-    /// buffers, results, and completion context alive until then.
+    /// On .submitted, completion is called exactly once on an implementation-defined
+    /// thread, possibly before this function returns. It must not block, reenter this
+    /// storage, or close it. The caller must keep buffers, results, and completion
+    /// context alive until the callback returns.
     pub fn submitReadManyAt(
         self: *Storage,
         io: Io,

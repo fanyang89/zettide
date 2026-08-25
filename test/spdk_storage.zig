@@ -17,6 +17,20 @@ const TestContext = struct {
     allocator: std.mem.Allocator,
 };
 
+const AsyncReadState = struct {
+    io: std.Io,
+    event: std.Io.Event = .unset,
+    failure: ?anyerror = null,
+    completed: bool = false,
+
+    fn complete(context_ptr: *anyopaque, failure: ?anyerror) void {
+        const self: *@This() = @ptrCast(@alignCast(context_ptr));
+        self.failure = failure;
+        self.completed = true;
+        self.event.set(self.io);
+    }
+};
+
 pub export fn zettide_spdk_storage_test_main() c_int {
     runMain() catch |err| {
         std.debug.print("SPDK storage test failed: {s}\n", .{@errorName(err)});
@@ -158,6 +172,7 @@ fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runti
 
 fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime) !void {
     const names = [_][]const u8{ "ZettideStorage0", "ZettideStorage1", "ZettideStorage2" };
+    try testAsyncReadClose(context, runtime, names[0]);
     var duplicate_storages: [3]zettide.v3.storage.Storage = undefined;
     var duplicate_count: usize = 0;
     errdefer zettide.v3.storage.closeAll(duplicate_storages[0..duplicate_count], context.io) catch {};
@@ -203,6 +218,7 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
         storages[index] = try runtime.openStorage(context.allocator, name, true);
         opened_count += 1;
     }
+    try testAsyncReadMany(context, &storages[0]);
 
     // Provisioning consumes every supplied storage on both success and failure.
     opened_count = 0;
@@ -249,6 +265,66 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
     if (try filesystem.read(context.io, reopened_inode, &payload, 0) != payload.len)
         return error.ShortRead;
     if (!std.mem.eql(u8, &payload, "SPDK")) return error.DataMismatch;
+}
+
+fn testAsyncReadMany(context: *TestContext, storage: *zettide.v3.storage.Storage) !void {
+    var expected: [2][4096]u8 = undefined;
+    for (&expected, 0..) |*block, block_index| {
+        for (block, 0..) |*byte, byte_index| byte.* = @truncate(block_index * 67 + byte_index * 29);
+    }
+    try storage.writeAllAt(context.io, &expected[0], 0);
+    try storage.writeAllAt(context.io, &expected[1], 4096);
+
+    var actual: [2][4096]u8 = @splat(@splat(0));
+    const reads = [_]zettide.v3.storage.Read{
+        .{ .buffer = &actual[0], .offset = 0 },
+        .{ .buffer = &actual[1], .offset = 4096 },
+    };
+    var results: [reads.len]zettide.v3.storage.ReadResult = undefined;
+    var state: AsyncReadState = .{ .io = context.io };
+    if (try storage.submitReadManyAt(
+        context.io,
+        &reads,
+        &results,
+        .{ .context = &state, .complete = AsyncReadState.complete },
+    ) != .submitted) return error.AsyncReadUnsupported;
+    state.event.waitUncancelable(context.io);
+    if (state.failure) |err| return err;
+    for (expected, actual, results) |expected_block, actual_block, result| {
+        if (result.failure) |err| return err;
+        if (result.amount != actual_block.len or !std.mem.eql(u8, &expected_block, &actual_block))
+            return error.AsyncReadMismatch;
+    }
+    const stats = storage.transportStats(context.io);
+    if (stats.async_submissions != 1 or stats.async_completions != 1)
+        return error.AsyncReadStatsMismatch;
+}
+
+fn testAsyncReadClose(
+    context: *TestContext,
+    runtime: *zettide.spdk_runtime.Runtime,
+    name: []const u8,
+) !void {
+    var storage = try runtime.openStorage(context.allocator, name, true);
+    var owned = true;
+    defer if (owned) storage.close(context.io) catch {};
+
+    var buffer: [4096]u8 = undefined;
+    const reads = [_]zettide.v3.storage.Read{.{ .buffer = &buffer, .offset = 0 }};
+    var results: [1]zettide.v3.storage.ReadResult = undefined;
+    var state: AsyncReadState = .{ .io = context.io };
+    if (try storage.submitReadManyAt(
+        context.io,
+        &reads,
+        &results,
+        .{ .context = &state, .complete = AsyncReadState.complete },
+    ) != .submitted) return error.AsyncReadUnsupported;
+    owned = false;
+    try storage.close(context.io);
+    if (!state.completed) return error.AsyncReadCloseReturnedEarly;
+    if (state.failure) |err| return err;
+    if (results[0].failure) |err| return err;
+    if (results[0].amount != buffer.len) return error.AsyncReadMismatch;
 }
 
 fn runtimeStatus(status: c_int) !void {
