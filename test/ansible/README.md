@@ -308,7 +308,8 @@ softirq snapshots, guest topology, and provider worker metrics. A completed run
 fails if provider queue-full rejections are nonzero.
 
 Set `zettide_vhost_scheduled_pool_download_proxy` to an HTTP proxy URL when the
-target host requires a proxy to download the verified guest image.
+target host requires a proxy to download the verified guest image or Zig
+dependencies.
 
 To use SPDK NVMe PCIe instead of the Linux block backend, both data controllers
 must be in IOMMU groups containing no other devices. Only namespace ID 1 is

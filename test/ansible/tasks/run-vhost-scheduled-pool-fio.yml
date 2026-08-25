@@ -197,6 +197,8 @@
     chdir: "{{ zettide_remote_workspace.path }}"
   environment:
     PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
+    http_proxy: "{{ zettide_vhost_scheduled_pool_download_proxy | default('') }}"
+    https_proxy: "{{ zettide_vhost_scheduled_pool_download_proxy | default('') }}"
   changed_when: true
 
 - name: Build Zettide CLI | {{ zettide_optimize }}
@@ -207,6 +209,9 @@
       - -Doptimize=ReleaseSafe
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    http_proxy: "{{ zettide_vhost_scheduled_pool_download_proxy | default('') }}"
+    https_proxy: "{{ zettide_vhost_scheduled_pool_download_proxy | default('') }}"
   changed_when: true
 
 - name: Link scheduled Pool vhost target | {{ zettide_optimize }}
