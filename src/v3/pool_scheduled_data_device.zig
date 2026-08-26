@@ -175,7 +175,7 @@ pub const Device = struct {
                 if (span_count == max_span_count) return error.BatchTooLarge;
                 const logical_offset = write.offset + processed;
                 const span_len = self.spanLength(logical_offset, write.bytes.len - processed);
-                const locations = try pool_blob_schedule.map(self.plan, logical_offset / self.plan.stripe_size);
+                const locations = try pool_blob_schedule.mapValidated(&self.plan, logical_offset / self.plan.stripe_size);
                 for (locations) |location| {
                     const member_index = self.memberIndex(location.slot) orelse unreachable;
                     const count = member_write_counts[member_index];
@@ -257,7 +257,7 @@ pub const Device = struct {
     }
 
     fn readSpanFirstAvailable(self: *Device, output: []u8, logical_offset: u64) !void {
-        const locations = try pool_blob_schedule.map(self.plan, logical_offset / self.plan.stripe_size);
+        const locations = try pool_blob_schedule.mapValidated(&self.plan, logical_offset / self.plan.stripe_size);
         const preferred_lane = self.read_sequence.fetchAdd(1, .monotonic) % pool_blob_schedule.replica_count;
         var last_error: anyerror = error.ReplicaUnavailable;
         for (0..pool_blob_schedule.replica_count) |attempt| {
@@ -277,7 +277,7 @@ pub const Device = struct {
     }
 
     fn readSpanQuorum(self: *Device, output: []u8, logical_offset: u64) !void {
-        const locations = try pool_blob_schedule.map(self.plan, logical_offset / self.plan.stripe_size);
+        const locations = try pool_blob_schedule.mapValidated(&self.plan, logical_offset / self.plan.stripe_size);
         const allocation_len = std.math.mul(usize, output.len, pool_blob_schedule.replica_count) catch
             return error.OutOfMemory;
         const copies = try self.allocator.alignedAlloc(
@@ -369,7 +369,7 @@ pub const Device = struct {
         var resolved: [max_read_count]bool = @splat(false);
         var last_errors: [max_read_count]anyerror = @splat(error.ReplicaUnavailable);
         for (reads, 0..) |read, request_index| {
-            const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
+            const locations = try pool_blob_schedule.mapValidated(&self.plan, read.offset / self.plan.stripe_size);
             request_locations[request_index] = locations;
             for (0..pool_blob_schedule.replica_count) |attempt| {
                 const lane = (preferred_lane + attempt) % pool_blob_schedule.replica_count;
@@ -482,7 +482,7 @@ pub const Device = struct {
         var copy_offset: usize = 0;
         for (reads, 0..) |read, request_index| {
             request_offsets[request_index] = copy_offset;
-            const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
+            const locations = try pool_blob_schedule.mapValidated(&self.plan, read.offset / self.plan.stripe_size);
             for (locations, 0..) |location, lane| {
                 if (self.memberIndex(location.slot) == null) continue;
                 available_lanes[request_index][available_counts[request_index]] = @intCast(lane);
@@ -566,7 +566,7 @@ pub const Device = struct {
         for (reads, 0..) |read, request_index| {
             if (resolved[request_index] or available_counts[request_index] < 3) continue;
             const lane: usize = available_lanes[request_index][2];
-            const locations = try pool_blob_schedule.map(self.plan, read.offset / self.plan.stripe_size);
+            const locations = try pool_blob_schedule.mapValidated(&self.plan, read.offset / self.plan.stripe_size);
             const location = locations[lane];
             const member_index = self.memberIndex(location.slot).?;
             const member_read_index = member_read_counts[member_index];

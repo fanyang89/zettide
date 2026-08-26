@@ -211,6 +211,11 @@ pub fn validate(plan: PlacementPlan) !void {
 
 pub fn map(plan: PlacementPlan, logical_stripe: u64) ![replica_count]Location {
     try validate(plan);
+    return mapValidated(&plan, logical_stripe);
+}
+
+/// Maps a stripe in a plan that has already passed `validate`.
+pub fn mapValidated(plan: *const PlacementPlan, logical_stripe: u64) ![replica_count]Location {
     if (logical_stripe >= plan.logical_stripe_count) return error.LogicalStripeOutOfRange;
     const n = plan.logical_stripe_count;
     const permuted: u64 = if (n == 1) 0 else @intCast(
