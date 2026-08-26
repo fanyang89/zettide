@@ -449,7 +449,8 @@ begin_deferred_signals
     -m 4G \
     "${qemu_memory_backend[@]}" \
     -numa node,memdev=mem \
-    -drive file="$overlay",if=virtio,format=qcow2,cache=none \
+    -drive file="$overlay",if=none,id=boot-disk,format=qcow2,cache=none \
+    -device virtio-blk-pci,drive=boot-disk,bootindex=1 \
     -drive file="$seed",if=none,id=seed,format=raw,readonly=on \
     -device virtio-scsi-pci,id=seed-scsi \
     -device scsi-cd,drive=seed \
