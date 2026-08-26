@@ -664,18 +664,18 @@ execute_case() {
     if [[ $benchmark_mode == raw_nvme ]]; then
         jq -r --arg name "$name" '
             [.jobs[] | select(.error == 0)] as $jobs |
-            ($jobs | map(.read.total_ios) | add) as $total_ios |
+            ($jobs | map(.read.clat_ns.N) | add) as $sample_count |
             [
                 $jobs[].read.clat_ns.bins | to_entries[] |
                 {latency_ns: (.key | tonumber), count: .value}
             ] |
             group_by(.latency_ns) |
             map({latency_ns: .[0].latency_ns, count: (map(.count) | add)}) as $bins |
-            ($bins | map(.count) | add) as $binned_ios |
-            if $total_ios <= 0 or $binned_ios != $total_ios then
+            ($bins | map(.count) | add) as $binned_samples |
+            if $sample_count <= 0 or $binned_samples != $sample_count then
                 error("invalid aggregate latency histogram")
             else
-                ($total_ios * 99 / 100 | ceil) as $p99_rank |
+                ($sample_count * 99 / 100 | ceil) as $p99_rank |
                 (reduce $bins[] as $bin (
                     {count: 0, p99_ns: null};
                     .count += $bin.count |
@@ -687,7 +687,7 @@ execute_case() {
                 )) as $percentile |
                 $name + " iops=" + (($jobs | map(.read.iops) | add) | tostring) +
                 " bw_bytes=" + (($jobs | map(.read.bw_bytes) | add) | tostring) +
-                " mean_ns=" + ((($jobs | map(.read.clat_ns.mean * .read.total_ios) | add) / $total_ios) | tostring) +
+                " mean_ns=" + ((($jobs | map(.read.clat_ns.mean * .read.clat_ns.N) | add) / $sample_count) | tostring) +
                 " p99_ns=" + ($percentile.p99_ns | tostring)
             end' "$result"
     else
