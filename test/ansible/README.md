@@ -354,6 +354,24 @@ uv run ansible-playbook test/ansible/spdk-nvme-perf.yml \
   -e zettide_nvmf_scheduled_pool_expected_pool_id=0debd8728b1e58221d69e96189855647
 ```
 
+The raw SPDK NVMe vhost profile adds only SPDK vhost-user-blk, QEMU virtio-blk,
+and guest fio above the same two namespaces. It validates the existing Pool
+identity first, then exports each physical bdev through its own read-only vhost
+controller. Guest fio runs one queue-depth-256 job per disk for aggregate queue
+depth 512:
+
+```sh
+uv run ansible-playbook test/ansible/vhost-spdk-nvme-fio.yml \
+  --limit zettide-tier1 \
+  -e '{"zettide_raw_device":{"path":"/dev/nvme1n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
+  -e zettide_vhost_scheduled_pool_storage_transport=spdk_nvme_pcie \
+  -e zettide_vhost_scheduled_pool_pcie_preparation_mode=validate \
+  -e '{"zettide_vhost_scheduled_pool_pcie_namespaces":["0000:04:00.0/1","0000:03:00.0/1"]}' \
+  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:spdk_nvme_pcie:/dev/nvme1n1:PHMB747600DE280CGN:0000:04:00.0/1:/dev/nvme0n1:PHMB746600SS280CGN:0000:03:00.0/1' \
+  -e zettide_nvmf_scheduled_pool_expected_pool_id=0debd8728b1e58221d69e96189855647 \
+  -e zettide_vhost_scheduled_pool_vcpu_cpu_base=16
+```
+
 The Catalog profile uses the same cases and export identity, but reads a real
 64 GiB thin Catalog Volume from an 8 MiB temporary file-backed Pool. Unmapped
 extents read as zero, so this isolates Catalog lookup, worker scheduling, and

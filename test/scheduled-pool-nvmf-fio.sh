@@ -30,6 +30,7 @@ raw_windows=${ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS:-0}
 storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
 pcie_namespace_text=${ZETTIDE_POOL_DATA_PCIE_NAMESPACES:-}
 pcie_preparation_mode=${ZETTIDE_POOL_DATA_PCIE_PREPARATION_MODE:-create}
+benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
 canonical_devices=()
 physical_ids=()
 frozen_serials=()
@@ -69,6 +70,10 @@ contains_forbidden_identity_character() {
     echo "storage transport must be linux or spdk_nvme_pcie" >&2
     exit 2
 }
+[[ $benchmark_mode == pool || $benchmark_mode == raw_nvme ]] || {
+    echo "benchmark mode must be pool or raw_nvme" >&2
+    exit 2
+}
 if [[ $storage_transport == spdk_nvme_pcie ]]; then
     [[ $physical_device_count -eq 2 && $raw_windows == 1 ]] || {
         echo "SPDK NVMe PCIe requires two physical devices and raw windows" >&2
@@ -99,6 +104,12 @@ if [[ $storage_transport == spdk_nvme_pcie ]]; then
         echo "SPDK NVMe PCIe validation requires an expected Pool ID" >&2
         exit 2
     fi
+fi
+if [[ $benchmark_mode == raw_nvme ]] &&
+    [[ $storage_transport != spdk_nvme_pcie || $pcie_preparation_mode != validate ||
+        ! $expected_pool_id =~ ^[0-9a-f]{32}$ || $benchmark_driver != test/spdk-vhost-user-blk-fio.sh ]]; then
+    echo "raw NVMe vhost requires SPDK PCIe, validation-only Pool preparation, an expected Pool ID, and the vhost benchmark driver" >&2
+    exit 2
 fi
 for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink sleep tr udevadm umount wipefs; do
     command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 2; }
@@ -402,6 +413,7 @@ prepare_pcie_pool() {
     fi
     begin_attach_deferred_signals
     env -u ZETTIDE_POOL_DATA_PCIE_PROBE \
+        ZETTIDE_POOL_DATA_BENCHMARK_MODE=pool \
         ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=spdk_nvme_pcie \
         ZETTIDE_POOL_DATA_PREPARATION_MODE="$pcie_preparation_mode" \
         ZETTIDE_POOL_DATA_MEMBER_WINDOWS="$raw_window_specs" \
@@ -761,6 +773,7 @@ finish() {
         echo "pool_id=$pool_id"
         echo "slice_size=$slice_size"
         echo "storage_transport=$storage_transport"
+        echo "benchmark_mode=$benchmark_mode"
         echo "pcie_namespaces=$pcie_namespace_text"
         echo "loops_detached=$loops_detached"
         echo "test_succeeded=$test_succeeded"

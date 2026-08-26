@@ -1,0 +1,11 @@
+---
+- name: Benchmark two SPDK NVMe bdevs through vhost-user-blk
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: vhost-spdk-nvme-fio
+    zettide_optimize_modes_override:
+      - ReleaseSafe
+    zettide_vhost_scheduled_pool_reactor_count: 2
+    zettide_vhost_scheduled_pool_guest_vcpus: 8
+    zettide_vhost_scheduled_pool_queues: 8
+    zettide_vhost_scheduled_pool_fio_case: randread-4k-qd256-j1-per-device

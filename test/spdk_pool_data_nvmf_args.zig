@@ -3,6 +3,7 @@ const std = @import("std");
 pub const ReadPolicy = enum { first_available, quorum };
 pub const StorageTransport = enum { linux, spdk_nvme_pcie };
 pub const PreparationMode = enum { none, create, validate };
+pub const BenchmarkMode = enum { pool, raw_nvme };
 pub const max_reactor_count = 16;
 pub const max_vhost_controller_count = 4;
 pub const default_concurrent_group_count = 8;
@@ -32,6 +33,13 @@ pub fn parsePreparationMode(text: ?[]const u8) !PreparationMode {
     if (std.mem.eql(u8, value, "create")) return .create;
     if (std.mem.eql(u8, value, "validate")) return .validate;
     return error.InvalidPreparationMode;
+}
+
+pub fn parseBenchmarkMode(text: ?[]const u8) !BenchmarkMode {
+    const value = text orelse return .pool;
+    if (std.mem.eql(u8, value, "pool")) return .pool;
+    if (std.mem.eql(u8, value, "raw_nvme")) return .raw_nvme;
+    return error.InvalidBenchmarkMode;
 }
 
 pub fn parsePcieNamespace(text: []const u8) !PcieNamespace {
@@ -195,6 +203,14 @@ test "preparation mode defaults to none and accepts supported modes" {
 test "preparation mode rejects empty and unknown values" {
     for ([_][]const u8{ "", "CREATE", "check", " create" }) |value|
         try std.testing.expectError(error.InvalidPreparationMode, parsePreparationMode(value));
+}
+
+test "benchmark mode defaults to Pool and accepts raw NVMe" {
+    try std.testing.expectEqual(BenchmarkMode.pool, try parseBenchmarkMode(null));
+    try std.testing.expectEqual(BenchmarkMode.pool, try parseBenchmarkMode("pool"));
+    try std.testing.expectEqual(BenchmarkMode.raw_nvme, try parseBenchmarkMode("raw_nvme"));
+    for ([_][]const u8{ "", "raw", "RAW_NVME" }) |value|
+        try std.testing.expectError(error.InvalidBenchmarkMode, parseBenchmarkMode(value));
 }
 
 test "PCIe namespaces require canonical BDF and nonzero NSID" {

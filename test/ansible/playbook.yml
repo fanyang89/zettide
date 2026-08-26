@@ -67,6 +67,7 @@
       - nvmf-catalog-optane-fio
       - nvmf-scheduled-pool-rxe-fio
       - vhost-scheduled-pool-fio
+      - vhost-spdk-nvme-fio
       - spdk-nvme-perf
       - iscsi-catalog-fio
     zettide_blob_fuse_fio_backing_size_effective: "{{ zettide_blob_fuse_fio_backing_size | default(34359738368) }}"
@@ -124,6 +125,7 @@
       iscsi-catalog-fio: tasks/run-iscsi-fio.yml
       nvmf-scheduled-pool-rxe-fio: tasks/run-nvmf-scheduled-pool-rxe-fio.yml
       vhost-scheduled-pool-fio: tasks/run-vhost-scheduled-pool-fio.yml
+      vhost-spdk-nvme-fio: tasks/run-vhost-scheduled-pool-fio.yml
       spdk-nvme-perf: tasks/run-vhost-scheduled-pool-fio.yml
     zettide_packages:
       RedHat:
@@ -485,7 +487,7 @@
                  + (zettide_iscsi_packages[ansible_facts.os_family]
                     if zettide_test_profile == 'iscsi-catalog-fio' else [])
                  + (zettide_vhost_packages[ansible_facts.os_family]
-                    if zettide_test_profile == 'vhost-scheduled-pool-fio' else [])
+                    if zettide_test_profile in ['vhost-scheduled-pool-fio', 'vhost-spdk-nvme-fio'] else [])
                  + (zettide_nfs_ganesha_packages[ansible_facts.os_family]
                     if zettide_test_profile == 'blob-pool-nfs-fio' else []) }}
             state: present
@@ -497,7 +499,7 @@
               - "{{ item }}"
           loop: >-
             {{ ['loop', 'kvm', 'kvm_amd']
-               if zettide_test_profile == 'vhost-scheduled-pool-fio'
+               if zettide_test_profile in ['vhost-scheduled-pool-fio', 'vhost-spdk-nvme-fio']
                else (['nvme', 'nvme-rdma', 'rdma_rxe', 'loop']
                if zettide_test_profile == 'nvmf-scheduled-pool-rxe-fio'
                else (['nvme', 'nvme-rdma', 'rdma_rxe']
@@ -588,7 +590,7 @@
               pool_fio_frontend: >-
                 {{ 'spdk-nvme-perf' if zettide_test_profile == 'spdk-nvme-perf'
                    else ('nfs' if zettide_test_profile == 'blob-pool-nfs-fio'
-                   else ('vhost-user-blk' if zettide_test_profile == 'vhost-scheduled-pool-fio'
+                    else ('vhost-user-blk' if zettide_test_profile in ['vhost-scheduled-pool-fio', 'vhost-spdk-nvme-fio']
                    else ('nvmf'
                          if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
                          else ('iscsi' if zettide_test_profile == 'iscsi-catalog-fio'
@@ -599,19 +601,23 @@
                          if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
                          else '') }}
               pool_fio_source_profile: >-
-                {{ ('synthetic-dual-physical-device'
+                {{ 'raw-dual-nvme'
+                   if zettide_test_profile == 'vhost-spdk-nvme-fio'
+                   else (('synthetic-dual-physical-device'
                     if zettide_raw_device.secondary is defined
                     else 'synthetic-single-physical-device')
                    if zettide_test_profile == 'vhost-scheduled-pool-fio'
                    else ('synthetic-single-physical-device'
                          if zettide_test_profile == 'nvmf-scheduled-pool-rxe-fio'
-                         else 'native') }}
+                         else 'native')) }}
               vhost_user_blk: >-
                 {{ {'image_url': zettide_vhost_scheduled_pool_image_url,
                     'image_sha256': zettide_vhost_scheduled_pool_image_sha256,
                     'guest_vcpus': zettide_vhost_scheduled_pool_guest_vcpus,
-                    'queues': zettide_vhost_scheduled_pool_queues}
-                   if zettide_test_profile == 'vhost-scheduled-pool-fio' else {} }}
+                    'queues': zettide_vhost_scheduled_pool_queues,
+                    'mode': ('raw_nvme' if zettide_test_profile == 'vhost-spdk-nvme-fio' else 'pool'),
+                    'fio_case': zettide_vhost_scheduled_pool_fio_case}
+                    if zettide_test_profile in ['vhost-scheduled-pool-fio', 'vhost-spdk-nvme-fio'] else {} }}
               spdk_nvme_perf: >-
                 {{ {'io_size': 4096,
                     'io_pattern': 'randread',

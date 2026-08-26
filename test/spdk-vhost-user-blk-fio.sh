@@ -28,6 +28,7 @@ perf_frequency=${ZETTIDE_VHOST_PERF_FREQUENCY:-199}
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
 target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
 storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
+benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
 target_pid=""
 qemu_pid=""
@@ -42,12 +43,26 @@ perf_data=""
 deferred_signal=0
 
 case $fio_case in
-    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16) ;;
+    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16 | randread-4k-qd256-j1-per-device) ;;
     *)
         echo "unknown vhost-user-blk fio case: $fio_case" >&2
         exit 2
         ;;
 esac
+[[ $benchmark_mode == pool || $benchmark_mode == raw_nvme ]] || {
+    echo "benchmark mode must be pool or raw_nvme" >&2
+    exit 2
+}
+if [[ $benchmark_mode == raw_nvme ]]; then
+    [[ $storage_transport == spdk_nvme_pcie && $controller_count -eq 2 &&
+        $fio_case == randread-4k-qd256-j1-per-device ]] || {
+        echo "raw NVMe mode requires SPDK PCIe, two controllers, and randread-4k-qd256-j1-per-device" >&2
+        exit 2
+    }
+elif [[ $fio_case == randread-4k-qd256-j1-per-device ]]; then
+    echo "randread-4k-qd256-j1-per-device requires raw NVMe mode" >&2
+    exit 2
+fi
 
 [[ $EUID -eq 0 ]] || {
     echo "vhost-user-blk fio requires root" >&2
@@ -246,7 +261,7 @@ cleanup() {
     elif [[ -n $target_pid ]]; then
         wait "$target_pid" 2>/dev/null || true
     fi
-    if [[ $benchmark_completed == true ]]; then
+    if [[ $benchmark_completed == true && $benchmark_mode == pool ]]; then
         if ! grep -Eq 'provider_worker_metrics .*queue_full_rejects=0([[:space:]]|$)' "$log_dir/target.log" ||
             grep -Eq 'provider_worker_metrics .*queue_full_rejects=[1-9][0-9]*([[:space:]]|$)' "$log_dir/target.log"; then
             echo "target reported missing or nonzero queue-full metrics" >&2
@@ -359,8 +374,11 @@ if [[ $storage_transport == spdk_nvme_pcie ]]; then
     target_command=(prlimit --memlock=unlimited:unlimited -- "${target_command[@]}")
 fi
 begin_deferred_signals
+target_member_windows=${ZETTIDE_POOL_DATA_MEMBER_WINDOWS:-}
+[[ $benchmark_mode == pool ]] || target_member_windows=""
 env ZETTIDE_POOL_DATA_FRONTEND=vhost \
-    ZETTIDE_POOL_DATA_MEMBER_WINDOWS="${ZETTIDE_POOL_DATA_MEMBER_WINDOWS:-}" \
+    ZETTIDE_POOL_DATA_BENCHMARK_MODE="$benchmark_mode" \
+    ZETTIDE_POOL_DATA_MEMBER_WINDOWS="$target_member_windows" \
     ZETTIDE_VHOST_SOCKET_DIR="$socket_dir" \
     ZETTIDE_VHOST_CONTROLLER_COUNT="$controller_count" \
     ZETTIDE_NVMF_REACTOR_COUNT="$reactor_count" \
@@ -528,6 +546,11 @@ EOF
 chmod 0755 "$work_dir/guest-identify.sh"
 scp "${scp_options[@]}" "$work_dir/guest-identify.sh" zettide@127.0.0.1:/tmp/guest-identify.sh
 guest_device=$(ssh "${ssh_options[@]}" zettide@127.0.0.1 sudo /tmp/guest-identify.sh "$controller_count")
+IFS=: read -r -a guest_devices <<<"$guest_device"
+[[ ${#guest_devices[@]} -eq $controller_count ]] || {
+    echo "guest device list does not match the controller count: $guest_device" >&2
+    exit 1
+}
 
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'lsblk -o NAME,KNAME,TYPE,SIZE,RO,MODEL,SERIAL' >"$log_dir/guest-lsblk.txt"
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'lspci -nn' >"$log_dir/guest-lspci.txt"
@@ -542,9 +565,6 @@ run_case() {
     local jobs=$5
     local size=$6
     local job_file=$work_dir/fio.job
-    local result=$log_dir/fio-$name.json
-    local status
-
     cat >"$job_file" <<EOF
 [global]
 filename=$guest_device
@@ -567,6 +587,46 @@ percentile_list=50:95:99:99.9
 
 [$name]
 EOF
+    execute_case "$name" "$job_file"
+}
+
+run_raw_nvme_case() {
+    local name=randread-4k-qd256-j1-per-device
+    local job_file=$work_dir/fio.job
+    local index
+
+    cat >"$job_file" <<EOF
+[global]
+rw=randread
+bs=4k
+size=$fio_size
+ioengine=io_uring
+iodepth=256
+direct=1
+invalidate=1
+time_based=1
+runtime=$runtime
+ramp_time=$ramp_time
+randrepeat=0
+norandommap=1
+percentile_list=50:95:99:99.9
+EOF
+    for index in "${!guest_devices[@]}"; do
+        cat >>"$job_file" <<EOF
+
+[$name-device-$index]
+filename=${guest_devices[index]}
+EOF
+    done
+    execute_case "$name" "$job_file"
+}
+
+execute_case() {
+    local name=$1
+    local job_file=$2
+    local result=$log_dir/fio-$name.json
+    local status
+
     scp "${scp_options[@]}" "$job_file" zettide@127.0.0.1:/tmp/zettide-fio.job
     start_monitors "$name"
     if [[ -n $perf_case && $name == "$perf_case" ]]; then
@@ -578,8 +638,13 @@ EOF
         end_deferred_signals
     fi
     set +e
-    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-        'sudo fio --readonly --eta=never --output-format=json /tmp/zettide-fio.job' >"$result"
+    if [[ $benchmark_mode == raw_nvme ]]; then
+        ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+            'sudo fio --readonly --eta=never --output-format=json+ /tmp/zettide-fio.job'
+    else
+        ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+            'sudo fio --readonly --eta=never --output-format=json /tmp/zettide-fio.job'
+    fi >"$result"
     status=$?
     set -e
     if [[ -n $perf_pid ]]; then
@@ -595,10 +660,41 @@ EOF
     cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
     ((status == 0)) || return "$status"
     jq -e '.jobs | length > 0 and all(.error == 0)' "$result" >/dev/null
-    jq -r '(.jobs[0].jobname) + " iops=" + (.jobs[0].read.iops|tostring) +
-        " bw_bytes=" + (.jobs[0].read.bw_bytes|tostring) +
-        " mean_ns=" + (.jobs[0].read.clat_ns.mean|tostring) +
-        " p99_ns=" + (.jobs[0].read.clat_ns.percentile["99.000000"]|tostring)' "$result"
+    if [[ $benchmark_mode == raw_nvme ]]; then
+        jq -r --arg name "$name" '
+            [.jobs[] | select(.error == 0)] as $jobs |
+            ($jobs | map(.read.total_ios) | add) as $total_ios |
+            [
+                $jobs[].read.clat_ns.bins | to_entries[] |
+                {latency_ns: (.key | tonumber), count: .value}
+            ] |
+            group_by(.latency_ns) |
+            map({latency_ns: .[0].latency_ns, count: (map(.count) | add)}) as $bins |
+            ($bins | map(.count) | add) as $binned_ios |
+            if $total_ios <= 0 or $binned_ios != $total_ios then
+                error("invalid aggregate latency histogram")
+            else
+                ($total_ios * 99 / 100 | ceil) as $p99_rank |
+                (reduce $bins[] as $bin (
+                    {count: 0, p99_ns: null};
+                    .count += $bin.count |
+                    if .p99_ns == null and .count >= $p99_rank then
+                        .p99_ns = $bin.latency_ns
+                    else
+                        .
+                    end
+                )) as $percentile |
+                $name + " iops=" + (($jobs | map(.read.iops) | add) | tostring) +
+                " bw_bytes=" + (($jobs | map(.read.bw_bytes) | add) | tostring) +
+                " mean_ns=" + ((($jobs | map(.read.clat_ns.mean * .read.total_ios) | add) / $total_ios) | tostring) +
+                " p99_ns=" + ($percentile.p99_ns | tostring)
+            end' "$result"
+    else
+        jq -r '(.jobs[0].jobname) + " iops=" + (.jobs[0].read.iops|tostring) +
+            " bw_bytes=" + (.jobs[0].read.bw_bytes|tostring) +
+            " mean_ns=" + (.jobs[0].read.clat_ns.mean|tostring) +
+            " p99_ns=" + (.jobs[0].read.clat_ns.percentile["99.000000"]|tostring)' "$result"
+    fi
 }
 
 run_selected_case() {
@@ -612,4 +708,5 @@ run_selected_case randread-4k-qd1-j1 randread 4k 1 1 "$fio_size"
 run_selected_case randread-4k-qd32-j1 randread 4k 32 1 "$fio_size"
 run_selected_case randread-4k-qd32-j4 randread 4k 32 4 "$fio_size"
 run_selected_case randread-4k-qd32-j16 randread 4k 32 16 "$fio_size"
+[[ $fio_case != randread-4k-qd256-j1-per-device ]] || run_raw_nvme_case
 benchmark_completed=true

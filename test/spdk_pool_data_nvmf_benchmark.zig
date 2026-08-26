@@ -380,6 +380,9 @@ fn run(
         .quorum => .quorum,
     };
     const expected_pool_id = try args.parsePoolId(expected_pool_id_text);
+    const benchmark_mode = try args.parseBenchmarkMode(
+        if (c.getenv("ZETTIDE_POOL_DATA_BENCHMARK_MODE")) |value| std.mem.span(value) else null,
+    );
     const frontend_text = if (c.getenv("ZETTIDE_POOL_DATA_FRONTEND")) |value| std.mem.span(value) else "nvmf";
     const frontend: Frontend = if (std.mem.eql(u8, frontend_text, "nvmf"))
         .nvmf
@@ -414,7 +417,7 @@ fn run(
             null, reactor_count)
     else
         0;
-    const vhost_worker_count = if (frontend == .vhost)
+    const vhost_worker_count = if (frontend == .vhost and benchmark_mode == .pool)
         try args.parseVhostWorkerCount(
             if (c.getenv("ZETTIDE_VHOST_WORKER_COUNT")) |value| std.mem.span(value) else null,
             vhost_controller_count,
@@ -453,6 +456,11 @@ fn run(
         &window_specs_buffer,
     );
     try validateWindowSpecs(window_specs, device_count);
+    if (benchmark_mode == .raw_nvme and
+        (frontend != .vhost or storage_transport != .spdk_nvme_pcie or
+            preparation_mode != .none or pcie_probe or window_specs.len != 0 or
+            device_count != 2 or vhost_controller_count != 2))
+        return error.InvalidRawNvmeConfiguration;
     if (preparation_mode != .none) {
         if (storage_transport != .spdk_nvme_pcie or device_count != 2 or
             window_specs.len != 6 or pcie_probe)
@@ -465,7 +473,7 @@ fn run(
     var pcie_namespaces: [2]args.PcieNamespace = undefined;
     if (storage_transport == .spdk_nvme_pcie) {
         if ((preparation_mode == .none and frontend != .vhost) or device_count != pcie_namespaces.len or
-            (!pcie_probe and window_specs.len == 0))
+            (!pcie_probe and window_specs.len == 0 and benchmark_mode != .raw_nvme))
             return error.InvalidPcieStorageConfiguration;
         if (raw_storage_mode != .auto or sqpoll_cpu_base != null)
             return error.PcieStorageRejectsLinuxTransportOptions;
@@ -505,7 +513,8 @@ fn run(
     defer if (owned_runtime_config) |config| allocator.free(config);
     const selected_runtime_config = owned_runtime_config orelse
         if (transport == .rdma) rdma_runtime_config else runtime_config;
-    std.debug.print("target-stage runtime start frontend={s} storage_transport={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
+    std.debug.print("target-stage runtime start mode={s} frontend={s} storage_transport={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
+        @tagName(benchmark_mode),
         frontend_text,
         @tagName(storage_transport),
         vhost_socket_directory orelse "none",
@@ -531,6 +540,57 @@ fn run(
     defer runtime.deinit();
     const runtime_handle: *anyopaque = @ptrCast(runtime.handle orelse return error.RuntimeStopped);
     std.debug.print("target-stage runtime ready\n", .{});
+    if (benchmark_mode == .raw_nvme) {
+        var controllers: [2]?*c.struct_zettide_spdk_vhost_blk_controller = @splat(null);
+        var controller_count: usize = 0;
+        defer while (controller_count > 0) {
+            controller_count -= 1;
+            closeRawVhostController(io, &controllers[controller_count]);
+        };
+        std.debug.print("target-stage raw NVMe export start controllers={d}\n", .{controllers.len});
+        for (&controllers, 0..) |*controller, index| {
+            var bdev_name_buffer: [32]u8 = undefined;
+            const bdev_name = try std.fmt.bufPrintZ(&bdev_name_buffer, "ZettidePhysical{d}n1", .{index});
+            var controller_name_buffer: [64]u8 = undefined;
+            const controller_name = try std.fmt.bufPrintZ(
+                &controller_name_buffer,
+                "zettide-scheduled-pool-data-{d}",
+                .{index},
+            );
+            var selected_mask_buffer: [32]u8 = undefined;
+            const selected_mask = try args.reactorMaskAt(reactor_mask, index, &selected_mask_buffer);
+            var controller_mask_buffer: [32]u8 = undefined;
+            const controller_mask = try std.fmt.bufPrintZ(&controller_mask_buffer, "{s}", .{selected_mask});
+            var options: c.struct_zettide_spdk_vhost_blk_controller_opts = undefined;
+            c.zettide_spdk_vhost_blk_controller_opts_init(&options, @sizeOf(@TypeOf(options)));
+            options.name = controller_name.ptr;
+            options.bdev_name = bdev_name.ptr;
+            options.cpumask = controller_mask.ptr;
+            options.readonly = true;
+            const status = c.zettide_spdk_vhost_blk_controller_create(
+                @ptrCast(runtime_handle),
+                &options,
+                controller,
+            );
+            if (status != 0) return error.RawNvmeVhostControllerCreateFailed;
+            controller_count += 1;
+            const handle = controller.* orelse return error.UnexpectedControllerStatus;
+            for (0..1000) |_| {
+                if (c.zettide_spdk_vhost_blk_controller_is_ready(handle)) break;
+                io.sleep(.fromMilliseconds(10), .awake) catch return error.VhostControllerReadyWaitFailed;
+            } else return error.RawNvmeVhostControllerNotReady;
+            const socket_path = std.mem.span(
+                c.zettide_spdk_vhost_blk_controller_get_socket_path(handle) orelse
+                    return error.RawNvmeVhostSocketUnavailable,
+            );
+            std.debug.print(
+                "target-stage raw NVMe export ready index={d} bdev={s} cpumask={s} readonly=true socket={s}\n",
+                .{ index, bdev_name, controller_mask, socket_path },
+            );
+        }
+        try publishReadyAndWait(io, ready_path, &signals);
+        return;
+    }
     var physical_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
     var physical_count: usize = 0;
     defer zettide.v3.storage.closeAll(physical_storages[0..physical_count], io) catch @panic("failed to close physical Pool storage");
@@ -576,7 +636,7 @@ fn run(
                 .spdk_nvme_pcie => open: {
                     var name_buffer: [32]u8 = undefined;
                     const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
-                    break :open try runtime.openStorage(allocator, name, preparation_mode != .none);
+                    break :open try runtime.openStorage(allocator, name, preparation_mode == .create);
                 },
             };
             physical_count += 1;
@@ -767,7 +827,7 @@ fn preparePool(
             io,
             allocator,
             storages,
-            .writable,
+            .read_only,
         ),
     }
     defer set.deinit();
@@ -841,6 +901,24 @@ fn closeVhostExport(io: std.Io, export_handle: *zettide.spdk_vhost_block_export.
         return;
     }
     @panic("timed out closing Pool data vhost export");
+}
+
+fn closeRawVhostController(
+    io: std.Io,
+    controller: *?*c.struct_zettide_spdk_vhost_blk_controller,
+) void {
+    const handle = controller.* orelse return;
+    for (0..1000) |_| {
+        const status = c.zettide_spdk_vhost_blk_controller_remove(handle);
+        if (status == 0) {
+            controller.* = null;
+            return;
+        }
+        if (status != -c.EBUSY) @panic("failed to remove raw NVMe vhost controller");
+        io.sleep(.fromMilliseconds(10), .awake) catch
+            @panic("failed to wait for raw NVMe vhost controller shutdown");
+    }
+    @panic("timed out removing raw NVMe vhost controller");
 }
 
 fn publishReadyAndWait(io: std.Io, ready_path: []const u8, signals: *const c.sigset_t) !void {
