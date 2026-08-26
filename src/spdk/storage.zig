@@ -27,7 +27,7 @@ const AsyncReadTask = struct {
     descriptors: [max_async_reads]c.struct_zettide_spdk_bdev_dispatcher_read = undefined,
     statuses: [max_async_reads]c_int = undefined,
     destinations: [max_async_reads][]u8 = undefined,
-    dma_buffers: [max_async_reads]*anyopaque = undefined,
+    dma_buffer: ?*anyopaque = null,
     result_indexes: [max_async_reads]u8 = undefined,
 };
 
@@ -147,21 +147,22 @@ fn submitReadManyAt(
         .results = results,
         .completion = completion,
     };
-    errdefer for (task.dma_buffers[0..task.submitted_count]) |buffer|
-        c.zettide_spdk_dma_free(buffer);
-
+    var dma_offsets: [max_async_reads]usize = undefined;
+    var dma_size: usize = 0;
+    const dma_alignment: usize = @intCast(context.geometry.buffer_alignment);
     for (reads, 0..) |read, result_index| {
         if (read.buffer.len == 0) continue;
-        const dma_buffer = c.zettide_spdk_dma_zmalloc(
-            read.buffer.len,
-            context.geometry.buffer_alignment,
-        ) orelse return error.OutOfMemory;
+        const remainder = dma_size % dma_alignment;
+        if (remainder != 0)
+            dma_size = std.math.add(usize, dma_size, dma_alignment - remainder) catch
+                return error.OutOfMemory;
         const index = task.submitted_count;
-        task.dma_buffers[index] = dma_buffer;
+        dma_offsets[index] = dma_size;
+        dma_size = std.math.add(usize, dma_size, read.buffer.len) catch return error.OutOfMemory;
         task.destinations[index] = read.buffer;
         task.result_indexes[index] = @intCast(result_index);
         task.descriptors[index] = .{
-            .buffer = dma_buffer,
+            .buffer = undefined,
             .offset = read.offset,
             .length = read.buffer.len,
         };
@@ -175,6 +176,16 @@ fn submitReadManyAt(
         callback.complete(callback.context, null);
         return .submitted;
     }
+    task.dma_buffer = c.zettide_spdk_dma_zmalloc(
+        dma_size,
+        context.geometry.buffer_alignment,
+    ) orelse return error.OutOfMemory;
+    const dma_buffer = task.dma_buffer.?;
+    errdefer c.zettide_spdk_dma_free(dma_buffer);
+    const dma_bytes: [*]u8 = @ptrCast(dma_buffer);
+    for (task.descriptors[0..task.submitted_count], dma_offsets[0..task.submitted_count]) |*descriptor, offset|
+        descriptor.buffer = dma_bytes + offset;
+
     _ = context.async_submissions.fetchAdd(1, .monotonic);
     const status = c.zettide_spdk_bdev_dispatcher_submit_read_many(
         context.dispatcher,
@@ -200,19 +211,19 @@ fn asyncReadComplete(context_ptr: ?*anyopaque) callconv(.c) void {
     for (
         task.statuses[0..task.submitted_count],
         task.destinations[0..task.submitted_count],
-        task.dma_buffers[0..task.submitted_count],
+        task.descriptors[0..task.submitted_count],
         task.result_indexes[0..task.submitted_count],
-    ) |status, destination, dma_buffer, result_index| {
+    ) |status, destination, descriptor, result_index| {
         const result = &task.results[result_index];
         if (status == 0) {
-            const dma_bytes: [*]const u8 = @ptrCast(dma_buffer);
+            const dma_bytes: [*]const u8 = @ptrCast(descriptor.buffer.?);
             @memcpy(destination, dma_bytes[0..destination.len]);
             result.amount = destination.len;
         } else {
             result.failure = statusErrorValue(status);
         }
-        c.zettide_spdk_dma_free(dma_buffer);
     }
+    c.zettide_spdk_dma_free(task.dma_buffer);
     std.heap.c_allocator.destroy(task);
     _ = context.async_completions.fetchAdd(1, .monotonic);
     completion.complete(completion.context, null);
