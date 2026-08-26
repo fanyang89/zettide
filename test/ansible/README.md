@@ -322,11 +322,11 @@ VFIO mappings:
 sudo sysctl -w vm.nr_hugepages=2304
 uv run ansible-playbook test/ansible/vhost-scheduled-pool-fio.yml \
   --limit zettide-tier1 \
-  -e '{"zettide_raw_device":{"path":"/dev/nvme2n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
+  -e '{"zettide_raw_device":{"path":"/dev/nvme1n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
   -e zettide_vhost_scheduled_pool_storage_transport=spdk_nvme_pcie \
-  -e '{"zettide_vhost_scheduled_pool_pcie_namespaces":["0000:07:00.0/1","0000:03:00.0/1"]}' \
-  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:spdk_nvme_pcie:/dev/nvme2n1:PHMB747600DE280CGN:0000:07:00.0/1:/dev/nvme0n1:PHMB746600SS280CGN:0000:03:00.0/1' \
-  -e zettide_nvmf_scheduled_pool_expected_pool_id=0dc67e4cdded2d37fc13e49f5544ba37
+  -e '{"zettide_vhost_scheduled_pool_pcie_namespaces":["0000:04:00.0/1","0000:03:00.0/1"]}' \
+  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:spdk_nvme_pcie:/dev/nvme1n1:PHMB747600DE280CGN:0000:04:00.0/1:/dev/nvme0n1:PHMB746600SS280CGN:0000:03:00.0/1' \
+  -e zettide_nvmf_scheduled_pool_expected_pool_id=0debd8728b1e58221d69e96189855647
 ```
 
 The lifecycle verifies each block-device serial against its BDF, rejects mixed
@@ -346,12 +346,12 @@ one worker per namespace, matching the vhost baseline's aggregate depth of 512:
 ```sh
 uv run ansible-playbook test/ansible/spdk-nvme-perf.yml \
   --limit zettide-tier1 \
-  -e '{"zettide_raw_device":{"path":"/dev/nvme2n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
+  -e '{"zettide_raw_device":{"path":"/dev/nvme1n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
   -e zettide_vhost_scheduled_pool_storage_transport=spdk_nvme_pcie \
   -e zettide_vhost_scheduled_pool_pcie_preparation_mode=validate \
-  -e '{"zettide_vhost_scheduled_pool_pcie_namespaces":["0000:07:00.0/1","0000:03:00.0/1"]}' \
-  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:spdk_nvme_pcie:/dev/nvme2n1:PHMB747600DE280CGN:0000:07:00.0/1:/dev/nvme0n1:PHMB746600SS280CGN:0000:03:00.0/1' \
-  -e zettide_nvmf_scheduled_pool_expected_pool_id=0dc67e4cdded2d37fc13e49f5544ba37
+  -e '{"zettide_vhost_scheduled_pool_pcie_namespaces":["0000:04:00.0/1","0000:03:00.0/1"]}' \
+  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:spdk_nvme_pcie:/dev/nvme1n1:PHMB747600DE280CGN:0000:04:00.0/1:/dev/nvme0n1:PHMB746600SS280CGN:0000:03:00.0/1' \
+  -e zettide_nvmf_scheduled_pool_expected_pool_id=0debd8728b1e58221d69e96189855647
 ```
 
 The Catalog profile uses the same cases and export identity, but reads a real

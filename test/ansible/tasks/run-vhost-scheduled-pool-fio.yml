@@ -34,7 +34,10 @@
       - zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') | string is match('^$|^[0-9]+$')
       - zettide_vhost_scheduled_pool_threaded_concurrency | default('') | string is match('^$|^[0-9]+$')
       - zettide_vhost_scheduled_pool_worker_count | default(2) | int >= 1
-      - zettide_vhost_scheduled_pool_worker_count | default(2) | int <= zettide_vhost_scheduled_pool_reactor_count | int
+      - >-
+        zettide_scheduled_pool_direct_perf or
+        zettide_vhost_scheduled_pool_worker_count | default(2) | int <=
+        zettide_vhost_scheduled_pool_reactor_count | int
       - zettide_vhost_scheduled_pool_inline_batches | default('') | string is match('^$|^[01]$')
       - zettide_vhost_scheduled_pool_target_gdb | default(0) | int in [0, 1]
       - zettide_vhost_scheduled_pool_guest_vcpus | string is match('^[0-9]+$')
