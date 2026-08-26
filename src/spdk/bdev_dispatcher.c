@@ -326,7 +326,7 @@ zettide_spdk_bdev_dispatcher_open(struct zettide_spdk_runtime *runtime,
 		return -EINVAL;
 	}
 	*dispatcher_out = NULL;
-	status = zettide_spdk_runtime_acquire(runtime, &owner);
+	status = zettide_spdk_runtime_acquire_dispatcher(runtime, &owner);
 	if (status != 0) {
 		return status;
 	}

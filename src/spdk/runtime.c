@@ -1,5 +1,7 @@
 #include "runtime.h"
 
+#include "spdk/cpuset.h"
+#include "spdk/env.h"
 #include "spdk/event.h"
 #include "spdk/thread.h"
 #include "spdk/vhost.h"
@@ -9,6 +11,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,6 +29,10 @@ struct zettide_spdk_runtime {
 	pthread_t thread;
 	enum runtime_state state;
 	struct spdk_thread *owner;
+	struct spdk_thread **dispatcher_owners;
+	size_t dispatcher_owner_count;
+	size_t next_dispatcher_owner;
+	size_t dispatcher_owners_stopping;
 	size_t active_leases;
 	int app_status;
 	char *name;
@@ -43,6 +50,99 @@ static pthread_mutex_t g_runtime_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool g_runtime_active;
 
 static void
+dispatcher_owner_stopped(void *context)
+{
+	struct zettide_spdk_runtime *runtime = context;
+
+	assert(spdk_get_thread() == runtime->owner);
+	assert(runtime->dispatcher_owners_stopping > 0);
+	runtime->dispatcher_owners_stopping--;
+	if (runtime->dispatcher_owners_stopping == 0) {
+		spdk_app_stop(runtime->app_status);
+	}
+}
+
+static void
+stop_dispatcher_owner(void *context)
+{
+	struct zettide_spdk_runtime *runtime = context;
+	int status;
+
+	spdk_thread_exit(spdk_get_thread());
+	status = spdk_thread_send_msg(runtime->owner, dispatcher_owner_stopped, runtime);
+	if (status != 0) {
+		spdk_app_stop(status);
+	}
+}
+
+static void
+stop_dispatcher_owners(struct zettide_spdk_runtime *runtime)
+{
+	size_t index;
+	int status;
+
+	assert(spdk_get_thread() == runtime->owner);
+	assert(runtime->dispatcher_owners_stopping == 0);
+	if (runtime->dispatcher_owner_count < 2) {
+		spdk_app_stop(runtime->app_status);
+		return;
+	}
+	runtime->dispatcher_owners_stopping = runtime->dispatcher_owner_count - 1;
+	for (index = 1; index < runtime->dispatcher_owner_count; index++) {
+		status = spdk_thread_send_msg(runtime->dispatcher_owners[index],
+				stop_dispatcher_owner, runtime);
+		if (status != 0) {
+			spdk_app_stop(status);
+			return;
+		}
+	}
+}
+
+static void
+bind_dispatcher_owner(void *context)
+{
+	(void)context;
+	spdk_thread_bind(spdk_get_thread(), true);
+}
+
+static int
+create_dispatcher_owners(struct zettide_spdk_runtime *runtime)
+{
+	struct spdk_cpuset cpumask;
+	struct spdk_thread *thread;
+	uint32_t app_core = spdk_env_get_current_core();
+	uint32_t core;
+	char name[32];
+	int status;
+
+	runtime->dispatcher_owners = calloc(spdk_env_get_core_count(),
+			sizeof(*runtime->dispatcher_owners));
+	if (runtime->dispatcher_owners == NULL) {
+		return -ENOMEM;
+	}
+	runtime->dispatcher_owners[0] = runtime->owner;
+	runtime->dispatcher_owner_count = 1;
+	SPDK_ENV_FOREACH_CORE(core) {
+		if (core == app_core) {
+			continue;
+		}
+		spdk_cpuset_zero(&cpumask);
+		spdk_cpuset_set_cpu(&cpumask, core, true);
+		(void)snprintf(name, sizeof(name), "zettide_dispatch_%u", core);
+		thread = spdk_thread_create(name, &cpumask);
+		if (thread == NULL) {
+			return -ENOMEM;
+		}
+		runtime->dispatcher_owners[runtime->dispatcher_owner_count++] = thread;
+		status = spdk_thread_send_msg(thread, bind_dispatcher_owner, NULL);
+		if (status != 0) {
+			return status;
+		}
+	}
+	return 0;
+}
+
+static void
 release_process_slot(void)
 {
 	int rc = pthread_mutex_lock(&g_runtime_mutex);
@@ -58,17 +158,30 @@ static void
 runtime_started(void *context)
 {
 	struct zettide_spdk_runtime *runtime = context;
+	int status;
 	int rc;
 
+	runtime->owner = spdk_get_thread();
+	status = runtime->owner == NULL ? -EIO : create_dispatcher_owners(runtime);
 	rc = pthread_mutex_lock(&runtime->mutex);
 	assert(rc == 0);
 	assert(runtime->state == RUNTIME_STARTING);
-	runtime->owner = spdk_get_thread();
-	runtime->state = RUNTIME_READY;
-	rc = pthread_cond_broadcast(&runtime->condition);
-	assert(rc == 0);
+	if (status == 0) {
+		runtime->state = RUNTIME_READY;
+		rc = pthread_cond_broadcast(&runtime->condition);
+		assert(rc == 0);
+	} else {
+		runtime->app_status = status;
+	}
 	rc = pthread_mutex_unlock(&runtime->mutex);
 	assert(rc == 0);
+	if (status != 0) {
+		if (runtime->owner == NULL) {
+			spdk_app_stop(status);
+		} else {
+			stop_dispatcher_owners(runtime);
+		}
+	}
 }
 
 static void *
@@ -128,13 +241,15 @@ run_runtime(void *context)
 static void
 stop_runtime(void *context)
 {
-	(void)context;
-	spdk_app_stop(0);
+	struct zettide_spdk_runtime *runtime = context;
+
+	stop_dispatcher_owners(runtime);
 }
 
 static void
 free_runtime_fields(struct zettide_spdk_runtime *runtime)
 {
+	free(runtime->dispatcher_owners);
 	free(runtime->json_data);
 	free(runtime->vhost_socket_path);
 	free(runtime->reactor_mask);
@@ -394,6 +509,32 @@ zettide_spdk_runtime_acquire(struct zettide_spdk_runtime *runtime,
 	}
 	runtime->active_leases++;
 	*owner_out = runtime->owner;
+	rc = pthread_mutex_unlock(&runtime->mutex);
+	assert(rc == 0);
+	return 0;
+}
+
+int
+zettide_spdk_runtime_acquire_dispatcher(struct zettide_spdk_runtime *runtime,
+		struct spdk_thread **owner_out)
+{
+	int rc;
+
+	if (runtime == NULL || owner_out == NULL) {
+		return -EINVAL;
+	}
+	*owner_out = NULL;
+	rc = pthread_mutex_lock(&runtime->mutex);
+	assert(rc == 0);
+	if (runtime->state != RUNTIME_READY) {
+		(void)pthread_mutex_unlock(&runtime->mutex);
+		return -ESHUTDOWN;
+	}
+	assert(runtime->dispatcher_owner_count > 0);
+	*owner_out = runtime->dispatcher_owners[runtime->next_dispatcher_owner];
+	runtime->next_dispatcher_owner =
+			(runtime->next_dispatcher_owner + 1) % runtime->dispatcher_owner_count;
+	runtime->active_leases++;
 	rc = pthread_mutex_unlock(&runtime->mutex);
 	assert(rc == 0);
 	return 0;

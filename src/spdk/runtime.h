@@ -40,6 +40,9 @@ int zettide_spdk_runtime_destroy(struct zettide_spdk_runtime *runtime);
 /* Used by clients to hold the runtime ready until asynchronous teardown succeeds. */
 int zettide_spdk_runtime_acquire(struct zettide_spdk_runtime *runtime,
 		struct spdk_thread **owner_out);
+/* Assigns dispatcher I/O across the runtime's reactor threads in round-robin order. */
+int zettide_spdk_runtime_acquire_dispatcher(struct zettide_spdk_runtime *runtime,
+		struct spdk_thread **owner_out);
 void zettide_spdk_runtime_release(struct zettide_spdk_runtime *runtime);
 const char *zettide_spdk_runtime_get_vhost_socket_path(
 		const struct zettide_spdk_runtime *runtime);

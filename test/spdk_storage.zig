@@ -54,7 +54,17 @@ fn runMain() !void {
         .allocator = std.heap.c_allocator,
     };
     var reactor_mask_buffer: [32]u8 = undefined;
-    try runtimeStatus(c.zettide_spdk_test_reactor_mask(&reactor_mask_buffer, reactor_mask_buffer.len));
+    var reactor_count: usize = 4;
+    while (true) {
+        const mask_status = c.zettide_spdk_test_reactor_mask_count(
+            &reactor_mask_buffer,
+            reactor_mask_buffer.len,
+            reactor_count,
+        );
+        if (mask_status == 0) break;
+        if (mask_status != -c.ENODEV or reactor_count == 1) try runtimeStatus(mask_status);
+        reactor_count -= 1;
+    }
     const reactor_mask = std.mem.sliceTo(&reactor_mask_buffer, 0);
     const runtime_options: zettide.spdk_runtime.Runtime.Options = .{
         .name = "zettide_spdk_storage_test",
@@ -67,6 +77,11 @@ fn runMain() !void {
     };
     var runtime = try zettide.spdk_runtime.Runtime.start(context.allocator, runtime_options);
     defer runtime.deinit();
+    if (reactor_count > 1)
+        try runtimeStatus(c.zettide_spdk_test_dispatcher_owner_round_robin(
+            @ptrCast(runtime.handle.?),
+            reactor_count,
+        ));
     second_runtime: {
         var unexpected = zettide.spdk_runtime.Runtime.start(context.allocator, runtime_options) catch |err| {
             if (err != error.RuntimeBusy) return err;
