@@ -556,6 +556,7 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .read_at = readAt,
     .read_many_at = readManyAt,
     .submit_read_many_at = submitReadManyAt,
+    .max_async_read_count = async_max_reads,
     .write_all_at = writeAllAt,
     .write_all_many_at = writeAllManyAt,
     .sync_data = syncData,

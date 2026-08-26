@@ -30,6 +30,60 @@ pub const AsyncReadCompletion = struct {
     complete: *const fn (context: *anyopaque, failure: ?anyerror) void,
 };
 
+pub const AsyncReadSubmitFn = *const fn (
+    context: *anyopaque,
+    io: Io,
+    reads: []const Read,
+    results: []ReadResult,
+    completion: AsyncReadCompletion,
+) anyerror!AsyncReadSubmit;
+
+pub const AsyncReadTarget = struct {
+    context: *anyopaque,
+    io: Io,
+    submit_fn: AsyncReadSubmitFn,
+    base_offset: u64,
+    length: u64,
+    max_read_count: usize,
+
+    pub fn sameBacking(self: AsyncReadTarget, other: AsyncReadTarget) bool {
+        return self.context == other.context and self.submit_fn == other.submit_fn and
+            self.io.userdata == other.io.userdata and self.io.vtable == other.io.vtable;
+    }
+
+    pub fn view(self: AsyncReadTarget, offset: u64, length: u64) !AsyncReadTarget {
+        if (offset > self.length or length > self.length - offset)
+            return error.StorageOutOfBounds;
+        var result = self;
+        result.base_offset = std.math.add(u64, self.base_offset, offset) catch
+            return error.StorageOutOfBounds;
+        result.length = length;
+        return result;
+    }
+
+    pub fn translate(self: AsyncReadTarget, read: Read) !Read {
+        const length = std.math.cast(u64, read.buffer.len) orelse return error.StorageOutOfBounds;
+        if (read.offset > self.length or length > self.length - read.offset)
+            return error.StorageOutOfBounds;
+        return .{
+            .buffer = read.buffer,
+            .offset = std.math.add(u64, self.base_offset, read.offset) catch
+                return error.StorageOutOfBounds,
+        };
+    }
+
+    pub fn submitReadManyAt(
+        self: AsyncReadTarget,
+        reads: []const Read,
+        results: []ReadResult,
+        completion: AsyncReadCompletion,
+    ) !AsyncReadSubmit {
+        if (reads.len != results.len) return error.InvalidReadBatch;
+        if (reads.len > self.max_read_count) return .unsupported;
+        return self.submit_fn(self.context, self.io, reads, results, completion);
+    }
+};
+
 pub const Write = struct {
     bytes: []const u8,
     offset: u64,
@@ -64,13 +118,9 @@ pub const Storage = struct {
         same_identity: *const fn (context: *anyopaque, other_context: *anyopaque) bool,
         read_at: *const fn (context: *anyopaque, io: Io, buffer: []u8, offset: u64) anyerror!usize,
         read_many_at: ?*const fn (context: *anyopaque, io: Io, reads: []const Read, results: []ReadResult) anyerror!void = null,
-        submit_read_many_at: ?*const fn (
-            context: *anyopaque,
-            io: Io,
-            reads: []const Read,
-            results: []ReadResult,
-            completion: AsyncReadCompletion,
-        ) anyerror!AsyncReadSubmit = null,
+        submit_read_many_at: ?AsyncReadSubmitFn = null,
+        resolve_async_read_target: ?*const fn (context: *anyopaque, io: Io) anyerror!?AsyncReadTarget = null,
+        max_async_read_count: usize = 0,
         write_all_at: *const fn (context: *anyopaque, io: Io, bytes: []const u8, offset: u64) anyerror!void,
         write_all_many_at: ?*const fn (context: *anyopaque, io: Io, writes: []const Write) anyerror!void = null,
         sync_data: ?*const fn (context: *anyopaque, io: Io) anyerror!void = null,
@@ -284,6 +334,23 @@ pub const Storage = struct {
                 return submit(backend.context, io, reads, results, completion);
         }
         return .unsupported;
+    }
+
+    pub fn asyncReadTarget(self: *Storage, io: Io) !?AsyncReadTarget {
+        if (self.backend != .custom) return null;
+        const backend = self.backend.custom;
+        if (backend.vtable.resolve_async_read_target) |resolve|
+            return resolve(backend.context, io);
+        const submit = backend.vtable.submit_read_many_at orelse return null;
+        if (backend.vtable.max_async_read_count == 0) return null;
+        return .{
+            .context = backend.context,
+            .io = io,
+            .submit_fn = submit,
+            .base_offset = 0,
+            .length = self.capacity_bytes,
+            .max_read_count = backend.vtable.max_async_read_count,
+        };
     }
 
     pub fn writeAllAt(self: *Storage, io: Io, bytes: []const u8, offset: u64) !void {

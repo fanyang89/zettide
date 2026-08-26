@@ -1,5 +1,15 @@
 const storage_api = @import("storage.zig");
 
+pub const AsyncReadDataTarget = struct {
+    target: storage_api.AsyncReadTarget,
+    release_context: ?*anyopaque = null,
+    release_fn: ?*const fn (*anyopaque) void = null,
+
+    pub fn release(self: AsyncReadDataTarget) void {
+        if (self.release_fn) |release_fn| release_fn(self.release_context.?);
+    }
+};
+
 pub const ReplicaEndpoint = struct {
     context: *anyopaque,
     geometry: Geometry,
@@ -20,6 +30,7 @@ pub const ReplicaEndpoint = struct {
             []storage_api.ReadResult,
             storage_api.AsyncReadCompletion,
         ) anyerror!storage_api.AsyncReadSubmit = null,
+        resolve_async_read_data_target: ?*const fn (*anyopaque) anyerror!?AsyncReadDataTarget = null,
         write_data: *const fn (*anyopaque, u64, []const u8) anyerror!void,
         write_data_many: ?*const fn (*anyopaque, []const storage_api.Write) anyerror!void = null,
         write_metadata_durable: *const fn (*anyopaque, u64, []const u8) anyerror!void,
@@ -69,6 +80,11 @@ pub const ReplicaEndpoint = struct {
         if (reads.len != results.len) return error.InvalidReadBatch;
         const submit = self.vtable.submit_read_data_many orelse return .unsupported;
         return submit(self.context, reads, results, completion);
+    }
+
+    pub fn asyncReadDataTarget(self: ReplicaEndpoint) anyerror!?AsyncReadDataTarget {
+        const resolve = self.vtable.resolve_async_read_data_target orelse return null;
+        return resolve(self.context);
     }
 
     pub fn writeData(self: ReplicaEndpoint, offset: u64, data: []const u8) anyerror!void {
