@@ -1,7 +1,6 @@
 const std = @import("std");
 const pool_blob_schedule = @import("pool_blob_schedule.zig");
-const replica_endpoint = @import("replica_endpoint.zig");
-const ReplicaEndpoint = replica_endpoint.ReplicaEndpoint;
+const ReplicaEndpoint = @import("replica_endpoint.zig").ReplicaEndpoint;
 const storage_api = @import("storage.zig");
 
 pub const minimum_io_size: u32 = 4096;
@@ -720,8 +719,6 @@ pub const Device = struct {
         member_indexes: []const usize,
         errors: []?anyerror,
     ) !void {
-        if (try self.runMergedReadManyOperations(operations, member_indexes, errors)) return;
-
         const State = struct {
             io: std.Io,
             event: std.Io.Event = .unset,
@@ -818,157 +815,6 @@ pub const Device = struct {
         }
     }
 
-    fn runMergedReadManyOperations(
-        self: *Device,
-        operations: []const Operation,
-        member_indexes: []const usize,
-        errors: []?anyerror,
-    ) !bool {
-        const Destination = struct {
-            operation: u8,
-            item: u8,
-        };
-        const State = struct {
-            io: std.Io,
-            event: std.Io.Event = .unset,
-            failure: ?anyerror = null,
-            submitted: bool = false,
-            fallback: bool = false,
-
-            fn complete(context: *anyopaque, failure: ?anyerror) void {
-                const state: *@This() = @ptrCast(@alignCast(context));
-                state.failure = failure;
-                state.event.set(state.io);
-            }
-        };
-        const TargetGroup = struct {
-            target: storage_api.AsyncReadTarget,
-            reads: [max_read_count]storage_api.Read = undefined,
-            results: [max_read_count]storage_api.ReadResult = undefined,
-            destinations: [max_read_count]Destination = undefined,
-            read_count: usize = 0,
-            operation_mask: u16 = 0,
-            state: State = undefined,
-        };
-
-        std.debug.assert(operations.len == member_indexes.len and operations.len == errors.len);
-        std.debug.assert(operations.len <= pool_blob_schedule.max_member_count);
-        var groups: [pool_blob_schedule.max_member_count]TargetGroup = undefined;
-        var group_count: usize = 0;
-        var resolved_targets: [pool_blob_schedule.max_member_count]replica_endpoint.AsyncReadDataTarget = undefined;
-        var resolved_count: usize = 0;
-        var targets_held = true;
-        defer if (targets_held) for (resolved_targets[0..resolved_count]) |resolved| resolved.release();
-        for (operations, member_indexes, 0..) |operation, member_index, operation_index| {
-            const batch = switch (operation) {
-                .read_many => |value| value,
-                else => return false,
-            };
-            const endpoint = self.members[member_index].endpoint;
-            const resolved = (endpoint.asyncReadDataTarget() catch return false) orelse return false;
-            resolved_targets[resolved_count] = resolved;
-            resolved_count += 1;
-            const target = resolved.target;
-            var target_index: usize = 0;
-            while (target_index < group_count and
-                !groups[target_index].target.sameBacking(target)) : (target_index += 1)
-            {}
-            if (target_index == group_count) {
-                groups[group_count] = .{ .target = target };
-                group_count += 1;
-            } else {
-                groups[target_index].target.max_read_count = @min(
-                    groups[target_index].target.max_read_count,
-                    target.max_read_count,
-                );
-            }
-            const group = &groups[target_index];
-            if (batch.reads.len > max_read_count - group.read_count or
-                batch.reads.len > group.target.max_read_count -| group.read_count)
-                return false;
-            group.operation_mask |= @as(u16, 1) << @intCast(operation_index);
-            for (batch.reads, 0..) |read, item_index| {
-                const index = group.read_count;
-                group.reads[index] = target.translate(read) catch return false;
-                group.results[index] = .{};
-                group.destinations[index] = .{
-                    .operation = @intCast(operation_index),
-                    .item = @intCast(item_index),
-                };
-                group.read_count += 1;
-            }
-        }
-        if (group_count >= operations.len) return false;
-
-        @memset(errors, null);
-        for (groups[0..group_count]) |*group| {
-            group.state = .{ .io = self.io };
-            const submit = group.target.submitReadManyAt(
-                group.reads[0..group.read_count],
-                group.results[0..group.read_count],
-                .{ .context = &group.state, .complete = State.complete },
-            ) catch |err| {
-                group.state.failure = err;
-                continue;
-            };
-            if (submit == .submitted)
-                group.state.submitted = true
-            else
-                group.state.fallback = true;
-        }
-        for (resolved_targets[0..resolved_count]) |resolved| resolved.release();
-        targets_held = false;
-
-        var fallback_operations: [pool_blob_schedule.max_member_count]Operation = undefined;
-        var fallback_members: [pool_blob_schedule.max_member_count]usize = undefined;
-        var fallback_errors: [pool_blob_schedule.max_member_count]?anyerror = @splat(null);
-        var fallback_indexes: [pool_blob_schedule.max_member_count]usize = undefined;
-        var fallback_count: usize = 0;
-        for (groups[0..group_count]) |*group| {
-            if (!group.state.fallback) continue;
-            for (operations, member_indexes, 0..) |operation, member_index, operation_index| {
-                if (group.operation_mask & (@as(u16, 1) << @intCast(operation_index)) == 0) continue;
-                fallback_operations[fallback_count] = operation;
-                fallback_members[fallback_count] = member_index;
-                fallback_indexes[fallback_count] = operation_index;
-                fallback_count += 1;
-            }
-        }
-        var fallback_run_error: ?anyerror = null;
-        if (fallback_count != 0) {
-            self.runConcurrentOperations(
-                fallback_operations[0..fallback_count],
-                fallback_members[0..fallback_count],
-                fallback_errors[0..fallback_count],
-            ) catch |err| {
-                fallback_run_error = err;
-            };
-            for (fallback_indexes[0..fallback_count], fallback_errors[0..fallback_count]) |index, failure|
-                errors[index] = failure;
-        }
-
-        for (groups[0..group_count]) |*group| {
-            if (group.state.submitted) group.state.event.waitUncancelable(self.io);
-            if (group.state.fallback) continue;
-            if (group.state.failure) |err| {
-                for (errors, 0..) |*result, operation_index| {
-                    if (group.operation_mask & (@as(u16, 1) << @intCast(operation_index)) != 0)
-                        result.* = err;
-                }
-                continue;
-            }
-            for (
-                group.results[0..group.read_count],
-                group.destinations[0..group.read_count],
-            ) |read_result, destination| switch (operations[destination.operation]) {
-                .read_many => |batch| batch.results[destination.item] = read_result,
-                else => unreachable,
-            };
-        }
-        if (fallback_run_error) |err| return err;
-        return true;
-    }
-
     fn freezeWrites(self: *Device) void {
         self.write_frozen.store(true, .release);
     }
@@ -993,13 +839,10 @@ fn firstError(errors: []const ?anyerror) ?anyerror {
 
 const TestEndpoint = struct {
     bytes: []u8,
-    async_target: ?storage_api.AsyncReadTarget = null,
     read_calls: std.atomic.Value(usize) = .init(0),
     read_batch_calls: std.atomic.Value(usize) = .init(0),
     read_batch_items: std.atomic.Value(usize) = .init(0),
     async_submit_calls: std.atomic.Value(usize) = .init(0),
-    async_target_resolves: std.atomic.Value(usize) = .init(0),
-    async_target_releases: std.atomic.Value(usize) = .init(0),
     write_calls: std.atomic.Value(usize) = .init(0),
     write_batch_calls: std.atomic.Value(usize) = .init(0),
     sync_calls: std.atomic.Value(usize) = .init(0),
@@ -1072,22 +915,6 @@ const TestEndpoint = struct {
         return .submitted;
     }
 
-    fn asyncReadDataTarget(context: *anyopaque) !?replica_endpoint.AsyncReadDataTarget {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        const target = self.async_target orelse return null;
-        _ = self.async_target_resolves.fetchAdd(1, .monotonic);
-        return .{
-            .target = target,
-            .release_context = self,
-            .release_fn = releaseAsyncReadDataTarget,
-        };
-    }
-
-    fn releaseAsyncReadDataTarget(context: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        _ = self.async_target_releases.fetchAdd(1, .monotonic);
-    }
-
     fn writeData(context: *anyopaque, offset: u64, bytes: []const u8) !void {
         const self: *@This() = @ptrCast(@alignCast(context));
         _ = self.write_calls.fetchAdd(1, .monotonic);
@@ -1120,57 +947,11 @@ const TestEndpoint = struct {
         .read_data = readData,
         .read_data_many = readDataMany,
         .submit_read_data_many = submitReadDataMany,
-        .resolve_async_read_data_target = asyncReadDataTarget,
         .write_data = writeData,
         .write_data_many = writeDataMany,
         .write_metadata_durable = writeMetadataDurable,
         .sync = syncEndpoint,
     };
-};
-
-const TestAsyncReadTarget = struct {
-    bytes: []u8,
-    submit_calls: std.atomic.Value(usize) = .init(0),
-    supported: bool = true,
-
-    fn submit(
-        context: *anyopaque,
-        _: std.Io,
-        reads: []const storage_api.Read,
-        results: []storage_api.ReadResult,
-        completion: storage_api.AsyncReadCompletion,
-    ) !storage_api.AsyncReadSubmit {
-        const self: *@This() = @ptrCast(@alignCast(context));
-        _ = self.submit_calls.fetchAdd(1, .monotonic);
-        if (!self.supported) return .unsupported;
-        for (results) |*result| result.* = .{};
-        for (reads, results) |read, *result| {
-            const start = std.math.cast(usize, read.offset) orelse {
-                result.failure = error.OutOfBounds;
-                continue;
-            };
-            if (start > self.bytes.len or read.buffer.len > self.bytes.len - start) {
-                result.failure = error.OutOfBounds;
-                continue;
-            }
-            @memcpy(read.buffer, self.bytes[start..][0..read.buffer.len]);
-            result.amount = read.buffer.len;
-        }
-        completion.complete(completion.context, null);
-        return .submitted;
-    }
-
-    fn view(self: *@This(), offset: u64, length: u64) !storage_api.AsyncReadTarget {
-        const root: storage_api.AsyncReadTarget = .{
-            .context = self,
-            .io = std.testing.io,
-            .submit_fn = submit,
-            .base_offset = 0,
-            .length = self.bytes.len,
-            .max_read_count = max_read_count,
-        };
-        return root.view(offset, length);
-    }
 };
 
 fn testPlan(member_count: usize, stripe_size: u32, stripes: u64) !pool_blob_schedule.PlacementPlan {
@@ -1235,67 +1016,6 @@ test "scheduled reads submit member batches asynchronously" {
     var submit_count: usize = 0;
     for (&contexts) |*context| submit_count += context.async_submit_calls.load(.monotonic);
     try std.testing.expect(submit_count > 1);
-    for (results) |result| {
-        try std.testing.expectEqual(@as(?anyerror, null), result.failure);
-        try std.testing.expectEqual(@as(usize, 4096), result.amount);
-    }
-}
-
-test "scheduled reads merge logical members sharing an async target" {
-    const plan = try testPlan(12, 4096, max_read_count);
-    var contexts: [12]TestEndpoint = undefined;
-    var endpoints: [12]MemberEndpoint = undefined;
-    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
-    defer deinitTestEndpoints(std.testing.allocator, &contexts);
-
-    var backing_length: usize = 0;
-    for (&contexts) |*context| backing_length += context.bytes.len;
-    const backing_bytes = try std.testing.allocator.alloc(u8, backing_length);
-    defer std.testing.allocator.free(backing_bytes);
-    var target: TestAsyncReadTarget = .{ .bytes = backing_bytes };
-    var base_offset: usize = 0;
-    for (&contexts, 0..) |*context, member_index| {
-        @memset(context.bytes, @intCast(member_index + 1));
-        @memcpy(backing_bytes[base_offset..][0..context.bytes.len], context.bytes);
-        context.async_target = try target.view(base_offset, context.bytes.len);
-        base_offset += context.bytes.len;
-    }
-    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
-
-    var output: [max_read_count][4096]u8 = undefined;
-    var reads: [max_read_count]storage_api.Read = undefined;
-    var expected: [max_read_count]u8 = undefined;
-    for (&output, &reads, &expected, 0..) |*buffer, *read, *value, logical_stripe| {
-        @memset(buffer, 0);
-        read.* = .{ .buffer = buffer, .offset = logical_stripe * 4096 };
-        const location = (try pool_blob_schedule.mapValidated(&plan, logical_stripe))[0];
-        value.* = @intCast(device.memberIndex(location.slot).? + 1);
-    }
-    var results: [max_read_count]storage_api.ReadResult = undefined;
-    try device.readManyAt(&reads, &results);
-
-    try std.testing.expectEqual(@as(usize, 1), target.submit_calls.load(.monotonic));
-    var resolve_count: usize = 0;
-    var release_count: usize = 0;
-    for (&contexts) |*context| {
-        resolve_count += context.async_target_resolves.load(.monotonic);
-        release_count += context.async_target_releases.load(.monotonic);
-    }
-    try std.testing.expect(resolve_count > 1);
-    try std.testing.expectEqual(resolve_count, release_count);
-    for (&output, expected, results) |*buffer, value, result| {
-        try std.testing.expect(std.mem.allEqual(u8, buffer, value));
-        try std.testing.expectEqual(@as(?anyerror, null), result.failure);
-        try std.testing.expectEqual(@as(usize, 4096), result.amount);
-    }
-
-    resetTestReads(&contexts);
-    target.submit_calls.store(0, .monotonic);
-    target.supported = false;
-    device.read_sequence.store(0, .monotonic);
-    try device.readManyAt(&reads, &results);
-    try std.testing.expectEqual(@as(usize, 1), target.submit_calls.load(.monotonic));
-    try std.testing.expectEqual(max_read_count, totalBatchItems(&contexts));
     for (results) |result| {
         try std.testing.expectEqual(@as(?anyerror, null), result.failure);
         try std.testing.expectEqual(@as(usize, 4096), result.amount);

@@ -10,8 +10,7 @@ const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
 const pool_scheduled_data_device = @import("pool_scheduled_data_device.zig");
 const pool_topology = @import("pool_topology.zig");
-const replica_endpoint = @import("replica_endpoint.zig");
-const ReplicaEndpoint = replica_endpoint.ReplicaEndpoint;
+const ReplicaEndpoint = @import("replica_endpoint.zig").ReplicaEndpoint;
 const storage_api = @import("storage.zig");
 
 const Io = std.Io;
@@ -460,10 +459,6 @@ fn claimedSubmitReadDataMany(
     return claimedReplicaContext(context_ptr).member.submitReadMany(.data, reads, results, completion);
 }
 
-fn claimedAsyncReadDataTarget(context_ptr: *anyopaque) !?replica_endpoint.AsyncReadDataTarget {
-    return claimedReplicaContext(context_ptr).member.asyncReadTarget(.data);
-}
-
 fn claimedWriteData(context_ptr: *anyopaque, offset: u64, bytes: []const u8) !void {
     const claim = claimedReplicaContext(context_ptr).data_claim orelse return error.ReadOnlyPoolData;
     try claim.write(offset, bytes);
@@ -488,7 +483,6 @@ const claimed_replica_vtable: ReplicaEndpoint.VTable = .{
     .read_data = claimedReadData,
     .read_data_many = claimedReadDataMany,
     .submit_read_data_many = claimedSubmitReadDataMany,
-    .resolve_async_read_data_target = claimedAsyncReadDataTarget,
     .write_data = claimedWriteData,
     .write_data_many = claimedWriteDataMany,
     .write_metadata_durable = claimedWriteMetadataDurable,

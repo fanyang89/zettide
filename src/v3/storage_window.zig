@@ -93,15 +93,6 @@ fn submitReadManyAt(
     return context.backing.submitReadManyAt(io, translated[0..reads.len], results, completion);
 }
 
-fn resolveAsyncReadTarget(
-    context_raw: *anyopaque,
-    io: std.Io,
-) !?storage_api.AsyncReadTarget {
-    const context: *Context = @ptrCast(@alignCast(context_raw));
-    const target = try context.backing.asyncReadTarget(io) orelse return null;
-    return try target.view(context.base_offset, context.length);
-}
-
 fn writeAllAt(context_raw: *anyopaque, io: std.Io, bytes: []const u8, offset: u64) !void {
     const context: *Context = @ptrCast(@alignCast(context_raw));
     try context.backing.writeAllAt(io, bytes, try translate(context, offset, bytes.len));
@@ -157,7 +148,6 @@ const vtable: storage_api.Storage.VTable = .{
     .read_at = readAt,
     .read_many_at = readManyAt,
     .submit_read_many_at = submitReadManyAt,
-    .resolve_async_read_target = resolveAsyncReadTarget,
     .write_all_at = writeAllAt,
     .write_all_many_at = writeAllManyAt,
     .sync_data = syncData,
@@ -196,100 +186,4 @@ test "windows translate batched I/O and preserve logical identity" {
     try std.testing.expectEqual(@as(usize, 4), results[0].amount);
     try std.testing.expectEqual(@as(usize, 4), results[1].amount);
     try std.testing.expectError(error.StorageOutOfBounds, first.readAt(std.testing.io, &first_bytes, 1021));
-}
-
-test "nested windows resolve translated views of one async backing" {
-    const Backend = struct {
-        bytes: [8192]u8 = @splat(0),
-        submit_calls: usize = 0,
-
-        fn sameIdentity(context: *anyopaque, other: *anyopaque) bool {
-            return context == other;
-        }
-
-        fn readAt(context: *anyopaque, _: std.Io, buffer: []u8, offset: u64) !usize {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            const start = std.math.cast(usize, offset) orelse return error.StorageOutOfBounds;
-            if (start > self.bytes.len or buffer.len > self.bytes.len - start)
-                return error.StorageOutOfBounds;
-            @memcpy(buffer, self.bytes[start..][0..buffer.len]);
-            return buffer.len;
-        }
-
-        fn submitReadManyAt(
-            context: *anyopaque,
-            _: std.Io,
-            reads: []const storage_api.Read,
-            results: []storage_api.ReadResult,
-            completion: storage_api.AsyncReadCompletion,
-        ) !storage_api.AsyncReadSubmit {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.submit_calls += 1;
-            for (results) |*result| result.* = .{};
-            for (reads, results) |read, *result| {
-                result.amount = try @This().readAt(context, std.testing.io, read.buffer, read.offset);
-            }
-            completion.complete(completion.context, null);
-            return .submitted;
-        }
-
-        fn writeAllAt(_: *anyopaque, _: std.Io, _: []const u8, _: u64) !void {}
-        fn sync(_: *anyopaque, _: std.Io) !void {}
-        fn close(_: *anyopaque, _: std.Io) !void {}
-
-        const vtable: storage_api.Storage.VTable = .{
-            .same_identity = @This().sameIdentity,
-            .read_at = @This().readAt,
-            .submit_read_many_at = @This().submitReadManyAt,
-            .max_async_read_count = 32,
-            .write_all_at = @This().writeAllAt,
-            .sync = @This().sync,
-            .close = @This().close,
-        };
-    };
-    const Completion = struct {
-        called: bool = false,
-
-        fn complete(context: *anyopaque, failure: ?anyerror) void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            std.debug.assert(failure == null);
-            self.called = true;
-        }
-    };
-
-    var backend: Backend = .{};
-    @memset(backend.bytes[1664..1672], 0x5a);
-    var backing = storage_api.Storage.initBackend(
-        &backend,
-        &Backend.vtable,
-        backend.bytes.len,
-        .spdk_bdev,
-        1,
-    );
-    defer backing.close(std.testing.io) catch {};
-    var outer = try create(std.testing.allocator, &backing, 1024, 4096);
-    defer outer.close(std.testing.io) catch {};
-    var inner = try create(std.testing.allocator, &outer, 512, 2048);
-    defer inner.close(std.testing.io) catch {};
-
-    const outer_target = (try outer.asyncReadTarget(std.testing.io)).?;
-    const inner_target = (try inner.asyncReadTarget(std.testing.io)).?;
-    try std.testing.expect(outer_target.sameBacking(inner_target));
-    var output: [8]u8 = undefined;
-    const translated = try inner_target.translate(.{ .buffer = &output, .offset = 128 });
-    try std.testing.expectEqual(@as(u64, 1664), translated.offset);
-    var results: [1]storage_api.ReadResult = undefined;
-    var completion: Completion = .{};
-    try std.testing.expectEqual(
-        storage_api.AsyncReadSubmit.submitted,
-        try inner_target.submitReadManyAt(
-            &.{translated},
-            &results,
-            .{ .context = &completion, .complete = Completion.complete },
-        ),
-    );
-    try std.testing.expect(completion.called);
-    try std.testing.expectEqual(@as(usize, 1), backend.submit_calls);
-    try std.testing.expectEqual(@as(usize, output.len), results[0].amount);
-    try std.testing.expect(std.mem.allEqual(u8, &output, 0x5a));
 }

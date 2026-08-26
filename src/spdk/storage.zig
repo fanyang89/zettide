@@ -359,7 +359,6 @@ const storage_vtable: storage_api.Storage.VTable = .{
     .same_identity = sameIdentity,
     .read_at = readAt,
     .submit_read_many_at = submitReadManyAt,
-    .max_async_read_count = max_async_reads,
     .write_all_at = writeAllAt,
     .sync = sync,
     .close = close,

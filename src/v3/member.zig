@@ -534,30 +534,6 @@ pub const Member = struct {
         return self.storage.submitReadManyAt(self.io, absolute[0..reads.len], results, completion);
     }
 
-    pub fn asyncReadTarget(
-        self: *Member,
-        kind: RegionKind,
-    ) !?replica_endpoint.AsyncReadDataTarget {
-        if (self.open_mode == .writable) return null;
-        try self.mutex.lockShared(self.io);
-        errdefer self.mutex.unlockShared(self.io);
-        if (self.isClosed()) return error.MemberClosed;
-        const region = switch (kind) {
-            .control => self.selected_header.control,
-            .metadata => self.selected_header.metadata,
-            .data => self.selected_header.data,
-        };
-        const target = try self.storage.asyncReadTarget(self.io) orelse {
-            self.mutex.unlockShared(self.io);
-            return null;
-        };
-        return .{
-            .target = try target.view(region.offset, region.length),
-            .release_context = self,
-            .release_fn = releaseAsyncReadTarget,
-        };
-    }
-
     pub fn write(self: *Member, kind: RegionKind, offset: u64, bytes: []const u8) !void {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -952,7 +928,6 @@ const member_replica_vtable: ReplicaEndpoint.VTable = .{
     .read_data = replicaReadData,
     .read_data_many = replicaReadDataMany,
     .submit_read_data_many = replicaSubmitReadDataMany,
-    .resolve_async_read_data_target = replicaAsyncReadDataTarget,
     .write_data = replicaWriteData,
     .write_metadata_durable = replicaWriteMetadataDurable,
     .sync = replicaSync,
@@ -985,15 +960,6 @@ fn replicaSubmitReadDataMany(
     completion: storage_api.AsyncReadCompletion,
 ) anyerror!storage_api.AsyncReadSubmit {
     return replicaMember(context).submitReadMany(.data, reads, results, completion);
-}
-
-fn replicaAsyncReadDataTarget(context: *anyopaque) !?replica_endpoint.AsyncReadDataTarget {
-    return replicaMember(context).asyncReadTarget(.data);
-}
-
-fn releaseAsyncReadTarget(context: *anyopaque) void {
-    const member = replicaMember(context);
-    member.mutex.unlockShared(member.io);
 }
 
 fn replicaWriteData(context: *anyopaque, offset: u64, data: []const u8) anyerror!void {
