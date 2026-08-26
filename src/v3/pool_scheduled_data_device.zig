@@ -17,6 +17,45 @@ pub const ReadPolicy = enum {
 
 pub const Options = struct {
     read_policy: ReadPolicy = .first_available,
+    read_path_metrics: ?*ReadPathMetrics = null,
+};
+
+pub const ReadPathMetrics = struct {
+    single_operation_batches: std.atomic.Value(u64) = .init(0),
+    single_operation_items: std.atomic.Value(u64) = .init(0),
+    multi_operation_batches: std.atomic.Value(u64) = .init(0),
+    multi_operation_count: std.atomic.Value(u64) = .init(0),
+    multi_operation_items: std.atomic.Value(u64) = .init(0),
+    async_submit_attempts: std.atomic.Value(u64) = .init(0),
+    async_submitted: std.atomic.Value(u64) = .init(0),
+    async_fallbacks: std.atomic.Value(u64) = .init(0),
+    async_submit_errors: std.atomic.Value(u64) = .init(0),
+
+    pub const Snapshot = struct {
+        single_operation_batches: u64,
+        single_operation_items: u64,
+        multi_operation_batches: u64,
+        multi_operation_count: u64,
+        multi_operation_items: u64,
+        async_submit_attempts: u64,
+        async_submitted: u64,
+        async_fallbacks: u64,
+        async_submit_errors: u64,
+    };
+
+    pub fn snapshot(self: *const ReadPathMetrics) Snapshot {
+        return .{
+            .single_operation_batches = self.single_operation_batches.load(.monotonic),
+            .single_operation_items = self.single_operation_items.load(.monotonic),
+            .multi_operation_batches = self.multi_operation_batches.load(.monotonic),
+            .multi_operation_count = self.multi_operation_count.load(.monotonic),
+            .multi_operation_items = self.multi_operation_items.load(.monotonic),
+            .async_submit_attempts = self.async_submit_attempts.load(.monotonic),
+            .async_submitted = self.async_submitted.load(.monotonic),
+            .async_fallbacks = self.async_fallbacks.load(.monotonic),
+            .async_submit_errors = self.async_submit_errors.load(.monotonic),
+        };
+    }
 };
 
 pub const MemberEndpoint = struct {
@@ -44,6 +83,7 @@ pub const Device = struct {
     member_count: usize,
     logical_capacity: u64,
     read_policy: ReadPolicy,
+    read_path_metrics: ?*ReadPathMetrics,
     mutex: std.Io.Mutex = .init,
     dirty_member_mask: u16 = 0,
     write_frozen: std.atomic.Value(bool) = .init(false),
@@ -78,6 +118,7 @@ pub const Device = struct {
             .logical_capacity = std.math.mul(u64, plan.logical_stripe_count, plan.stripe_size) catch
                 return error.CapacityOverflow,
             .read_policy = options.read_policy,
+            .read_path_metrics = options.read_path_metrics,
         };
         for (endpoints, 0..) |candidate, member_index| {
             for (endpoints[0..member_index]) |previous|
@@ -679,6 +720,13 @@ pub const Device = struct {
     ) !void {
         std.debug.assert(operations.len == member_indexes.len and operations.len == errors.len);
         if (operations.len == 1) {
+            if (self.read_path_metrics) |metrics| {
+                const item_count = readItemCount(operations[0]);
+                if (item_count != 0) {
+                    _ = metrics.single_operation_batches.fetchAdd(1, .monotonic);
+                    _ = metrics.single_operation_items.fetchAdd(item_count, .monotonic);
+                }
+            }
             runOperation(self.members[member_indexes[0]].endpoint, operations[0], &errors[0]);
             return;
         }
@@ -687,7 +735,16 @@ pub const Device = struct {
             .read, .read_many => {},
             else => all_reads = false,
         };
-        if (all_reads) return self.runReadOperations(operations, member_indexes, errors);
+        if (all_reads) {
+            if (self.read_path_metrics) |metrics| {
+                var item_count: u64 = 0;
+                for (operations) |operation| item_count += readItemCount(operation);
+                _ = metrics.multi_operation_batches.fetchAdd(1, .monotonic);
+                _ = metrics.multi_operation_count.fetchAdd(@intCast(operations.len), .monotonic);
+                _ = metrics.multi_operation_items.fetchAdd(item_count, .monotonic);
+            }
+            return self.runReadOperations(operations, member_indexes, errors);
+        }
         return self.runConcurrentOperations(operations, member_indexes, errors);
     }
 
@@ -746,6 +803,8 @@ pub const Device = struct {
             result.* = null;
             state.* = .{ .io = self.io };
             const endpoint = self.members[member_index].endpoint;
+            if (self.read_path_metrics) |metrics|
+                _ = metrics.async_submit_attempts.fetchAdd(1, .monotonic);
             const submit = switch (operation) {
                 .read => |read| submit: {
                     state.singleton_read[0] = .{ .buffer = read.buffer, .offset = read.offset };
@@ -763,12 +822,18 @@ pub const Device = struct {
                 ),
                 else => unreachable,
             } catch |err| {
+                if (self.read_path_metrics) |metrics|
+                    _ = metrics.async_submit_errors.fetchAdd(1, .monotonic);
                 result.* = err;
                 continue;
             };
             if (submit == .submitted) {
+                if (self.read_path_metrics) |metrics|
+                    _ = metrics.async_submitted.fetchAdd(1, .monotonic);
                 state.submitted = true;
             } else {
+                if (self.read_path_metrics) |metrics|
+                    _ = metrics.async_fallbacks.fetchAdd(1, .monotonic);
                 use_fallback.* = true;
             }
         }
@@ -819,6 +884,14 @@ pub const Device = struct {
         self.write_frozen.store(true, .release);
     }
 };
+
+fn readItemCount(operation: Operation) u64 {
+    return switch (operation) {
+        .read => 1,
+        .read_many => |batch| @intCast(batch.reads.len),
+        else => 0,
+    };
+}
 
 fn runOperation(endpoint: ReplicaEndpoint, operation: Operation, result: *?anyerror) void {
     result.* = null;
@@ -1003,7 +1076,14 @@ test "scheduled reads submit member batches asynchronously" {
     try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
     defer deinitTestEndpoints(std.testing.allocator, &contexts);
     for (&contexts) |*context| context.supports_async_reads = true;
-    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    var metrics: ReadPathMetrics = .{};
+    var device = try Device.initOptions(
+        std.testing.allocator,
+        std.testing.io,
+        &endpoints,
+        plan,
+        .{ .read_path_metrics = &metrics },
+    );
 
     var buffers: [12][4096]u8 = undefined;
     var reads: [buffers.len]storage_api.Read = undefined;
@@ -1020,6 +1100,14 @@ test "scheduled reads submit member batches asynchronously" {
         try std.testing.expectEqual(@as(?anyerror, null), result.failure);
         try std.testing.expectEqual(@as(usize, 4096), result.amount);
     }
+    const snapshot = metrics.snapshot();
+    try std.testing.expect(snapshot.multi_operation_batches != 0);
+    try std.testing.expectEqual(@as(u64, @intCast(submit_count)), snapshot.multi_operation_count);
+    try std.testing.expectEqual(@as(u64, @intCast(reads.len)), snapshot.multi_operation_items);
+    try std.testing.expectEqual(@as(u64, @intCast(submit_count)), snapshot.async_submit_attempts);
+    try std.testing.expectEqual(@as(u64, @intCast(submit_count)), snapshot.async_submitted);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.async_fallbacks);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.async_submit_errors);
 }
 
 fn totalBatchItems(contexts: []TestEndpoint) usize {
@@ -1226,7 +1314,14 @@ test "scheduled first-available batches rotate while preserving member batch dep
     var endpoints: [3]MemberEndpoint = undefined;
     try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
     defer deinitTestEndpoints(std.testing.allocator, &contexts);
-    var device = try Device.init(std.testing.allocator, std.testing.io, &endpoints, plan);
+    var metrics: ReadPathMetrics = .{};
+    var device = try Device.initOptions(
+        std.testing.allocator,
+        std.testing.io,
+        &endpoints,
+        plan,
+        .{ .read_path_metrics = &metrics },
+    );
     for (0..pool_blob_schedule.replica_count) |lane| @memset(mappedBytes(&device, &contexts, 0, lane), 0x6b);
 
     const locations = try pool_blob_schedule.map(plan, 0);
@@ -1250,6 +1345,11 @@ test "scheduled first-available batches rotate while preserving member batch dep
         }
     }
     for (&output) |*block| try std.testing.expect(std.mem.allEqual(u8, block, 0x6b));
+    const snapshot = metrics.snapshot();
+    try std.testing.expectEqual(@as(u64, 4), snapshot.single_operation_batches);
+    try std.testing.expectEqual(@as(u64, 8), snapshot.single_operation_items);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.multi_operation_batches);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.async_submit_attempts);
 }
 
 test "scheduled first-available batch retries only failed and short reads" {

@@ -677,14 +677,35 @@ fn run(
     if (try set.dataMode() != .blob or authority.layout.scheduled_blob == null)
         return error.ScheduledBlobPoolRequired;
 
+    var read_path_metrics: zettide.v3.pool_scheduled_data_device.ReadPathMetrics = .{};
     var pool_storage = try zettide.v3.pool_data_storage.createOptions(
         allocator,
         io,
         &set,
         false,
-        .{ .read_policy = read_policy },
+        .{
+            .read_policy = read_policy,
+            .read_path_metrics = &read_path_metrics,
+        },
     );
     defer pool_storage.close(io) catch @panic("failed to close Pool data storage");
+    defer {
+        const metrics = read_path_metrics.snapshot();
+        std.debug.print(
+            "pool_read_path_metrics single_operation_batches={d} single_operation_items={d} multi_operation_batches={d} multi_operation_count={d} multi_operation_items={d} async_submit_attempts={d} async_submitted={d} async_fallbacks={d} async_submit_errors={d}\n",
+            .{
+                metrics.single_operation_batches,
+                metrics.single_operation_items,
+                metrics.multi_operation_batches,
+                metrics.multi_operation_count,
+                metrics.multi_operation_items,
+                metrics.async_submit_attempts,
+                metrics.async_submitted,
+                metrics.async_fallbacks,
+                metrics.async_submit_errors,
+            },
+        );
+    }
     defer {
         var submissions: u64 = 0;
         var completions: u64 = 0;

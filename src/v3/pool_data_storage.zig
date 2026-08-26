@@ -20,6 +20,7 @@ const io_alignment = 4096;
 
 pub const CreateOptions = struct {
     read_policy: pool_scheduled_data_device.ReadPolicy = .first_available,
+    read_path_metrics: ?*pool_scheduled_data_device.ReadPathMetrics = null,
 };
 
 const Device = union(enum) {
@@ -140,7 +141,10 @@ pub fn createOptions(
             io,
             endpoints[0..validated.member_count],
             plan,
-            .{ .read_policy = options.read_policy },
+            .{
+                .read_policy = options.read_policy,
+                .read_path_metrics = options.read_path_metrics,
+            },
         ) };
     } else {
         context.device = .{ .mirrored = try .init(
