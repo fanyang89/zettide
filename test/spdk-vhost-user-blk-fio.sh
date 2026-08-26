@@ -55,8 +55,9 @@ esac
 }
 if [[ $benchmark_mode == raw_nvme ]]; then
     [[ $storage_transport == spdk_nvme_pcie && $controller_count -eq 2 &&
-        $fio_case == randread-4k-qd256-j1-per-device ]] || {
-        echo "raw NVMe mode requires SPDK PCIe, two controllers, and randread-4k-qd256-j1-per-device" >&2
+        ($fio_case == randread-4k-qd32-j16 ||
+            $fio_case == randread-4k-qd256-j1-per-device) ]] || {
+        echo "raw NVMe mode requires SPDK PCIe, two controllers, and a supported random-read case" >&2
         exit 2
     }
 elif [[ $fio_case == randread-4k-qd256-j1-per-device ]]; then

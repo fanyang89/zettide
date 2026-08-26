@@ -120,11 +120,13 @@
       - zettide_vhost_scheduled_pool_pcie_preparation_mode | default('create') == 'validate'
       - zettide_nvmf_scheduled_pool_expected_pool_id | default('') is match('^[0-9a-f]{32}$')
       - zettide_vhost_scheduled_pool_reactor_count | int == 2
-      - zettide_vhost_scheduled_pool_fio_case == 'randread-4k-qd256-j1-per-device'
+      - >-
+        zettide_vhost_scheduled_pool_fio_case in
+        ['randread-4k-qd32-j16', 'randread-4k-qd256-j1-per-device']
     fail_msg: >-
       Raw SPDK NVMe vhost requires two reactors, SPDK PCIe transport,
-      validation-only Pool preparation, the expected Pool ID, and the
-      per-device queue-depth-256 case.
+      validation-only Pool preparation, the expected Pool ID, and a supported
+      random-read case.
   when: zettide_scheduled_pool_raw_vhost
 
 - name: Normalize scheduled Pool disk arguments | {{ zettide_optimize }}

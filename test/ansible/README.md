@@ -358,7 +358,9 @@ The raw SPDK NVMe vhost profile adds only SPDK vhost-user-blk, QEMU virtio-blk,
 and guest fio above the same two namespaces. It validates the existing Pool
 identity first, then exports each physical bdev through its own read-only vhost
 controller. Guest fio runs one queue-depth-256 job per disk for aggregate queue
-depth 512:
+depth 512 by default. To compare the same job shape as the scheduled Pool, set
+`zettide_vhost_scheduled_pool_fio_case=randread-4k-qd32-j16`; all 16 fio clones
+then share both disks at queue depth 32, preserving aggregate queue depth 512:
 
 ```sh
 uv run ansible-playbook test/ansible/vhost-spdk-nvme-fio.yml \
