@@ -337,6 +337,23 @@ It creates a new Pool by default; set
 `zettide_vhost_scheduled_pool_pcie_preparation_mode=validate` with the expected
 Pool ID to reuse and validate an existing Pool without rewriting it.
 
+The direct SPDK NVMe perf profile measures the two physical namespaces without
+the Pool or vhost data paths. It requires validation-only preparation so the
+existing Pool identity is checked before the read-only benchmark. The default
+4 KiB random-read workload uses two SPDK cores and queue depth 256 per worker,
+one worker per namespace, matching the vhost baseline's aggregate depth of 512:
+
+```sh
+uv run ansible-playbook test/ansible/spdk-nvme-perf.yml \
+  --limit zettide-tier1 \
+  -e '{"zettide_raw_device":{"path":"/dev/nvme2n1","serial":"PHMB747600DE280CGN","secondary":{"path":"/dev/nvme0n1","serial":"PHMB746600SS280CGN"}}}' \
+  -e zettide_vhost_scheduled_pool_storage_transport=spdk_nvme_pcie \
+  -e zettide_vhost_scheduled_pool_pcie_preparation_mode=validate \
+  -e '{"zettide_vhost_scheduled_pool_pcie_namespaces":["0000:07:00.0/1","0000:03:00.0/1"]}' \
+  -e 'zettide_scheduled_pool_nvmf_fio_confirm=DESTROY:spdk_nvme_pcie:/dev/nvme2n1:PHMB747600DE280CGN:0000:07:00.0/1:/dev/nvme0n1:PHMB746600SS280CGN:0000:03:00.0/1' \
+  -e zettide_nvmf_scheduled_pool_expected_pool_id=0dc67e4cdded2d37fc13e49f5544ba37
+```
+
 The Catalog profile uses the same cases and export identity, but reads a real
 64 GiB thin Catalog Volume from an 8 MiB temporary file-backed Pool. Unmapped
 extents read as zero, so this isolates Catalog lookup, worker scheduling, and

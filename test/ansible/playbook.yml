@@ -57,6 +57,18 @@
     zettide_vhost_scheduled_pool_reactor_count: 1
     zettide_vhost_scheduled_pool_guest_vcpus: 4
     zettide_vhost_scheduled_pool_queues: 1
+    zettide_spdk_nvme_perf_io_depth: 256
+    zettide_spdk_nvme_perf_core_mask: "0x3"
+    zettide_spdk_profiles:
+      - nvmf-fio
+      - nvmf-catalog-fio
+      - nvmf-catalog-rxe-fio
+      - nvmf-catalog-mapped-fio
+      - nvmf-catalog-optane-fio
+      - nvmf-scheduled-pool-rxe-fio
+      - vhost-scheduled-pool-fio
+      - spdk-nvme-perf
+      - iscsi-catalog-fio
     zettide_blob_fuse_fio_backing_size_effective: "{{ zettide_blob_fuse_fio_backing_size | default(34359738368) }}"
     zettide_blob_fuse_fio_file_size_effective: "{{ zettide_blob_fuse_fio_file_size | default(268435456) }}"
     zettide_blob_fuse_fio_runtime_effective: "{{ zettide_blob_fuse_fio_runtime | default(8) }}"
@@ -112,6 +124,7 @@
       iscsi-catalog-fio: tasks/run-iscsi-fio.yml
       nvmf-scheduled-pool-rxe-fio: tasks/run-nvmf-scheduled-pool-rxe-fio.yml
       vhost-scheduled-pool-fio: tasks/run-vhost-scheduled-pool-fio.yml
+      spdk-nvme-perf: tasks/run-vhost-scheduled-pool-fio.yml
     zettide_packages:
       RedHat:
         - acl
@@ -408,12 +421,29 @@
       become: false
       run_once: true
       changed_when: true
-      when: >-
-        zettide_test_profile in
-        ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio',
-         'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio',
-         'nvmf-scheduled-pool-rxe-fio', 'vhost-scheduled-pool-fio',
-         'iscsi-catalog-fio']
+      when: zettide_test_profile in zettide_spdk_profiles
+
+    - name: Read the pinned SPDK source revision
+      ansible.builtin.command:
+        argv: [git, rev-parse, HEAD]
+      args:
+        chdir: "{{ zettide_controller_root }}/../third_party/spdk"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      changed_when: false
+      register: zettide_spdk_source_revision
+      when: zettide_test_profile in zettide_spdk_profiles
+
+    - name: Hash the staged SPDK source archive
+      ansible.builtin.stat:
+        path: "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: zettide_spdk_source_archive
+      when: zettide_test_profile in zettide_spdk_profiles
 
     - name: Require a supported target family
       ansible.builtin.assert:
@@ -448,11 +478,7 @@
               {{ (zettide_packages[ansible_facts.os_family]
                   if zettide_test_profile == 'tier1'
                   else (zettide_nvmf_packages[ansible_facts.os_family]
-                        if zettide_test_profile in
-                           ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio',
-                            'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio',
-                            'nvmf-scheduled-pool-rxe-fio', 'vhost-scheduled-pool-fio',
-                            'iscsi-catalog-fio']
+                        if zettide_test_profile in zettide_spdk_profiles
                         else zettide_io_packages[ansible_facts.os_family]))
                  + (zettide_nvmf_rdma_packages[ansible_facts.os_family]
                      if zettide_test_profile in ['nvmf-catalog-rxe-fio', 'nvmf-scheduled-pool-rxe-fio'] else [])
@@ -477,7 +503,7 @@
                else (['nvme', 'nvme-rdma', 'rdma_rxe']
                if zettide_test_profile == 'nvmf-catalog-rxe-fio'
                else (['nvme', 'nvme-tcp']
-               if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
+               if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'spdk-nvme-perf']
                else (['iscsi_tcp'] if zettide_test_profile == 'iscsi-catalog-fio'
                else (['fuse'] if zettide_test_profile in ['blob-fuse-fio', 'blob-pool-fio']
                else ['fuse', 'loop']))))) }}
@@ -489,11 +515,8 @@
             path: /dev/fuse
           register: zettide_fuse_device
           when: >-
-            zettide_test_profile not in
-            ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio',
-             'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio',
-             'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio',
-             'vhost-scheduled-pool-fio', 'iscsi-catalog-fio']
+            zettide_test_profile != 'blob-pool-nfs-fio' and
+            zettide_test_profile not in zettide_spdk_profiles
 
         - name: Require the FUSE device
           ansible.builtin.assert:
@@ -502,11 +525,8 @@
               - zettide_fuse_device.stat.ischr
             fail_msg: "/dev/fuse is unavailable on the remote test host."
           when: >-
-            zettide_test_profile not in
-            ['blob-pool-nfs-fio', 'nvmf-fio', 'nvmf-catalog-fio',
-             'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio',
-             'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio',
-             'vhost-scheduled-pool-fio', 'iscsi-catalog-fio']
+            zettide_test_profile != 'blob-pool-nfs-fio' and
+            zettide_test_profile not in zettide_spdk_profiles
 
         - name: Check the remote Zig version
           ansible.builtin.command:
@@ -553,6 +573,12 @@
               source_revision: "{{ zettide_source_revision.stdout }}"
               source_status: "{{ zettide_source_status.stdout_lines }}"
               source_archive_sha256: "{{ zettide_source_archive.stat.checksum }}"
+              spdk_source_revision: >-
+                {{ zettide_spdk_source_revision.stdout
+                   if zettide_spdk_source_revision.stdout is defined else 'not-recorded' }}
+              spdk_source_archive_sha256: >-
+                {{ zettide_spdk_source_archive.stat.checksum
+                   if zettide_spdk_source_archive.stat is defined else 'not-recorded' }}
               zig_version: "{{ zettide_remote_zig.stdout }}"
               fio_version: "{{ zettide_remote_fio.stdout | default('not-recorded') }}"
               io_targets: "{{ zettide_io_targets | default([]) }}"
@@ -560,12 +586,13 @@
               blob_device_targets: "{{ zettide_blob_device_targets | default([]) }}"
               blob_fuse_targets: "{{ zettide_blob_fuse_targets | default([]) }}"
               pool_fio_frontend: >-
-                {{ 'nfs' if zettide_test_profile == 'blob-pool-nfs-fio'
+                {{ 'spdk-nvme-perf' if zettide_test_profile == 'spdk-nvme-perf'
+                   else ('nfs' if zettide_test_profile == 'blob-pool-nfs-fio'
                    else ('vhost-user-blk' if zettide_test_profile == 'vhost-scheduled-pool-fio'
                    else ('nvmf'
-                          if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
-                           else ('iscsi' if zettide_test_profile == 'iscsi-catalog-fio'
-                           else 'fuse'))) }}
+                         if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
+                         else ('iscsi' if zettide_test_profile == 'iscsi-catalog-fio'
+                         else 'fuse')))) }}
               nvmf_transport: >-
                 {{ 'rdma' if zettide_test_profile in ['nvmf-catalog-rxe-fio', 'nvmf-scheduled-pool-rxe-fio']
                    else ('tcp'
@@ -575,16 +602,24 @@
                 {{ ('synthetic-dual-physical-device'
                     if zettide_raw_device.secondary is defined
                     else 'synthetic-single-physical-device')
-                    if zettide_test_profile == 'vhost-scheduled-pool-fio'
-                    else ('synthetic-single-physical-device'
-                    if zettide_test_profile == 'nvmf-scheduled-pool-rxe-fio'
-                    else 'native') }}
+                   if zettide_test_profile == 'vhost-scheduled-pool-fio'
+                   else ('synthetic-single-physical-device'
+                         if zettide_test_profile == 'nvmf-scheduled-pool-rxe-fio'
+                         else 'native') }}
               vhost_user_blk: >-
                 {{ {'image_url': zettide_vhost_scheduled_pool_image_url,
                     'image_sha256': zettide_vhost_scheduled_pool_image_sha256,
                     'guest_vcpus': zettide_vhost_scheduled_pool_guest_vcpus,
                     'queues': zettide_vhost_scheduled_pool_queues}
                    if zettide_test_profile == 'vhost-scheduled-pool-fio' else {} }}
+              spdk_nvme_perf: >-
+                {{ {'io_size': 4096,
+                    'io_pattern': 'randread',
+                    'io_depth_per_worker': zettide_spdk_nvme_perf_io_depth,
+                    'core_mask': zettide_spdk_nvme_perf_core_mask,
+                    'runtime': zettide_nvmf_fio_runtime,
+                    'warmup_time': zettide_nvmf_fio_ramp_time}
+                   if zettide_test_profile == 'spdk-nvme-perf' else {} }}
               blob_fuse_fio:
                 backing_size: "{{ zettide_blob_fuse_fio_backing_size_effective }}"
                 file_size: "{{ zettide_blob_fuse_fio_file_size_effective }}"

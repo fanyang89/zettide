@@ -2,6 +2,8 @@
 - name: Initialize scheduled Pool vhost configuration | {{ zettide_optimize }}
   ansible.builtin.set_fact:
     zettide_scheduled_pool_vhost_config: "{{ zettide_raw_device | default({}) }}"
+    zettide_scheduled_pool_result_name: "{{ zettide_test_profile }}"
+    zettide_scheduled_pool_direct_perf: "{{ zettide_test_profile == 'spdk-nvme-perf' }}"
 
 - name: Validate primary scheduled Pool disk configuration | {{ zettide_optimize }}
   ansible.builtin.assert:
@@ -40,6 +42,9 @@
       - zettide_vhost_scheduled_pool_queues | string is match('^[0-9]+$')
       - zettide_vhost_scheduled_pool_queues | int >= 1
       - zettide_vhost_scheduled_pool_queues | int <= zettide_vhost_scheduled_pool_guest_vcpus | int
+      - zettide_spdk_nvme_perf_io_depth | default(256) | string is match('^[1-9][0-9]*$')
+      - zettide_spdk_nvme_perf_io_depth | default(256) | int <= 65535
+      - zettide_spdk_nvme_perf_core_mask | default('0x3') | string is match('^(0[xX][0-9a-fA-F]+|[1-9][0-9]*)$')
       - >-
         zettide_vhost_scheduled_pool_fio_case in
         ['', 'seq-read-1m-qd32-j1', 'seq-read-128k-qd1-j1',
@@ -93,6 +98,17 @@
       transport auto, and no SQPOLL CPU base.
   when: zettide_vhost_scheduled_pool_storage_transport | default('linux') == 'spdk_nvme_pcie'
 
+- name: Validate direct SPDK NVMe perf configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_vhost_scheduled_pool_storage_transport | default('linux') == 'spdk_nvme_pcie'
+      - zettide_vhost_scheduled_pool_pcie_preparation_mode | default('create') == 'validate'
+      - zettide_nvmf_scheduled_pool_expected_pool_id | default('') is match('^[0-9a-f]{32}$')
+    fail_msg: >-
+      Direct SPDK NVMe perf requires SPDK PCIe transport, validation-only Pool
+      preparation, and the expected Pool ID.
+  when: zettide_scheduled_pool_direct_perf
+
 - name: Normalize scheduled Pool disk arguments | {{ zettide_optimize }}
   ansible.builtin.set_fact:
     zettide_scheduled_pool_vhost_device_args: >-
@@ -135,7 +151,7 @@
 
 - name: Create scheduled Pool vhost result directory | {{ zettide_optimize }}
   ansible.builtin.file:
-    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/vhost-scheduled-pool-fio"
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_scheduled_pool_result_name }}"
     state: directory
     mode: "0755"
 
@@ -144,6 +160,7 @@
     path: /var/cache/zettide
     state: directory
     mode: "0755"
+  when: not zettide_scheduled_pool_direct_perf
 
 - name: Download the verified Fedora guest image | {{ zettide_optimize }}
   ansible.builtin.get_url:
@@ -156,6 +173,7 @@
         'https_proxy': zettide_vhost_scheduled_pool_download_proxy}
        if zettide_vhost_scheduled_pool_download_proxy | default('') | length > 0
        else {} }}
+  when: not zettide_scheduled_pool_direct_perf
 
 - name: Extract SPDK source | {{ zettide_optimize }}
   ansible.builtin.unarchive:
@@ -185,6 +203,14 @@
   args:
     chdir: "{{ zettide_remote_workspace.path }}/spdk"
   changed_when: true
+
+- name: Build SPDK NVMe perf | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv: [make, "-j{{ ansible_facts.processor_vcpus | default(2) }}"]
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}/spdk/app/spdk_nvme_perf"
+  changed_when: true
+  when: zettide_scheduled_pool_direct_perf
 
 - name: Build scheduled Pool target library | {{ zettide_optimize }}
   ansible.builtin.command:
@@ -276,9 +302,9 @@
     ZETTIDE_SCHEDULED_POOL_NVMF_TARGET: "{{ zettide_remote_workspace.path }}/test/spdk-pool-data-vhost-benchmark"
     ZETTIDE_SCHEDULED_POOL_NVMF_READ_POLICY: "{{ zettide_vhost_scheduled_pool_read_policy }}"
     ZETTIDE_SCHEDULED_POOL_NVMF_EXPECTED_POOL_ID: "{{ zettide_nvmf_scheduled_pool_expected_pool_id | default('') }}"
-    ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER: test/spdk-vhost-user-blk-fio.sh
-    ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME: vhost
-    ZETTIDE_SCHEDULED_POOL_PROFILE: vhost-scheduled-pool-fio
+    ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER: "{{ 'test/spdk-nvme-perf.sh' if zettide_scheduled_pool_direct_perf else 'test/spdk-vhost-user-blk-fio.sh' }}"
+    ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME: "{{ 'spdk-nvme-perf' if zettide_scheduled_pool_direct_perf else 'vhost' }}"
+    ZETTIDE_SCHEDULED_POOL_PROFILE: "{{ zettide_scheduled_pool_result_name }}"
     ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS: "1"
     ZETTIDE_NVMF_REACTOR_COUNT: "{{ zettide_vhost_scheduled_pool_reactor_count }}"
     ZETTIDE_POOL_DATA_CONCURRENT_GROUPS: "{{ zettide_vhost_scheduled_pool_concurrent_groups | default(8) }}"
@@ -301,7 +327,12 @@
     ZETTIDE_VHOST_FIO_CASE: "{{ zettide_vhost_scheduled_pool_fio_case }}"
     ZETTIDE_VHOST_FIO_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
     ZETTIDE_VHOST_FIO_RAMP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
-    ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/vhost-scheduled-pool-fio"
+    ZETTIDE_SPDK_NVME_PERF_BINARY: "{{ zettide_remote_workspace.path }}/spdk/build/bin/spdk_nvme_perf"
+    ZETTIDE_SPDK_NVME_PERF_IO_DEPTH: "{{ zettide_spdk_nvme_perf_io_depth | default(256) }}"
+    ZETTIDE_SPDK_NVME_PERF_CORE_MASK: "{{ zettide_spdk_nvme_perf_core_mask | default('0x3') }}"
+    ZETTIDE_SPDK_NVME_PERF_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
+    ZETTIDE_SPDK_NVME_PERF_WARMUP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
+    ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_scheduled_pool_result_name }}"
   async: "{{ zettide_raw_timeout }}"
   poll: 15
   changed_when: true
@@ -314,11 +345,11 @@
       rc={{ zettide_scheduled_pool_vhost_result.rc | default(1) }}
       {{ zettide_scheduled_pool_vhost_result.stdout | default('') }}
       {{ zettide_scheduled_pool_vhost_result.stderr | default(zettide_scheduled_pool_vhost_result.msg | default('')) }}
-    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/vhost-scheduled-pool-fio/ansible.log"
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_scheduled_pool_result_name }}/ansible.log"
     mode: "0644"
 
 - name: Require scheduled Pool vhost lifecycle | {{ zettide_optimize }}
   ansible.builtin.assert:
     that:
       - zettide_scheduled_pool_vhost_result.rc | default(1) == 0
-    fail_msg: "Scheduled Pool vhost fio failed; inspect the fetched logs."
+    fail_msg: "Scheduled Pool benchmark failed; inspect the fetched logs."

@@ -1,0 +1,7 @@
+---
+- name: Benchmark two physical NVMe namespaces with SPDK perf
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: spdk-nvme-perf
+    zettide_optimize_modes_override:
+      - ReleaseSafe
