@@ -1,0 +1,8 @@
+---
+- name: Verify static NFS CSI volumes with a temporary kind cluster
+  ansible.builtin.import_playbook: playbook.yml
+  vars:
+    zettide_test_profile_override: csi-nfs-kind
+    zettide_optimize_modes_override:
+      - ReleaseSafe
+    zettide_nfs_nconnect: 8

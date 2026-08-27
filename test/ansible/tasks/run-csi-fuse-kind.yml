@@ -1,0 +1,158 @@
+---
+- name: Require the supported FUSE CSI architecture | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.architecture == 'x86_64'
+      - ansible_facts.distribution == 'Fedora'
+      - ansible_facts.distribution_major_version == '44'
+      - ansible_play_hosts_all | length == 1
+    fail_msg: "The FUSE CSI kind profile requires one Fedora 44 x86_64 host."
+
+- name: Create FUSE CSI kind result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/csi-fuse-kind"
+    state: directory
+    mode: "0755"
+
+- name: Test the FUSE CSI node service | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - mise
+      - exec
+      - --
+      - go
+      - test
+      - ./...
+  args:
+    chdir: "{{ zettide_controller_root }}/csi"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Vet the FUSE CSI node service | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - mise
+      - exec
+      - --
+      - go
+      - vet
+      - ./...
+  args:
+    chdir: "{{ zettide_controller_root }}/csi"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Build the FUSE CSI node service | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - mise
+      - exec
+      - --
+      - go
+      - build
+      - -trimpath
+      - -ldflags=-s -w -X main.version=v0.1.0
+      - -o
+      - "{{ zettide_controller_staging.path }}/zettide-csi-node"
+      - ./cmd/zettide-csi-node
+  args:
+    chdir: "{{ zettide_controller_root }}/csi"
+  environment:
+    CGO_ENABLED: "0"
+    GOARCH: amd64
+    GOOS: linux
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Create remote FUSE CSI image directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/csi/bin"
+    state: directory
+    mode: "0755"
+
+- name: Copy the FUSE CSI node service to the remote host | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    src: "{{ zettide_controller_staging.path }}/zettide-csi-node"
+    dest: "{{ zettide_remote_workspace.path }}/csi/bin/zettide-csi-node"
+    mode: "0755"
+
+- name: Build Zettide for the kind runtime | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+
+- name: Copy Zettide into the FUSE CSI image context | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    src: "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
+    dest: "{{ zettide_remote_workspace.path }}/csi/bin/zettide"
+    remote_src: true
+    mode: "0755"
+
+- name: Copy FUSE runtime into the image context | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ zettide_remote_workspace.path }}/csi/bin/{{ item.dest }}"
+    remote_src: true
+    local_follow: true
+    mode: "{{ item.mode }}"
+  loop:
+    - src: /usr/bin/fusermount3
+      dest: fusermount3
+      mode: "0755"
+    - src: /usr/lib64/libfuse3.so.4
+      dest: libfuse3.so.4
+      mode: "0755"
+
+- name: Verify Docker for FUSE CSI kind | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - info
+  changed_when: false
+
+- name: Prepare pinned kind tools | {{ zettide_optimize }}
+  ansible.builtin.include_tasks: prepare-kind.yml
+
+- name: Run FUSE CSI kind lifecycle | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - bash
+      - test/fuse-csi-kind.sh
+      - "{{ zettide_remote_workspace.path }}/csi/bin/zettide"
+      - "{{ zettide_remote_workspace.path }}/csi/bin/zettide-csi-node"
+      - "{{ zettide_remote_workspace.path }}/csi-tools/kind"
+      - "{{ zettide_remote_workspace.path }}/csi-tools/kubectl"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    ZETTIDE_TEST_LOG_DIR: >-
+      {{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/csi-fuse-kind
+  async: 7200
+  poll: 10
+  changed_when: true
+  failed_when: false
+  register: zettide_csi_fuse_kind_result
+
+- name: Record FUSE CSI kind lifecycle | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_csi_fuse_kind_result.rc | default(1) }}
+      {{ zettide_csi_fuse_kind_result.stdout | default('') }}
+      {{ zettide_csi_fuse_kind_result.stderr | default(zettide_csi_fuse_kind_result.msg | default('')) }}
+    dest: >-
+      {{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/csi-fuse-kind/ansible.log
+    mode: "0644"
+
+- name: Require FUSE CSI kind lifecycle | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_csi_fuse_kind_result.rc | default(1) == 0
+    fail_msg: "FUSE CSI kind verification failed; inspect the fetched csi-fuse-kind logs."

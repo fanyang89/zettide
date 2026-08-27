@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!bin/
+!bin/zettide
+!bin/zettide-csi-node
+!bin/fusermount3
+!bin/libfuse3.so.4

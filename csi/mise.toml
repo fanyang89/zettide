@@ -1,0 +1,10 @@
+[tools]
+go = "1.26.5"
+
+[tasks.check]
+run = [
+  "gofmt -d cmd internal",
+  "go vet ./...",
+  "go test ./...",
+  "CGO_ENABLED=0 go build -trimpath -o /tmp/zettide-csi-node ./cmd/zettide-csi-node",
+]
