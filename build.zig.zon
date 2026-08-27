@@ -12,6 +12,11 @@
             .url = "https://github.com/hendriknielaender/zBench/archive/f12a2262bcd9d300207890555c577da5e29de453.tar.gz",
             .hash = "zbench-0.14.1-YTdc781OAQCR6wxqkgAwm9bG4TnFGzm8c9aE-ZPiTAU1",
         },
+        .gperftools = .{
+            .url = "https://codeload.github.com/fanyang89/gperftools/tar.gz/1a01cd2cf8f7000845d343fa8e0bbac70378858b",
+            .hash = "N-V-__8AAGKVkABvsDVHhSU8seHKvtJ8Q23b9Y0OMiFVWt-y",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",
@@ -25,5 +30,8 @@
         "vendor/utf8proc",
         "vendor/libfuse-tests",
         "vendor/xfstests",
+        "vendor/grpc-lite/tools/build_native.sh",
+        "vendor/grpc-lite/tools/gperftools_force_link.c",
+        "vendor/grpc-lite/tools/mbedtls_user_config.h",
     },
 }

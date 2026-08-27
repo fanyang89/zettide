@@ -25,6 +25,8 @@ reactor_count=${ZETTIDE_NVMF_REACTOR_COUNT:-1}
 controller_count=${ZETTIDE_VHOST_CONTROLLER_COUNT:-$reactor_count}
 perf_case=${ZETTIDE_VHOST_PERF_CASE:-}
 perf_frequency=${ZETTIDE_VHOST_PERF_FREQUENCY:-199}
+cpu_profile_case=${ZETTIDE_VHOST_CPU_PROFILE_CASE:-}
+cpu_profile_signal=12
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
 target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
 storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
@@ -40,6 +42,8 @@ socket_paths=()
 monitor_pids=()
 perf_pid=""
 perf_data=""
+cpu_profile_active=false
+cpu_profile_path=""
 deferred_signal=0
 
 case $fio_case in
@@ -95,6 +99,18 @@ if [[ -n $perf_case && $perf_case != "$fio_case" ]]; then
     echo "perf case must match the selected fio case" >&2
     exit 2
 fi
+if [[ -n $cpu_profile_case && $cpu_profile_case != "$fio_case" ]]; then
+    echo "CPU profile case must match the selected fio case" >&2
+    exit 2
+fi
+if [[ -n $cpu_profile_case && -n $perf_case ]]; then
+    echo "CPU profiling and perf recording must run separately" >&2
+    exit 2
+fi
+if [[ -n $cpu_profile_case && $target_gdb == 1 ]]; then
+    echo "CPU profiling and target debugging must run separately" >&2
+    exit 2
+fi
 ((queues <= guest_vcpus)) || {
     echo "vhost queue count must not exceed guest vCPU count" >&2
     exit 2
@@ -123,6 +139,12 @@ done
 if [[ -n $perf_case ]]; then
     command -v perf >/dev/null || {
         echo "perf is required when a perf case is selected" >&2
+        exit 2
+    }
+fi
+if [[ -n $cpu_profile_case ]]; then
+    command -v nm >/dev/null || {
+        echo "nm is required when a CPU profile case is selected" >&2
         exit 2
     }
 fi
@@ -229,6 +251,33 @@ start_monitors() {
     end_deferred_signals
 }
 
+first_cpu_profile_file() {
+    local profile_file
+
+    while IFS= read -r profile_file; do
+        printf '%s\n' "$profile_file"
+        return 0
+    done < <(compgen -G "$cpu_profile_path*")
+    return 1
+}
+
+stop_cpu_profile() {
+    local profile_file
+
+    [[ $cpu_profile_active == true ]] || return 0
+    kill -"$cpu_profile_signal" "$target_pid" 2>/dev/null || {
+        echo "failed to stop target CPU profiling" >&2
+        return 1
+    }
+    cpu_profile_active=false
+    sleep 0.2
+    profile_file=$(first_cpu_profile_file || true)
+    [[ -n $profile_file && -s $profile_file ]] || {
+        echo "target CPU profile is missing or empty: $cpu_profile_path*" >&2
+        return 1
+    }
+}
+
 cleanup() {
     local result=$?
     local deadline
@@ -240,6 +289,9 @@ cleanup() {
         kill -INT "$perf_pid" 2>/dev/null || true
         wait "$perf_pid" 2>/dev/null || true
         perf_pid=""
+    fi
+    if ! stop_cpu_profile; then
+        result=1
     fi
     if [[ -n $qemu_pid ]] && process_running "$qemu_pid"; then
         if [[ $guest_ready == true ]]; then
@@ -289,6 +341,15 @@ trap cleanup EXIT
 restore_signal_traps
 
 mkdir -p "$log_dir"
+if [[ -n $cpu_profile_case ]]; then
+    if ! nm -g --defined-only "$target" | grep -E ' [TW] ProfilerStart$' >/dev/null; then
+        echo "target does not contain the gperftools CPU profiler: $target" >&2
+        exit 2
+    fi
+    cpu_profile_path=$log_dir/gperftools-$cpu_profile_case.prof
+    rm -f "$cpu_profile_path" "$cpu_profile_path".*
+    cp "$target" "$log_dir/gperftools-target"
+fi
 work_dir=$(mktemp -d "$log_dir/vhost-fio.XXXXXX")
 socket_dir=$(mktemp -d /tmp/zettide-vhost.XXXXXX)
 for ((index = 0; index < controller_count; index++)); do
@@ -377,13 +438,19 @@ fi
 begin_deferred_signals
 target_member_windows=${ZETTIDE_POOL_DATA_MEMBER_WINDOWS:-}
 [[ $benchmark_mode == pool ]] || target_member_windows=""
-env ZETTIDE_POOL_DATA_FRONTEND=vhost \
-    ZETTIDE_POOL_DATA_BENCHMARK_MODE="$benchmark_mode" \
-    ZETTIDE_POOL_DATA_MEMBER_WINDOWS="$target_member_windows" \
-    ZETTIDE_VHOST_SOCKET_DIR="$socket_dir" \
-    ZETTIDE_VHOST_CONTROLLER_COUNT="$controller_count" \
-    ZETTIDE_NVMF_REACTOR_COUNT="$reactor_count" \
-    "${target_command[@]}" \
+target_environment=(
+    env
+    ZETTIDE_POOL_DATA_FRONTEND=vhost
+    ZETTIDE_POOL_DATA_BENCHMARK_MODE="$benchmark_mode"
+    ZETTIDE_POOL_DATA_MEMBER_WINDOWS="$target_member_windows"
+    ZETTIDE_VHOST_SOCKET_DIR="$socket_dir"
+    ZETTIDE_VHOST_CONTROLLER_COUNT="$controller_count"
+    ZETTIDE_NVMF_REACTOR_COUNT="$reactor_count"
+)
+if [[ -n $cpu_profile_case ]]; then
+    target_environment+=(CPUPROFILE="$cpu_profile_path" CPUPROFILESIGNAL="$cpu_profile_signal")
+fi
+"${target_environment[@]}" "${target_command[@]}" \
     >"$log_dir/target.log" 2>&1 &
 target_pid=$!
 end_deferred_signals
@@ -628,6 +695,7 @@ execute_case() {
     local job_file=$2
     local result=$log_dir/fio-$name.json
     local status
+    local deadline
 
     scp "${scp_options[@]}" "$job_file" zettide@127.0.0.1:/tmp/zettide-fio.job
     start_monitors "$name"
@@ -639,6 +707,22 @@ execute_case() {
         perf_pid=$!
         end_deferred_signals
     fi
+    if [[ -n $cpu_profile_case && $name == "$cpu_profile_case" ]]; then
+        kill -"$cpu_profile_signal" "$target_pid"
+        cpu_profile_active=true
+        deadline=$((SECONDS + 2))
+        while ! first_cpu_profile_file >/dev/null; do
+            process_running "$target_pid" || {
+                echo "target exited while starting CPU profiling" >&2
+                return 1
+            }
+            ((SECONDS < deadline)) || {
+                echo "target did not start CPU profiling" >&2
+                return 1
+            }
+            sleep 0.01
+        done
+    fi
     set +e
     if [[ $benchmark_mode == raw_nvme ]]; then
         ssh "${ssh_options[@]}" zettide@127.0.0.1 \
@@ -649,6 +733,7 @@ execute_case() {
     fi >"$result"
     status=$?
     set -e
+    stop_cpu_profile
     if [[ -n $perf_pid ]]; then
         kill -INT "$perf_pid" 2>/dev/null || true
         wait "$perf_pid" 2>/dev/null || true

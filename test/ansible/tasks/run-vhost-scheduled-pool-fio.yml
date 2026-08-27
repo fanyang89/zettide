@@ -5,6 +5,8 @@
     zettide_scheduled_pool_result_name: "{{ zettide_test_profile }}"
     zettide_scheduled_pool_direct_perf: "{{ zettide_test_profile == 'spdk-nvme-perf' }}"
     zettide_scheduled_pool_raw_vhost: "{{ zettide_test_profile == 'vhost-spdk-nvme-fio' }}"
+    zettide_scheduled_pool_cpu_profile: >-
+      {{ zettide_vhost_scheduled_pool_cpu_profile_case | default('') | length > 0 }}
 
 - name: Validate primary scheduled Pool disk configuration | {{ zettide_optimize }}
   ansible.builtin.assert:
@@ -41,6 +43,16 @@
         zettide_vhost_scheduled_pool_reactor_count | int
       - zettide_vhost_scheduled_pool_inline_batches | default('') | string is match('^$|^[01]$')
       - zettide_vhost_scheduled_pool_target_gdb | default(0) | int in [0, 1]
+      - >-
+        not zettide_scheduled_pool_cpu_profile or
+        zettide_vhost_scheduled_pool_cpu_profile_case == zettide_vhost_scheduled_pool_fio_case
+      - >-
+        not zettide_scheduled_pool_cpu_profile or
+        zettide_vhost_scheduled_pool_perf_case | default('') == ''
+      - not zettide_scheduled_pool_cpu_profile or not zettide_scheduled_pool_direct_perf
+      - >-
+        not zettide_scheduled_pool_cpu_profile or
+        zettide_vhost_scheduled_pool_target_gdb | default(0) | int == 0
       - zettide_vhost_scheduled_pool_guest_vcpus | string is match('^[0-9]+$')
       - zettide_vhost_scheduled_pool_guest_vcpus | int >= 1
       - zettide_vhost_scheduled_pool_queues | string is match('^[0-9]+$')
@@ -239,6 +251,7 @@
       - build
       - -Dspdk=true
       - -Doptimize=ReleaseSafe
+      - "-Dbenchmark-cpu-profiler={{ zettide_scheduled_pool_cpu_profile | ternary('true', 'false') }}"
       - build-nvmf-pool-data-benchmark
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
@@ -265,11 +278,15 @@
   ansible.builtin.shell:
     cmd: >-
       cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
+      {{ '-fno-omit-frame-pointer' if zettide_scheduled_pool_cpu_profile else '' }}
       -Isrc -Itest src/spdk/runtime.c src/spdk/bdev_endpoint.c
       src/spdk/bdev_dispatcher.c src/spdk/bdev_provider.c
       src/spdk/nvmf_tcp_export.c src/spdk/vhost_blk_controller.c
       test/spdk_runtime.c test/spdk_pool_data_nvmf_benchmark_main.c
       zig-out/lib/libzettide-spdk-pool-data-nvmf-benchmark.a
+      {{ ('zig-out/lib/zettide-benchmark-cpu-profiler-force-link.o '
+          ~ 'zig-out/lib/libzettide-benchmark-cpu-profiler.a')
+         if zettide_scheduled_pool_cpu_profile else '' }}
       -o test/spdk-pool-data-vhost-benchmark -pthread -lstdc++ -Wl,--no-as-needed
       $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
       spdk_event spdk_event_bdev spdk_vhost spdk_event_vhost_blk spdk_event_nvmf
@@ -337,6 +354,7 @@
     ZETTIDE_POOL_DATA_PCIE_PREPARATION_MODE: "{{ zettide_vhost_scheduled_pool_pcie_preparation_mode | default('create') }}"
     ZETTIDE_VHOST_PERF_CASE: "{{ zettide_vhost_scheduled_pool_perf_case | default('') }}"
     ZETTIDE_VHOST_PERF_FREQUENCY: "{{ zettide_vhost_scheduled_pool_perf_frequency | default(199) }}"
+    ZETTIDE_VHOST_CPU_PROFILE_CASE: "{{ zettide_vhost_scheduled_pool_cpu_profile_case | default('') }}"
     ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE: "{{ zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') }}"
     ZETTIDE_VHOST_VCPU_CPU_BASE: "{{ zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') }}"
     ZETTIDE_POOL_DATA_THREADED_CONCURRENCY: "{{ zettide_vhost_scheduled_pool_threaded_concurrency | default('') }}"

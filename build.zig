@@ -18,8 +18,16 @@ pub fn build(b: *std.Build) void {
     const privileged_test_mode = b.option(PrivilegedTestMode, "privileged-tests", "Privileged tests: off, auto, or required") orelse .auto;
     const block_test_mode = b.option(BlockTestMode, "block-tests", "Linux block device tests: off, auto, or required") orelse .off;
     const enable_spdk = b.option(bool, "spdk", "Link the Linux endpoint daemon with SPDK") orelse false;
+    const enable_benchmark_cpu_profiler = b.option(
+        bool,
+        "benchmark-cpu-profiler",
+        "Link the gperftools CPU profiler into the scheduled Pool benchmark",
+    ) orelse false;
     const crc32c_dependency = b.dependency("crc32c", .{});
     if (enable_spdk and target.result.os.tag != .linux) @panic("SPDK support requires Linux");
+    if (enable_benchmark_cpu_profiler and !enable_spdk) {
+        @panic("benchmark CPU profiling requires SPDK support");
+    }
 
     const portable_core = createCoreModule(b, target, optimize, false, crc32c_dependency);
     const app_core = createCoreModule(b, target, optimize, target.result.os.tag == .linux, crc32c_dependency);
@@ -71,6 +79,12 @@ pub fn build(b: *std.Build) void {
         });
         pool_data_nvmf_benchmark_module.addIncludePath(b.path("src"));
         pool_data_nvmf_benchmark_module.addIncludePath(b.path("test"));
+        const benchmark_cpu_profiler = if (enable_benchmark_cpu_profiler) blk: {
+            const gperftools_dependency = b.lazyDependency("gperftools", .{}) orelse return;
+            pool_data_benchmark_core.omit_frame_pointer = false;
+            pool_data_nvmf_benchmark_module.omit_frame_pointer = false;
+            break :blk addBenchmarkCpuProfiler(b, gperftools_dependency.path(""), target);
+        } else null;
         const pool_data_nvmf_benchmark = b.addLibrary(.{
             .name = "zettide-spdk-pool-data-nvmf-benchmark",
             .linkage = .static,
@@ -83,6 +97,20 @@ pub fn build(b: *std.Build) void {
             "Build the ReleaseSafe scheduled Pool data NVMe-oF benchmark target",
         );
         pool_data_nvmf_benchmark_step.dependOn(&install_pool_data_nvmf_benchmark.step);
+        if (benchmark_cpu_profiler) |profiler| {
+            const install_profiler_archive = b.addInstallFileWithDir(
+                profiler.archive,
+                .lib,
+                "libzettide-benchmark-cpu-profiler.a",
+            );
+            const install_profiler_force_link = b.addInstallFileWithDir(
+                profiler.force_link,
+                .lib,
+                "zettide-benchmark-cpu-profiler-force-link.o",
+            );
+            pool_data_nvmf_benchmark_step.dependOn(&install_profiler_archive.step);
+            pool_data_nvmf_benchmark_step.dependOn(&install_profiler_force_link.step);
+        }
 
         const pool_data_nvmf_args_test_module = b.createModule(.{
             .root_source_file = b.path("test/spdk_pool_data_nvmf_args.zig"),
@@ -680,6 +708,38 @@ fn addCrc32c(
         });
     }
     return config_header;
+}
+
+const BenchmarkCpuProfiler = struct {
+    archive: std.Build.LazyPath,
+    force_link: std.Build.LazyPath,
+};
+
+fn addBenchmarkCpuProfiler(
+    b: *std.Build,
+    source_dir: std.Build.LazyPath,
+    target: std.Build.ResolvedTarget,
+) BenchmarkCpuProfiler {
+    const target_triple = target.query.zigTriple(b.allocator) catch @panic("OOM");
+    const run = b.addSystemCommand(&.{"bash"});
+    run.addFileArg(b.path("vendor/grpc-lite/tools/build_native.sh"));
+    run.addArg("gperftools");
+    run.addDirectoryArg(source_dir);
+    const output = run.addOutputDirectoryArg("gperftools");
+    run.addArgs(&.{
+        "RelWithDebInfo",
+        "cc",
+        "c++",
+        b.graph.zig_exe,
+        target_triple,
+    });
+    run.addFileArg(b.path("vendor/grpc-lite/tools/gperftools_force_link.c"));
+    run.addFileArg(b.path("vendor/grpc-lite/tools/mbedtls_user_config.h"));
+    run.addArgs(&.{ "false", "false", "true", "false" });
+    return .{
+        .archive = output.path(b, "libgrpc_lite_gperftools.a"),
+        .force_link = output.path(b, "gperftools_force_link.o"),
+    };
 }
 
 fn createExecutable(
