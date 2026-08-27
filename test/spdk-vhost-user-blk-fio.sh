@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -ge 6 ]] || {
-    echo "usage: spdk-vhost-user-blk-fio.sh TARGET READY_FILE LOG_DIR POOL_ID READ_POLICY DEVICE..." >&2
-    exit 2
-}
-
-target=$1
-ready_file=$2
-log_dir=$3
-pool_id=$4
-read_policy=$5
-shift 5
-devices=("$@")
+storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
+if [[ $storage_transport == synthetic ]]; then
+    [[ $# -eq 4 ]] || {
+        echo "usage: spdk-vhost-user-blk-fio.sh TARGET READY_FILE LOG_DIR READ_POLICY" >&2
+        exit 2
+    }
+    target=$1
+    ready_file=$2
+    log_dir=$3
+    pool_id=""
+    read_policy=$4
+    devices=()
+else
+    [[ $# -ge 6 ]] || {
+        echo "usage: spdk-vhost-user-blk-fio.sh TARGET READY_FILE LOG_DIR POOL_ID READ_POLICY DEVICE..." >&2
+        exit 2
+    }
+    target=$1
+    ready_file=$2
+    log_dir=$3
+    pool_id=$4
+    read_policy=$5
+    shift 5
+    devices=("$@")
+fi
 
 runtime=${ZETTIDE_VHOST_FIO_RUNTIME:-20}
 ramp_time=${ZETTIDE_VHOST_FIO_RAMP_TIME:-5}
@@ -29,7 +42,6 @@ cpu_profile_case=${ZETTIDE_VHOST_CPU_PROFILE_CASE:-}
 cpu_profile_signal=12
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
 target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
-storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
 benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
 target_pid=""
@@ -57,6 +69,14 @@ esac
     echo "benchmark mode must be pool or raw_nvme" >&2
     exit 2
 }
+[[ $storage_transport == linux || $storage_transport == spdk_nvme_pcie || $storage_transport == synthetic ]] || {
+    echo "storage transport must be linux, spdk_nvme_pcie, or synthetic" >&2
+    exit 2
+}
+if [[ $storage_transport == synthetic && $benchmark_mode != pool ]]; then
+    echo "synthetic storage requires Pool benchmark mode" >&2
+    exit 2
+fi
 if [[ $benchmark_mode == raw_nvme ]]; then
     [[ $storage_transport == spdk_nvme_pcie && $controller_count -eq 2 &&
         ($fio_case == randread-4k-qd32-j16 ||
@@ -320,6 +340,12 @@ cleanup() {
             echo "target reported missing or nonzero queue-full metrics" >&2
             result=1
         fi
+        if [[ $storage_transport == synthetic ]] &&
+            { ! grep -Eq 'pool_read_path_metrics .*async_submitted=[1-9][0-9]* async_fallbacks=0 async_submit_errors=0([[:space:]]|$)' "$log_dir/target.log" ||
+                ! grep -Eq 'pool_async_metrics submissions=[1-9][0-9]* completions=[1-9][0-9]* queue_full=0([[:space:]]|$)' "$log_dir/target.log"; }; then
+            echo "synthetic storage reported missing, fallback, or queue-full async reads" >&2
+            result=1
+        fi
     fi
     for socket_path in "${socket_paths[@]}"; do
         if [[ -e $socket_path ]]; then
@@ -427,7 +453,11 @@ scp_options=(
 )
 
 rm -f "$ready_file"
-target_command=("$target" "$ready_file" "$pool_id" "$read_policy" "${devices[@]}")
+if [[ $storage_transport == synthetic ]]; then
+    target_command=("$target" "$ready_file" "$read_policy")
+else
+    target_command=("$target" "$ready_file" "$pool_id" "$read_policy" "${devices[@]}")
+fi
 if [[ $target_gdb == 1 ]]; then
     target_command=(gdb --batch --return-child-result -ex run -ex "thread apply all bt full" --args "${target_command[@]}")
 fi
@@ -442,6 +472,7 @@ target_environment=(
     env
     ZETTIDE_POOL_DATA_FRONTEND=vhost
     ZETTIDE_POOL_DATA_BENCHMARK_MODE="$benchmark_mode"
+    ZETTIDE_POOL_DATA_STORAGE_TRANSPORT="$storage_transport"
     ZETTIDE_POOL_DATA_MEMBER_WINDOWS="$target_member_windows"
     ZETTIDE_VHOST_SOCKET_DIR="$socket_dir"
     ZETTIDE_VHOST_CONTROLLER_COUNT="$controller_count"

@@ -1,6 +1,7 @@
 const std = @import("std");
 const zettide = @import("zettide");
 const args = @import("spdk_pool_data_nvmf_args.zig");
+const synthetic_storage = @import("spdk_pool_data_synthetic_storage.zig");
 
 const c = @import("spdk_c");
 
@@ -373,7 +374,7 @@ fn run(
 ) !void {
     const allocator = std.heap.c_allocator;
     const device_count = std.math.cast(usize, device_count_raw) orelse return error.InvalidDeviceCount;
-    if (device_count == 0 or device_count > zettide.v3.pool_member_set.max_member_count)
+    if (device_count > zettide.v3.pool_member_set.max_member_count)
         return error.InvalidDeviceCount;
     const read_policy: zettide.v3.pool_scheduled_data_device.ReadPolicy = switch (try args.parseReadPolicy(read_policy_raw)) {
         .first_available => .first_available,
@@ -383,6 +384,14 @@ fn run(
     const benchmark_mode = try args.parseBenchmarkMode(
         if (c.getenv("ZETTIDE_POOL_DATA_BENCHMARK_MODE")) |value| std.mem.span(value) else null,
     );
+    const storage_transport = try args.parseStorageTransport(
+        if (c.getenv("ZETTIDE_POOL_DATA_STORAGE_TRANSPORT")) |value| std.mem.span(value) else null,
+    );
+    if (storage_transport == .synthetic) {
+        if (device_count != 0) return error.InvalidSyntheticStorageConfiguration;
+    } else if (device_count == 0) {
+        return error.InvalidDeviceCount;
+    }
     const frontend_text = if (c.getenv("ZETTIDE_POOL_DATA_FRONTEND")) |value| std.mem.span(value) else "nvmf";
     const frontend: Frontend = if (std.mem.eql(u8, frontend_text, "nvmf"))
         .nvmf
@@ -427,9 +436,6 @@ fn run(
     const concurrent_group_count = try args.parseConcurrentGroupCount(
         if (c.getenv("ZETTIDE_POOL_DATA_CONCURRENT_GROUPS")) |value| std.mem.span(value) else null,
     );
-    const storage_transport = try args.parseStorageTransport(
-        if (c.getenv("ZETTIDE_POOL_DATA_STORAGE_TRANSPORT")) |value| std.mem.span(value) else null,
-    );
     const preparation_mode = try args.parsePreparationMode(
         if (c.getenv("ZETTIDE_POOL_DATA_PREPARATION_MODE")) |value| std.mem.span(value) else null,
     );
@@ -456,6 +462,11 @@ fn run(
         &window_specs_buffer,
     );
     try validateWindowSpecs(window_specs, device_count);
+    if (storage_transport == .synthetic and
+        (benchmark_mode != .pool or preparation_mode != .none or pcie_probe or
+            window_specs.len != 0 or raw_storage_mode != .auto or sqpoll_cpu_base != null or
+            !std.mem.allEqual(u8, &expected_pool_id, 0)))
+        return error.InvalidSyntheticStorageConfiguration;
     if (benchmark_mode == .raw_nvme and
         (frontend != .vhost or storage_transport != .spdk_nvme_pcie or
             preparation_mode != .none or pcie_probe or window_specs.len != 0 or
@@ -532,8 +543,8 @@ fn run(
         .reactor_mask = reactor_mask,
         .json_data = selected_runtime_config,
         .mem_size_mb = 512,
-        .no_pci = storage_transport == .linux,
-        .no_huge = storage_transport == .linux,
+        .no_pci = storage_transport != .spdk_nvme_pcie,
+        .no_huge = storage_transport != .spdk_nvme_pcie,
         .disable_cpumask_locks = true,
         .vhost_socket_path = vhost_socket_directory,
     });
@@ -594,37 +605,27 @@ fn run(
     var physical_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
     var physical_count: usize = 0;
     defer zettide.v3.storage.closeAll(physical_storages[0..physical_count], io) catch @panic("failed to close physical Pool storage");
-    if (pcie_probe) {
-        for (physical_storages[0..device_count], 0..) |*storage, index| {
-            var name_buffer: [32]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
-            storage.* = try runtime.openStorage(allocator, name, false);
-            physical_count += 1;
-        }
-        std.debug.print("target-stage PCIe probe ready namespaces={d}\n", .{physical_count});
-        return;
-    }
     var member_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
     var member_count: usize = 0;
     errdefer zettide.v3.storage.closeAll(member_storages[0..member_count], io) catch {};
-    if (window_specs.len == 0) {
-        for (device_paths[0..device_count], member_storages[0..device_count], 0..) |device_path_z, *storage, index| {
-            const opened = try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
-                io,
-                allocator,
-                std.mem.span(device_path_z),
-                false,
-                true,
-                raw_storage_mode,
-                if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
-            );
-            storage.* = opened.storage;
-            member_count += 1;
-        }
+    var read_path_metrics: zettide.v3.pool_scheduled_data_device.ReadPathMetrics = .{};
+    var pool_storage: zettide.v3.storage.Storage = undefined;
+    if (storage_transport == .synthetic) {
+        pool_storage = try synthetic_storage.create(allocator, io, read_policy, &read_path_metrics);
     } else {
-        for (device_paths[0..device_count], physical_storages[0..device_count], 0..) |device_path_z, *storage, index| {
-            storage.* = switch (storage_transport) {
-                .linux => (try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
+        if (pcie_probe) {
+            for (physical_storages[0..device_count], 0..) |*storage, index| {
+                var name_buffer: [32]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
+                storage.* = try runtime.openStorage(allocator, name, false);
+                physical_count += 1;
+            }
+            std.debug.print("target-stage PCIe probe ready namespaces={d}\n", .{physical_count});
+            return;
+        }
+        if (window_specs.len == 0) {
+            for (device_paths[0..device_count], member_storages[0..device_count], 0..) |device_path_z, *storage, index| {
+                const opened = try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
                     io,
                     allocator,
                     std.mem.span(device_path_z),
@@ -632,62 +633,78 @@ fn run(
                     true,
                     raw_storage_mode,
                     if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
-                )).storage,
-                .spdk_nvme_pcie => open: {
-                    var name_buffer: [32]u8 = undefined;
-                    const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
-                    break :open try runtime.openStorage(allocator, name, preparation_mode == .create);
-                },
-            };
-            physical_count += 1;
+                );
+                storage.* = opened.storage;
+                member_count += 1;
+            }
+        } else {
+            for (device_paths[0..device_count], physical_storages[0..device_count], 0..) |device_path_z, *storage, index| {
+                storage.* = switch (storage_transport) {
+                    .linux => (try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
+                        io,
+                        allocator,
+                        std.mem.span(device_path_z),
+                        false,
+                        true,
+                        raw_storage_mode,
+                        if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
+                    )).storage,
+                    .spdk_nvme_pcie => open: {
+                        var name_buffer: [32]u8 = undefined;
+                        const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
+                        break :open try runtime.openStorage(allocator, name, preparation_mode == .create);
+                    },
+                    .synthetic => unreachable,
+                };
+                physical_count += 1;
+            }
+            for (window_specs, member_storages[0..window_specs.len]) |spec, *storage| {
+                storage.* = try zettide.v3.storage_window.create(
+                    allocator,
+                    &physical_storages[spec.device_index],
+                    spec.offset,
+                    spec.length,
+                );
+                member_count += 1;
+            }
         }
-        for (window_specs, member_storages[0..window_specs.len]) |spec, *storage| {
-            storage.* = try zettide.v3.storage_window.create(
+        const transferring_count = member_count;
+        member_count = 0;
+        if (preparation_mode != .none) {
+            const pool_id = try preparePool(
+                io,
                 allocator,
-                &physical_storages[spec.device_index],
-                spec.offset,
-                spec.length,
+                member_storages[0..transferring_count],
+                preparation_mode,
+                expected_pool_id,
             );
-            member_count += 1;
+            try publishPreparedPoolId(io, ready_path, pool_id);
+            return;
         }
-    }
-    const transferring_count = member_count;
-    member_count = 0;
-    if (preparation_mode != .none) {
-        const pool_id = try preparePool(
+        var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
             io,
             allocator,
             member_storages[0..transferring_count],
-            preparation_mode,
-            expected_pool_id,
+            .read_only,
         );
-        try publishPreparedPoolId(io, ready_path, pool_id);
-        return;
-    }
-    var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
-        io,
-        allocator,
-        member_storages[0..transferring_count],
-        .read_only,
-    );
-    errdefer set.deinit();
-    const authority = set.authority() orelse return error.MissingAuthority;
-    if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
-        return error.UnexpectedPoolId;
-    if (try set.dataMode() != .blob or authority.layout.scheduled_blob == null)
-        return error.ScheduledBlobPoolRequired;
+        errdefer set.deinit();
+        const authority = set.authority() orelse return error.MissingAuthority;
+        if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
+            return error.UnexpectedPoolId;
+        if (try set.dataMode() != .blob or authority.layout.scheduled_blob == null)
+            return error.ScheduledBlobPoolRequired;
 
-    var read_path_metrics: zettide.v3.pool_scheduled_data_device.ReadPathMetrics = .{};
-    var pool_storage = try zettide.v3.pool_data_storage.createOptions(
-        allocator,
-        io,
-        &set,
-        false,
-        .{
-            .read_policy = read_policy,
-            .read_path_metrics = &read_path_metrics,
-        },
-    );
+        pool_storage = try zettide.v3.pool_data_storage.createOptions(
+            allocator,
+            io,
+            &set,
+            false,
+            .{
+                .read_policy = read_policy,
+                .read_path_metrics = &read_path_metrics,
+            },
+        );
+    }
     defer pool_storage.close(io) catch @panic("failed to close Pool data storage");
     defer {
         const metrics = read_path_metrics.snapshot();
@@ -710,11 +727,18 @@ fn run(
         var submissions: u64 = 0;
         var completions: u64 = 0;
         var queue_full: u64 = 0;
-        for (physical_storages[0..physical_count]) |*storage| {
-            const stats = storage.transportStats(io);
+        if (storage_transport == .synthetic) {
+            const stats = pool_storage.transportStats(io);
             submissions +|= stats.async_submissions;
             completions +|= stats.async_completions;
             queue_full +|= stats.async_queue_full;
+        } else {
+            for (physical_storages[0..physical_count]) |*storage| {
+                const stats = storage.transportStats(io);
+                submissions +|= stats.async_submissions;
+                completions +|= stats.async_completions;
+                queue_full +|= stats.async_queue_full;
+            }
         }
         std.debug.print(
             "pool_async_metrics submissions={d} completions={d} queue_full={d}\n",

@@ -592,7 +592,9 @@
                    else ('nfs' if zettide_test_profile == 'blob-pool-nfs-fio'
                     else ('vhost-user-blk' if zettide_test_profile in ['vhost-scheduled-pool-fio', 'vhost-spdk-nvme-fio']
                    else ('nvmf'
-                         if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
+                          if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio',
+                          'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio',
+                          'nvmf-catalog-optane-fio', 'nvmf-scheduled-pool-rxe-fio']
                          else ('iscsi' if zettide_test_profile == 'iscsi-catalog-fio'
                          else 'fuse')))) }}
               nvmf_transport: >-
@@ -601,22 +603,26 @@
                          if zettide_test_profile in ['nvmf-fio', 'nvmf-catalog-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
                          else '') }}
               pool_fio_source_profile: >-
-                {{ 'raw-dual-nvme'
+                {{ 'synthetic-async-storage'
+                   if zettide_test_profile == 'vhost-scheduled-pool-fio' and
+                   zettide_vhost_scheduled_pool_storage_transport | default('linux') == 'synthetic'
+                   else ('raw-dual-nvme'
                    if zettide_test_profile == 'vhost-spdk-nvme-fio'
                    else (('synthetic-dual-physical-device'
-                    if zettide_raw_device.secondary is defined
+                     if zettide_raw_device.secondary is defined
                     else 'synthetic-single-physical-device')
-                   if zettide_test_profile == 'vhost-scheduled-pool-fio'
-                   else ('synthetic-single-physical-device'
-                         if zettide_test_profile == 'nvmf-scheduled-pool-rxe-fio'
-                         else 'native')) }}
+                    if zettide_test_profile == 'vhost-scheduled-pool-fio'
+                    else ('synthetic-single-physical-device'
+                          if zettide_test_profile == 'nvmf-scheduled-pool-rxe-fio'
+                          else 'native'))) }}
               vhost_user_blk: >-
                 {{ {'image_url': zettide_vhost_scheduled_pool_image_url,
                     'image_sha256': zettide_vhost_scheduled_pool_image_sha256,
                     'guest_vcpus': zettide_vhost_scheduled_pool_guest_vcpus,
-                    'queues': zettide_vhost_scheduled_pool_queues,
-                    'mode': ('raw_nvme' if zettide_test_profile == 'vhost-spdk-nvme-fio' else 'pool'),
-                    'fio_case': zettide_vhost_scheduled_pool_fio_case}
+                     'queues': zettide_vhost_scheduled_pool_queues,
+                     'mode': ('raw_nvme' if zettide_test_profile == 'vhost-spdk-nvme-fio' else 'pool'),
+                     'storage_transport': zettide_vhost_scheduled_pool_storage_transport | default('linux'),
+                     'fio_case': zettide_vhost_scheduled_pool_fio_case}
                     if zettide_test_profile in ['vhost-scheduled-pool-fio', 'vhost-spdk-nvme-fio'] else {} }}
               spdk_nvme_perf: >-
                 {{ {'io_size': 4096,
@@ -692,7 +698,10 @@
         - name: Fetch remote test results
           ansible.builtin.fetch:
             src: "{{ zettide_remote_workspace.path }}/results.tar.gz"
-            dest: "{{ zettide_results_root }}/{{ inventory_hostname }}-{{ ansible_facts['date_time']['iso8601_basic_short'] }}-{{ zettide_source_revision.stdout[:12] }}.tar.gz"
+            dest: >-
+              {{ zettide_results_root ~ '/' ~ inventory_hostname ~ '-' ~
+                 ansible_facts['date_time']['iso8601_basic_short'] ~ '-' ~
+                 zettide_source_revision.stdout[:12] ~ '.tar.gz' }}
             flat: true
           register: zettide_fetch_results
           when: zettide_archive_results.rc == 0

@@ -35,6 +35,34 @@ pub fn build(b: *std.Build) void {
     const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
 
+    const pool_data_benchmark_core = createCoreModule(
+        b,
+        target,
+        .ReleaseSafe,
+        false,
+        crc32c_dependency,
+    );
+    const pool_data_nvmf_args_test_module = b.createModule(.{
+        .root_source_file = b.path("test/spdk_pool_data_nvmf_args.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    const pool_data_nvmf_args_tests = b.addTest(.{
+        .root_module = pool_data_nvmf_args_test_module,
+    });
+    const run_pool_data_nvmf_args_tests = b.addRunArtifact(pool_data_nvmf_args_tests);
+    const pool_data_synthetic_storage_test_module = b.createModule(.{
+        .root_source_file = b.path("test/spdk_pool_data_synthetic_storage.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = pool_data_benchmark_core }},
+    });
+    const pool_data_synthetic_storage_tests = b.addTest(.{
+        .root_module = pool_data_synthetic_storage_test_module,
+    });
+    const run_pool_data_synthetic_storage_tests = b.addRunArtifact(pool_data_synthetic_storage_tests);
+
     if (enable_spdk) {
         const catalog_nvmf_benchmark_module = b.createModule(.{
             .root_source_file = b.path("test/spdk_catalog_nvmf_benchmark.zig"),
@@ -60,13 +88,6 @@ pub fn build(b: *std.Build) void {
         );
         catalog_nvmf_benchmark_step.dependOn(&install_catalog_nvmf_benchmark.step);
 
-        const pool_data_benchmark_core = createCoreModule(
-            b,
-            target,
-            .ReleaseSafe,
-            false,
-            crc32c_dependency,
-        );
         const pool_data_nvmf_benchmark_module = b.createModule(.{
             .root_source_file = b.path("test/spdk_pool_data_nvmf_benchmark.zig"),
             .target = target,
@@ -112,21 +133,13 @@ pub fn build(b: *std.Build) void {
             pool_data_nvmf_benchmark_step.dependOn(&install_profiler_force_link.step);
         }
 
-        const pool_data_nvmf_args_test_module = b.createModule(.{
-            .root_source_file = b.path("test/spdk_pool_data_nvmf_args.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        });
-        const pool_data_nvmf_args_tests = b.addTest(.{
-            .root_module = pool_data_nvmf_args_test_module,
-        });
-        const run_pool_data_nvmf_args_tests = b.addRunArtifact(pool_data_nvmf_args_tests);
         const pool_data_nvmf_benchmark_test_step = b.step(
             "test-nvmf-pool-data-benchmark",
-            "Test scheduled Pool data NVMe-oF benchmark arguments and worker compilation",
+            "Test scheduled Pool data NVMe-oF benchmark support",
         );
         pool_data_nvmf_benchmark_test_step.dependOn(&install_pool_data_nvmf_benchmark.step);
         pool_data_nvmf_benchmark_test_step.dependOn(&run_pool_data_nvmf_args_tests.step);
+        pool_data_nvmf_benchmark_test_step.dependOn(&run_pool_data_synthetic_storage_tests.step);
     }
 
     const run_cmd = b.addRunArtifact(exe);
@@ -139,6 +152,8 @@ pub fn build(b: *std.Build) void {
     const run_core_tests = b.addRunArtifact(core_tests);
     const unit_step = b.step("test-unit", "Run deterministic unit tests");
     unit_step.dependOn(&run_core_tests.step);
+    unit_step.dependOn(&run_pool_data_nvmf_args_tests.step);
+    unit_step.dependOn(&run_pool_data_synthetic_storage_tests.step);
 
     if (target.result.os.tag == .linux) {
         const nfs_backend_module = b.createModule(.{

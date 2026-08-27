@@ -4,17 +4,27 @@
 set -euo pipefail
 export LC_ALL=C
 
-[[ $# -eq 3 || $# -eq 5 ]] || {
-    echo "usage: scheduled-pool-nvmf-fio.sh CLI DEVICE SERIAL [DEVICE SERIAL]" >&2
-    exit 2
-}
-
-cli=$1
-physical_devices=("$2")
-expected_serials=("$3")
-if [[ $# -eq 5 ]]; then
-    physical_devices+=("$4")
-    expected_serials+=("$5")
+storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
+if [[ $storage_transport == synthetic ]]; then
+    [[ $# -eq 1 ]] || {
+        echo "usage: scheduled-pool-nvmf-fio.sh CLI" >&2
+        exit 2
+    }
+    cli=$1
+    physical_devices=()
+    expected_serials=()
+else
+    [[ $# -eq 3 || $# -eq 5 ]] || {
+        echo "usage: scheduled-pool-nvmf-fio.sh CLI DEVICE SERIAL [DEVICE SERIAL]" >&2
+        exit 2
+    }
+    cli=$1
+    physical_devices=("$2")
+    expected_serials=("$3")
+    if [[ $# -eq 5 ]]; then
+        physical_devices+=("$4")
+        expected_serials+=("$5")
+    fi
 fi
 physical_device_count=${#physical_devices[@]}
 member_count=$((physical_device_count * 3))
@@ -27,7 +37,6 @@ benchmark_driver=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER:-test/spdk-nvmf-fio.s
 benchmark_log_name=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME:-nvmf}
 lifecycle_profile=${ZETTIDE_SCHEDULED_POOL_PROFILE:-nvmf-scheduled-pool-rxe-fio}
 raw_windows=${ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS:-0}
-storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
 pcie_namespace_text=${ZETTIDE_POOL_DATA_PCIE_NAMESPACES:-}
 pcie_preparation_mode=${ZETTIDE_POOL_DATA_PCIE_PREPARATION_MODE:-create}
 benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
@@ -66,14 +75,35 @@ contains_forbidden_identity_character() {
     echo "raw window mode must be 0 or 1" >&2
     exit 2
 }
-[[ $storage_transport == linux || $storage_transport == spdk_nvme_pcie ]] || {
-    echo "storage transport must be linux or spdk_nvme_pcie" >&2
+[[ $storage_transport == linux || $storage_transport == spdk_nvme_pcie || $storage_transport == synthetic ]] || {
+    echo "storage transport must be linux, spdk_nvme_pcie, or synthetic" >&2
     exit 2
 }
 [[ $benchmark_mode == pool || $benchmark_mode == raw_nvme ]] || {
     echo "benchmark mode must be pool or raw_nvme" >&2
     exit 2
 }
+if [[ $storage_transport == synthetic ]]; then
+    [[ $benchmark_mode == pool && $raw_windows == 0 && -z $expected_pool_id &&
+        $benchmark_driver == test/spdk-vhost-user-blk-fio.sh ]] || {
+        echo "synthetic storage requires Pool vhost mode without devices or Pool metadata" >&2
+        exit 2
+    }
+    [[ -x $target ]] || { echo "target is unavailable" >&2; exit 2; }
+    if [[ $benchmark_driver != test/* || $benchmark_driver == *..* || ! -x $benchmark_driver ]]; then
+        echo "benchmark driver must be an executable repository-relative test/ path without .." >&2
+        exit 2
+    fi
+    [[ $benchmark_log_name =~ ^[a-z0-9-]+$ ]] || {
+        echo "benchmark log name must contain only lowercase letters, digits, and hyphens" >&2
+        exit 2
+    }
+    mkdir -p "$log_dir"
+    unset ZETTIDE_POOL_DATA_MEMBER_WINDOWS
+    export ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=$storage_transport
+    exec bash "$benchmark_driver" "$target" "$log_dir/$benchmark_log_name-ready" \
+        "$log_dir/$benchmark_log_name" "$read_policy"
+fi
 if [[ $storage_transport == spdk_nvme_pcie ]]; then
     [[ $physical_device_count -eq 2 && $raw_windows == 1 ]] || {
         echo "SPDK NVMe PCIe requires two physical devices and raw windows" >&2

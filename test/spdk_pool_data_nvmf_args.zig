@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const ReadPolicy = enum { first_available, quorum };
-pub const StorageTransport = enum { linux, spdk_nvme_pcie };
+pub const StorageTransport = enum { linux, spdk_nvme_pcie, synthetic };
 pub const PreparationMode = enum { none, create, validate };
 pub const BenchmarkMode = enum { pool, raw_nvme };
 pub const max_reactor_count = 16;
@@ -24,6 +24,7 @@ pub fn parseStorageTransport(text: ?[]const u8) !StorageTransport {
     const value = text orelse return .linux;
     if (std.mem.eql(u8, value, "linux")) return .linux;
     if (std.mem.eql(u8, value, "spdk_nvme_pcie")) return .spdk_nvme_pcie;
+    if (std.mem.eql(u8, value, "synthetic")) return .synthetic;
     return error.InvalidStorageTransport;
 }
 
@@ -185,11 +186,12 @@ test "read policy accepts only supported values" {
     try std.testing.expectError(error.InvalidReadPolicy, parseReadPolicy(2));
 }
 
-test "storage transport defaults to Linux and accepts PCIe" {
+test "storage transport defaults to Linux and accepts supported backends" {
     try std.testing.expectEqual(StorageTransport.linux, try parseStorageTransport(null));
     try std.testing.expectEqual(StorageTransport.linux, try parseStorageTransport("linux"));
     try std.testing.expectEqual(StorageTransport.spdk_nvme_pcie, try parseStorageTransport("spdk_nvme_pcie"));
-    for ([_][]const u8{ "", "pcie", "SPDK_NVME_PCIE" }) |value|
+    try std.testing.expectEqual(StorageTransport.synthetic, try parseStorageTransport("synthetic"));
+    for ([_][]const u8{ "", "pcie", "SPDK_NVME_PCIE", "dummy" }) |value|
         try std.testing.expectError(error.InvalidStorageTransport, parseStorageTransport(value));
 }
 
