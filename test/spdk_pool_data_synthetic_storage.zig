@@ -226,13 +226,15 @@ pub fn create(
     io: std.Io,
     read_policy: scheduled_device.ReadPolicy,
     read_path_metrics: ?*scheduled_device.ReadPathMetrics,
+    fill_first_available_reads: bool,
 ) !storage_api.Storage {
     const context = try allocator.create(Context);
     errdefer allocator.destroy(context);
     context.* = undefined;
     context.allocator = allocator;
     context.executor = .{};
-    try context.executor.init(io, read_policy == .quorum);
+    const fill_reads = read_policy == .quorum or fill_first_available_reads;
+    try context.executor.init(io, fill_reads);
     errdefer context.executor.stop();
 
     var geometries: [member_count]pool_blob_schedule.Geometry = undefined;
@@ -247,7 +249,7 @@ pub fn create(
         endpoint_context.* = .{
             .executor = &context.executor,
             .data_length = data_length,
-            .fill_reads = read_policy == .quorum,
+            .fill_reads = fill_reads,
         };
         endpoint.* = .{ .slot = entry.slot, .endpoint = endpoint_context.endpoint() };
     }
@@ -572,7 +574,7 @@ test "synthetic executor handles concurrent producers and slot reuse" {
 
 test "synthetic scheduled storage completes reads without touching buffers" {
     var metrics: scheduled_device.ReadPathMetrics = .{};
-    var storage = try create(std.testing.allocator, std.testing.io, .first_available, &metrics);
+    var storage = try create(std.testing.allocator, std.testing.io, .first_available, &metrics, false);
     defer storage.close(std.testing.io) catch unreachable;
 
     var buffer: [4096]u8 = @splat(0x5a);
@@ -592,8 +594,24 @@ test "synthetic scheduled storage completes reads without touching buffers" {
     try std.testing.expectEqual(@as(u64, 1), metrics.snapshot().async_submitted);
 }
 
+test "synthetic scheduled storage can fill first-available reads" {
+    var storage = try create(std.testing.allocator, std.testing.io, .first_available, null, true);
+    defer storage.close(std.testing.io) catch unreachable;
+
+    var buffer: [4096]u8 = @splat(0x5a);
+    var result: [1]storage_api.ReadResult = undefined;
+    try storage.readManyAt(
+        std.testing.io,
+        &.{.{ .buffer = &buffer, .offset = 0 }},
+        &result,
+    );
+    try std.testing.expectEqual(@as(usize, buffer.len), result[0].amount);
+    try std.testing.expectEqual(@as(?anyerror, null), result[0].failure);
+    try std.testing.expect(std.mem.allEqual(u8, &buffer, 0));
+}
+
 test "synthetic scheduled storage supplies matching quorum data" {
-    var storage = try create(std.testing.allocator, std.testing.io, .quorum, null);
+    var storage = try create(std.testing.allocator, std.testing.io, .quorum, null, false);
     defer storage.close(std.testing.io) catch unreachable;
 
     var buffer: [4096]u8 = @splat(0x5a);

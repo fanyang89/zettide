@@ -611,7 +611,13 @@ fn run(
     var read_path_metrics: zettide.v3.pool_scheduled_data_device.ReadPathMetrics = .{};
     var pool_storage: zettide.v3.storage.Storage = undefined;
     if (storage_transport == .synthetic) {
-        pool_storage = try synthetic_storage.create(allocator, io, read_policy, &read_path_metrics);
+        pool_storage = try synthetic_storage.create(
+            allocator,
+            io,
+            read_policy,
+            &read_path_metrics,
+            frontend == .nvmf,
+        );
     } else {
         if (pcie_probe) {
             for (physical_storages[0..device_count], 0..) |*storage, index| {
@@ -810,6 +816,7 @@ fn run(
                     .submit = submit_callback,
                     .block_count = pool_storage.capacity() / block_size,
                     .max_io_blocks = max_batch_bytes / block_size,
+                    .read_buffers_unchanged = storage_transport == .synthetic and read_policy == .first_available,
                 };
                 var bdev_name_buffer: [64]u8 = undefined;
                 const bdev_name = try std.fmt.bufPrint(&bdev_name_buffer, "ZettideScheduledPoolData{d}", .{index});

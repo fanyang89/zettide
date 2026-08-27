@@ -9,6 +9,7 @@ pub const Backend = struct {
     block_count: u64,
     write_unit_blocks: u32 = 1,
     max_io_blocks: u32 = 256,
+    read_buffers_unchanged: bool = false,
 };
 
 /// Owns an SPDK bdev backed by an external asynchronous request provider.
@@ -35,6 +36,7 @@ pub const ProviderBdev = struct {
         options.max_io_blocks = backend.max_io_blocks;
         options.backend_context = backend.context;
         options.submit = backend.submit;
+        options.read_buffers_unchanged = backend.read_buffers_unchanged;
 
         var handle: ?*c.struct_zettide_spdk_bdev_provider = null;
         try statusError(c.zettide_spdk_bdev_provider_create(@ptrCast(runtime), &options, &handle));

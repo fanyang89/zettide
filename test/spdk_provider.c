@@ -1,6 +1,10 @@
 #include "spdk/bdev_dispatcher.h"
 #include "spdk/bdev_provider.h"
 
+#include "spdk/bdev.h"
+#include "spdk/thread.h"
+
+#include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -9,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/uio.h>
 
 enum {
 	block_size = 4096,
@@ -53,6 +58,131 @@ struct delete_waiter {
 	bool completed;
 	int status;
 };
+
+struct readv_waiter {
+	pthread_mutex_t mutex;
+	pthread_cond_t condition;
+	const char *bdev_name;
+	struct iovec *iovs;
+	int iov_count;
+	uint64_t offset;
+	uint64_t length;
+	struct spdk_bdev_desc *descriptor;
+	struct spdk_io_channel *channel;
+	bool completed;
+	int status;
+};
+
+static void
+readv_finish(struct readv_waiter *waiter, int status)
+{
+	int rc;
+
+	if (waiter->channel != NULL) {
+		spdk_put_io_channel(waiter->channel);
+		waiter->channel = NULL;
+	}
+	if (waiter->descriptor != NULL) {
+		spdk_bdev_close(waiter->descriptor);
+		waiter->descriptor = NULL;
+	}
+	rc = pthread_mutex_lock(&waiter->mutex);
+	assert(rc == 0);
+	waiter->status = status;
+	waiter->completed = true;
+	rc = pthread_cond_signal(&waiter->condition);
+	assert(rc == 0);
+	rc = pthread_mutex_unlock(&waiter->mutex);
+	assert(rc == 0);
+}
+
+static void
+readv_complete(struct spdk_bdev_io *bdev_io, bool success, void *context)
+{
+	struct readv_waiter *waiter = context;
+
+	spdk_bdev_free_io(bdev_io);
+	readv_finish(waiter, success ? 0 : -EIO);
+}
+
+static void
+readv_event(enum spdk_bdev_event_type type, struct spdk_bdev *bdev, void *context)
+{
+	(void)type;
+	(void)bdev;
+	(void)context;
+}
+
+static void
+readv_start(void *context)
+{
+	struct readv_waiter *waiter = context;
+	int status;
+
+	status = spdk_bdev_open_ext(waiter->bdev_name, false, readv_event, NULL,
+			&waiter->descriptor);
+	if (status == 0) {
+		waiter->channel = spdk_bdev_get_io_channel(waiter->descriptor);
+		if (waiter->channel == NULL) {
+			status = -ENOMEM;
+		}
+	}
+	if (status == 0) {
+		status = spdk_bdev_readv(waiter->descriptor, waiter->channel,
+				waiter->iovs, waiter->iov_count, waiter->offset,
+				waiter->length, readv_complete, waiter);
+	}
+	if (status != 0) {
+		readv_finish(waiter, status);
+	}
+}
+
+static int
+provider_readv(struct zettide_spdk_runtime *runtime, const char *bdev_name,
+		struct iovec *iovs, int iov_count, uint64_t offset, uint64_t length)
+{
+	struct readv_waiter waiter = {
+		.bdev_name = bdev_name,
+		.iovs = iovs,
+		.iov_count = iov_count,
+		.offset = offset,
+		.length = length,
+	};
+	struct spdk_thread *owner;
+	int status;
+	int rc;
+
+	rc = pthread_mutex_init(&waiter.mutex, NULL);
+	if (rc != 0) {
+		return -rc;
+	}
+	rc = pthread_cond_init(&waiter.condition, NULL);
+	if (rc != 0) {
+		(void)pthread_mutex_destroy(&waiter.mutex);
+		return -rc;
+	}
+	status = zettide_spdk_runtime_acquire(runtime, &owner);
+	if (status == 0) {
+		rc = pthread_mutex_lock(&waiter.mutex);
+		assert(rc == 0);
+		status = spdk_thread_send_msg(owner, readv_start, &waiter);
+		while (status == 0 && !waiter.completed) {
+			rc = pthread_cond_wait(&waiter.condition, &waiter.mutex);
+			assert(rc == 0);
+		}
+		if (status == 0) {
+			status = waiter.status;
+		}
+		rc = pthread_mutex_unlock(&waiter.mutex);
+		assert(rc == 0);
+		zettide_spdk_runtime_release(runtime);
+	}
+	rc = pthread_cond_destroy(&waiter.condition);
+	assert(rc == 0);
+	rc = pthread_mutex_destroy(&waiter.mutex);
+	assert(rc == 0);
+	return status;
+}
 
 static int
 execute_request(struct test_backend *backend,
@@ -357,6 +487,8 @@ main(void)
 	struct delete_waiter delete_waiter;
 	uint8_t *write_buffer = NULL;
 	uint8_t *read_buffer = NULL;
+	uint8_t *readv_buffer = NULL;
+	struct iovec read_iovs[3];
 	char reactor_mask[32];
 	int cpu = first_allowed_cpu();
 	int status;
@@ -414,7 +546,8 @@ main(void)
 	}
 	write_buffer = zettide_spdk_dma_zmalloc(2 * block_size, geometry.buffer_alignment);
 	read_buffer = zettide_spdk_dma_zmalloc(2 * block_size, geometry.buffer_alignment);
-	if (write_buffer == NULL || read_buffer == NULL) {
+	readv_buffer = zettide_spdk_dma_zmalloc(2 * block_size, geometry.buffer_alignment);
+	if (write_buffer == NULL || read_buffer == NULL || readv_buffer == NULL) {
 		status = -ENOMEM;
 		goto done;
 	}
@@ -435,6 +568,18 @@ main(void)
 		backend.last_write_buffer != write_buffer ||
 		backend.last_read_buffer != read_buffer ||
 		backend.flush_count != 1) {
+		status = status != 0 ? status : -EIO;
+		goto done;
+	}
+	read_iovs[0] = (struct iovec){ .iov_base = readv_buffer, .iov_len = 1024 };
+	read_iovs[1] = (struct iovec){ .iov_base = readv_buffer + 1024, .iov_len = 3072 };
+	read_iovs[2] = (struct iovec){ .iov_base = readv_buffer + block_size,
+		.iov_len = block_size };
+	memset(readv_buffer, 0, 2 * block_size);
+	status = provider_readv(runtime, provider_opts.name, read_iovs, 3,
+			3 * block_size, 2 * block_size);
+	if (status != 0 || memcmp(write_buffer, readv_buffer, 2 * block_size) != 0 ||
+		backend.last_read_buffer == readv_buffer) {
 		status = status != 0 ? status : -EIO;
 		goto done;
 	}
@@ -478,7 +623,21 @@ main(void)
 		status = close_status != 0 ? close_status : delete_status;
 	}
 	if (status == 0) {
+		provider_opts.read_buffers_unchanged = true;
 		status = zettide_spdk_bdev_provider_create(runtime, &provider_opts, &provider);
+	}
+	if (status == 0) {
+		memset(readv_buffer, 0xa5, 2 * block_size);
+		status = provider_readv(runtime, provider_opts.name, read_iovs, 3,
+				3 * block_size, 2 * block_size);
+		if (status == 0) {
+			for (index = 0; index < 2 * block_size; index++) {
+				if (readv_buffer[index] != 0xa5) {
+					status = -EIO;
+					break;
+				}
+			}
+		}
 	}
 	if (status == 0) {
 		status = zettide_spdk_bdev_provider_delete_wait(provider);
@@ -488,6 +647,7 @@ main(void)
 	}
 
 done:
+	zettide_spdk_dma_free(readv_buffer);
 	zettide_spdk_dma_free(read_buffer);
 	zettide_spdk_dma_free(write_buffer);
 	if (dispatcher != NULL) {
