@@ -727,6 +727,10 @@ pub const Device = struct {
                     _ = metrics.single_operation_items.fetchAdd(item_count, .monotonic);
                 }
             }
+            switch (operations[0]) {
+                .read, .read_many => return self.runReadOperations(operations, member_indexes, errors),
+                else => {},
+            }
             runOperation(self.members[member_indexes[0]].endpoint, operations[0], &errors[0]);
             return;
         }
@@ -850,14 +854,19 @@ pub const Device = struct {
             fallback_indexes[fallback_count] = index;
             fallback_count += 1;
         }
+        var fallback_run_error: ?anyerror = null;
         if (fallback_count != 0) {
-            try self.runConcurrentOperations(
+            self.runConcurrentOperations(
                 fallback_operations[0..fallback_count],
                 fallback_members[0..fallback_count],
                 fallback_errors[0..fallback_count],
-            );
-            for (fallback_indexes[0..fallback_count], fallback_errors[0..fallback_count]) |index, failure|
-                errors[index] = failure;
+            ) catch |err| {
+                fallback_run_error = err;
+            };
+            if (fallback_run_error == null) {
+                for (fallback_indexes[0..fallback_count], fallback_errors[0..fallback_count]) |index, failure|
+                    errors[index] = failure;
+            }
         }
         for (operations, errors, states[0..operations.len]) |operation, *result, *state| {
             if (!state.submitted) continue;
@@ -878,6 +887,7 @@ pub const Device = struct {
                 else => unreachable,
             }
         }
+        if (fallback_run_error) |err| return err;
     }
 
     fn freezeWrites(self: *Device) void {
@@ -1314,6 +1324,7 @@ test "scheduled first-available batches rotate while preserving member batch dep
     var endpoints: [3]MemberEndpoint = undefined;
     try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
     defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    for (&contexts) |*context| context.supports_async_reads = true;
     var metrics: ReadPathMetrics = .{};
     var device = try Device.initOptions(
         std.testing.allocator,
@@ -1349,7 +1360,9 @@ test "scheduled first-available batches rotate while preserving member batch dep
     try std.testing.expectEqual(@as(u64, 4), snapshot.single_operation_batches);
     try std.testing.expectEqual(@as(u64, 8), snapshot.single_operation_items);
     try std.testing.expectEqual(@as(u64, 0), snapshot.multi_operation_batches);
-    try std.testing.expectEqual(@as(u64, 0), snapshot.async_submit_attempts);
+    try std.testing.expectEqual(@as(u64, 4), snapshot.async_submit_attempts);
+    try std.testing.expectEqual(@as(u64, 4), snapshot.async_submitted);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.async_fallbacks);
 }
 
 test "scheduled first-available batch retries only failed and short reads" {
