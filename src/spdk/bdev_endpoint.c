@@ -192,6 +192,38 @@ zettide_spdk_bdev_get_name(const struct zettide_spdk_bdev_endpoint *endpoint)
 	return spdk_bdev_get_name(endpoint->bdev);
 }
 
+bool
+zettide_spdk_bdev_buffer_is_dma_capable(const struct zettide_spdk_bdev_endpoint *endpoint,
+		const void *buffer, uint64_t length)
+{
+	uintptr_t address = (uintptr_t)buffer;
+	uint64_t remaining = length;
+	uint32_t alignment;
+
+	if (endpoint == NULL || buffer == NULL || length == 0 || !on_owner_thread(endpoint)) {
+		return false;
+	}
+	alignment = endpoint->geometry.buffer_alignment;
+	if ((alignment > 1 && address % alignment != 0) ||
+		length > (uint64_t)(UINTPTR_MAX - address)) {
+		return false;
+	}
+	while (remaining > 0) {
+		uint64_t translated = remaining;
+
+		if (spdk_vtophys((void *)address, &translated) == SPDK_VTOPHYS_ERROR ||
+			translated == 0) {
+			return false;
+		}
+		if (translated > remaining) {
+			translated = remaining;
+		}
+		address += (uintptr_t)translated;
+		remaining -= translated;
+	}
+	return true;
+}
+
 static int
 validate_range(const struct zettide_spdk_bdev_endpoint *endpoint, const void *buffer,
 		uint64_t offset, uint64_t length, bool write)
@@ -413,6 +445,12 @@ zettide_spdk_bdev_flush(struct zettide_spdk_bdev_endpoint *endpoint,
 	}
 	return submit_request(endpoint, REQUEST_FLUSH, NULL, offset, length,
 			callback, callback_context);
+}
+
+void *
+zettide_spdk_dma_malloc(size_t size, size_t alignment)
+{
+	return spdk_dma_malloc(size, alignment, NULL);
 }
 
 void *

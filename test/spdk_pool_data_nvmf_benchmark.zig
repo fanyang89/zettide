@@ -757,22 +757,34 @@ fn run(
         var submissions: u64 = 0;
         var completions: u64 = 0;
         var queue_full: u64 = 0;
+        var direct_batches: u64 = 0;
+        var direct_bytes: u64 = 0;
+        var bounce_batches: u64 = 0;
+        var bounce_bytes: u64 = 0;
         if (storage_transport == .synthetic) {
             const stats = pool_storage.transportStats(io);
             submissions +|= stats.async_submissions;
             completions +|= stats.async_completions;
             queue_full +|= stats.async_queue_full;
+            direct_batches +|= stats.read_direct_batches;
+            direct_bytes +|= stats.read_direct_bytes;
+            bounce_batches +|= stats.read_bounce_batches;
+            bounce_bytes +|= stats.read_bounce_bytes;
         } else {
             for (physical_storages[0..physical_count]) |*storage| {
                 const stats = storage.transportStats(io);
                 submissions +|= stats.async_submissions;
                 completions +|= stats.async_completions;
                 queue_full +|= stats.async_queue_full;
+                direct_batches +|= stats.read_direct_batches;
+                direct_bytes +|= stats.read_direct_bytes;
+                bounce_batches +|= stats.read_bounce_batches;
+                bounce_bytes +|= stats.read_bounce_bytes;
             }
         }
         std.debug.print(
-            "pool_async_metrics submissions={d} completions={d} queue_full={d}\n",
-            .{ submissions, completions, queue_full },
+            "pool_async_metrics submissions={d} completions={d} queue_full={d} direct_batches={d} direct_bytes={d} bounce_batches={d} bounce_bytes={d}\n",
+            .{ submissions, completions, queue_full, direct_batches, direct_bytes, bounce_batches, bounce_bytes },
         );
     }
     if (pool_storage.capacity() == 0 or pool_storage.capacity() % block_size != 0)
