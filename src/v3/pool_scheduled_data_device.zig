@@ -10,6 +10,12 @@ pub const max_write_count: usize = 32;
 pub const max_write_size: usize = 1024 * 1024;
 pub const max_span_count: usize = 64;
 
+fn uninitialized(comptime T: type) T {
+    // Skip ReleaseSafe poisoning when callers initialize every consumed element.
+    @setRuntimeSafety(false);
+    return undefined;
+}
+
 pub const ReadPolicy = enum {
     first_available,
     quorum,
@@ -405,7 +411,9 @@ pub const Device = struct {
         const preferred_lane = self.read_sequence.fetchAdd(1, .monotonic) % pool_blob_schedule.replica_count;
         var available_counts: [max_read_count]u8 = @splat(0);
         var available_lanes: [max_read_count][pool_blob_schedule.replica_count]u8 = undefined;
-        var request_locations: [max_read_count][pool_blob_schedule.replica_count]pool_blob_schedule.Location = undefined;
+        var request_locations = uninitialized(
+            [max_read_count][pool_blob_schedule.replica_count]pool_blob_schedule.Location,
+        );
         var attempts: [max_read_count]u8 = @splat(0);
         var resolved: [max_read_count]bool = @splat(false);
         var last_errors: [max_read_count]anyerror = @splat(error.ReplicaUnavailable);
@@ -422,8 +430,12 @@ pub const Device = struct {
         }
 
         while (true) {
-            var member_reads: [pool_blob_schedule.max_member_count][max_read_count]storage_api.Read = undefined;
-            var member_results: [pool_blob_schedule.max_member_count][max_read_count]storage_api.ReadResult = undefined;
+            var member_reads = uninitialized(
+                [pool_blob_schedule.max_member_count][max_read_count]storage_api.Read,
+            );
+            var member_results = uninitialized(
+                [pool_blob_schedule.max_member_count][max_read_count]storage_api.ReadResult,
+            );
             var member_targets: [pool_blob_schedule.max_member_count][max_read_count]Target = undefined;
             var member_read_counts: [pool_blob_schedule.max_member_count]usize = @splat(0);
             var pending_count: usize = 0;
