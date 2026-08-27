@@ -32,6 +32,8 @@ struct controller_command {
 	bool completed;
 	int status;
 	struct zettide_spdk_vhost_blk_controller *controller;
+	uint32_t coalescing_delay_base_us;
+	uint32_t coalescing_iops_threshold;
 };
 
 static void
@@ -76,6 +78,22 @@ run_remove(void *context)
 	device = spdk_vhost_dev_find(controller->name);
 	spdk_vhost_unlock();
 	status = device == NULL ? -ENODEV : spdk_vhost_dev_remove(device);
+	complete_command(command, status);
+}
+
+static void
+run_set_coalescing(void *context)
+{
+	struct controller_command *command = context;
+	struct zettide_spdk_vhost_blk_controller *controller = command->controller;
+	struct spdk_vhost_dev *device;
+	int status;
+
+	spdk_vhost_lock();
+	device = spdk_vhost_dev_find(controller->name);
+	status = device == NULL ? -ENODEV : spdk_vhost_set_coalescing(device,
+			command->coalescing_delay_base_us, command->coalescing_iops_threshold);
+	spdk_vhost_unlock();
 	complete_command(command, status);
 }
 
@@ -285,6 +303,34 @@ zettide_spdk_vhost_blk_controller_remove(
 		return -rc;
 	}
 	status = remove_controller(controller);
+	rc = pthread_setcancelstate(old_cancel_state, &ignored_cancel_state);
+	assert(rc == 0);
+	return status;
+}
+
+int
+zettide_spdk_vhost_blk_controller_set_coalescing(
+		struct zettide_spdk_vhost_blk_controller *controller,
+		uint32_t delay_base_us, uint32_t iops_threshold)
+{
+	struct controller_command command = {
+		.controller = controller,
+		.coalescing_delay_base_us = delay_base_us,
+		.coalescing_iops_threshold = iops_threshold,
+	};
+	int old_cancel_state;
+	int ignored_cancel_state;
+	int status;
+	int rc;
+
+	if (controller == NULL) {
+		return -EINVAL;
+	}
+	rc = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_cancel_state);
+	if (rc != 0) {
+		return -rc;
+	}
+	status = dispatch_command(&command, run_set_coalescing);
 	rc = pthread_setcancelstate(old_cancel_state, &ignored_cancel_state);
 	assert(rc == 0);
 	return status;

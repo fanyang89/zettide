@@ -5,6 +5,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,9 @@ int zettide_spdk_vhost_blk_controller_create(struct zettide_spdk_runtime *runtim
 		struct zettide_spdk_vhost_blk_controller **controller_out);
 int zettide_spdk_vhost_blk_controller_remove(
 		struct zettide_spdk_vhost_blk_controller *controller);
+int zettide_spdk_vhost_blk_controller_set_coalescing(
+		struct zettide_spdk_vhost_blk_controller *controller,
+		uint32_t delay_base_us, uint32_t iops_threshold);
 const char *zettide_spdk_vhost_blk_controller_get_socket_path(
 		const struct zettide_spdk_vhost_blk_controller *controller);
 bool zettide_spdk_vhost_blk_controller_is_ready(

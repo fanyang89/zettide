@@ -121,6 +121,8 @@ fn run(socket_directory: [*:0]const u8) !void {
     );
     defer first.close() catch unreachable;
     try std.testing.expect(first.socketPath().len != 0);
+    try std.testing.expectError(error.InvalidExportOptions, first.setCoalescing(4, 99));
+    try first.setCoalescing(4, 10_000);
 
     try std.testing.expectError(error.ExportAlreadyExists, export_api.VhostBlockExport.create(
         std.heap.c_allocator,

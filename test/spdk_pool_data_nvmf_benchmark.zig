@@ -459,6 +459,13 @@ fn run(
     const vhost_inline_batches = (try args.parseOptionalFlag(
         if (c.getenv("ZETTIDE_VHOST_INLINE_BATCHES")) |value| std.mem.span(value) else null,
     )) orelse (vhost_worker_count > 1);
+    const vhost_coalescing = if (frontend == .vhost)
+        try args.parseVhostCoalescing(
+            if (c.getenv("ZETTIDE_VHOST_COALESCING_DELAY_BASE_US")) |value| std.mem.span(value) else null,
+            if (c.getenv("ZETTIDE_VHOST_COALESCING_IOPS_THRESHOLD")) |value| std.mem.span(value) else null,
+        )
+    else
+        null;
     const pcie_probe = (try args.parseOptionalFlag(
         if (c.getenv("ZETTIDE_POOL_DATA_PCIE_PROBE")) |value| std.mem.span(value) else null,
     )) orelse false;
@@ -532,7 +539,7 @@ fn run(
     defer if (owned_runtime_config) |config| allocator.free(config);
     const selected_runtime_config = owned_runtime_config orelse
         if (transport == .rdma) rdma_runtime_config else runtime_config;
-    std.debug.print("target-stage runtime start mode={s} frontend={s} storage_transport={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
+    std.debug.print("target-stage runtime start mode={s} frontend={s} storage_transport={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} coalescing_delay_base_us={?d} coalescing_iops_threshold={?d} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
         @tagName(benchmark_mode),
         frontend_text,
         @tagName(storage_transport),
@@ -541,6 +548,8 @@ fn run(
         vhost_controller_count,
         vhost_worker_count,
         vhost_inline_batches,
+        if (vhost_coalescing) |coalescing| coalescing.delay_base_us else null,
+        if (vhost_coalescing) |coalescing| coalescing.iops_threshold else null,
         concurrent_group_count,
         @tagName(raw_storage_mode),
         sqpoll_cpu_base,
@@ -594,6 +603,13 @@ fn run(
             if (status != 0) return error.RawNvmeVhostControllerCreateFailed;
             controller_count += 1;
             const handle = controller.* orelse return error.UnexpectedControllerStatus;
+            if (vhost_coalescing) |coalescing| {
+                if (c.zettide_spdk_vhost_blk_controller_set_coalescing(
+                    handle,
+                    coalescing.delay_base_us,
+                    coalescing.iops_threshold,
+                ) != 0) return error.VhostCoalescingConfigurationFailed;
+            }
             for (0..1000) |_| {
                 if (c.zettide_spdk_vhost_blk_controller_is_ready(handle)) break;
                 io.sleep(.fromMilliseconds(10), .awake) catch return error.VhostControllerReadyWaitFailed;
@@ -844,6 +860,12 @@ fn run(
                     },
                 );
                 export_count += 1;
+                if (vhost_coalescing) |coalescing| {
+                    try exports[index].setCoalescing(
+                        coalescing.delay_base_us,
+                        coalescing.iops_threshold,
+                    );
+                }
                 std.debug.print("target-stage export ready frontend=vhost index={d} cpumask={s} socket={s}\n", .{ index, controller_mask, exports[index].socketPath() });
             }
             try publishReadyAndWait(io, ready_path, &signals);

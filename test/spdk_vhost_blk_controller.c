@@ -102,6 +102,16 @@ main(int argc, char **argv)
 		status = -EIO;
 		goto cleanup;
 	}
+	status = expect_status("invalid controller coalescing",
+			zettide_spdk_vhost_blk_controller_set_coalescing(controller, 4, 99), -EINVAL);
+	if (status != 0) {
+		goto cleanup;
+	}
+	status = zettide_spdk_vhost_blk_controller_set_coalescing(controller, 4, 10000);
+	if (status != 0) {
+		fprintf(stderr, "controller coalescing configuration failed: %d\n", status);
+		goto cleanup;
+	}
 	status = zettide_spdk_vhost_blk_controller_create(runtime, &controller_opts, &unexpected);
 	if (status >= 0 || unexpected != NULL) {
 		fprintf(stderr, "duplicate controller create unexpectedly succeeded\n");
