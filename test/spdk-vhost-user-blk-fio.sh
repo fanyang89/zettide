@@ -729,6 +729,8 @@ execute_case() {
     local deadline
 
     scp "${scp_options[@]}" "$job_file" zettide@127.0.0.1:/tmp/zettide-fio.job
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+        'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-before.txt"
     start_monitors "$name"
     if [[ -n $perf_case && $name == "$perf_case" ]]; then
         perf_data=$log_dir/perf-$name.data
@@ -776,6 +778,8 @@ execute_case() {
     fi
     stop_monitors
     cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+        'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-after.txt"
     ((status == 0)) || return "$status"
     jq -e '.jobs | length > 0 and all(.error == 0)' "$result" >/dev/null
     if [[ $benchmark_mode == raw_nvme ]]; then
