@@ -259,6 +259,7 @@
       RedHat:
         - autoconf
         - automake
+        - cmake
         - elfutils-libelf-devel
         - fio
         - fuse3-devel
@@ -282,6 +283,7 @@
         - autoconf
         - automake
         - build-essential
+        - cmake
         - fio
         - libfuse3-dev
         - jq
