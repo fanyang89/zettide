@@ -13,6 +13,12 @@ const executor_lane_count = 4;
 const queue_capacity = 256;
 const max_reads = scheduled_device.max_read_count;
 
+fn uninitialized(comptime T: type) T {
+    // Skip ReleaseSafe poisoning when callers initialize every consumed element.
+    @setRuntimeSafety(false);
+    return undefined;
+}
+
 const AsyncReadTask = struct {
     reads: [max_reads]storage_api.Read = undefined,
     read_count: usize,
@@ -90,24 +96,25 @@ const AsyncLane = struct {
         }
     }
 
-    fn dequeue(self: *AsyncLane) ?AsyncReadTask {
+    fn dequeue(self: *AsyncLane, task: *AsyncReadTask) bool {
         const position = self.dequeue_position;
         const slot = &self.slots[position % queue_capacity];
-        if (slot.sequence.load(.acquire) != position +% 1) return null;
-        const task = slot.task;
+        if (slot.sequence.load(.acquire) != position +% 1) return false;
+        task.* = slot.task;
         self.dequeue_position = position +% 1;
         slot.sequence.store(position +% queue_capacity, .release);
-        return task;
+        return true;
     }
 
     fn run(self: *AsyncLane) void {
+        var task = uninitialized(AsyncReadTask);
         while (true) {
-            if (self.dequeue()) |task| {
+            if (self.dequeue(&task)) {
                 self.execute(task);
                 continue;
             }
             self.wake.reset();
-            if (self.dequeue()) |task| {
+            if (self.dequeue(&task)) {
                 self.execute(task);
                 continue;
             }
@@ -463,6 +470,7 @@ test "synthetic lane rejects a full queue and reuses every slot" {
     lane.resetQueue();
     var completion_context: u8 = 0;
     var results: [0]storage_api.ReadResult = .{};
+    var task = uninitialized(AsyncReadTask);
 
     for (0..2) |round| {
         for (0..queue_capacity) |index| {
@@ -486,13 +494,13 @@ test "synthetic lane rejects a full queue and reuses every slot" {
             },
         }));
         for (0..queue_capacity) |index| {
-            const task = lane.dequeue() orelse return error.MissingQueuedTask;
+            if (!lane.dequeue(&task)) return error.MissingQueuedTask;
             try std.testing.expectEqual(
                 @as(u64, @intCast(round * queue_capacity + index)),
                 task.data_length,
             );
         }
-        try std.testing.expectEqual(@as(?AsyncReadTask, null), lane.dequeue());
+        try std.testing.expect(!lane.dequeue(&task));
     }
 }
 

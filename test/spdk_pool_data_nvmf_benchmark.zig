@@ -5,6 +5,12 @@ const synthetic_storage = @import("spdk_pool_data_synthetic_storage.zig");
 
 const c = @import("spdk_c");
 
+fn uninitialized(comptime T: type) T {
+    // Skip ReleaseSafe poisoning when callers initialize every consumed element.
+    @setRuntimeSafety(false);
+    return undefined;
+}
+
 const block_size = 4096;
 const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
@@ -251,7 +257,9 @@ const Worker = struct {
                 continue;
             }
 
-            var batch: ReadGroup = .{};
+            var batch: ReadGroup = .{
+                .queued = uninitialized([max_batch_requests]Queued),
+            };
             batch.queued[0] = queued;
             batch.count = 1;
             var total_bytes = queued.request.length;
@@ -293,9 +301,9 @@ const Worker = struct {
     }
 
     fn executeReadBatch(self: *Worker, batch: ReadGroup) void {
-        var reads: [max_batch_requests]zettide.v3.storage.Read = undefined;
-        var results: [max_batch_requests]zettide.v3.storage.ReadResult = undefined;
-        var statuses: [max_batch_requests]c_int = undefined;
+        var reads = uninitialized([max_batch_requests]zettide.v3.storage.Read);
+        var results = uninitialized([max_batch_requests]zettide.v3.storage.ReadResult);
+        var statuses = uninitialized([max_batch_requests]c_int);
         for (batch.queued[0..batch.count], reads[0..batch.count]) |queued, *read| {
             const request = queued.request;
             read.* = .{

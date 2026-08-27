@@ -807,7 +807,7 @@ pub const Device = struct {
             }
         };
         std.debug.assert(operations.len <= pool_blob_schedule.max_member_count);
-        var states: [pool_blob_schedule.max_member_count]State = undefined;
+        var states = uninitialized([pool_blob_schedule.max_member_count]State);
         var fallback: [pool_blob_schedule.max_member_count]bool = @splat(false);
         for (operations, member_indexes, errors, states[0..operations.len], fallback[0..operations.len]) |
             operation,
@@ -817,7 +817,11 @@ pub const Device = struct {
             *use_fallback,
         | {
             result.* = null;
-            state.* = .{ .io = self.io };
+            state.* = .{
+                .io = self.io,
+                .singleton_read = uninitialized([1]storage_api.Read),
+                .singleton_result = uninitialized([1]storage_api.ReadResult),
+            };
             const endpoint = self.members[member_index].endpoint;
             if (self.read_path_metrics) |metrics|
                 _ = metrics.async_submit_attempts.fetchAdd(1, .monotonic);
@@ -1128,6 +1132,43 @@ test "scheduled reads submit member batches asynchronously" {
     try std.testing.expectEqual(@as(u64, @intCast(reads.len)), snapshot.multi_operation_items);
     try std.testing.expectEqual(@as(u64, @intCast(submit_count)), snapshot.async_submit_attempts);
     try std.testing.expectEqual(@as(u64, @intCast(submit_count)), snapshot.async_submitted);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.async_fallbacks);
+    try std.testing.expectEqual(@as(u64, 0), snapshot.async_submit_errors);
+}
+
+test "scheduled quorum scalar read uses asynchronous member submissions" {
+    const plan = try testPlan(3, 4096, 4);
+    var contexts: [3]TestEndpoint = undefined;
+    var endpoints: [3]MemberEndpoint = undefined;
+    try initTestEndpoints(std.testing.allocator, &contexts, &endpoints, plan);
+    defer deinitTestEndpoints(std.testing.allocator, &contexts);
+    for (&contexts) |*context| context.supports_async_reads = true;
+    var metrics: ReadPathMetrics = .{};
+    var device = try Device.initOptions(
+        std.testing.allocator,
+        std.testing.io,
+        &endpoints,
+        plan,
+        .{ .read_policy = .quorum, .read_path_metrics = &metrics },
+    );
+    for (0..pool_blob_schedule.replica_count) |lane|
+        @memset(mappedBytes(&device, &contexts, 0, lane), 0x5a);
+
+    var output: [4096]u8 = undefined;
+    try std.testing.expectEqual(output.len, try device.readAt(&output, 0));
+    try std.testing.expect(std.mem.allEqual(u8, &output, 0x5a));
+
+    var submit_count: usize = 0;
+    var scalar_read_count: usize = 0;
+    for (&contexts) |*context| {
+        submit_count += context.async_submit_calls.load(.monotonic);
+        scalar_read_count += context.read_calls.load(.monotonic);
+    }
+    try std.testing.expectEqual(@as(usize, 2), submit_count);
+    try std.testing.expectEqual(@as(usize, 0), scalar_read_count);
+    const snapshot = metrics.snapshot();
+    try std.testing.expectEqual(@as(u64, 2), snapshot.async_submit_attempts);
+    try std.testing.expectEqual(@as(u64, 2), snapshot.async_submitted);
     try std.testing.expectEqual(@as(u64, 0), snapshot.async_fallbacks);
     try std.testing.expectEqual(@as(u64, 0), snapshot.async_submit_errors);
 }
