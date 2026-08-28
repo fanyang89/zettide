@@ -4,9 +4,30 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer");
+    const test_step = addComponent(b, target, optimize, sanitize_thread, "", "test");
 
+    const fmt = b.addFmt(.{
+        .paths = &.{ "build.zig", "build.zig.zon", "src", "tests" },
+        .check = true,
+    });
+    const fmt_step = b.step("fmt-check", "Check Zig formatting");
+    fmt_step.dependOn(&fmt.step);
+
+    const ci_step = b.step("ci", "Run local CI checks");
+    ci_step.dependOn(fmt_step);
+    ci_step.dependOn(test_step);
+}
+
+pub fn addComponent(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitize_thread: ?bool,
+    base_dir: []const u8,
+    test_step_name: []const u8,
+) *std.Build.Step {
     const module = b.addModule("zettide_cawfs", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = componentPath(b, base_dir, "src/root.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = sanitize_thread,
@@ -22,12 +43,12 @@ pub fn build(b: *std.Build) void {
         .root_module = module,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step(test_step_name, "Run cawfs tests");
     test_step.dependOn(&run_unit_tests.step);
 
     const integration_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/root.zig"),
+            .root_source_file = componentPath(b, base_dir, "tests/root.zig"),
             .target = target,
             .optimize = optimize,
             .sanitize_thread = sanitize_thread,
@@ -35,15 +56,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(integration_tests).step);
+    return test_step;
+}
 
-    const fmt = b.addFmt(.{
-        .paths = &.{ "build.zig", "src", "tests" },
-        .check = true,
-    });
-    const fmt_step = b.step("fmt-check", "Check Zig formatting");
-    fmt_step.dependOn(&fmt.step);
-
-    const ci_step = b.step("ci", "Run local CI checks");
-    ci_step.dependOn(fmt_step);
-    ci_step.dependOn(test_step);
+fn componentPath(b: *std.Build, base_dir: []const u8, sub_path: []const u8) std.Build.LazyPath {
+    if (base_dir.len == 0) return b.path(sub_path);
+    return b.path(b.pathJoin(&.{ base_dir, sub_path }));
 }

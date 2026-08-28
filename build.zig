@@ -1,5 +1,6 @@
 const std = @import("std");
-const raft_build = @import("raftz");
+const cawfs_build = @import("cawfs/build.zig");
+const control_build = @import("control/build.zig");
 
 const FuseTestMode = enum { off, auto, required };
 const Smb3TestMode = enum { off, auto, required };
@@ -543,8 +544,19 @@ pub fn build(b: *std.Build) void {
     cross_step.dependOn(&windows_name_tests.step);
     cross_step.dependOn(&macos_name_tests.step);
 
-    const control_test_step = addControlComponent(b, target, optimize);
-    const cawfs_test_step = addCawfsComponent(b, target, optimize, sanitize_thread);
+    const control_test_step = control_build.addComponent(b, target, optimize, "control", .{
+        .generate = "gen-control-proto",
+        .run = "run-control",
+        .tests = "test-control",
+    });
+    const cawfs_test_step = cawfs_build.addComponent(
+        b,
+        target,
+        optimize,
+        sanitize_thread,
+        "cawfs",
+        "test-cawfs",
+    );
 
     const test_step = b.step("test", "Run unit, CLI, control, and cawfs tests");
     test_step.dependOn(unit_step);
@@ -552,160 +564,36 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(control_test_step);
     test_step.dependOn(cawfs_test_step);
 
-    const ci_step = b.step("ci", "Run default tests and cross-compilation checks");
+    const fmt = b.addFmt(.{
+        .paths = &.{
+            "build.zig",
+            "build.zig.zon",
+            "src",
+            "test",
+            "benchmarks",
+            "control/build.zig",
+            "control/build.zig.zon",
+            "control/src",
+            "cawfs/build.zig",
+            "cawfs/build.zig.zon",
+            "cawfs/src",
+            "cawfs/tests",
+            "node-protocol/build.zig",
+            "node-protocol/build.zig.zon",
+            "node-protocol/src",
+        },
+        .check = true,
+    });
+    const fmt_step = b.step("fmt-check", "Check all Zig formatting");
+    fmt_step.dependOn(&fmt.step);
+    const cawfs_fmt_step = b.step("fmt-check-cawfs", "Check cawfs Zig formatting");
+    cawfs_fmt_step.dependOn(fmt_step);
+
+    const ci_step = b.step("ci", "Run formatting, default tests, and cross-compilation checks");
+    ci_step.dependOn(fmt_step);
     ci_step.dependOn(test_step);
     ci_step.dependOn(cross_step);
     ci_step.dependOn(&fs_ops_benchmark.step);
-}
-
-fn addControlComponent(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step {
-    const raft_dependency = b.dependency("raftz", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const grpc_dependency = raft_build.grpcLiteDependency(raft_dependency, target, optimize);
-    const grpc_module = grpc_dependency.module("grpc_lite");
-    const protobuf_module = grpc_module.import_table.get("protobuf").?;
-    const clap_dependency = b.dependency("clap", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const uuid_dependency = b.dependency("uuid", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const node_protocol_dependency = b.dependency("zettide_node_protocol", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const generate_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
-        .destination_directory = b.path(".zig-cache/generated-control"),
-        .source_files = &.{b.path("control/proto/zettide/control/v1/control.proto")},
-        .include_directories = &.{b.path("control/proto")},
-    });
-    const generate_node_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
-        .destination_directory = b.path(".zig-cache/generated-node"),
-        .source_files = &.{node_protocol_dependency.path("proto/zettide/control/v1/data_service.proto")},
-        .include_directories = &.{node_protocol_dependency.path("proto")},
-    });
-    const generate_proto_step = b.step("gen-control-proto", "Generate control-plane Zig protobuf sources");
-    generate_proto_step.dependOn(&generate_proto.step);
-    generate_proto_step.dependOn(&generate_node_proto.step);
-
-    const control_proto = b.createModule(.{
-        .root_source_file = b.path(".zig-cache/generated-control/zettide/control/v1.pb.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
-    });
-    const node_proto = b.createModule(.{
-        .root_source_file = b.path(".zig-cache/generated-node/zettide/control/v1.pb.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
-    });
-
-    const control = b.addModule("zettide_control", .{
-        .root_source_file = b.path("control/src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "clap", .module = clap_dependency.module("clap") },
-            .{ .name = "control_proto", .module = control_proto },
-            .{ .name = "grpc_lite", .module = grpc_module },
-            .{ .name = "node_proto", .module = node_proto },
-            .{ .name = "raftz", .module = raft_dependency.module("raftz") },
-            .{ .name = "uuid", .module = uuid_dependency.module("uuid") },
-            .{ .name = "zettide_node_protocol", .module = node_protocol_dependency.module("zettide_node_protocol") },
-        },
-    });
-
-    const library = b.addLibrary(.{
-        .name = "zettide-control",
-        .root_module = control,
-    });
-    library.step.dependOn(&generate_proto.step);
-    library.step.dependOn(&generate_node_proto.step);
-    b.installArtifact(library);
-
-    const executable_module = b.createModule(.{
-        .root_source_file = b.path("control/src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "zettide_control", .module = control }},
-    });
-    const executable = b.addExecutable(.{
-        .name = "zettide-control",
-        .root_module = executable_module,
-    });
-    executable.step.dependOn(&generate_proto.step);
-    executable.step.dependOn(&generate_node_proto.step);
-    b.installArtifact(executable);
-
-    const run_executable = b.addRunArtifact(executable);
-    if (b.args) |args| run_executable.addArgs(args);
-    const run_step = b.step("run-control", "Run the metadata control plane");
-    run_step.dependOn(&run_executable.step);
-
-    const tests = b.addTest(.{ .root_module = control });
-    tests.step.dependOn(&generate_proto.step);
-    tests.step.dependOn(&generate_node_proto.step);
-    const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step("test-control", "Run control-plane unit tests");
-    test_step.dependOn(&run_tests.step);
-    return test_step;
-}
-
-fn addCawfsComponent(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    sanitize_thread: ?bool,
-) *std.Build.Step {
-    const module = b.addModule("zettide_cawfs", .{
-        .root_source_file = b.path("cawfs/src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = sanitize_thread,
-    });
-
-    const library = b.addLibrary(.{
-        .name = "zettide-cawfs",
-        .root_module = module,
-    });
-    b.installArtifact(library);
-
-    const unit_tests = b.addTest(.{
-        .root_module = module,
-    });
-    const run_unit_tests = b.addRunArtifact(unit_tests);
-    const test_step = b.step("test-cawfs", "Run cawfs tests");
-    test_step.dependOn(&run_unit_tests.step);
-
-    const integration_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("cawfs/tests/root.zig"),
-            .target = target,
-            .optimize = optimize,
-            .sanitize_thread = sanitize_thread,
-            .imports = &.{.{ .name = "zettide_cawfs", .module = module }},
-        }),
-    });
-    test_step.dependOn(&b.addRunArtifact(integration_tests).step);
-
-    const fmt = b.addFmt(.{
-        .paths = &.{ "cawfs/build.zig", "cawfs/src", "cawfs/tests" },
-        .check = true,
-    });
-    const fmt_step = b.step("fmt-check-cawfs", "Check cawfs Zig formatting");
-    fmt_step.dependOn(&fmt.step);
-
-    return test_step;
 }
 
 fn createNameProfileCrossTest(
