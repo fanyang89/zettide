@@ -57,6 +57,7 @@
         zettide_vhost_scheduled_pool_worker_count | default(2) | int <=
         zettide_vhost_scheduled_pool_reactor_count | int
       - zettide_vhost_scheduled_pool_inline_batches | default('') | string is match('^$|^[01]$')
+      - zettide_vhost_scheduled_pool_guest_mitigations_off | default(0) | string is match('^[01]$')
       - zettide_vhost_scheduled_pool_coalescing_delay_base_us | default('') | string is match('^$|^[0-9]+$')
       - zettide_vhost_scheduled_pool_coalescing_iops_threshold | default('') | string is match('^$|^[0-9]+$')
       - >-
@@ -401,6 +402,7 @@
     ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE: "{{ zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') }}"
     ZETTIDE_VHOST_VCPU_CPU_BASE: "{{ zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') }}"
     ZETTIDE_VHOST_TARGET_CPU_LIST: "{{ zettide_vhost_scheduled_pool_target_cpu_list | default('') }}"
+    ZETTIDE_VHOST_GUEST_MITIGATIONS_OFF: "{{ zettide_vhost_scheduled_pool_guest_mitigations_off | default(0) }}"
     ZETTIDE_POOL_DATA_THREADED_CONCURRENCY: "{{ zettide_vhost_scheduled_pool_threaded_concurrency | default('') }}"
     ZETTIDE_VHOST_WORKER_COUNT: "{{ zettide_vhost_scheduled_pool_worker_count | default(2) }}"
     ZETTIDE_VHOST_INLINE_BATCHES: "{{ zettide_vhost_scheduled_pool_inline_batches | default('') }}"

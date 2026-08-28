@@ -42,6 +42,7 @@ cpu_profile_case=${ZETTIDE_VHOST_CPU_PROFILE_CASE:-}
 cpu_profile_signal=12
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
 target_cpu_list=${ZETTIDE_VHOST_TARGET_CPU_LIST:-}
+guest_mitigations_off=${ZETTIDE_VHOST_GUEST_MITIGATIONS_OFF:-0}
 target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
 benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
@@ -665,6 +666,31 @@ done
     echo "guest did not install fio and become ready after 180 seconds" >&2
     exit 1
 }
+
+if [[ $guest_mitigations_off == 1 ]]; then
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+        'sudo grubby --update-kernel=ALL --args="mitigations=off" && sudo reboot' >/dev/null 2>&1 || true
+    sleep 5
+    guest_ready=false
+    deadline=$((SECONDS + 180))
+    while ((SECONDS < deadline)); do
+        process_running "$qemu_pid" || {
+            wait "$qemu_pid" || true
+            echo "QEMU exited during the mitigations=off reboot; see $log_dir/qemu-serial.log" >&2
+            exit 1
+        }
+        if ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+            'test -f ~/.zettide-fio-ready && command -v fio >/dev/null' 2>/dev/null; then
+            guest_ready=true
+            break
+        fi
+        sleep 2
+    done
+    [[ $guest_ready == true ]] || {
+        echo "guest did not come back after the mitigations=off reboot" >&2
+        exit 1
+    }
+fi
 
 cat >"$work_dir/guest-identify.sh" <<'EOF'
 #!/usr/bin/env bash
