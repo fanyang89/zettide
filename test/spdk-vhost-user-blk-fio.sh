@@ -41,6 +41,7 @@ perf_frequency=${ZETTIDE_VHOST_PERF_FREQUENCY:-199}
 cpu_profile_case=${ZETTIDE_VHOST_CPU_PROFILE_CASE:-}
 cpu_profile_signal=12
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
+target_cpu_list=${ZETTIDE_VHOST_TARGET_CPU_LIST:-}
 target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
 benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
@@ -520,6 +521,10 @@ fi
 if [[ $storage_transport == spdk_nvme_pcie ]]; then
     command -v prlimit >/dev/null || { echo "prlimit is required for SPDK NVMe PCIe" >&2; exit 2; }
     target_command=(prlimit --memlock=unlimited:unlimited -- "${target_command[@]}")
+fi
+if [[ -n $target_cpu_list ]]; then
+    command -v taskset >/dev/null || { echo "taskset is required for target CPU pinning" >&2; exit 2; }
+    target_command=(taskset -c "$target_cpu_list" "${target_command[@]}")
 fi
 begin_deferred_signals
 target_member_windows=${ZETTIDE_POOL_DATA_MEMBER_WINDOWS:-}

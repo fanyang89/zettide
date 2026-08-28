@@ -636,6 +636,7 @@
                     'threaded_concurrency': zettide_vhost_scheduled_pool_threaded_concurrency | default(''),
                     'inline_batches': zettide_vhost_scheduled_pool_inline_batches | default(''),
                     'vcpu_cpu_base': zettide_vhost_scheduled_pool_vcpu_cpu_base | default(''),
+                    'target_cpu_list': zettide_vhost_scheduled_pool_target_cpu_list | default(''),
                     'raw_transport': zettide_vhost_scheduled_pool_raw_transport | default('auto'),
                     'sqpoll_cpu_base': zettide_vhost_scheduled_pool_sqpoll_cpu_base | default(''),
                     'pcie_namespaces': zettide_vhost_scheduled_pool_pcie_namespaces | default([]),

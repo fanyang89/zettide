@@ -47,6 +47,9 @@
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | int >= 1
       - zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') | string is match('^$|^[0-9]+$')
       - zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') | string is match('^$|^[0-9]+$')
+      - >-
+        zettide_vhost_scheduled_pool_target_cpu_list | default('') | string
+        is match('^$|^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$')
       - zettide_vhost_scheduled_pool_threaded_concurrency | default('') | string is match('^$|^[0-9]+$')
       - zettide_vhost_scheduled_pool_worker_count | default(2) | int >= 1
       - >-
@@ -397,6 +400,7 @@
     ZETTIDE_VHOST_CPU_PROFILE_CASE: "{{ zettide_vhost_scheduled_pool_cpu_profile_case | default('') }}"
     ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE: "{{ zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') }}"
     ZETTIDE_VHOST_VCPU_CPU_BASE: "{{ zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') }}"
+    ZETTIDE_VHOST_TARGET_CPU_LIST: "{{ zettide_vhost_scheduled_pool_target_cpu_list | default('') }}"
     ZETTIDE_POOL_DATA_THREADED_CONCURRENCY: "{{ zettide_vhost_scheduled_pool_threaded_concurrency | default('') }}"
     ZETTIDE_VHOST_WORKER_COUNT: "{{ zettide_vhost_scheduled_pool_worker_count | default(2) }}"
     ZETTIDE_VHOST_INLINE_BATCHES: "{{ zettide_vhost_scheduled_pool_inline_batches | default('') }}"
