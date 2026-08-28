@@ -16,11 +16,26 @@ const Context = struct {
     read_bounce_bytes: std.atomic.Value(u64) = .init(0),
     async_state: std.atomic.Value(u64) = .init(0),
     async_drained: std.Io.Event = .unset,
+    // Recycling AsyncReadTask avoids the ReleaseSafe undefined-fill poison that
+    // std.mem.Allocator applies on every create/destroy in the hot read path.
+    task_pool: [task_pool_capacity]*AsyncReadTask = undefined,
+    task_pool_count: usize = 0,
+    task_pool_locked: std.atomic.Value(bool) = .init(false),
 };
+
+fn taskPoolLock(context: *Context) void {
+    while (context.task_pool_locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null)
+        std.atomic.spinLoopHint();
+}
+
+fn taskPoolUnlock(context: *Context) void {
+    context.task_pool_locked.store(false, .release);
+}
 
 const max_async_reads = 32;
 const async_closing: u64 = 1 << 63;
 const async_count_mask = async_closing - 1;
+const task_pool_capacity = 1024;
 
 const AsyncReadTask = struct {
     context: *Context,
@@ -120,6 +135,30 @@ fn readAt(context_ptr: *anyopaque, _: std.Io, buffer: []u8, offset: u64) !usize 
     return buffer.len;
 }
 
+fn allocTask(context: *Context) !*AsyncReadTask {
+    taskPoolLock(context);
+    if (context.task_pool_count > 0) {
+        context.task_pool_count -= 1;
+        const task = context.task_pool[context.task_pool_count];
+        taskPoolUnlock(context);
+        return task;
+    }
+    taskPoolUnlock(context);
+    return std.heap.c_allocator.create(AsyncReadTask);
+}
+
+fn freeTask(context: *Context, task: *AsyncReadTask) void {
+    taskPoolLock(context);
+    if (context.task_pool_count < task_pool_capacity) {
+        context.task_pool[context.task_pool_count] = task;
+        context.task_pool_count += 1;
+        taskPoolUnlock(context);
+        return;
+    }
+    taskPoolUnlock(context);
+    std.heap.c_allocator.destroy(task);
+}
+
 fn submitReadManyAt(
     context_ptr: *anyopaque,
     io: std.Io,
@@ -142,8 +181,8 @@ fn submitReadManyAt(
             try validateIo(context, read.offset, read.buffer.len, context.geometry.logical_block_size);
     }
 
-    const task = try std.heap.c_allocator.create(AsyncReadTask);
-    errdefer std.heap.c_allocator.destroy(task);
+    const task = try allocTask(context);
+    errdefer freeTask(context, task);
     task.* = .{
         .context = context,
         .io = io,
@@ -164,7 +203,7 @@ fn submitReadManyAt(
     }
     if (task.submitted_count == 0) {
         const callback = task.completion;
-        std.heap.c_allocator.destroy(task);
+        freeTask(context, task);
         _ = context.async_submissions.fetchAdd(1, .monotonic);
         _ = context.async_completions.fetchAdd(1, .monotonic);
         callback.complete(callback.context, null);
@@ -212,7 +251,7 @@ fn asyncReadComplete(context_ptr: ?*anyopaque, direct: bool) callconv(.c) void {
         _ = context.read_bounce_batches.fetchAdd(1, .monotonic);
         _ = context.read_bounce_bytes.fetchAdd(task.total_bytes, .monotonic);
     }
-    std.heap.c_allocator.destroy(task);
+    freeTask(context, task);
     _ = context.async_completions.fetchAdd(1, .monotonic);
     completion.complete(completion.context, null);
     releaseAsync(context, io);
@@ -259,6 +298,11 @@ fn close(context_ptr: *anyopaque, io: std.Io) !void {
             std.atomic.spinLoopHint();
     }
     const close_error = statusError(c.zettide_spdk_bdev_dispatcher_close(context.dispatcher));
+    taskPoolLock(context);
+    const pooled = context.task_pool_count;
+    context.task_pool_count = 0;
+    taskPoolUnlock(context);
+    for (context.task_pool[0..pooled]) |task| std.heap.c_allocator.destroy(task);
     c.free(context.canonical_name);
     const allocator = context.allocator;
     allocator.destroy(context);
