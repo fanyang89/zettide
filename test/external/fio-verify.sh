@@ -30,6 +30,14 @@ fio_aux_dir="$fio_log_dir/fio-aux"
 mkdir "$fio_data_dir"
 mkdir -p "$fio_aux_dir"
 
+# Ubuntu 24.04 ships fio 3.36, which predates verify_header_seed. Older fio
+# versions do not validate that field, so omit only the unsupported option.
+effective_job_file=$job_file
+if ! "$fio" --cmdhelp=verify_header_seed 2>&1 | grep -q 'verify_header_seed:'; then
+    effective_job_file="$fio_aux_dir/fio-verify.compat.fio"
+    grep -v '^verify_header_seed=' "$job_file" >"$effective_job_file"
+fi
+
 run_fio() {
     local phase=$1
     local allow_file_create=$2
@@ -38,7 +46,7 @@ run_fio() {
     FIO_DIR="$fio_data_dir" FIO_ALLOW_FILE_CREATE="$allow_file_create" \
         FIO_VERIFY_HEADER_SEED="$verify_header_seed" \
         timeout --kill-after=30s 1800s \
-        "$fio" --aux-path="$fio_aux_dir" "$@" "$job_file" \
+        "$fio" --aux-path="$fio_aux_dir" "$@" "$effective_job_file" \
         2>&1 | tee "$fio_log_dir/fio-$phase.log"
 }
 
