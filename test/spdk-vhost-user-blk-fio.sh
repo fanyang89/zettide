@@ -61,7 +61,7 @@ cpu_profile_path=""
 deferred_signal=0
 
 case $fio_case in
-    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16 | randread-4k-qd256-j1-per-device) ;;
+    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd16-j32 | randread-4k-qd32-j16 | randread-4k-qd32-j32 | randread-4k-qd256-j1-per-device) ;;
     *)
         echo "unknown vhost-user-blk fio case: $fio_case" >&2
         exit 2
@@ -986,6 +986,8 @@ run_selected_case seq-read-128k-qd1-j1 read 128k 1 1 "$fio_size"
 run_selected_case randread-4k-qd1-j1 randread 4k 1 1 "$fio_size"
 run_selected_case randread-4k-qd32-j1 randread 4k 32 1 "$fio_size"
 run_selected_case randread-4k-qd32-j4 randread 4k 32 4 "$fio_size"
+run_selected_case randread-4k-qd16-j32 randread 4k 16 32 "$fio_size"
 run_selected_case randread-4k-qd32-j16 randread 4k 32 16 "$fio_size"
+run_selected_case randread-4k-qd32-j32 randread 4k 32 32 "$fio_size"
 [[ $fio_case != randread-4k-qd256-j1-per-device ]] || run_raw_nvme_case
 benchmark_completed=true
