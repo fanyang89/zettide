@@ -191,6 +191,94 @@ record_event() {
     printf '%s %s\n' "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$events_log"
 }
 
+print_optional_file() {
+    local label=$1 path=$2 value
+    [[ -r $path ]] || return 0
+    value=$(<"$path")
+    printf '%s=%s\n' "$label" "$value"
+}
+
+record_host_environment() {
+    local output=$1 status_path policy_path policy
+    {
+        echo "== kernel =="
+        print_optional_file cmdline /proc/cmdline
+        print_optional_file isolated_cpus /sys/devices/system/cpu/isolated
+        print_optional_file nohz_full /sys/devices/system/cpu/nohz_full
+        print_optional_file nmi_watchdog /proc/sys/kernel/nmi_watchdog
+        print_optional_file numa_balancing /proc/sys/kernel/numa_balancing
+
+        echo "== cpu =="
+        lscpu
+        lscpu -e=CPU,NODE,SOCKET,CORE,CACHE,ONLINE,MAXMHZ,MINMHZ
+
+        echo "== cpufreq =="
+        for policy_path in /sys/devices/system/cpu/cpufreq/policy*; do
+            [[ -d $policy_path ]] || continue
+            policy=${policy_path##*/}
+            print_optional_file "$policy.driver" "$policy_path/scaling_driver"
+            print_optional_file "$policy.governor" "$policy_path/scaling_governor"
+            print_optional_file "$policy.min_khz" "$policy_path/scaling_min_freq"
+            print_optional_file "$policy.max_khz" "$policy_path/scaling_max_freq"
+        done
+        print_optional_file boost /sys/devices/system/cpu/cpufreq/boost
+
+        echo "== memory =="
+        print_optional_file thp_enabled /sys/kernel/mm/transparent_hugepage/enabled
+        print_optional_file thp_defrag /sys/kernel/mm/transparent_hugepage/defrag
+        print_optional_file nr_hugepages /proc/sys/vm/nr_hugepages
+
+        echo "== irqbalance =="
+        if command -v systemctl >/dev/null; then
+            printf 'active='
+            systemctl is-active irqbalance || true
+            printf 'enabled='
+            systemctl is-enabled irqbalance || true
+        else
+            echo unavailable
+        fi
+
+        echo "== vulnerabilities =="
+        for status_path in /sys/devices/system/cpu/vulnerabilities/*; do
+            [[ -r $status_path ]] || continue
+            printf '%s: ' "${status_path##*/}"
+            cat "$status_path"
+        done
+    } >"$output"
+}
+
+record_pcie_state() {
+    local name=$1 bdf pci_path driver group irq_path irq affinity effective
+    [[ $storage_transport == spdk_nvme_pcie ]] || return 0
+    {
+        print_optional_file default_smp_affinity /proc/irq/default_smp_affinity
+        for bdf in "${pcie_bdfs[@]}"; do
+            pci_path=/sys/bus/pci/devices/$bdf
+            echo "== $bdf =="
+            driver=unbound
+            [[ -L $pci_path/driver ]] && driver=$(basename "$(readlink -f -- "$pci_path/driver")")
+            echo "driver=$driver"
+            print_optional_file numa_node "$pci_path/numa_node"
+            print_optional_file local_cpulist "$pci_path/local_cpulist"
+            group=unavailable
+            [[ -L $pci_path/iommu_group ]] && group=$(basename "$(readlink -f -- "$pci_path/iommu_group")")
+            echo "iommu_group=$group"
+            for irq_path in "$pci_path"/msi_irqs/*; do
+                [[ -e $irq_path ]] || continue
+                irq=${irq_path##*/}
+                affinity=unavailable
+                effective=unavailable
+                [[ -r /proc/irq/$irq/smp_affinity_list ]] && affinity=$(<"/proc/irq/$irq/smp_affinity_list")
+                [[ -r /proc/irq/$irq/effective_affinity_list ]] && effective=$(<"/proc/irq/$irq/effective_affinity_list")
+                printf 'irq=%s affinity=%s effective=%s\n' "$irq" "$affinity" "$effective"
+                grep -E "^[[:space:]]*$irq:" /proc/interrupts || true
+            done
+        done
+    } >"$log_dir/host-pcie-$name.txt"
+}
+
+record_host_environment "$log_dir/host-environment.txt"
+
 next_enumeration_file() {
     local kind=$1
     mktemp "$log_dir/.${kind}.XXXXXX"
@@ -787,6 +875,7 @@ finish() {
         sleep 1
     done
     ((restore_rc == 0)) || cleanup_rc=1
+    record_pcie_state restored || cleanup_rc=1
     detach_loops || cleanup_rc=1
     {
         echo "profile=$lifecycle_profile"
@@ -828,6 +917,7 @@ if [[ $storage_transport == spdk_nvme_pcie ]]; then
     command -v prlimit >/dev/null || { echo "prlimit is required for SPDK NVMe PCIe" >&2; exit 2; }
     modprobe vfio-pci
     validate_pcie_devices
+    record_pcie_state native
 fi
 
 handle_signal() {
@@ -1151,14 +1241,30 @@ if [[ $raw_windows == 1 ]]; then
 fi
 fi
 export ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=$storage_transport
+benchmark_ready_file=$log_dir/$benchmark_log_name-ready
+rm -f "$benchmark_ready_file"
+cp /proc/interrupts "$log_dir/host-interrupts-benchmark-before.txt"
+cp /proc/softirqs "$log_dir/host-softirqs-benchmark-before.txt"
 begin_attach_deferred_signals
-bash "$benchmark_driver" "$target" "$log_dir/$benchmark_log_name-ready" "$log_dir/$benchmark_log_name" \
+bash "$benchmark_driver" "$target" "$benchmark_ready_file" "$log_dir/$benchmark_log_name" \
     "$pool_id" "$read_policy" "${benchmark_devices[@]}" &
 benchmark_pid=$!
 end_attach_deferred_signals
+for ((attempt = 0; attempt < 1000; attempt++)); do
+    [[ -e $benchmark_ready_file ]] && break
+    kill -0 "$benchmark_pid" 2>/dev/null || break
+    sleep 0.01
+done
+if [[ -e $benchmark_ready_file ]]; then
+    sleep 0.2
+    record_pcie_state active
+fi
 benchmark_status=0
 wait "$benchmark_pid" || benchmark_status=$?
 benchmark_pid=""
+cp /proc/interrupts "$log_dir/host-interrupts-benchmark-after.txt"
+cp /proc/softirqs "$log_dir/host-softirqs-benchmark-after.txt"
+record_pcie_state completed
 ((benchmark_status == 0)) || exit "$benchmark_status"
 if [[ $storage_transport == spdk_nvme_pcie ]]; then
     restore_pcie_devices

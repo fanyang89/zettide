@@ -260,6 +260,7 @@ stop_monitors() {
 start_monitors() {
     local name=$1
 
+    cp /proc/interrupts "$log_dir/host-interrupts-$name-before.txt"
     cp /proc/softirqs "$log_dir/host-softirqs-$name-before.txt"
     begin_deferred_signals
     pidstat -t -u -r -w -p "$target_pid,$qemu_pid" 1 >"$log_dir/host-pidstat-$name.log" &
@@ -269,6 +270,47 @@ start_monitors() {
     iostat -dx -y 1 >"$log_dir/host-iostat-$name.log" &
     monitor_pids+=("$!")
     end_deferred_signals
+}
+
+record_pid_threads() {
+    local role=$1 pid=$2 task_path tid comm status_line allowed voluntary nonvoluntary
+    local stat_line stat_fields processor
+    local -a fields=()
+
+    [[ -d /proc/$pid/task ]] || return 0
+    for task_path in "/proc/$pid/task"/*; do
+        tid=${task_path##*/}
+        IFS= read -r comm <"$task_path/comm" || continue
+        allowed=unknown
+        voluntary=unknown
+        nonvoluntary=unknown
+        [[ -r $task_path/status ]] || continue
+        while IFS= read -r status_line; do
+            case $status_line in
+                Cpus_allowed_list:*) allowed=${status_line#*:} ;;
+                voluntary_ctxt_switches:*) voluntary=${status_line#*:} ;;
+                nonvoluntary_ctxt_switches:*) nonvoluntary=${status_line#*:} ;;
+            esac
+        done <"$task_path/status"
+        allowed=${allowed//$'\t'/}
+        voluntary=${voluntary//$'\t'/}
+        nonvoluntary=${nonvoluntary//$'\t'/}
+        IFS= read -r stat_line <"$task_path/stat" || continue
+        stat_fields=${stat_line##*) }
+        read -r -a fields <<<"$stat_fields"
+        processor=${fields[36]:-unknown}
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$role" "$pid" "$tid" "$processor" "$allowed" "$voluntary" "$nonvoluntary" "$comm"
+    done
+}
+
+record_thread_snapshot() {
+    local name=$1
+    {
+        printf 'role\tpid\ttid\tprocessor\tallowed_cpus\tvoluntary_switches\tnonvoluntary_switches\tcomm\n'
+        record_pid_threads target "$target_pid"
+        record_pid_threads qemu "$qemu_pid"
+    } >"$log_dir/host-threads-$name.txt"
 }
 
 first_cpu_profile_file() {
@@ -567,7 +609,7 @@ if [[ -n $vcpu_cpu_base ]]; then
     for ((index = 0; index < guest_vcpus; index++)); do
         vcpu_tid=""
         for ((attempt = 0; attempt < 1000; attempt++)); do
-            for task_path in /proc/$qemu_pid/task/*; do
+            for task_path in "/proc/$qemu_pid/task"/*; do
                 read -r task_name <"$task_path/comm" || continue
                 if [[ $task_name == "CPU $index/KVM" ]]; then
                     vcpu_tid=${task_path##*/}
@@ -656,6 +698,36 @@ ssh "${ssh_options[@]}" zettide@127.0.0.1 'lsblk -o NAME,KNAME,TYPE,SIZE,RO,MODE
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'lspci -nn' >"$log_dir/guest-lspci.txt"
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'uname -a' >"$log_dir/guest-uname.txt"
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'fio --version' >"$log_dir/guest-fio-version.txt"
+ssh "${ssh_options[@]}" zettide@127.0.0.1 'cat /proc/cmdline' >"$log_dir/guest-cmdline.txt"
+ssh "${ssh_options[@]}" zettide@127.0.0.1 'lscpu; lscpu -e=CPU,NODE,SOCKET,CORE,CACHE,ONLINE' \
+    >"$log_dir/guest-cpu-topology.txt"
+ssh "${ssh_options[@]}" zettide@127.0.0.1 '
+    for path in /sys/devices/system/cpu/vulnerabilities/*; do
+        test -r "$path" || continue
+        printf "%s: " "${path##*/}"
+        cat "$path"
+    done
+' >"$log_dir/guest-vulnerabilities.txt"
+ssh "${ssh_options[@]}" zettide@127.0.0.1 '
+    for pair in \
+        isolated_cpus:/sys/devices/system/cpu/isolated \
+        nohz_full:/sys/devices/system/cpu/nohz_full \
+        nmi_watchdog:/proc/sys/kernel/nmi_watchdog \
+        numa_balancing:/proc/sys/kernel/numa_balancing; do
+        label=${pair%%:*}
+        path=${pair#*:}
+        test -r "$path" || continue
+        value=$(cat "$path")
+        printf "%s=%s\n" "$label" "$value"
+    done
+    if command -v systemctl >/dev/null; then
+        printf "irqbalance_active="
+        systemctl is-active irqbalance || true
+        printf "irqbalance_enabled="
+        systemctl is-enabled irqbalance || true
+    fi
+' >"$log_dir/guest-scheduling.txt"
+record_thread_snapshot initial
 
 run_case() {
     local name=$1
@@ -731,6 +803,9 @@ execute_case() {
     scp "${scp_options[@]}" "$job_file" zettide@127.0.0.1:/tmp/zettide-fio.job
     ssh "${ssh_options[@]}" zettide@127.0.0.1 \
         'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-before.txt"
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+        'cat /proc/softirqs' >"$log_dir/guest-softirqs-$name-before.txt"
+    record_thread_snapshot "$name-before"
     start_monitors "$name"
     if [[ -n $perf_case && $name == "$perf_case" ]]; then
         perf_data=$log_dir/perf-$name.data
@@ -777,9 +852,13 @@ execute_case() {
             --sort=comm,dso,symbol --input "$perf_data" >"$log_dir/perf-$name-inclusive.txt"
     fi
     stop_monitors
+    cp /proc/interrupts "$log_dir/host-interrupts-$name-after.txt"
     cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
     ssh "${ssh_options[@]}" zettide@127.0.0.1 \
         'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-after.txt"
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+        'cat /proc/softirqs' >"$log_dir/guest-softirqs-$name-after.txt"
+    record_thread_snapshot "$name-after"
     ((status == 0)) || return "$status"
     jq -e '.jobs | length > 0 and all(.error == 0)' "$result" >/dev/null
     if [[ $benchmark_mode == raw_nvme ]]; then
