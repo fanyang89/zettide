@@ -77,14 +77,24 @@ const Worker = struct {
         count: usize = 0,
     };
 
+    // DispatchSlot carries a ReadGroup by pointer so std.Io.Group.concurrent
+    // only allocates a small task header instead of copying the whole batch
+    // (and paying ReleaseSafe undefined-fill poison on both alloc and free).
+    const DispatchSlot = struct {
+        batch: ReadGroup = undefined,
+        in_use: std.atomic.Value(bool) = .init(false),
+    };
+
     io: std.Io,
     storage: *zettide.v3.storage.Storage,
     concurrent_group_count: usize,
     inline_batches: bool,
     slots: [queue_capacity]Slot,
+    read_slots: []DispatchSlot,
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
     wake: std.Io.Event = .unset,
+    waiting: std.atomic.Value(bool) = .init(false),
     stopping: std.atomic.Value(bool) = .init(false),
     submit_attempts: std.atomic.Value(u64) = .init(0),
     accepted: std.atomic.Value(u64) = .init(0),
@@ -110,10 +120,14 @@ const Worker = struct {
         self.storage = storage;
         self.concurrent_group_count = concurrent_group_count;
         self.inline_batches = inline_batches;
+        self.read_slots = try std.heap.c_allocator.alloc(DispatchSlot, concurrent_group_count);
+        errdefer std.heap.c_allocator.free(self.read_slots);
+        for (self.read_slots) |*slot| slot.* = .{};
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
         self.wake = .unset;
+        self.waiting = .init(false);
         self.stopping = .init(false);
         self.submit_attempts = .init(0);
         self.accepted = .init(0);
@@ -147,6 +161,7 @@ const Worker = struct {
                 self.completed_requests.load(.monotonic),
             },
         );
+        std.heap.c_allocator.free(self.read_slots);
         std.heap.c_allocator.destroy(self);
     }
 
@@ -198,7 +213,9 @@ const Worker = struct {
                 };
                 self.recordAccepted();
                 slot.sequence.store(position + 1, .release);
-                self.wake.set(self.io);
+                // Signal only when the worker is actually blocked in next();
+                // steady-state submits skip the futex wake entirely.
+                if (self.waiting.swap(false, .seq_cst)) self.wake.set(self.io);
                 return 0;
             }
             if (sequence < position) {
@@ -241,7 +258,16 @@ const Worker = struct {
             self.wake.reset();
             if (self.dequeue()) |queued| return queued;
             if (self.stopping.load(.acquire)) return null;
+            // Announce the wait before the final dequeue check. Submit publishes
+            // the slot before swapping this flag (both seq_cst), so a missed
+            // dequeue implies the submitter observed the flag and will set wake.
+            self.waiting.store(true, .seq_cst);
+            if (self.dequeue()) |queued| {
+                _ = self.waiting.swap(false, .seq_cst);
+                return queued;
+            }
             self.wake.waitUncancelable(self.io);
+            _ = self.waiting.swap(false, .seq_cst);
         }
     }
 
@@ -280,27 +306,44 @@ const Worker = struct {
             _ = self.grouped_request_count.fetchAdd(batch.count, .monotonic);
             _ = self.grouped_bytes.fetchAdd(total_bytes, .monotonic);
             if (self.inline_batches) {
-                self.executeReadBatch(batch);
+                self.executeReadBatch(&batch);
                 continue;
             }
             permits.waitUncancelable(self.io);
-            groups.concurrent(self.io, executeReadGroup, .{ self, &permits, batch }) catch {
-                executeReadGroup(self, &permits, batch) catch {};
+            const slot = self.acquireDispatchSlot();
+            slot.batch = batch;
+            groups.concurrent(self.io, executeReadGroup, .{ self, &permits, slot }) catch {
+                executeReadGroup(self, &permits, slot) catch {};
             };
         }
         groups.await(self.io) catch unreachable;
     }
 
+    fn acquireDispatchSlot(self: *Worker) *DispatchSlot {
+        // The permits semaphore bounds in-flight groups to read_slots.len, so a
+        // free slot always exists by the time this runs.
+        while (true) {
+            for (self.read_slots) |*slot| {
+                if (!slot.in_use.load(.acquire) and
+                    slot.in_use.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
+                    return slot;
+            }
+        }
+    }
+
     fn executeReadGroup(
         self: *Worker,
         permits: *std.Io.Semaphore,
-        batch: ReadGroup,
+        slot: *DispatchSlot,
     ) std.Io.Cancelable!void {
-        defer permits.post(self.io);
-        self.executeReadBatch(batch);
+        defer {
+            slot.in_use.store(false, .release);
+            permits.post(self.io);
+        }
+        self.executeReadBatch(&slot.batch);
     }
 
-    fn executeReadBatch(self: *Worker, batch: ReadGroup) void {
+    fn executeReadBatch(self: *Worker, batch: *const ReadGroup) void {
         var reads = uninitialized([max_batch_requests]zettide.v3.storage.Read);
         var results = uninitialized([max_batch_requests]zettide.v3.storage.ReadResult);
         var statuses = uninitialized([max_batch_requests]c_int);
@@ -331,7 +374,7 @@ const Worker = struct {
         self.completeReadBatch(batch, statuses[0..batch.count]);
     }
 
-    fn completeReadBatch(self: *Worker, batch: ReadGroup, statuses: []const c_int) void {
+    fn completeReadBatch(self: *Worker, batch: *const ReadGroup, statuses: []const c_int) void {
         var completions: [max_batch_requests]c.struct_zettide_spdk_bdev_provider_completion = undefined;
         for (batch.queued[0..batch.count], statuses, completions[0..batch.count]) |queued, status, *completion| {
             completion.* = .{
