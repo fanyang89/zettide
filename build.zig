@@ -233,9 +233,9 @@ pub fn build(b: *std.Build) void {
             "libs/cawfs/build.zig.zon",
             "libs/cawfs/src",
             "libs/cawfs/tests",
-            "libs/node-protocol/build.zig",
-            "libs/node-protocol/build.zig.zon",
-            "libs/node-protocol/src",
+            "libs/data-service-contracts/build.zig",
+            "libs/data-service-contracts/build.zig.zon",
+            "libs/data-service-contracts/src",
         },
         .check = true,
     });

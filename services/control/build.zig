@@ -46,7 +46,7 @@ pub fn addComponent(
         .target = target,
         .optimize = optimize,
     });
-    const node_protocol_dependency = b.dependency("zettide_node_protocol", .{
+    const data_service_contracts_dependency = b.dependency("zettide_data_service_contracts", .{
         .target = target,
         .optimize = optimize,
     });
@@ -62,8 +62,8 @@ pub fn addComponent(
     const generated_node_dir = createGeneratedDirectory(b, ".zettide-node-proto");
     const generate_node_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
         .destination_directory = generated_node_dir,
-        .source_files = &.{node_protocol_dependency.path("proto/zettide/control/v1/data_service.proto")},
-        .include_directories = &.{node_protocol_dependency.path("proto")},
+        .source_files = &.{data_service_contracts_dependency.path("proto/zettide/control/v1/data_service.proto")},
+        .include_directories = &.{data_service_contracts_dependency.path("proto")},
     });
     generated_node_dir.addStepDependencies(&generate_node_proto.step);
 
@@ -108,7 +108,7 @@ pub fn addComponent(
             .{ .name = "node_proto", .module = node_proto },
             .{ .name = "raftz", .module = raft_dependency.module("raftz") },
             .{ .name = "uuid", .module = uuid_dependency.module("uuid") },
-            .{ .name = "zettide_node_protocol", .module = node_protocol_dependency.module("zettide_node_protocol") },
+            .{ .name = "zettide_data_service_contracts", .module = data_service_contracts_dependency.module("zettide_data_service_contracts") },
         },
     });
 

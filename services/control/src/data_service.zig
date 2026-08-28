@@ -1,5 +1,5 @@
 const std = @import("std");
-const protocol = @import("zettide_node_protocol");
+const protocol = @import("zettide_data_service_contracts");
 const uuid = @import("uuid");
 
 pub const Id = protocol.Id;

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const grpc = @import("grpc_lite");
 const pb = @import("node_proto");
-const protocol = @import("zettide_node_protocol");
+const protocol = @import("zettide_data_service_contracts");
 const lease = protocol.primary_lease;
 
 pub const DataServer = struct {

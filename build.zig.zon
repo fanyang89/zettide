@@ -19,8 +19,8 @@
             .url = "https://codeberg.org/r4gus/uuid-zig/archive/0.5.0.tar.gz",
             .hash = "uuid-0.5.0-oOieIQx-AABtc9U3ihv_bf9pZAYoKp4UMsNFHBr-cn-w",
         },
-        .zettide_node_protocol = .{
-            .path = "libs/node-protocol",
+        .zettide_data_service_contracts = .{
+            .path = "libs/data-service-contracts",
         },
         .zbench = .{
             // v0.13.0 is the latest release compatible with Zig 0.16.

@@ -1,7 +1,7 @@
 .{
-    .name = .zettide_node_protocol,
+    .name = .zettide_data_service_contracts,
     .version = "0.1.0",
-    .fingerprint = 0x790b0c966a3274b8,
+    .fingerprint = 0x54e0c06f4a6987c4,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{

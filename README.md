@@ -26,7 +26,7 @@ repositories retain their histories here as merged directory trees:
 | `services/csi/` | CSI node service and container image |
 | `services/nfs-fsal/` | NFS-Ganesha FSAL adapter |
 | `libs/cawfs/` | Conditional-write transaction engine for shared writable filesystems |
-| `libs/node-protocol/` | Shared node data-service protocol and fencing contracts |
+| `libs/data-service-contracts/` | Shared data-service API and authority/fencing contracts |
 | `tests/` | Zig, C, shell, conformance, and integration tests |
 | `tests/automation/` | Isolated uv/Ansible project for remote and hardware test automation |
 | `benchmarks/` | Buildable benchmark entry points |
