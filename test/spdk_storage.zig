@@ -311,7 +311,9 @@ fn testAsyncReadMany(context: *TestContext, storage: *zettide.v3.storage.Storage
             return error.AsyncReadMismatch;
     }
     const stats = storage.transportStats(context.io);
-    if (stats.async_submissions != 1 or stats.async_completions != 1)
+    if (stats.async_submissions != 1 or stats.async_completions != 1 or
+        stats.read_direct_batches != 0 or stats.read_direct_bytes != 0 or
+        stats.read_bounce_batches != 1 or stats.read_bounce_bytes != 2 * 4096)
         return error.AsyncReadStatsMismatch;
 }
 

@@ -5,20 +5,23 @@
     zettide_scheduled_pool_result_name: "{{ zettide_test_profile }}"
     zettide_scheduled_pool_direct_perf: "{{ zettide_test_profile == 'spdk-nvme-perf' }}"
     zettide_scheduled_pool_raw_vhost: "{{ zettide_test_profile == 'vhost-spdk-nvme-fio' }}"
+    zettide_scheduled_pool_synthetic: >-
+      {{ zettide_vhost_scheduled_pool_storage_transport | default('linux') == 'synthetic' }}
     zettide_scheduled_pool_cpu_profile: >-
       {{ zettide_vhost_scheduled_pool_cpu_profile_case | default('') | length > 0 }}
 
-- name: Validate primary scheduled Pool disk configuration | {{ zettide_optimize }}
+- name: Validate scheduled Pool vhost configuration | {{ zettide_optimize }}
   ansible.builtin.assert:
     that:
       - zettide_scheduled_pool_vhost_config is mapping
-      - zettide_scheduled_pool_vhost_config.path is defined
-      - zettide_scheduled_pool_vhost_config.serial is defined
-      - zettide_scheduled_pool_vhost_config.path is string
-      - zettide_scheduled_pool_vhost_config.serial is string
-      - zettide_scheduled_pool_vhost_config.path is match('^[^:\x00-\x1f\x7f]+$')
-      - zettide_scheduled_pool_vhost_config.serial is match('^[^:\x00-\x1f\x7f]+$')
+      - zettide_scheduled_pool_synthetic or zettide_scheduled_pool_vhost_config.path is defined
+      - zettide_scheduled_pool_synthetic or zettide_scheduled_pool_vhost_config.serial is defined
+      - zettide_scheduled_pool_synthetic or zettide_scheduled_pool_vhost_config.path is string
+      - zettide_scheduled_pool_synthetic or zettide_scheduled_pool_vhost_config.serial is string
+      - zettide_scheduled_pool_synthetic or zettide_scheduled_pool_vhost_config.path is match('^[^:\x00-\x1f\x7f]+$')
+      - zettide_scheduled_pool_synthetic or zettide_scheduled_pool_vhost_config.serial is match('^[^:\x00-\x1f\x7f]+$')
       - >-
+        zettide_scheduled_pool_synthetic or
         zettide_scheduled_pool_vhost_config.secondary is not defined or
         zettide_scheduled_pool_vhost_config.secondary is mapping
       - ansible_play_hosts_all | length == 1
@@ -30,11 +33,23 @@
       - zettide_vhost_scheduled_pool_concurrent_groups | default(8) | int >= 1
       - zettide_vhost_scheduled_pool_concurrent_groups | default(8) | int <= 64
       - zettide_vhost_scheduled_pool_raw_transport | default('auto') in ['auto', 'posix', 'io_uring', 'io_uring_iopoll', 'io_uring_iopoll_sqpoll']
-      - zettide_vhost_scheduled_pool_storage_transport | default('linux') in ['linux', 'spdk_nvme_pcie']
+      - zettide_vhost_scheduled_pool_storage_transport | default('linux') in ['linux', 'spdk_nvme_pcie', 'synthetic']
+      - >-
+        not zettide_scheduled_pool_synthetic or
+        zettide_vhost_scheduled_pool_raw_transport | default('auto') == 'auto'
+      - >-
+        not zettide_scheduled_pool_synthetic or
+        zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') == ''
+      - >-
+        not zettide_scheduled_pool_synthetic or
+        zettide_vhost_scheduled_pool_pcie_namespaces | default([]) | length == 0
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | string is match('^[0-9]+$')
       - zettide_vhost_scheduled_pool_perf_frequency | default(199) | int >= 1
       - zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') | string is match('^$|^[0-9]+$')
       - zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') | string is match('^$|^[0-9]+$')
+      - >-
+        zettide_vhost_scheduled_pool_target_cpu_list | default('') | string
+        is match('^$|^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$')
       - zettide_vhost_scheduled_pool_threaded_concurrency | default('') | string is match('^$|^[0-9]+$')
       - zettide_vhost_scheduled_pool_worker_count | default(2) | int >= 1
       - >-
@@ -42,6 +57,26 @@
         zettide_vhost_scheduled_pool_worker_count | default(2) | int <=
         zettide_vhost_scheduled_pool_reactor_count | int
       - zettide_vhost_scheduled_pool_inline_batches | default('') | string is match('^$|^[01]$')
+      - zettide_vhost_scheduled_pool_guest_mitigations_off | default(0) | string is match('^[01]$')
+      - zettide_vhost_scheduled_pool_hold_seconds | default(0) | string is match('^[0-9]+$')
+      - zettide_vhost_scheduled_pool_extra_ssh_pubkey | default('') | string is match('^$|^[^\\r\\n]+$')
+      - zettide_vhost_scheduled_pool_coalescing_delay_base_us | default('') | string is match('^$|^[0-9]+$')
+      - zettide_vhost_scheduled_pool_coalescing_iops_threshold | default('') | string is match('^$|^[0-9]+$')
+      - >-
+        (zettide_vhost_scheduled_pool_coalescing_delay_base_us | default('') | string | length == 0) ==
+        (zettide_vhost_scheduled_pool_coalescing_iops_threshold | default('') | string | length == 0)
+      - >-
+        zettide_vhost_scheduled_pool_coalescing_delay_base_us | default('') | string | length == 0 or
+        zettide_vhost_scheduled_pool_coalescing_delay_base_us | int >= 1
+      - >-
+        zettide_vhost_scheduled_pool_coalescing_delay_base_us | default('') | string | length == 0 or
+        zettide_vhost_scheduled_pool_coalescing_delay_base_us | int <= 4294967295
+      - >-
+        zettide_vhost_scheduled_pool_coalescing_iops_threshold | default('') | string | length == 0 or
+        zettide_vhost_scheduled_pool_coalescing_iops_threshold | int >= 100
+      - >-
+        zettide_vhost_scheduled_pool_coalescing_iops_threshold | default('') | string | length == 0 or
+        zettide_vhost_scheduled_pool_coalescing_iops_threshold | int <= 429496729
       - zettide_vhost_scheduled_pool_target_gdb | default(0) | int in [0, 1]
       - >-
         not zettide_scheduled_pool_cpu_profile or
@@ -65,18 +100,20 @@
         zettide_vhost_scheduled_pool_fio_case in
         ['', 'seq-read-1m-qd32-j1', 'seq-read-128k-qd1-j1',
         'randread-4k-qd1-j1', 'randread-4k-qd32-j1', 'randread-4k-qd32-j4',
-        'randread-4k-qd32-j16', 'randread-4k-qd256-j1-per-device']
+        'randread-4k-qd16-j32', 'randread-4k-qd32-j16', 'randread-4k-qd32-j32',
+        'randread-4k-qd64-j32', 'randread-4k-qd128-j16',
+        'randread-4k-qd256-j1-per-device']
       - >-
         ansible_facts.processor_vcpus is not defined or
         zettide_vhost_scheduled_pool_reactor_count | int <= ansible_facts.processor_vcpus | int
     fail_msg: >-
-      Configure zettide_raw_device.path and serial, with an optional secondary
-      path and serial mapping.
+      Configure a supported scheduled Pool vhost benchmark.
 
 - name: Detect secondary scheduled Pool disk | {{ zettide_optimize }}
   ansible.builtin.set_fact:
     zettide_scheduled_pool_vhost_secondary_enabled: >-
-      {{ zettide_scheduled_pool_vhost_config.secondary is defined }}
+      {{ not zettide_scheduled_pool_synthetic and
+         zettide_scheduled_pool_vhost_config.secondary is defined }}
 
 - name: Validate secondary scheduled Pool disk configuration | {{ zettide_optimize }}
   ansible.builtin.assert:
@@ -144,24 +181,26 @@
 - name: Normalize scheduled Pool disk arguments | {{ zettide_optimize }}
   ansible.builtin.set_fact:
     zettide_scheduled_pool_vhost_device_args: >-
-      {{ [zettide_scheduled_pool_vhost_config.path,
+      {{ [] if zettide_scheduled_pool_synthetic else
+         [zettide_scheduled_pool_vhost_config.path,
           zettide_scheduled_pool_vhost_config.serial] +
          ([zettide_scheduled_pool_vhost_config.secondary.path,
            zettide_scheduled_pool_vhost_config.secondary.serial]
           if zettide_scheduled_pool_vhost_secondary_enabled else []) }}
     zettide_scheduled_pool_vhost_expected_confirmation: >-
-      {{ ('DESTROY:spdk_nvme_pcie:' ~ zettide_scheduled_pool_vhost_config.path ~ ':' ~
+      {{ '' if zettide_scheduled_pool_synthetic else
+         (('DESTROY:spdk_nvme_pcie:' ~ zettide_scheduled_pool_vhost_config.path ~ ':' ~
           zettide_scheduled_pool_vhost_config.serial ~ ':' ~
           zettide_vhost_scheduled_pool_pcie_namespaces[0] ~ ':' ~
           zettide_scheduled_pool_vhost_config.secondary.path ~ ':' ~
           zettide_scheduled_pool_vhost_config.secondary.serial ~ ':' ~
           zettide_vhost_scheduled_pool_pcie_namespaces[1])
          if zettide_vhost_scheduled_pool_storage_transport | default('linux') == 'spdk_nvme_pcie'
-         else ('DESTROY:' ~ zettide_scheduled_pool_vhost_config.path ~ ':' ~
-          zettide_scheduled_pool_vhost_config.serial ~
-          (':' ~ zettide_scheduled_pool_vhost_config.secondary.path ~ ':' ~
-           zettide_scheduled_pool_vhost_config.secondary.serial
-           if zettide_scheduled_pool_vhost_secondary_enabled else '')) }}
+          else ('DESTROY:' ~ zettide_scheduled_pool_vhost_config.path ~ ':' ~
+           zettide_scheduled_pool_vhost_config.serial ~
+           (':' ~ zettide_scheduled_pool_vhost_config.secondary.path ~ ':' ~
+            zettide_scheduled_pool_vhost_config.secondary.serial
+            if zettide_scheduled_pool_vhost_secondary_enabled else ''))) }}
 
 - name: Require exact scheduled Pool destruction confirmation | {{ zettide_optimize }}
   ansible.builtin.assert:
@@ -172,13 +211,17 @@
     fail_msg: >-
       Pass -e zettide_scheduled_pool_nvmf_fio_confirm={{
       zettide_scheduled_pool_vhost_expected_confirmation }}.
+  when: not zettide_scheduled_pool_synthetic
 
 - name: Validate optional scheduled Pool reuse identity | {{ zettide_optimize }}
   ansible.builtin.assert:
     that:
       - >-
-        zettide_nvmf_scheduled_pool_expected_pool_id | default('') == '' or
-        zettide_nvmf_scheduled_pool_expected_pool_id is match('^[0-9a-f]{32}$')
+        (zettide_scheduled_pool_synthetic and
+         zettide_nvmf_scheduled_pool_expected_pool_id | default('') == '') or
+        (not zettide_scheduled_pool_synthetic and
+         (zettide_nvmf_scheduled_pool_expected_pool_id | default('') == '' or
+          zettide_nvmf_scheduled_pool_expected_pool_id is match('^[0-9a-f]{32}$')))
     fail_msg: "Expected scheduled Pool ID must be 32 lowercase hexadecimal characters."
 
 - name: Create scheduled Pool vhost result directory | {{ zettide_optimize }}
@@ -284,9 +327,7 @@
       src/spdk/nvmf_tcp_export.c src/spdk/vhost_blk_controller.c
       test/spdk_runtime.c test/spdk_pool_data_nvmf_benchmark_main.c
       zig-out/lib/libzettide-spdk-pool-data-nvmf-benchmark.a
-      {{ ('zig-out/lib/zettide-benchmark-cpu-profiler-force-link.o '
-          ~ 'zig-out/lib/libzettide-benchmark-cpu-profiler.a')
-         if zettide_scheduled_pool_cpu_profile else '' }}
+      {{ zettide_scheduled_pool_profiler_link_args if zettide_scheduled_pool_cpu_profile else '' }}
       -o test/spdk-pool-data-vhost-benchmark -pthread -lstdc++ -Wl,--no-as-needed
       $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
       spdk_event spdk_event_bdev spdk_vhost spdk_event_vhost_blk spdk_event_nvmf
@@ -294,6 +335,10 @@
       -Wl,--as-needed
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
+  vars:
+    zettide_scheduled_pool_profiler_link_args: >-
+      zig-out/lib/zettide-benchmark-cpu-profiler-force-link.o
+      zig-out/lib/libzettide-benchmark-cpu-profiler.a
   changed_when: true
 
 - name: Discover SPDK shared library paths | {{ zettide_optimize }}
@@ -335,7 +380,7 @@
     LD_LIBRARY_PATH: >-
       {{ zettide_scheduled_pool_vhost_spdk_library_flags.stdout.split()
          | map('regex_replace', '^-L', '') | join(':') }}
-    ZETTIDE_SCHEDULED_POOL_NVMF_FIO_CONFIRM: "{{ zettide_scheduled_pool_nvmf_fio_confirm }}"
+    ZETTIDE_SCHEDULED_POOL_NVMF_FIO_CONFIRM: "{{ zettide_scheduled_pool_nvmf_fio_confirm | default('') }}"
     ZETTIDE_SCHEDULED_POOL_NVMF_TARGET: "{{ zettide_remote_workspace.path }}/test/spdk-pool-data-vhost-benchmark"
     ZETTIDE_SCHEDULED_POOL_NVMF_READ_POLICY: "{{ zettide_vhost_scheduled_pool_read_policy }}"
     ZETTIDE_SCHEDULED_POOL_NVMF_EXPECTED_POOL_ID: "{{ zettide_nvmf_scheduled_pool_expected_pool_id | default('') }}"
@@ -344,22 +389,30 @@
       {{ 'spdk-nvme-perf' if zettide_scheduled_pool_direct_perf
          else ('vhost-spdk-nvme' if zettide_scheduled_pool_raw_vhost else 'vhost') }}
     ZETTIDE_SCHEDULED_POOL_PROFILE: "{{ zettide_scheduled_pool_result_name }}"
-    ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS: "1"
+    ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS: "{{ '0' if zettide_scheduled_pool_synthetic else '1' }}"
     ZETTIDE_NVMF_REACTOR_COUNT: "{{ zettide_vhost_scheduled_pool_reactor_count }}"
     ZETTIDE_POOL_DATA_CONCURRENT_GROUPS: "{{ zettide_vhost_scheduled_pool_concurrent_groups | default(8) }}"
     ZETTIDE_POOL_DATA_RAW_TRANSPORT: "{{ zettide_vhost_scheduled_pool_raw_transport | default('auto') }}"
     ZETTIDE_POOL_DATA_STORAGE_TRANSPORT: "{{ zettide_vhost_scheduled_pool_storage_transport | default('linux') }}"
     ZETTIDE_POOL_DATA_BENCHMARK_MODE: "{{ 'raw_nvme' if zettide_scheduled_pool_raw_vhost else 'pool' }}"
     ZETTIDE_POOL_DATA_PCIE_NAMESPACES: "{{ zettide_vhost_scheduled_pool_pcie_namespaces | default([]) | join(',') }}"
-    ZETTIDE_POOL_DATA_PCIE_PREPARATION_MODE: "{{ zettide_vhost_scheduled_pool_pcie_preparation_mode | default('create') }}"
+    ZETTIDE_POOL_DATA_PCIE_PREPARATION_MODE: >-
+      {{ 'none' if zettide_scheduled_pool_synthetic else
+         zettide_vhost_scheduled_pool_pcie_preparation_mode | default('create') }}
     ZETTIDE_VHOST_PERF_CASE: "{{ zettide_vhost_scheduled_pool_perf_case | default('') }}"
     ZETTIDE_VHOST_PERF_FREQUENCY: "{{ zettide_vhost_scheduled_pool_perf_frequency | default(199) }}"
     ZETTIDE_VHOST_CPU_PROFILE_CASE: "{{ zettide_vhost_scheduled_pool_cpu_profile_case | default('') }}"
     ZETTIDE_POOL_DATA_SQPOLL_CPU_BASE: "{{ zettide_vhost_scheduled_pool_sqpoll_cpu_base | default('') }}"
     ZETTIDE_VHOST_VCPU_CPU_BASE: "{{ zettide_vhost_scheduled_pool_vcpu_cpu_base | default('') }}"
+    ZETTIDE_VHOST_TARGET_CPU_LIST: "{{ zettide_vhost_scheduled_pool_target_cpu_list | default('') }}"
+    ZETTIDE_VHOST_GUEST_MITIGATIONS_OFF: "{{ zettide_vhost_scheduled_pool_guest_mitigations_off | default(0) }}"
+    ZETTIDE_VHOST_EXTRA_SSH_PUBKEY: "{{ zettide_vhost_scheduled_pool_extra_ssh_pubkey | default('') }}"
+    ZETTIDE_VHOST_HOLD_SECONDS: "{{ zettide_vhost_scheduled_pool_hold_seconds | default(0) }}"
     ZETTIDE_POOL_DATA_THREADED_CONCURRENCY: "{{ zettide_vhost_scheduled_pool_threaded_concurrency | default('') }}"
     ZETTIDE_VHOST_WORKER_COUNT: "{{ zettide_vhost_scheduled_pool_worker_count | default(2) }}"
     ZETTIDE_VHOST_INLINE_BATCHES: "{{ zettide_vhost_scheduled_pool_inline_batches | default('') }}"
+    ZETTIDE_VHOST_COALESCING_DELAY_BASE_US: "{{ zettide_vhost_scheduled_pool_coalescing_delay_base_us | default('') }}"
+    ZETTIDE_VHOST_COALESCING_IOPS_THRESHOLD: "{{ zettide_vhost_scheduled_pool_coalescing_iops_threshold | default('') }}"
     ZETTIDE_VHOST_TARGET_GDB: "{{ zettide_vhost_scheduled_pool_target_gdb | default(0) }}"
     ZETTIDE_VHOST_BASE_IMAGE: /var/cache/zettide/fedora-cloud-base.qcow2
     ZETTIDE_VHOST_GUEST_VCPUS: "{{ zettide_vhost_scheduled_pool_guest_vcpus }}"

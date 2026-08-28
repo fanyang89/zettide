@@ -51,6 +51,10 @@ pub const TransportStats = struct {
     async_submissions: u64 = 0,
     async_completions: u64 = 0,
     async_queue_full: u64 = 0,
+    read_direct_batches: u64 = 0,
+    read_direct_bytes: u64 = 0,
+    read_bounce_batches: u64 = 0,
+    read_bounce_bytes: u64 = 0,
 };
 
 /// Owned durable random-access storage used by a v3 member.

@@ -1,0 +1,149 @@
+syntax = "proto3";
+
+package zettide.control.v1;
+
+service DataService {
+  rpc EnsureReplica(EnsureReplicaRequest) returns (EnsureReplicaResponse);
+  rpc InspectReplica(InspectReplicaRequest) returns (InspectReplicaResponse);
+  rpc DeleteReplica(DeleteReplicaRequest) returns (DeleteReplicaResponse);
+  rpc IdentifyHolder(IdentifyHolderRequest) returns (IdentifyHolderResponse);
+  rpc StagePrimary(StagePrimaryRequest) returns (StagePrimaryResponse);
+  rpc FenceReplica(FenceReplicaRequest) returns (FenceReplicaResponse);
+  rpc RecoverPrimary(RecoverPrimaryRequest) returns (RecoverPrimaryResponse);
+  rpc MarkPrimaryReady(MarkPrimaryReadyRequest) returns (MarkPrimaryReadyResponse);
+  rpc InspectPrimary(InspectPrimaryRequest) returns (InspectPrimaryResponse);
+}
+
+enum DataReplicaState {
+  DATA_REPLICA_STATE_UNSPECIFIED = 0;
+  DATA_REPLICA_STATE_ACTIVE = 1;
+  DATA_REPLICA_STATE_TOMBSTONED = 2;
+}
+
+message DataReplicaAttestation {
+  string volume_id = 1;
+  string placement_id = 2;
+  string allocation_id = 3;
+  uint64 generation = 4;
+  bytes member_id = 5;
+  uint64 offset_bytes = 6;
+  uint64 length_bytes = 7;
+  bytes backend_digest = 8;
+}
+
+message DataReplica {
+  DataReplicaState state = 1;
+  DataReplicaAttestation attestation = 2;
+}
+
+message EnsureReplicaRequest {
+  string operation_id = 1;
+  string volume_id = 2;
+  string placement_id = 3;
+  string allocation_id = 4;
+  uint64 generation = 5;
+  bytes member_id = 6;
+  uint64 offset_bytes = 7;
+  uint64 length_bytes = 8;
+}
+
+message EnsureReplicaResponse {
+  string operation_id = 1;
+  DataReplica replica = 2;
+}
+
+message InspectReplicaRequest {
+  string operation_id = 1;
+  string volume_id = 2;
+  string placement_id = 3;
+  string allocation_id = 4;
+  uint64 generation = 5;
+  bytes member_id = 6;
+  uint64 offset_bytes = 7;
+  uint64 length_bytes = 8;
+}
+
+message InspectReplicaResponse {
+  string operation_id = 1;
+  DataReplica replica = 2;
+}
+
+message DeleteReplicaRequest {
+  string operation_id = 1;
+  string volume_id = 2;
+  string placement_id = 3;
+  string allocation_id = 4;
+  uint64 generation = 5;
+  bytes member_id = 6;
+  uint64 offset_bytes = 7;
+  uint64 length_bytes = 8;
+}
+
+message DeleteReplicaResponse {
+  string operation_id = 1;
+  DataReplica replica = 2;
+}
+
+// Node-local identities are canonical UUIDv7 values encoded as exactly 16 bytes.
+// Digests are exactly 32 bytes. Mutations are idempotent for an identical binding.
+message DataAuthorityBinding {
+  bytes volume_id = 1;
+  bytes primary_placement_id = 2;
+  bytes primary_node_id = 3;
+  bytes lease_id = 4;
+  bytes holder_boot_id = 5;
+  uint64 authority_generation = 6;
+  uint64 write_epoch = 7;
+  uint64 placement_revision = 8;
+  bytes activation_nonce = 9;
+  bytes authority_digest = 10;
+}
+
+message IdentifyHolderRequest {}
+message IdentifyHolderResponse { bytes holder_boot_id = 1; }
+
+message StagePrimaryRequest {
+  DataAuthorityBinding binding = 1;
+  uint32 lease_duration_ms = 2;
+}
+
+message StagePrimaryResponse {
+  DataAuthorityBinding binding = 1;
+  uint32 lease_duration_ms = 2;
+}
+
+message DataReplicaFenceBinding {
+  bytes operation_id = 1;
+  bytes volume_id = 2;
+  bytes placement_id = 3;
+  uint64 replica_generation = 4;
+  uint64 write_epoch = 5;
+  bytes primary_node_id = 6;
+  bytes lease_id = 7;
+  bytes authority_digest = 8;
+}
+
+message FenceReplicaRequest { DataReplicaFenceBinding binding = 1; }
+message FenceReplicaResponse {
+  DataReplicaFenceBinding binding = 1;
+  bytes fence_digest = 2;
+}
+
+message RecoverPrimaryRequest { DataAuthorityBinding binding = 1; }
+message RecoverPrimaryResponse {
+  DataAuthorityBinding binding = 1;
+  uint64 certified_sequence = 2;
+  bytes history_digest = 3;
+  bool empty_frontier = 4;
+}
+
+message MarkPrimaryReadyRequest { DataAuthorityBinding binding = 1; }
+message MarkPrimaryReadyResponse { DataAuthorityBinding binding = 1; }
+message InspectPrimaryRequest { DataAuthorityBinding binding = 1; }
+message InspectPrimaryResponse {
+  DataAuthorityBinding binding = 1;
+  bool current_active = 2;
+  bool current_admitting = 3;
+  bool candidate_fresh = 4;
+  bool should_renew = 5;
+}

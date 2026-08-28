@@ -10,13 +10,32 @@ const Context = struct {
     canonical_name: [*:0]u8,
     async_submissions: std.atomic.Value(u64) = .init(0),
     async_completions: std.atomic.Value(u64) = .init(0),
+    read_direct_batches: std.atomic.Value(u64) = .init(0),
+    read_direct_bytes: std.atomic.Value(u64) = .init(0),
+    read_bounce_batches: std.atomic.Value(u64) = .init(0),
+    read_bounce_bytes: std.atomic.Value(u64) = .init(0),
     async_state: std.atomic.Value(u64) = .init(0),
     async_drained: std.Io.Event = .unset,
+    // Recycling AsyncReadTask avoids the ReleaseSafe undefined-fill poison that
+    // std.mem.Allocator applies on every create/destroy in the hot read path.
+    task_pool: [task_pool_capacity]*AsyncReadTask = undefined,
+    task_pool_count: usize = 0,
+    task_pool_locked: std.atomic.Value(bool) = .init(false),
 };
+
+fn taskPoolLock(context: *Context) void {
+    while (context.task_pool_locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null)
+        std.atomic.spinLoopHint();
+}
+
+fn taskPoolUnlock(context: *Context) void {
+    context.task_pool_locked.store(false, .release);
+}
 
 const max_async_reads = 32;
 const async_closing: u64 = 1 << 63;
 const async_count_mask = async_closing - 1;
+const task_pool_capacity = 1024;
 
 const AsyncReadTask = struct {
     context: *Context,
@@ -24,10 +43,9 @@ const AsyncReadTask = struct {
     results: []storage_api.ReadResult,
     completion: storage_api.AsyncReadCompletion,
     submitted_count: usize = 0,
+    total_bytes: u64 = 0,
     descriptors: [max_async_reads]c.struct_zettide_spdk_bdev_dispatcher_read = undefined,
     statuses: [max_async_reads]c_int = undefined,
-    destinations: [max_async_reads][]u8 = undefined,
-    dma_buffer: ?*anyopaque = null,
     result_indexes: [max_async_reads]u8 = undefined,
 };
 
@@ -103,7 +121,7 @@ fn readAt(context_ptr: *anyopaque, _: std.Io, buffer: []u8, offset: u64) !usize 
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     if (buffer.len == 0) return 0;
     try validateIo(context, offset, buffer.len, context.geometry.logical_block_size);
-    const dma_buffer = c.zettide_spdk_dma_zmalloc(buffer.len, context.geometry.buffer_alignment) orelse
+    const dma_buffer = c.zettide_spdk_dma_malloc(buffer.len, context.geometry.buffer_alignment) orelse
         return error.OutOfMemory;
     defer c.zettide_spdk_dma_free(dma_buffer);
     try statusError(c.zettide_spdk_bdev_dispatcher_read(
@@ -115,6 +133,30 @@ fn readAt(context_ptr: *anyopaque, _: std.Io, buffer: []u8, offset: u64) !usize 
     const dma_bytes: [*]const u8 = @ptrCast(dma_buffer);
     @memcpy(buffer, dma_bytes[0..buffer.len]);
     return buffer.len;
+}
+
+fn allocTask(context: *Context) !*AsyncReadTask {
+    taskPoolLock(context);
+    if (context.task_pool_count > 0) {
+        context.task_pool_count -= 1;
+        const task = context.task_pool[context.task_pool_count];
+        taskPoolUnlock(context);
+        return task;
+    }
+    taskPoolUnlock(context);
+    return std.heap.c_allocator.create(AsyncReadTask);
+}
+
+fn freeTask(context: *Context, task: *AsyncReadTask) void {
+    taskPoolLock(context);
+    if (context.task_pool_count < task_pool_capacity) {
+        context.task_pool[context.task_pool_count] = task;
+        context.task_pool_count += 1;
+        taskPoolUnlock(context);
+        return;
+    }
+    taskPoolUnlock(context);
+    std.heap.c_allocator.destroy(task);
 }
 
 fn submitReadManyAt(
@@ -139,30 +181,21 @@ fn submitReadManyAt(
             try validateIo(context, read.offset, read.buffer.len, context.geometry.logical_block_size);
     }
 
-    const task = try std.heap.c_allocator.create(AsyncReadTask);
-    errdefer std.heap.c_allocator.destroy(task);
+    const task = try allocTask(context);
+    errdefer freeTask(context, task);
     task.* = .{
         .context = context,
         .io = io,
         .results = results,
         .completion = completion,
     };
-    var dma_offsets: [max_async_reads]usize = undefined;
-    var dma_size: usize = 0;
-    const dma_alignment: usize = @intCast(context.geometry.buffer_alignment);
     for (reads, 0..) |read, result_index| {
         if (read.buffer.len == 0) continue;
-        const remainder = dma_size % dma_alignment;
-        if (remainder != 0)
-            dma_size = std.math.add(usize, dma_size, dma_alignment - remainder) catch
-                return error.OutOfMemory;
         const index = task.submitted_count;
-        dma_offsets[index] = dma_size;
-        dma_size = std.math.add(usize, dma_size, read.buffer.len) catch return error.OutOfMemory;
-        task.destinations[index] = read.buffer;
+        task.total_bytes +|= @intCast(read.buffer.len);
         task.result_indexes[index] = @intCast(result_index);
         task.descriptors[index] = .{
-            .buffer = undefined,
+            .buffer = @ptrCast(read.buffer.ptr),
             .offset = read.offset,
             .length = read.buffer.len,
         };
@@ -170,21 +203,12 @@ fn submitReadManyAt(
     }
     if (task.submitted_count == 0) {
         const callback = task.completion;
-        std.heap.c_allocator.destroy(task);
+        freeTask(context, task);
         _ = context.async_submissions.fetchAdd(1, .monotonic);
         _ = context.async_completions.fetchAdd(1, .monotonic);
         callback.complete(callback.context, null);
         return .submitted;
     }
-    task.dma_buffer = c.zettide_spdk_dma_zmalloc(
-        dma_size,
-        context.geometry.buffer_alignment,
-    ) orelse return error.OutOfMemory;
-    const dma_buffer = task.dma_buffer.?;
-    errdefer c.zettide_spdk_dma_free(dma_buffer);
-    const dma_bytes: [*]u8 = @ptrCast(dma_buffer);
-    for (task.descriptors[0..task.submitted_count], dma_offsets[0..task.submitted_count]) |*descriptor, offset|
-        descriptor.buffer = dma_bytes + offset;
 
     _ = context.async_submissions.fetchAdd(1, .monotonic);
     const status = c.zettide_spdk_bdev_dispatcher_submit_read_many(
@@ -203,28 +227,31 @@ fn submitReadManyAt(
     return .submitted;
 }
 
-fn asyncReadComplete(context_ptr: ?*anyopaque) callconv(.c) void {
+fn asyncReadComplete(context_ptr: ?*anyopaque, direct: bool) callconv(.c) void {
     const task: *AsyncReadTask = @ptrCast(@alignCast(context_ptr.?));
     const context = task.context;
     const io = task.io;
     const completion = task.completion;
     for (
         task.statuses[0..task.submitted_count],
-        task.destinations[0..task.submitted_count],
         task.descriptors[0..task.submitted_count],
         task.result_indexes[0..task.submitted_count],
-    ) |status, destination, descriptor, result_index| {
+    ) |status, descriptor, result_index| {
         const result = &task.results[result_index];
         if (status == 0) {
-            const dma_bytes: [*]const u8 = @ptrCast(descriptor.buffer.?);
-            @memcpy(destination, dma_bytes[0..destination.len]);
-            result.amount = destination.len;
+            result.amount = @intCast(descriptor.length);
         } else {
             result.failure = statusErrorValue(status);
         }
     }
-    c.zettide_spdk_dma_free(task.dma_buffer);
-    std.heap.c_allocator.destroy(task);
+    if (direct) {
+        _ = context.read_direct_batches.fetchAdd(1, .monotonic);
+        _ = context.read_direct_bytes.fetchAdd(task.total_bytes, .monotonic);
+    } else {
+        _ = context.read_bounce_batches.fetchAdd(1, .monotonic);
+        _ = context.read_bounce_bytes.fetchAdd(task.total_bytes, .monotonic);
+    }
+    freeTask(context, task);
     _ = context.async_completions.fetchAdd(1, .monotonic);
     completion.complete(completion.context, null);
     releaseAsync(context, io);
@@ -239,7 +266,7 @@ fn writeAllAt(context_ptr: *anyopaque, _: std.Io, bytes: []const u8, offset: u64
         context.geometry.write_unit_blocks,
     ) catch return error.InvalidStorageGeometry;
     try validateIo(context, offset, bytes.len, write_unit_size);
-    const dma_buffer = c.zettide_spdk_dma_zmalloc(bytes.len, context.geometry.buffer_alignment) orelse
+    const dma_buffer = c.zettide_spdk_dma_malloc(bytes.len, context.geometry.buffer_alignment) orelse
         return error.OutOfMemory;
     defer c.zettide_spdk_dma_free(dma_buffer);
     const dma_bytes: [*]u8 = @ptrCast(dma_buffer);
@@ -271,6 +298,11 @@ fn close(context_ptr: *anyopaque, io: std.Io) !void {
             std.atomic.spinLoopHint();
     }
     const close_error = statusError(c.zettide_spdk_bdev_dispatcher_close(context.dispatcher));
+    taskPoolLock(context);
+    const pooled = context.task_pool_count;
+    context.task_pool_count = 0;
+    taskPoolUnlock(context);
+    for (context.task_pool[0..pooled]) |task| std.heap.c_allocator.destroy(task);
     c.free(context.canonical_name);
     const allocator = context.allocator;
     allocator.destroy(context);
@@ -313,6 +345,10 @@ fn transportStats(context_ptr: *anyopaque, _: std.Io) storage_api.TransportStats
     return .{
         .async_submissions = context.async_submissions.load(.monotonic),
         .async_completions = context.async_completions.load(.monotonic),
+        .read_direct_batches = context.read_direct_batches.load(.monotonic),
+        .read_direct_bytes = context.read_direct_bytes.load(.monotonic),
+        .read_bounce_batches = context.read_bounce_batches.load(.monotonic),
+        .read_bounce_bytes = context.read_bounce_bytes.load(.monotonic),
     };
 }
 
@@ -320,6 +356,10 @@ fn resetTransportStats(context_ptr: *anyopaque, _: std.Io) void {
     const context: *Context = @ptrCast(@alignCast(context_ptr));
     context.async_submissions.store(0, .monotonic);
     context.async_completions.store(0, .monotonic);
+    context.read_direct_batches.store(0, .monotonic);
+    context.read_direct_bytes.store(0, .monotonic);
+    context.read_bounce_batches.store(0, .monotonic);
+    context.read_bounce_bytes.store(0, .monotonic);
 }
 
 fn validateIo(context: *const Context, offset: u64, len: usize, alignment: u32) !void {

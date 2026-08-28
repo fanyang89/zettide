@@ -13,9 +13,11 @@ jobs:
         optimize: [Debug, ReleaseSafe]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: mlugg/setup-zig@v2
         with:
-          version: master
+          version: 0.16.0
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev
       - name: Run portable tests
@@ -35,9 +37,11 @@ jobs:
       ZETTIDE_TEST_LOG_DIR: ${{ github.workspace }}/test-results
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: mlugg/setup-zig@v2
         with:
-          version: master
+          version: 0.16.0
       - name: Install FUSE, fio, and Samba
         run: sudo apt-get update && sudo apt-get install -y e2fsprogs fio fuse3 libfuse3-dev samba smbclient util-linux
       - name: Install dufs

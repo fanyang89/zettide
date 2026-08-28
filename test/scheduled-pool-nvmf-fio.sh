@@ -4,17 +4,27 @@
 set -euo pipefail
 export LC_ALL=C
 
-[[ $# -eq 3 || $# -eq 5 ]] || {
-    echo "usage: scheduled-pool-nvmf-fio.sh CLI DEVICE SERIAL [DEVICE SERIAL]" >&2
-    exit 2
-}
-
-cli=$1
-physical_devices=("$2")
-expected_serials=("$3")
-if [[ $# -eq 5 ]]; then
-    physical_devices+=("$4")
-    expected_serials+=("$5")
+storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
+if [[ $storage_transport == synthetic ]]; then
+    [[ $# -eq 1 ]] || {
+        echo "usage: scheduled-pool-nvmf-fio.sh CLI" >&2
+        exit 2
+    }
+    cli=$1
+    physical_devices=()
+    expected_serials=()
+else
+    [[ $# -eq 3 || $# -eq 5 ]] || {
+        echo "usage: scheduled-pool-nvmf-fio.sh CLI DEVICE SERIAL [DEVICE SERIAL]" >&2
+        exit 2
+    }
+    cli=$1
+    physical_devices=("$2")
+    expected_serials=("$3")
+    if [[ $# -eq 5 ]]; then
+        physical_devices+=("$4")
+        expected_serials+=("$5")
+    fi
 fi
 physical_device_count=${#physical_devices[@]}
 member_count=$((physical_device_count * 3))
@@ -27,7 +37,6 @@ benchmark_driver=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_DRIVER:-test/spdk-nvmf-fio.s
 benchmark_log_name=${ZETTIDE_SCHEDULED_POOL_BENCHMARK_LOG_NAME:-nvmf}
 lifecycle_profile=${ZETTIDE_SCHEDULED_POOL_PROFILE:-nvmf-scheduled-pool-rxe-fio}
 raw_windows=${ZETTIDE_SCHEDULED_POOL_RAW_WINDOWS:-0}
-storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
 pcie_namespace_text=${ZETTIDE_POOL_DATA_PCIE_NAMESPACES:-}
 pcie_preparation_mode=${ZETTIDE_POOL_DATA_PCIE_PREPARATION_MODE:-create}
 benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
@@ -66,14 +75,35 @@ contains_forbidden_identity_character() {
     echo "raw window mode must be 0 or 1" >&2
     exit 2
 }
-[[ $storage_transport == linux || $storage_transport == spdk_nvme_pcie ]] || {
-    echo "storage transport must be linux or spdk_nvme_pcie" >&2
+[[ $storage_transport == linux || $storage_transport == spdk_nvme_pcie || $storage_transport == synthetic ]] || {
+    echo "storage transport must be linux, spdk_nvme_pcie, or synthetic" >&2
     exit 2
 }
 [[ $benchmark_mode == pool || $benchmark_mode == raw_nvme ]] || {
     echo "benchmark mode must be pool or raw_nvme" >&2
     exit 2
 }
+if [[ $storage_transport == synthetic ]]; then
+    [[ $benchmark_mode == pool && $raw_windows == 0 && -z $expected_pool_id &&
+        $benchmark_driver == test/spdk-vhost-user-blk-fio.sh ]] || {
+        echo "synthetic storage requires Pool vhost mode without devices or Pool metadata" >&2
+        exit 2
+    }
+    [[ -x $target ]] || { echo "target is unavailable" >&2; exit 2; }
+    if [[ $benchmark_driver != test/* || $benchmark_driver == *..* || ! -x $benchmark_driver ]]; then
+        echo "benchmark driver must be an executable repository-relative test/ path without .." >&2
+        exit 2
+    fi
+    [[ $benchmark_log_name =~ ^[a-z0-9-]+$ ]] || {
+        echo "benchmark log name must contain only lowercase letters, digits, and hyphens" >&2
+        exit 2
+    }
+    mkdir -p "$log_dir"
+    unset ZETTIDE_POOL_DATA_MEMBER_WINDOWS
+    export ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=$storage_transport
+    exec bash "$benchmark_driver" "$target" "$log_dir/$benchmark_log_name-ready" \
+        "$log_dir/$benchmark_log_name" "$read_policy"
+fi
 if [[ $storage_transport == spdk_nvme_pcie ]]; then
     [[ $physical_device_count -eq 2 && $raw_windows == 1 ]] || {
         echo "SPDK NVMe PCIe requires two physical devices and raw windows" >&2
@@ -111,7 +141,7 @@ if [[ $benchmark_mode == raw_nvme ]] &&
     echo "raw NVMe vhost requires SPDK PCIe, validation-only Pool preparation, an expected Pool ID, and the vhost benchmark driver" >&2
     exit 2
 fi
-for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink sleep tr udevadm umount wipefs; do
+for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink setsid sleep tr udevadm umount wipefs; do
     command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 2; }
 done
 [[ -x $cli && -x $target ]] || {
@@ -160,6 +190,94 @@ events_log=$log_dir/lifecycle-events.log
 record_event() {
     printf '%s %s\n' "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$events_log"
 }
+
+print_optional_file() {
+    local label=$1 path=$2 value
+    [[ -r $path ]] || return 0
+    value=$(<"$path")
+    printf '%s=%s\n' "$label" "$value"
+}
+
+record_host_environment() {
+    local output=$1 status_path policy_path policy
+    {
+        echo "== kernel =="
+        print_optional_file cmdline /proc/cmdline
+        print_optional_file isolated_cpus /sys/devices/system/cpu/isolated
+        print_optional_file nohz_full /sys/devices/system/cpu/nohz_full
+        print_optional_file nmi_watchdog /proc/sys/kernel/nmi_watchdog
+        print_optional_file numa_balancing /proc/sys/kernel/numa_balancing
+
+        echo "== cpu =="
+        lscpu
+        lscpu -e=CPU,NODE,SOCKET,CORE,CACHE,ONLINE,MAXMHZ,MINMHZ
+
+        echo "== cpufreq =="
+        for policy_path in /sys/devices/system/cpu/cpufreq/policy*; do
+            [[ -d $policy_path ]] || continue
+            policy=${policy_path##*/}
+            print_optional_file "$policy.driver" "$policy_path/scaling_driver"
+            print_optional_file "$policy.governor" "$policy_path/scaling_governor"
+            print_optional_file "$policy.min_khz" "$policy_path/scaling_min_freq"
+            print_optional_file "$policy.max_khz" "$policy_path/scaling_max_freq"
+        done
+        print_optional_file boost /sys/devices/system/cpu/cpufreq/boost
+
+        echo "== memory =="
+        print_optional_file thp_enabled /sys/kernel/mm/transparent_hugepage/enabled
+        print_optional_file thp_defrag /sys/kernel/mm/transparent_hugepage/defrag
+        print_optional_file nr_hugepages /proc/sys/vm/nr_hugepages
+
+        echo "== irqbalance =="
+        if command -v systemctl >/dev/null; then
+            printf 'active='
+            systemctl is-active irqbalance || true
+            printf 'enabled='
+            systemctl is-enabled irqbalance || true
+        else
+            echo unavailable
+        fi
+
+        echo "== vulnerabilities =="
+        for status_path in /sys/devices/system/cpu/vulnerabilities/*; do
+            [[ -r $status_path ]] || continue
+            printf '%s: ' "${status_path##*/}"
+            cat "$status_path"
+        done
+    } >"$output"
+}
+
+record_pcie_state() {
+    local name=$1 bdf pci_path driver group irq_path irq affinity effective
+    [[ $storage_transport == spdk_nvme_pcie ]] || return 0
+    {
+        print_optional_file default_smp_affinity /proc/irq/default_smp_affinity
+        for bdf in "${pcie_bdfs[@]}"; do
+            pci_path=/sys/bus/pci/devices/$bdf
+            echo "== $bdf =="
+            driver=unbound
+            [[ -L $pci_path/driver ]] && driver=$(basename "$(readlink -f -- "$pci_path/driver")")
+            echo "driver=$driver"
+            print_optional_file numa_node "$pci_path/numa_node"
+            print_optional_file local_cpulist "$pci_path/local_cpulist"
+            group=unavailable
+            [[ -L $pci_path/iommu_group ]] && group=$(basename "$(readlink -f -- "$pci_path/iommu_group")")
+            echo "iommu_group=$group"
+            for irq_path in "$pci_path"/msi_irqs/*; do
+                [[ -e $irq_path ]] || continue
+                irq=${irq_path##*/}
+                affinity=unavailable
+                effective=unavailable
+                [[ -r /proc/irq/$irq/smp_affinity_list ]] && affinity=$(<"/proc/irq/$irq/smp_affinity_list")
+                [[ -r /proc/irq/$irq/effective_affinity_list ]] && effective=$(<"/proc/irq/$irq/effective_affinity_list")
+                printf 'irq=%s affinity=%s effective=%s\n' "$irq" "$affinity" "$effective"
+                grep -E "^[[:space:]]*$irq:" /proc/interrupts || true
+            done
+        done
+    } >"$log_dir/host-pcie-$name.txt"
+}
+
+record_host_environment "$log_dir/host-environment.txt"
 
 next_enumeration_file() {
     local kind=$1
@@ -412,7 +530,7 @@ prepare_pcie_pool() {
         expected_id=$expected_pool_id
     fi
     begin_attach_deferred_signals
-    env -u ZETTIDE_POOL_DATA_PCIE_PROBE \
+    setsid --wait env -u ZETTIDE_POOL_DATA_PCIE_PROBE \
         ZETTIDE_POOL_DATA_BENCHMARK_MODE=pool \
         ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=spdk_nvme_pcie \
         ZETTIDE_POOL_DATA_PREPARATION_MODE="$pcie_preparation_mode" \
@@ -423,7 +541,11 @@ prepare_pcie_pool() {
     benchmark_pid=$!
     end_attach_deferred_signals
     wait "$benchmark_pid" || prepare_status=$?
-    benchmark_pid=""
+    if benchmark_group_running; then
+        echo "SPDK NVMe PCIe Pool preparation left running descendants" >&2
+        prepare_status=1
+    fi
+    stop_benchmark || prepare_status=1
     if ((prepare_status != 0)); then
         echo "SPDK NVMe PCIe Pool preparation failed; inspect $log_dir/spdk-pcie-prepare.log" >&2
         return 1
@@ -744,20 +866,67 @@ detach_loops() {
     return "$status"
 }
 
+benchmark_group_running() {
+    local stat_path stat_line stat_fields state pgrp
+    [[ -n $benchmark_pid ]] || return 1
+    for stat_path in /proc/[0-9]*/stat; do
+        IFS= read -r stat_line <"$stat_path" 2>/dev/null || continue
+        stat_fields=${stat_line##*) }
+        read -r state _ pgrp _ <<<"$stat_fields"
+        [[ $pgrp == "$benchmark_pid" && $state != Z ]] && return 0
+    done
+    return 1
+}
+
+stop_benchmark() {
+    local deadline status=0
+    [[ -n $benchmark_pid ]] || return 0
+    if benchmark_group_running; then
+        kill -TERM -- "-$benchmark_pid" 2>/dev/null || true
+        deadline=$((SECONDS + 45))
+        while benchmark_group_running && ((SECONDS < deadline)); do
+            sleep 0.1
+        done
+        if benchmark_group_running; then
+            kill -KILL -- "-$benchmark_pid" 2>/dev/null || true
+            deadline=$((SECONDS + 3))
+            while benchmark_group_running && ((SECONDS < deadline)); do
+                sleep 0.1
+            done
+        fi
+        if benchmark_group_running; then
+            echo "benchmark process group remains running; refusing storage cleanup" >&2
+            status=1
+        fi
+    fi
+    if ((status == 0)); then
+        wait "$benchmark_pid" 2>/dev/null || true
+        benchmark_pid=""
+    fi
+    return "$status"
+}
+
 finish() {
-    local command_rc=$? cleanup_rc=0 physical_index restore_attempt restore_rc=1
+    local command_rc=$? cleanup_rc=0 physical_index restore_attempt restore_rc=1 benchmark_stopped=true
     trap - EXIT
     trap '' HUP INT TERM
     set +e
-    for restore_attempt in 1 2 3; do
-        if restore_pcie_devices; then
-            restore_rc=0
-            break
-        fi
-        sleep 1
-    done
-    ((restore_rc == 0)) || cleanup_rc=1
-    detach_loops || cleanup_rc=1
+    if stop_benchmark; then
+        for restore_attempt in 1 2 3; do
+            if restore_pcie_devices; then
+                restore_rc=0
+                break
+            fi
+            sleep 1
+        done
+        ((restore_rc == 0)) || cleanup_rc=1
+        record_pcie_state restored || cleanup_rc=1
+        detach_loops || cleanup_rc=1
+    else
+        benchmark_stopped=false
+        cleanup_rc=1
+        record_event "cleanup-blocked reason=benchmark-process-group-running pid=$benchmark_pid"
+    fi
     {
         echo "profile=$lifecycle_profile"
         echo "physical_devices=$physical_device_count"
@@ -776,6 +945,7 @@ finish() {
         echo "benchmark_mode=$benchmark_mode"
         echo "pcie_namespaces=$pcie_namespace_text"
         echo "loops_detached=$loops_detached"
+        echo "benchmark_stopped=$benchmark_stopped"
         echo "test_succeeded=$test_succeeded"
         echo "command_rc=$command_rc"
         echo "cleanup_rc=$cleanup_rc"
@@ -798,16 +968,13 @@ if [[ $storage_transport == spdk_nvme_pcie ]]; then
     command -v prlimit >/dev/null || { echo "prlimit is required for SPDK NVMe PCIe" >&2; exit 2; }
     modprobe vfio-pci
     validate_pcie_devices
+    record_pcie_state native
 fi
 
 handle_signal() {
     local status=$1
     trap '' HUP INT TERM
-    if [[ -n $benchmark_pid ]] && kill -0 "$benchmark_pid" 2>/dev/null; then
-        kill -TERM "$benchmark_pid" 2>/dev/null || true
-        wait "$benchmark_pid" 2>/dev/null || true
-        benchmark_pid=""
-    fi
+    stop_benchmark || true
     exit "$status"
 }
 
@@ -1121,14 +1288,34 @@ if [[ $raw_windows == 1 ]]; then
 fi
 fi
 export ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=$storage_transport
+benchmark_ready_file=$log_dir/$benchmark_log_name-ready
+rm -f "$benchmark_ready_file"
+cp /proc/interrupts "$log_dir/host-interrupts-benchmark-before.txt"
+cp /proc/softirqs "$log_dir/host-softirqs-benchmark-before.txt"
 begin_attach_deferred_signals
-bash "$benchmark_driver" "$target" "$log_dir/$benchmark_log_name-ready" "$log_dir/$benchmark_log_name" \
+setsid --wait bash "$benchmark_driver" "$target" "$benchmark_ready_file" "$log_dir/$benchmark_log_name" \
     "$pool_id" "$read_policy" "${benchmark_devices[@]}" &
 benchmark_pid=$!
 end_attach_deferred_signals
+for ((attempt = 0; attempt < 1000; attempt++)); do
+    [[ -e $benchmark_ready_file ]] && break
+    kill -0 "$benchmark_pid" 2>/dev/null || break
+    sleep 0.01
+done
+if [[ -e $benchmark_ready_file ]]; then
+    sleep 0.2
+    record_pcie_state active
+fi
 benchmark_status=0
 wait "$benchmark_pid" || benchmark_status=$?
-benchmark_pid=""
+if benchmark_group_running; then
+    echo "benchmark driver left running descendants" >&2
+    benchmark_status=1
+fi
+stop_benchmark || benchmark_status=1
+cp /proc/interrupts "$log_dir/host-interrupts-benchmark-after.txt"
+cp /proc/softirqs "$log_dir/host-softirqs-benchmark-after.txt"
+record_pcie_state completed
 ((benchmark_status == 0)) || exit "$benchmark_status"
 if [[ $storage_transport == spdk_nvme_pcie ]]; then
     restore_pcie_devices

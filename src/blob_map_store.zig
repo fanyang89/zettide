@@ -423,7 +423,7 @@ pub const MapStore = struct {
         reference: blob_map.PageRef,
         boundary: u64,
         maximum_generation: u64,
-        is_root: bool,
+        _: bool,
         scratch: []u8,
     ) !blob_map.Header {
         if (scratch.len != blob_map.page_size) return error.InvalidBlobBuffer;
@@ -438,12 +438,14 @@ pub const MapStore = struct {
         );
         const page: *const [blob_map.page_size]u8 = @ptrCast(scratch.ptr);
         const header = try blob_map.decodeHeaderVerified(page);
+        // Map pages are immutable. A logical-size-only snapshot may advance
+        // without rewriting its root, so every page generation is an upper-bound
+        // check. Digest and key-range validation still bind the exact root.
         if (header.level != reference.level or
             header.first_key != reference.first_key or
             header.last_key != reference.last_key or
             (header.level == 0) != (header.kind == .leaf) or
-            header.generation > maximum_generation or
-            (is_root and header.generation != maximum_generation))
+            header.generation > maximum_generation)
             return error.BlobMapReferenceMismatch;
         return header;
     }

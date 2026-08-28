@@ -20,6 +20,7 @@ struct zettide_spdk_bdev_provider {
 	struct zettide_spdk_runtime *runtime;
 	void *backend_context;
 	zettide_spdk_bdev_provider_submit submit;
+	bool read_buffers_unchanged;
 };
 
 struct provider_io {
@@ -173,11 +174,13 @@ single_iov_buffer(struct spdk_bdev_io *bdev_io, uint64_t length)
 static void
 complete_provider_io(struct provider_io *io)
 {
+	struct zettide_spdk_bdev_provider *provider = io->bdev_io->bdev->ctxt;
 	bool copied = true;
 
 	assert(spdk_get_thread() == io->submit_thread);
 	if (io->status == 0 && io->owns_buffer &&
-		io->operation == ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
+		io->operation == ZETTIDE_SPDK_BDEV_PROVIDER_READ &&
+		!provider->read_buffers_unchanged) {
 		copied = copy_to_iovs(io->bdev_io->u.bdev.iovs,
 				io->bdev_io->u.bdev.iovcnt, io->buffer, io->length);
 	}
@@ -421,6 +424,7 @@ create_provider(const struct zettide_spdk_bdev_provider_opts *opts,
 	provider->runtime = runtime;
 	provider->backend_context = opts->backend_context;
 	provider->submit = opts->submit;
+	provider->read_buffers_unchanged = opts->read_buffers_unchanged;
 	status = spdk_bdev_register(&provider->bdev);
 	if (status != 0) {
 		free(provider->bdev.name);

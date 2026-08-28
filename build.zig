@@ -1,4 +1,5 @@
 const std = @import("std");
+const raft_build = @import("raftz");
 
 const FuseTestMode = enum { off, auto, required };
 const Smb3TestMode = enum { off, auto, required };
@@ -23,6 +24,7 @@ pub fn build(b: *std.Build) void {
         "benchmark-cpu-profiler",
         "Link the gperftools CPU profiler into the scheduled Pool benchmark",
     ) orelse false;
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer for cawfs tests");
     const crc32c_dependency = b.dependency("crc32c", .{});
     if (enable_spdk and target.result.os.tag != .linux) @panic("SPDK support requires Linux");
     if (enable_benchmark_cpu_profiler and !enable_spdk) {
@@ -34,6 +36,36 @@ pub fn build(b: *std.Build) void {
     if (enable_spdk) _ = configureSpdk(b, app_core, target, optimize);
     const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
+    const dev_step = b.step("dev", "Build the primary Zettide executable for watch mode");
+    dev_step.dependOn(&exe.step);
+
+    const pool_data_benchmark_core = createCoreModule(
+        b,
+        target,
+        .ReleaseSafe,
+        false,
+        crc32c_dependency,
+    );
+    const pool_data_nvmf_args_test_module = b.createModule(.{
+        .root_source_file = b.path("test/spdk_pool_data_nvmf_args.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    const pool_data_nvmf_args_tests = b.addTest(.{
+        .root_module = pool_data_nvmf_args_test_module,
+    });
+    const run_pool_data_nvmf_args_tests = b.addRunArtifact(pool_data_nvmf_args_tests);
+    const pool_data_synthetic_storage_test_module = b.createModule(.{
+        .root_source_file = b.path("test/spdk_pool_data_synthetic_storage.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zettide", .module = pool_data_benchmark_core }},
+    });
+    const pool_data_synthetic_storage_tests = b.addTest(.{
+        .root_module = pool_data_synthetic_storage_test_module,
+    });
+    const run_pool_data_synthetic_storage_tests = b.addRunArtifact(pool_data_synthetic_storage_tests);
 
     if (enable_spdk) {
         const catalog_nvmf_benchmark_module = b.createModule(.{
@@ -60,13 +92,6 @@ pub fn build(b: *std.Build) void {
         );
         catalog_nvmf_benchmark_step.dependOn(&install_catalog_nvmf_benchmark.step);
 
-        const pool_data_benchmark_core = createCoreModule(
-            b,
-            target,
-            .ReleaseSafe,
-            false,
-            crc32c_dependency,
-        );
         const pool_data_nvmf_benchmark_module = b.createModule(.{
             .root_source_file = b.path("test/spdk_pool_data_nvmf_benchmark.zig"),
             .target = target,
@@ -112,21 +137,13 @@ pub fn build(b: *std.Build) void {
             pool_data_nvmf_benchmark_step.dependOn(&install_profiler_force_link.step);
         }
 
-        const pool_data_nvmf_args_test_module = b.createModule(.{
-            .root_source_file = b.path("test/spdk_pool_data_nvmf_args.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        });
-        const pool_data_nvmf_args_tests = b.addTest(.{
-            .root_module = pool_data_nvmf_args_test_module,
-        });
-        const run_pool_data_nvmf_args_tests = b.addRunArtifact(pool_data_nvmf_args_tests);
         const pool_data_nvmf_benchmark_test_step = b.step(
             "test-nvmf-pool-data-benchmark",
-            "Test scheduled Pool data NVMe-oF benchmark arguments and worker compilation",
+            "Test scheduled Pool data NVMe-oF benchmark support",
         );
         pool_data_nvmf_benchmark_test_step.dependOn(&install_pool_data_nvmf_benchmark.step);
         pool_data_nvmf_benchmark_test_step.dependOn(&run_pool_data_nvmf_args_tests.step);
+        pool_data_nvmf_benchmark_test_step.dependOn(&run_pool_data_synthetic_storage_tests.step);
     }
 
     const run_cmd = b.addRunArtifact(exe);
@@ -139,6 +156,8 @@ pub fn build(b: *std.Build) void {
     const run_core_tests = b.addRunArtifact(core_tests);
     const unit_step = b.step("test-unit", "Run deterministic unit tests");
     unit_step.dependOn(&run_core_tests.step);
+    unit_step.dependOn(&run_pool_data_nvmf_args_tests.step);
+    unit_step.dependOn(&run_pool_data_synthetic_storage_tests.step);
 
     if (target.result.os.tag == .linux) {
         const nfs_backend_module = b.createModule(.{
@@ -524,14 +543,169 @@ pub fn build(b: *std.Build) void {
     cross_step.dependOn(&windows_name_tests.step);
     cross_step.dependOn(&macos_name_tests.step);
 
-    const test_step = b.step("test", "Run unit and CLI tests");
+    const control_test_step = addControlComponent(b, target, optimize);
+    const cawfs_test_step = addCawfsComponent(b, target, optimize, sanitize_thread);
+
+    const test_step = b.step("test", "Run unit, CLI, control, and cawfs tests");
     test_step.dependOn(unit_step);
     test_step.dependOn(cli_step);
+    test_step.dependOn(control_test_step);
+    test_step.dependOn(cawfs_test_step);
 
     const ci_step = b.step("ci", "Run default tests and cross-compilation checks");
     ci_step.dependOn(test_step);
     ci_step.dependOn(cross_step);
     ci_step.dependOn(&fs_ops_benchmark.step);
+}
+
+fn addControlComponent(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step {
+    const raft_dependency = b.dependency("raftz", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const grpc_dependency = raft_build.grpcLiteDependency(raft_dependency, target, optimize);
+    const grpc_module = grpc_dependency.module("grpc_lite");
+    const protobuf_module = grpc_module.import_table.get("protobuf").?;
+    const clap_dependency = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const uuid_dependency = b.dependency("uuid", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const node_protocol_dependency = b.dependency("zettide_node_protocol", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const generate_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
+        .destination_directory = b.path(".zig-cache/generated-control"),
+        .source_files = &.{b.path("control/proto/zettide/control/v1/control.proto")},
+        .include_directories = &.{b.path("control/proto")},
+    });
+    const generate_node_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
+        .destination_directory = b.path(".zig-cache/generated-node"),
+        .source_files = &.{node_protocol_dependency.path("proto/zettide/control/v1/data_service.proto")},
+        .include_directories = &.{node_protocol_dependency.path("proto")},
+    });
+    const generate_proto_step = b.step("gen-control-proto", "Generate control-plane Zig protobuf sources");
+    generate_proto_step.dependOn(&generate_proto.step);
+    generate_proto_step.dependOn(&generate_node_proto.step);
+
+    const control_proto = b.createModule(.{
+        .root_source_file = b.path(".zig-cache/generated-control/zettide/control/v1.pb.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
+    });
+    const node_proto = b.createModule(.{
+        .root_source_file = b.path(".zig-cache/generated-node/zettide/control/v1.pb.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
+    });
+
+    const control = b.addModule("zettide_control", .{
+        .root_source_file = b.path("control/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "clap", .module = clap_dependency.module("clap") },
+            .{ .name = "control_proto", .module = control_proto },
+            .{ .name = "grpc_lite", .module = grpc_module },
+            .{ .name = "node_proto", .module = node_proto },
+            .{ .name = "raftz", .module = raft_dependency.module("raftz") },
+            .{ .name = "uuid", .module = uuid_dependency.module("uuid") },
+            .{ .name = "zettide_node_protocol", .module = node_protocol_dependency.module("zettide_node_protocol") },
+        },
+    });
+
+    const library = b.addLibrary(.{
+        .name = "zettide-control",
+        .root_module = control,
+    });
+    library.step.dependOn(&generate_proto.step);
+    library.step.dependOn(&generate_node_proto.step);
+    b.installArtifact(library);
+
+    const executable_module = b.createModule(.{
+        .root_source_file = b.path("control/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zettide_control", .module = control }},
+    });
+    const executable = b.addExecutable(.{
+        .name = "zettide-control",
+        .root_module = executable_module,
+    });
+    executable.step.dependOn(&generate_proto.step);
+    executable.step.dependOn(&generate_node_proto.step);
+    b.installArtifact(executable);
+
+    const run_executable = b.addRunArtifact(executable);
+    if (b.args) |args| run_executable.addArgs(args);
+    const run_step = b.step("run-control", "Run the metadata control plane");
+    run_step.dependOn(&run_executable.step);
+
+    const tests = b.addTest(.{ .root_module = control });
+    tests.step.dependOn(&generate_proto.step);
+    tests.step.dependOn(&generate_node_proto.step);
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test-control", "Run control-plane unit tests");
+    test_step.dependOn(&run_tests.step);
+    return test_step;
+}
+
+fn addCawfsComponent(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitize_thread: ?bool,
+) *std.Build.Step {
+    const module = b.addModule("zettide_cawfs", .{
+        .root_source_file = b.path("cawfs/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = sanitize_thread,
+    });
+
+    const library = b.addLibrary(.{
+        .name = "zettide-cawfs",
+        .root_module = module,
+    });
+    b.installArtifact(library);
+
+    const unit_tests = b.addTest(.{
+        .root_module = module,
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const test_step = b.step("test-cawfs", "Run cawfs tests");
+    test_step.dependOn(&run_unit_tests.step);
+
+    const integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("cawfs/tests/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = sanitize_thread,
+            .imports = &.{.{ .name = "zettide_cawfs", .module = module }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(integration_tests).step);
+
+    const fmt = b.addFmt(.{
+        .paths = &.{ "cawfs/build.zig", "cawfs/src", "cawfs/tests" },
+        .check = true,
+    });
+    const fmt_step = b.step("fmt-check-cawfs", "Check cawfs Zig formatting");
+    fmt_step.dependOn(&fmt.step);
+
+    return test_step;
 }
 
 fn createNameProfileCrossTest(

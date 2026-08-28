@@ -1,13 +1,19 @@
 const std = @import("std");
 
 pub const ReadPolicy = enum { first_available, quorum };
-pub const StorageTransport = enum { linux, spdk_nvme_pcie };
+pub const StorageTransport = enum { linux, spdk_nvme_pcie, synthetic };
 pub const PreparationMode = enum { none, create, validate };
 pub const BenchmarkMode = enum { pool, raw_nvme };
+pub const VhostCoalescing = struct {
+    delay_base_us: u32,
+    iops_threshold: u32,
+};
 pub const max_reactor_count = 16;
 pub const max_vhost_controller_count = 4;
 pub const default_concurrent_group_count = 8;
 pub const max_concurrent_group_count = 64;
+// SPDK scales this by its 10 ms stats interval using u32 arithmetic.
+pub const max_vhost_coalescing_iops_threshold = std.math.maxInt(u32) / 10;
 
 pub const WindowSpec = struct {
     device_index: usize,
@@ -24,6 +30,7 @@ pub fn parseStorageTransport(text: ?[]const u8) !StorageTransport {
     const value = text orelse return .linux;
     if (std.mem.eql(u8, value, "linux")) return .linux;
     if (std.mem.eql(u8, value, "spdk_nvme_pcie")) return .spdk_nvme_pcie;
+    if (std.mem.eql(u8, value, "synthetic")) return .synthetic;
     return error.InvalidStorageTransport;
 }
 
@@ -136,6 +143,19 @@ pub fn parseOptionalFlag(text: ?[]const u8) !?bool {
     return error.InvalidFlag;
 }
 
+pub fn parseVhostCoalescing(delay_text: ?[]const u8, threshold_text: ?[]const u8) !?VhostCoalescing {
+    const delay_value = delay_text orelse "";
+    const threshold_value = threshold_text orelse "";
+    if (delay_value.len == 0 and threshold_value.len == 0) return null;
+    if (delay_value.len == 0 or threshold_value.len == 0) return error.InvalidVhostCoalescing;
+    const delay_base_us = parseDecimal(u32, delay_value) catch return error.InvalidVhostCoalescing;
+    const iops_threshold = parseDecimal(u32, threshold_value) catch return error.InvalidVhostCoalescing;
+    if (delay_base_us == 0 or iops_threshold < 100 or
+        iops_threshold > max_vhost_coalescing_iops_threshold)
+        return error.InvalidVhostCoalescing;
+    return .{ .delay_base_us = delay_base_us, .iops_threshold = iops_threshold };
+}
+
 pub fn reactorMaskAt(mask: []const u8, index: usize, buffer: []u8) ![]const u8 {
     if (mask.len < 3 or mask[0] != '[' or mask[mask.len - 1] != ']')
         return error.InvalidReactorMask;
@@ -185,11 +205,12 @@ test "read policy accepts only supported values" {
     try std.testing.expectError(error.InvalidReadPolicy, parseReadPolicy(2));
 }
 
-test "storage transport defaults to Linux and accepts PCIe" {
+test "storage transport defaults to Linux and accepts supported backends" {
     try std.testing.expectEqual(StorageTransport.linux, try parseStorageTransport(null));
     try std.testing.expectEqual(StorageTransport.linux, try parseStorageTransport("linux"));
     try std.testing.expectEqual(StorageTransport.spdk_nvme_pcie, try parseStorageTransport("spdk_nvme_pcie"));
-    for ([_][]const u8{ "", "pcie", "SPDK_NVME_PCIE" }) |value|
+    try std.testing.expectEqual(StorageTransport.synthetic, try parseStorageTransport("synthetic"));
+    for ([_][]const u8{ "", "pcie", "SPDK_NVME_PCIE", "dummy" }) |value|
         try std.testing.expectError(error.InvalidStorageTransport, parseStorageTransport(value));
 }
 
@@ -298,6 +319,26 @@ test "optional flag accepts only zero and one" {
     try std.testing.expectEqual(@as(?bool, false), try parseOptionalFlag("0"));
     try std.testing.expectEqual(@as(?bool, true), try parseOptionalFlag("1"));
     try std.testing.expectError(error.InvalidFlag, parseOptionalFlag("true"));
+}
+
+test "vhost coalescing requires a valid parameter pair" {
+    try std.testing.expectEqual(@as(?VhostCoalescing, null), try parseVhostCoalescing(null, null));
+    try std.testing.expectEqual(@as(?VhostCoalescing, null), try parseVhostCoalescing("", ""));
+    try std.testing.expectEqualDeep(
+        VhostCoalescing{ .delay_base_us = 4, .iops_threshold = 10_000 },
+        (try parseVhostCoalescing("4", "10000")).?,
+    );
+    for ([_][2]?[]const u8{
+        .{ "4", null },
+        .{ null, "10000" },
+        .{ "0", "10000" },
+        .{ "4", "99" },
+        .{ "4", "429496730" },
+        .{ "+4", "10000" },
+        .{ "4", "4294967296" },
+    }) |values| {
+        try std.testing.expectError(error.InvalidVhostCoalescing, parseVhostCoalescing(values[0], values[1]));
+    }
 }
 
 test "reactor mask selects one core" {

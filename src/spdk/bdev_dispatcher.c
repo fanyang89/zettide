@@ -58,12 +58,17 @@ struct dispatcher_read_batch;
 struct dispatcher_read_item {
 	struct dispatcher_read_batch *batch;
 	struct zettide_spdk_bdev_dispatcher_read read;
+	void *io_buffer;
+	size_t bounce_offset;
 };
 
 struct dispatcher_read_batch {
 	struct zettide_spdk_bdev_dispatcher *dispatcher;
+	size_t item_count;
 	size_t remaining;
 	bool submitting;
+	bool direct;
+	void *bounce_buffer;
 	int *statuses;
 	zettide_spdk_bdev_dispatcher_batch_cb callback;
 	void *callback_context;
@@ -115,9 +120,21 @@ finish_read_batch(struct dispatcher_read_batch *batch)
 {
 	zettide_spdk_bdev_dispatcher_batch_cb callback = batch->callback;
 	void *callback_context = batch->callback_context;
+	bool direct = batch->direct;
+	size_t index;
 
+	if (!direct && batch->bounce_buffer != NULL) {
+		for (index = 0; index < batch->item_count; index++) {
+			struct dispatcher_read_item *item = &batch->items[index];
+
+			if (batch->statuses[index] == 0) {
+				memcpy(item->read.buffer, item->io_buffer, (size_t)item->read.length);
+			}
+		}
+		zettide_spdk_dma_free(batch->bounce_buffer);
+	}
 	free(batch);
-	callback(callback_context);
+	callback(callback_context, direct);
 }
 
 static void
@@ -135,19 +152,88 @@ read_batch_item_complete(void *context, int status)
 	}
 }
 
+static int
+prepare_read_batch(struct dispatcher_read_batch *batch)
+{
+	const struct zettide_spdk_bdev_geometry *geometry;
+	size_t alignment;
+	size_t bounce_size = 0;
+	size_t index;
+
+	batch->direct = true;
+	for (index = 0; index < batch->item_count; index++) {
+		struct dispatcher_read_item *item = &batch->items[index];
+
+		if (!zettide_spdk_bdev_buffer_is_dma_capable(batch->dispatcher->endpoint,
+				item->read.buffer, item->read.length)) {
+			batch->direct = false;
+			break;
+		}
+	}
+	if (batch->direct) {
+		for (index = 0; index < batch->item_count; index++) {
+			batch->items[index].io_buffer = batch->items[index].read.buffer;
+		}
+		return 0;
+	}
+
+	geometry = zettide_spdk_bdev_get_geometry(batch->dispatcher->endpoint);
+	if (geometry == NULL || geometry->buffer_alignment == 0) {
+		return -ENODEV;
+	}
+	alignment = geometry->buffer_alignment;
+	for (index = 0; index < batch->item_count; index++) {
+		struct dispatcher_read_item *item = &batch->items[index];
+		size_t length = (size_t)item->read.length;
+		size_t remainder = bounce_size % alignment;
+
+		if (remainder != 0) {
+			size_t padding = alignment - remainder;
+
+			if (bounce_size > SIZE_MAX - padding) {
+				return -EOVERFLOW;
+			}
+			bounce_size += padding;
+		}
+		item->bounce_offset = bounce_size;
+		if (bounce_size > SIZE_MAX - length) {
+			return -EOVERFLOW;
+		}
+		bounce_size += length;
+	}
+	batch->bounce_buffer = zettide_spdk_dma_malloc(bounce_size, alignment);
+	if (batch->bounce_buffer == NULL) {
+		return -ENOMEM;
+	}
+	for (index = 0; index < batch->item_count; index++) {
+		batch->items[index].io_buffer =
+			(uint8_t *)batch->bounce_buffer + batch->items[index].bounce_offset;
+	}
+	return 0;
+}
+
 static void
 run_read_batch(void *context)
 {
 	struct dispatcher_read_batch *batch = context;
-	size_t read_count = batch->remaining;
 	size_t index;
 	int status;
 
-	for (index = 0; index < read_count; index++) {
+	status = prepare_read_batch(batch);
+	if (status != 0) {
+		for (index = 0; index < batch->item_count; index++) {
+			batch->statuses[index] = status;
+		}
+		batch->remaining = 0;
+		batch->submitting = false;
+		finish_read_batch(batch);
+		return;
+	}
+	for (index = 0; index < batch->item_count; index++) {
 		struct dispatcher_read_item *item = &batch->items[index];
 
 		status = zettide_spdk_bdev_read(batch->dispatcher->endpoint,
-				item->read.buffer, item->read.offset, item->read.length,
+				item->io_buffer, item->read.offset, item->read.length,
 				read_batch_item_complete, item);
 		if (status != 0) {
 			read_batch_item_complete(item, status);
@@ -431,12 +517,21 @@ zettide_spdk_bdev_dispatcher_submit_read_many(
 	if (read_count > (SIZE_MAX - sizeof(*batch)) / sizeof(*batch->items)) {
 		return -EOVERFLOW;
 	}
+	for (index = 0; index < read_count; index++) {
+		if (reads[index].buffer == NULL || reads[index].length == 0) {
+			return -EINVAL;
+		}
+		if (reads[index].length > SIZE_MAX) {
+			return -EOVERFLOW;
+		}
+	}
 	allocation_size = sizeof(*batch) + read_count * sizeof(*batch->items);
 	batch = calloc(1, allocation_size);
 	if (batch == NULL) {
 		return -ENOMEM;
 	}
 	batch->dispatcher = dispatcher;
+	batch->item_count = read_count;
 	batch->remaining = read_count;
 	batch->submitting = true;
 	batch->statuses = statuses;

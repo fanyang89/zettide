@@ -19,7 +19,7 @@ struct zettide_spdk_bdev_dispatcher_read {
 	uint64_t length;
 };
 
-typedef void (*zettide_spdk_bdev_dispatcher_batch_cb)(void *callback_context);
+typedef void (*zettide_spdk_bdev_dispatcher_batch_cb)(void *callback_context, bool direct);
 
 /*
  * These blocking calls must only be made from non-SPDK threads. The owner must
@@ -40,9 +40,12 @@ int zettide_spdk_bdev_dispatcher_get_name(
 int zettide_spdk_bdev_dispatcher_read(struct zettide_spdk_bdev_dispatcher *dispatcher,
 		void *buffer, uint64_t offset, uint64_t length);
 /*
- * On success, each status is filled and callback is called exactly once on the
- * SPDK owner thread. The callback must not block or reenter the dispatcher. The
- * caller must keep buffers, statuses, and callback context alive until it returns.
+ * The reads name their final destinations. The owner submits the entire batch
+ * directly only when every destination is fully DMA-capable; otherwise it uses
+ * one internal DMA bounce buffer. On success, each status is filled and callback
+ * is called exactly once on the SPDK owner thread with the selected path. The
+ * callback must not block or reenter the dispatcher. The caller must keep the
+ * destinations, statuses, and callback context alive until it returns.
  */
 int zettide_spdk_bdev_dispatcher_submit_read_many(
 		struct zettide_spdk_bdev_dispatcher *dispatcher,

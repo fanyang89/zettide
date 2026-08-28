@@ -1,0 +1,31 @@
+.{
+    .name = .zettide_control,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xfa2f3383beccff5f,
+    .dependencies = .{
+        .clap = .{
+            .url = "https://github.com/fanyang89/zig-clap/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
+        },
+        .raftz = .{
+            .path = "../vendor/raftz",
+        },
+        .uuid = .{
+            .url = "https://codeberg.org/r4gus/uuid-zig/archive/0.5.0.tar.gz",
+            .hash = "uuid-0.5.0-oOieIQx-AABtc9U3ihv_bf9pZAYoKp4UMsNFHBr-cn-w",
+        },
+        .zettide_node_protocol = .{
+            .path = "../node-protocol",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "README.md",
+        "mise.toml",
+        "proto",
+        "src",
+    },
+}

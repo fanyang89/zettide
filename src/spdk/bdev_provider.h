@@ -3,6 +3,7 @@
 
 #include "runtime.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -59,6 +60,12 @@ struct zettide_spdk_bdev_provider_opts {
 	uint32_t max_io_blocks;
 	void *backend_context;
 	zettide_spdk_bdev_provider_submit submit;
+	/*
+	 * Backend READ operations leave the supplied buffer unchanged. Preserve
+	 * original multi-IOV contents instead of copying an untouched bounce buffer.
+	 * Only enable this when exposing existing frontend contents is acceptable.
+	 */
+	bool read_buffers_unchanged;
 };
 
 void zettide_spdk_bdev_provider_opts_init(

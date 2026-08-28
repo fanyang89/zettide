@@ -80,6 +80,15 @@ pub const VhostBlockExport = struct {
         return self.socket_path;
     }
 
+    pub fn setCoalescing(self: *VhostBlockExport, delay_base_us: u32, iops_threshold: u32) !void {
+        const controller = self.controller orelse return error.ExportClosed;
+        try statusError(c.zettide_spdk_vhost_blk_controller_set_coalescing(
+            controller,
+            delay_base_us,
+            iops_threshold,
+        ));
+    }
+
     /// Keeps all remaining state valid when a teardown step fails, so close is retryable.
     pub fn close(self: *VhostBlockExport) !void {
         if (self.controller) |controller| {

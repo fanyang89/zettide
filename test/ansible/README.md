@@ -244,7 +244,7 @@ directories. It never writes raw block devices.
 
 ## NVMe-oF/TCP fio
 
-The NVMe-oF profile builds the pinned `third_party/spdk` source on the remote
+The NVMe-oF profile builds the pinned `vendor/spdk` source on the remote
 host, exports a 64 GiB memory-backed provider bdev over loopback TCP, connects
 it through the Linux kernel NVMe/TCP initiator, and runs read-only fio cases.
 It measures the provider, SPDK NVMe-oF, and kernel initiator ceiling rather
@@ -306,6 +306,27 @@ counts `2` and `4` before changing the reactor count. The result archive adds
 per-thread target/QEMU `pidstat`, per-CPU `mpstat`, block-device `iostat`, host
 softirq snapshots, guest topology, and provider worker metrics. A completed run
 fails if provider queue-full rejections are nonzero.
+
+Set the storage transport to `synthetic` to profile the scheduled Pool,
+provider, vhost, and guest paths without a block device, Pool ID, destructive
+confirmation, or provisioning. Replica reads complete from dedicated executor
+threads; `first_available` leaves buffers untouched and `quorum` supplies
+matching zero-filled replicas. This example preserves aggregate queue depth 512
+and records the selected fio case with gperftools:
+
+```sh
+uv run ansible-playbook test/ansible/vhost-scheduled-pool-fio.yml \
+  --limit zettide-tier1 \
+  -e zettide_vhost_scheduled_pool_storage_transport=synthetic \
+  -e zettide_vhost_scheduled_pool_reactor_count=2 \
+  -e zettide_vhost_scheduled_pool_guest_vcpus=8 \
+  -e zettide_vhost_scheduled_pool_queues=8 \
+  -e zettide_vhost_scheduled_pool_worker_count=2 \
+  -e zettide_vhost_scheduled_pool_concurrent_groups=8 \
+  -e zettide_vhost_scheduled_pool_threaded_concurrency=16 \
+  -e zettide_vhost_scheduled_pool_vcpu_cpu_base=16 \
+  -e zettide_vhost_scheduled_pool_cpu_profile_case=randread-4k-qd32-j16
+```
 
 Set `zettide_vhost_scheduled_pool_download_proxy` to an HTTP proxy URL when the
 target host requires a proxy to download the verified guest image or Zig

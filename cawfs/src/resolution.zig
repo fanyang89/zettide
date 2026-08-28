@@ -1,0 +1,116 @@
+//! Resolution of indeterminate conditional publications.
+
+const std = @import("std");
+const anchor = @import("anchor.zig");
+const commit = @import("commit.zig");
+const store_mod = @import("store.zig");
+
+pub const Attempt = struct {
+    base_revision: u64,
+    base_generation: u64,
+    base_mode_epoch: u64,
+    transaction_id: store_mod.TransactionId,
+};
+
+pub const Options = struct {
+    max_depth: usize = 1024,
+};
+
+pub const Resolution = enum {
+    committed,
+    not_committed,
+    /// The base anchor is still current, so the request may still take effect.
+    pending,
+};
+
+pub const Error = error{
+    GenerationOverflow,
+    MissingCommit,
+    CommitGenerationMismatch,
+    AnchorCommitMismatch,
+    TransactionGenerationMismatch,
+    BrokenAncestry,
+    AncestryTooDeep,
+    InvalidAnchorState,
+    InvalidAttempt,
+    RevisionOverflow,
+    ModeEpochRegression,
+};
+
+/// Resolves whether one specific publish request entered the current commit
+/// ancestry. Errors mean the outcome cannot be determined safely.
+pub fn resolve(
+    store: store_mod.ConditionalStore,
+    allocator: std.mem.Allocator,
+    attempt: Attempt,
+    options: Options,
+) !Resolution {
+    return resolveInternal(store, allocator, attempt, options, true);
+}
+
+/// Resolves a request known to have finished dispatch. If the base is still
+/// current, the publication did not survive and can no longer take effect.
+pub fn resolveTerminal(
+    store: store_mod.ConditionalStore,
+    allocator: std.mem.Allocator,
+    attempt: Attempt,
+    options: Options,
+) !Resolution {
+    return resolveInternal(store, allocator, attempt, options, false);
+}
+
+fn resolveInternal(
+    store: store_mod.ConditionalStore,
+    allocator: std.mem.Allocator,
+    attempt: Attempt,
+    options: Options,
+    request_may_be_in_flight: bool,
+) !Resolution {
+    if (attempt.base_revision < attempt.base_generation or attempt.base_mode_epoch == 0)
+        return error.InvalidAttempt;
+    if (attempt.base_revision == std.math.maxInt(u64)) return error.RevisionOverflow;
+    const attempted_generation = std.math.add(u64, attempt.base_generation, 1) catch
+        return error.GenerationOverflow;
+    var snapshot = try store.readAnchor(allocator);
+    defer snapshot.deinit();
+    const current = try anchor.decode(&snapshot.anchor);
+
+    if (current.generation < attempt.base_generation) return .not_committed;
+    if (current.generation == attempt.base_generation) {
+        if (current.revision != attempt.base_revision) return .not_committed;
+        if (current.mode_epoch != attempt.base_mode_epoch) return .not_committed;
+        return if (request_may_be_in_flight) .pending else .not_committed;
+    }
+    const generation_delta = current.generation - attempt.base_generation;
+    const minimum_revision = std.math.add(u64, attempt.base_revision, generation_delta) catch
+        return error.RevisionOverflow;
+    if (current.revision < minimum_revision) return error.InvalidAnchorState;
+    if (current.mode_epoch < attempt.base_mode_epoch) return error.ModeEpochRegression;
+
+    const distance = current.generation - attempted_generation + 1;
+    const max_depth = std.math.cast(u64, options.max_depth) orelse std.math.maxInt(u64);
+    if (distance > max_depth) return error.AncestryTooDeep;
+
+    var object_ref = current.head orelse return error.MissingCommit;
+    var expected_generation = current.generation;
+    var first = true;
+    while (expected_generation >= attempted_generation) : (expected_generation -= 1) {
+        var bytes = try store.loadImmutable(object_ref, allocator);
+        defer bytes.deinit();
+        const record = try commit.decode(bytes.bytes);
+
+        if (record.generation != expected_generation) return error.CommitGenerationMismatch;
+        if (first and !std.mem.eql(u8, &record.transaction_id, &current.transaction_id))
+            return error.AnchorCommitMismatch;
+        if (std.mem.eql(u8, &record.transaction_id, &attempt.transaction_id)) {
+            if (expected_generation != attempted_generation)
+                return error.TransactionGenerationMismatch;
+            return .committed;
+        }
+        if (expected_generation == attempted_generation) return .not_committed;
+
+        object_ref = record.parent orelse return error.BrokenAncestry;
+        first = false;
+    }
+    unreachable;
+}

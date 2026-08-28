@@ -13,6 +13,27 @@ are not mounted as filesystems. The core cross-compiles for Windows; the native
 WinFsp dispatcher remains an explicit, conditionally compiled integration
 boundary.
 
+## Repository Layout
+
+This is the single source repository for the Zettide storage project. The
+former `zettide-control`, `zettide-cawfs`, and `zettide-node-protocol`
+repositories retain their histories here as merged directory trees:
+
+| Path | Role |
+| --- | --- |
+| `src/` | Pool, Volume, BlobFilesystem, frontend, and endpoint implementation |
+| `control/` | Raft-replicated metadata and cluster coordination |
+| `cawfs/` | Conditional-write transaction engine for shared writable filesystems |
+| `node-protocol/` | Shared node data-service protocol and fencing contracts |
+| `vendor/grpc-lite/` | Zig RPC runtime submodule |
+| `vendor/raftz/` | Consensus runtime submodule |
+| `vendor/spdk/` | Managed SPDK fork submodule |
+
+`qtr` and `etz` are intentionally outside this storage repository and are not
+part of its bootstrap, build, test, or update lifecycle. See
+[`docs/repository-migration.md`](docs/repository-migration.md) for the imported
+history map and publication order.
+
 ## Capability Stages
 
 Tier 1 is the single-node storage takeover milestone. It requires all four
@@ -38,8 +59,8 @@ The later tiers remain cumulative:
 | Tier 2 | Dynamic Pool membership, recoverable online capacity/protection migration, multi-Volume service governance, attachment governance, and fuller platform lifecycle |
 | Tier 3 | Cross-node replication, fencing, storage failover, repair, and caller-directed republication |
 
-Tier 3 control metadata foundations exist in `zettide-control`, but the
-distributed data path does not.
+Tier 3 control metadata foundations exist in the integrated `control/` module,
+but the distributed data path does not.
 
 The current raw Pool product commands accept one unprotected device, three
 replicated devices, or 3 through 12 `scheduled-replicated` devices. The format
@@ -65,7 +86,7 @@ NQN and NVMe serial values. The iSCSI target lifecycle is also not implemented.
 
 ## Requirements
 
-- Zig master nightly (managed by the root `mise.toml`)
+- Zig 0.16.0 (managed by the root `mise.toml`)
 - Linux: libfuse3 development files for mounting support
 - Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
 - Optional Linux SMB3 feasibility tests: Samba server and client tools
@@ -75,15 +96,31 @@ NQN and NVMe serial values. The iSCSI target lifecycle is also not implemented.
 
 ## Build
 
+Initialize the dependency submodules and run the unified build through mise:
+
+```sh
+mise trust
+mise install
+mise run bootstrap
+mise run build
+mise run test
+mise run check
+```
+
+The equivalent focused Zig gates include:
+
 ```sh
 zig build
 zig build test
+zig build test-control
+zig build test-cawfs
+zig build ci
 ```
 
 Build the Linux endpoint daemon against an SPDK pkg-config installation with:
 
 ```sh
-PKG_CONFIG_PATH=../third_party/spdk/build/lib/pkgconfig zig build -Dspdk=true
+PKG_CONFIG_PATH=vendor/spdk/build/lib/pkgconfig zig build -Dspdk=true
 ```
 
 ## Benchmarks
@@ -159,7 +196,7 @@ zig build -j1 test-posix-nightly -Dfuse-tests=required -Dexternal-tests=required
 zig build ci
 ```
 
-`zig build test` runs the portable unit and CLI suites. FUSE tests
+`zig build test` runs the portable unit, CLI, control-plane, and cawfs suites. FUSE tests
 perform real Linux syscalls and require writable `/dev/fuse`, `fusermount3`,
 and `mountpoint`. Use `-Dfuse-tests=auto` to skip them when those capabilities
 are unavailable.
@@ -178,7 +215,7 @@ its generated pkg-config metadata. For a sibling SPDK checkout built with shared
 libraries, run:
 
 ```sh
-PKG_CONFIG_PATH=../third_party/spdk/build/lib/pkgconfig \
+PKG_CONFIG_PATH=vendor/spdk/build/lib/pkgconfig \
 zig build test-spdk-link
 ```
 

@@ -1,13 +1,20 @@
 const std = @import("std");
 const zettide = @import("zettide");
 const args = @import("spdk_pool_data_nvmf_args.zig");
+const synthetic_storage = @import("spdk_pool_data_synthetic_storage.zig");
 
 const c = @import("spdk_c");
+
+fn uninitialized(comptime T: type) T {
+    // Skip ReleaseSafe poisoning when callers initialize every consumed element.
+    @setRuntimeSafety(false);
+    return undefined;
+}
 
 const block_size = 4096;
 const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
-const queue_capacity = 1024;
+const queue_capacity = 2048;
 const Frontend = enum { nvmf, vhost };
 const runtime_config =
     \\{"subsystems":[
@@ -70,14 +77,24 @@ const Worker = struct {
         count: usize = 0,
     };
 
+    // DispatchSlot carries a ReadGroup by pointer so std.Io.Group.concurrent
+    // only allocates a small task header instead of copying the whole batch
+    // (and paying ReleaseSafe undefined-fill poison on both alloc and free).
+    const DispatchSlot = struct {
+        batch: ReadGroup = undefined,
+        in_use: std.atomic.Value(bool) = .init(false),
+    };
+
     io: std.Io,
     storage: *zettide.v3.storage.Storage,
     concurrent_group_count: usize,
     inline_batches: bool,
     slots: [queue_capacity]Slot,
+    read_slots: []DispatchSlot,
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
     wake: std.Io.Event = .unset,
+    waiting: std.atomic.Value(bool) = .init(false),
     stopping: std.atomic.Value(bool) = .init(false),
     submit_attempts: std.atomic.Value(u64) = .init(0),
     accepted: std.atomic.Value(u64) = .init(0),
@@ -103,10 +120,14 @@ const Worker = struct {
         self.storage = storage;
         self.concurrent_group_count = concurrent_group_count;
         self.inline_batches = inline_batches;
+        self.read_slots = try std.heap.c_allocator.alloc(DispatchSlot, concurrent_group_count);
+        errdefer std.heap.c_allocator.free(self.read_slots);
+        for (self.read_slots) |*slot| slot.* = .{};
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
         self.wake = .unset;
+        self.waiting = .init(false);
         self.stopping = .init(false);
         self.submit_attempts = .init(0);
         self.accepted = .init(0);
@@ -140,6 +161,7 @@ const Worker = struct {
                 self.completed_requests.load(.monotonic),
             },
         );
+        std.heap.c_allocator.free(self.read_slots);
         std.heap.c_allocator.destroy(self);
     }
 
@@ -191,7 +213,9 @@ const Worker = struct {
                 };
                 self.recordAccepted();
                 slot.sequence.store(position + 1, .release);
-                self.wake.set(self.io);
+                // Signal only when the worker is actually blocked in next();
+                // steady-state submits skip the futex wake entirely.
+                if (self.waiting.swap(false, .seq_cst)) self.wake.set(self.io);
                 return 0;
             }
             if (sequence < position) {
@@ -234,7 +258,16 @@ const Worker = struct {
             self.wake.reset();
             if (self.dequeue()) |queued| return queued;
             if (self.stopping.load(.acquire)) return null;
+            // Announce the wait before the final dequeue check. Submit publishes
+            // the slot before swapping this flag (both seq_cst), so a missed
+            // dequeue implies the submitter observed the flag and will set wake.
+            self.waiting.store(true, .seq_cst);
+            if (self.dequeue()) |queued| {
+                _ = self.waiting.swap(false, .seq_cst);
+                return queued;
+            }
             self.wake.waitUncancelable(self.io);
+            _ = self.waiting.swap(false, .seq_cst);
         }
     }
 
@@ -250,7 +283,9 @@ const Worker = struct {
                 continue;
             }
 
-            var batch: ReadGroup = .{};
+            var batch: ReadGroup = .{
+                .queued = uninitialized([max_batch_requests]Queued),
+            };
             batch.queued[0] = queued;
             batch.count = 1;
             var total_bytes = queued.request.length;
@@ -271,30 +306,47 @@ const Worker = struct {
             _ = self.grouped_request_count.fetchAdd(batch.count, .monotonic);
             _ = self.grouped_bytes.fetchAdd(total_bytes, .monotonic);
             if (self.inline_batches) {
-                self.executeReadBatch(batch);
+                self.executeReadBatch(&batch);
                 continue;
             }
             permits.waitUncancelable(self.io);
-            groups.concurrent(self.io, executeReadGroup, .{ self, &permits, batch }) catch {
-                executeReadGroup(self, &permits, batch) catch {};
+            const slot = self.acquireDispatchSlot();
+            slot.batch = batch;
+            groups.concurrent(self.io, executeReadGroup, .{ self, &permits, slot }) catch {
+                executeReadGroup(self, &permits, slot) catch {};
             };
         }
         groups.await(self.io) catch unreachable;
     }
 
+    fn acquireDispatchSlot(self: *Worker) *DispatchSlot {
+        // The permits semaphore bounds in-flight groups to read_slots.len, so a
+        // free slot always exists by the time this runs.
+        while (true) {
+            for (self.read_slots) |*slot| {
+                if (!slot.in_use.load(.acquire) and
+                    slot.in_use.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
+                    return slot;
+            }
+        }
+    }
+
     fn executeReadGroup(
         self: *Worker,
         permits: *std.Io.Semaphore,
-        batch: ReadGroup,
+        slot: *DispatchSlot,
     ) std.Io.Cancelable!void {
-        defer permits.post(self.io);
-        self.executeReadBatch(batch);
+        defer {
+            slot.in_use.store(false, .release);
+            permits.post(self.io);
+        }
+        self.executeReadBatch(&slot.batch);
     }
 
-    fn executeReadBatch(self: *Worker, batch: ReadGroup) void {
-        var reads: [max_batch_requests]zettide.v3.storage.Read = undefined;
-        var results: [max_batch_requests]zettide.v3.storage.ReadResult = undefined;
-        var statuses: [max_batch_requests]c_int = undefined;
+    fn executeReadBatch(self: *Worker, batch: *const ReadGroup) void {
+        var reads = uninitialized([max_batch_requests]zettide.v3.storage.Read);
+        var results = uninitialized([max_batch_requests]zettide.v3.storage.ReadResult);
+        var statuses = uninitialized([max_batch_requests]c_int);
         for (batch.queued[0..batch.count], reads[0..batch.count]) |queued, *read| {
             const request = queued.request;
             read.* = .{
@@ -322,7 +374,7 @@ const Worker = struct {
         self.completeReadBatch(batch, statuses[0..batch.count]);
     }
 
-    fn completeReadBatch(self: *Worker, batch: ReadGroup, statuses: []const c_int) void {
+    fn completeReadBatch(self: *Worker, batch: *const ReadGroup, statuses: []const c_int) void {
         var completions: [max_batch_requests]c.struct_zettide_spdk_bdev_provider_completion = undefined;
         for (batch.queued[0..batch.count], statuses, completions[0..batch.count]) |queued, status, *completion| {
             completion.* = .{
@@ -373,7 +425,7 @@ fn run(
 ) !void {
     const allocator = std.heap.c_allocator;
     const device_count = std.math.cast(usize, device_count_raw) orelse return error.InvalidDeviceCount;
-    if (device_count == 0 or device_count > zettide.v3.pool_member_set.max_member_count)
+    if (device_count > zettide.v3.pool_member_set.max_member_count)
         return error.InvalidDeviceCount;
     const read_policy: zettide.v3.pool_scheduled_data_device.ReadPolicy = switch (try args.parseReadPolicy(read_policy_raw)) {
         .first_available => .first_available,
@@ -383,6 +435,14 @@ fn run(
     const benchmark_mode = try args.parseBenchmarkMode(
         if (c.getenv("ZETTIDE_POOL_DATA_BENCHMARK_MODE")) |value| std.mem.span(value) else null,
     );
+    const storage_transport = try args.parseStorageTransport(
+        if (c.getenv("ZETTIDE_POOL_DATA_STORAGE_TRANSPORT")) |value| std.mem.span(value) else null,
+    );
+    if (storage_transport == .synthetic) {
+        if (device_count != 0) return error.InvalidSyntheticStorageConfiguration;
+    } else if (device_count == 0) {
+        return error.InvalidDeviceCount;
+    }
     const frontend_text = if (c.getenv("ZETTIDE_POOL_DATA_FRONTEND")) |value| std.mem.span(value) else "nvmf";
     const frontend: Frontend = if (std.mem.eql(u8, frontend_text, "nvmf"))
         .nvmf
@@ -427,9 +487,6 @@ fn run(
     const concurrent_group_count = try args.parseConcurrentGroupCount(
         if (c.getenv("ZETTIDE_POOL_DATA_CONCURRENT_GROUPS")) |value| std.mem.span(value) else null,
     );
-    const storage_transport = try args.parseStorageTransport(
-        if (c.getenv("ZETTIDE_POOL_DATA_STORAGE_TRANSPORT")) |value| std.mem.span(value) else null,
-    );
     const preparation_mode = try args.parsePreparationMode(
         if (c.getenv("ZETTIDE_POOL_DATA_PREPARATION_MODE")) |value| std.mem.span(value) else null,
     );
@@ -445,6 +502,13 @@ fn run(
     const vhost_inline_batches = (try args.parseOptionalFlag(
         if (c.getenv("ZETTIDE_VHOST_INLINE_BATCHES")) |value| std.mem.span(value) else null,
     )) orelse (vhost_worker_count > 1);
+    const vhost_coalescing = if (frontend == .vhost)
+        try args.parseVhostCoalescing(
+            if (c.getenv("ZETTIDE_VHOST_COALESCING_DELAY_BASE_US")) |value| std.mem.span(value) else null,
+            if (c.getenv("ZETTIDE_VHOST_COALESCING_IOPS_THRESHOLD")) |value| std.mem.span(value) else null,
+        )
+    else
+        null;
     const pcie_probe = (try args.parseOptionalFlag(
         if (c.getenv("ZETTIDE_POOL_DATA_PCIE_PROBE")) |value| std.mem.span(value) else null,
     )) orelse false;
@@ -456,6 +520,11 @@ fn run(
         &window_specs_buffer,
     );
     try validateWindowSpecs(window_specs, device_count);
+    if (storage_transport == .synthetic and
+        (benchmark_mode != .pool or preparation_mode != .none or pcie_probe or
+            window_specs.len != 0 or raw_storage_mode != .auto or sqpoll_cpu_base != null or
+            !std.mem.allEqual(u8, &expected_pool_id, 0)))
+        return error.InvalidSyntheticStorageConfiguration;
     if (benchmark_mode == .raw_nvme and
         (frontend != .vhost or storage_transport != .spdk_nvme_pcie or
             preparation_mode != .none or pcie_probe or window_specs.len != 0 or
@@ -513,7 +582,7 @@ fn run(
     defer if (owned_runtime_config) |config| allocator.free(config);
     const selected_runtime_config = owned_runtime_config orelse
         if (transport == .rdma) rdma_runtime_config else runtime_config;
-    std.debug.print("target-stage runtime start mode={s} frontend={s} storage_transport={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
+    std.debug.print("target-stage runtime start mode={s} frontend={s} storage_transport={s} socket={s} reactor_mask={s} vhost_controllers={d} vhost_workers={d} inline_batches={} coalescing_delay_base_us={?d} coalescing_iops_threshold={?d} concurrent_groups={d} raw_transport={s} sqpoll_cpu_base={?d} threaded_concurrency={?d}\n", .{
         @tagName(benchmark_mode),
         frontend_text,
         @tagName(storage_transport),
@@ -522,6 +591,8 @@ fn run(
         vhost_controller_count,
         vhost_worker_count,
         vhost_inline_batches,
+        if (vhost_coalescing) |coalescing| coalescing.delay_base_us else null,
+        if (vhost_coalescing) |coalescing| coalescing.iops_threshold else null,
         concurrent_group_count,
         @tagName(raw_storage_mode),
         sqpoll_cpu_base,
@@ -532,8 +603,8 @@ fn run(
         .reactor_mask = reactor_mask,
         .json_data = selected_runtime_config,
         .mem_size_mb = 512,
-        .no_pci = storage_transport == .linux,
-        .no_huge = storage_transport == .linux,
+        .no_pci = storage_transport != .spdk_nvme_pcie,
+        .no_huge = storage_transport != .spdk_nvme_pcie,
         .disable_cpumask_locks = true,
         .vhost_socket_path = vhost_socket_directory,
     });
@@ -575,6 +646,13 @@ fn run(
             if (status != 0) return error.RawNvmeVhostControllerCreateFailed;
             controller_count += 1;
             const handle = controller.* orelse return error.UnexpectedControllerStatus;
+            if (vhost_coalescing) |coalescing| {
+                if (c.zettide_spdk_vhost_blk_controller_set_coalescing(
+                    handle,
+                    coalescing.delay_base_us,
+                    coalescing.iops_threshold,
+                ) != 0) return error.VhostCoalescingConfigurationFailed;
+            }
             for (0..1000) |_| {
                 if (c.zettide_spdk_vhost_blk_controller_is_ready(handle)) break;
                 io.sleep(.fromMilliseconds(10), .awake) catch return error.VhostControllerReadyWaitFailed;
@@ -594,37 +672,33 @@ fn run(
     var physical_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
     var physical_count: usize = 0;
     defer zettide.v3.storage.closeAll(physical_storages[0..physical_count], io) catch @panic("failed to close physical Pool storage");
-    if (pcie_probe) {
-        for (physical_storages[0..device_count], 0..) |*storage, index| {
-            var name_buffer: [32]u8 = undefined;
-            const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
-            storage.* = try runtime.openStorage(allocator, name, false);
-            physical_count += 1;
-        }
-        std.debug.print("target-stage PCIe probe ready namespaces={d}\n", .{physical_count});
-        return;
-    }
     var member_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
     var member_count: usize = 0;
     errdefer zettide.v3.storage.closeAll(member_storages[0..member_count], io) catch {};
-    if (window_specs.len == 0) {
-        for (device_paths[0..device_count], member_storages[0..device_count], 0..) |device_path_z, *storage, index| {
-            const opened = try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
-                io,
-                allocator,
-                std.mem.span(device_path_z),
-                false,
-                true,
-                raw_storage_mode,
-                if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
-            );
-            storage.* = opened.storage;
-            member_count += 1;
-        }
+    var read_path_metrics: zettide.v3.pool_scheduled_data_device.ReadPathMetrics = .{};
+    var pool_storage: zettide.v3.storage.Storage = undefined;
+    if (storage_transport == .synthetic) {
+        pool_storage = try synthetic_storage.create(
+            allocator,
+            io,
+            read_policy,
+            &read_path_metrics,
+            frontend == .nvmf,
+        );
     } else {
-        for (device_paths[0..device_count], physical_storages[0..device_count], 0..) |device_path_z, *storage, index| {
-            storage.* = switch (storage_transport) {
-                .linux => (try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
+        if (pcie_probe) {
+            for (physical_storages[0..device_count], 0..) |*storage, index| {
+                var name_buffer: [32]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
+                storage.* = try runtime.openStorage(allocator, name, false);
+                physical_count += 1;
+            }
+            std.debug.print("target-stage PCIe probe ready namespaces={d}\n", .{physical_count});
+            return;
+        }
+        if (window_specs.len == 0) {
+            for (device_paths[0..device_count], member_storages[0..device_count], 0..) |device_path_z, *storage, index| {
+                const opened = try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
                     io,
                     allocator,
                     std.mem.span(device_path_z),
@@ -632,62 +706,78 @@ fn run(
                     true,
                     raw_storage_mode,
                     if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
-                )).storage,
-                .spdk_nvme_pcie => open: {
-                    var name_buffer: [32]u8 = undefined;
-                    const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
-                    break :open try runtime.openStorage(allocator, name, preparation_mode == .create);
-                },
-            };
-            physical_count += 1;
+                );
+                storage.* = opened.storage;
+                member_count += 1;
+            }
+        } else {
+            for (device_paths[0..device_count], physical_storages[0..device_count], 0..) |device_path_z, *storage, index| {
+                storage.* = switch (storage_transport) {
+                    .linux => (try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
+                        io,
+                        allocator,
+                        std.mem.span(device_path_z),
+                        false,
+                        true,
+                        raw_storage_mode,
+                        if (sqpoll_cpu_base) |base| try std.math.add(u32, base, try std.math.mul(u32, @intCast(index), 2)) else null,
+                    )).storage,
+                    .spdk_nvme_pcie => open: {
+                        var name_buffer: [32]u8 = undefined;
+                        const name = try std.fmt.bufPrint(&name_buffer, "ZettidePhysical{d}n1", .{index});
+                        break :open try runtime.openStorage(allocator, name, preparation_mode == .create);
+                    },
+                    .synthetic => unreachable,
+                };
+                physical_count += 1;
+            }
+            for (window_specs, member_storages[0..window_specs.len]) |spec, *storage| {
+                storage.* = try zettide.v3.storage_window.create(
+                    allocator,
+                    &physical_storages[spec.device_index],
+                    spec.offset,
+                    spec.length,
+                );
+                member_count += 1;
+            }
         }
-        for (window_specs, member_storages[0..window_specs.len]) |spec, *storage| {
-            storage.* = try zettide.v3.storage_window.create(
+        const transferring_count = member_count;
+        member_count = 0;
+        if (preparation_mode != .none) {
+            const pool_id = try preparePool(
+                io,
                 allocator,
-                &physical_storages[spec.device_index],
-                spec.offset,
-                spec.length,
+                member_storages[0..transferring_count],
+                preparation_mode,
+                expected_pool_id,
             );
-            member_count += 1;
+            try publishPreparedPoolId(io, ready_path, pool_id);
+            return;
         }
-    }
-    const transferring_count = member_count;
-    member_count = 0;
-    if (preparation_mode != .none) {
-        const pool_id = try preparePool(
+        var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
             io,
             allocator,
             member_storages[0..transferring_count],
-            preparation_mode,
-            expected_pool_id,
+            .read_only,
         );
-        try publishPreparedPoolId(io, ready_path, pool_id);
-        return;
-    }
-    var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
-        io,
-        allocator,
-        member_storages[0..transferring_count],
-        .read_only,
-    );
-    errdefer set.deinit();
-    const authority = set.authority() orelse return error.MissingAuthority;
-    if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
-        return error.UnexpectedPoolId;
-    if (try set.dataMode() != .blob or authority.layout.scheduled_blob == null)
-        return error.ScheduledBlobPoolRequired;
+        errdefer set.deinit();
+        const authority = set.authority() orelse return error.MissingAuthority;
+        if (!std.mem.eql(u8, &authority.topology.set_id, &expected_pool_id))
+            return error.UnexpectedPoolId;
+        if (try set.dataMode() != .blob or authority.layout.scheduled_blob == null)
+            return error.ScheduledBlobPoolRequired;
 
-    var read_path_metrics: zettide.v3.pool_scheduled_data_device.ReadPathMetrics = .{};
-    var pool_storage = try zettide.v3.pool_data_storage.createOptions(
-        allocator,
-        io,
-        &set,
-        false,
-        .{
-            .read_policy = read_policy,
-            .read_path_metrics = &read_path_metrics,
-        },
-    );
+        pool_storage = try zettide.v3.pool_data_storage.createOptions(
+            allocator,
+            io,
+            &set,
+            false,
+            .{
+                .read_policy = read_policy,
+                .read_path_metrics = &read_path_metrics,
+            },
+        );
+    }
     defer pool_storage.close(io) catch @panic("failed to close Pool data storage");
     defer {
         const metrics = read_path_metrics.snapshot();
@@ -710,15 +800,34 @@ fn run(
         var submissions: u64 = 0;
         var completions: u64 = 0;
         var queue_full: u64 = 0;
-        for (physical_storages[0..physical_count]) |*storage| {
-            const stats = storage.transportStats(io);
+        var direct_batches: u64 = 0;
+        var direct_bytes: u64 = 0;
+        var bounce_batches: u64 = 0;
+        var bounce_bytes: u64 = 0;
+        if (storage_transport == .synthetic) {
+            const stats = pool_storage.transportStats(io);
             submissions +|= stats.async_submissions;
             completions +|= stats.async_completions;
             queue_full +|= stats.async_queue_full;
+            direct_batches +|= stats.read_direct_batches;
+            direct_bytes +|= stats.read_direct_bytes;
+            bounce_batches +|= stats.read_bounce_batches;
+            bounce_bytes +|= stats.read_bounce_bytes;
+        } else {
+            for (physical_storages[0..physical_count]) |*storage| {
+                const stats = storage.transportStats(io);
+                submissions +|= stats.async_submissions;
+                completions +|= stats.async_completions;
+                queue_full +|= stats.async_queue_full;
+                direct_batches +|= stats.read_direct_batches;
+                direct_bytes +|= stats.read_direct_bytes;
+                bounce_batches +|= stats.read_bounce_batches;
+                bounce_bytes +|= stats.read_bounce_bytes;
+            }
         }
         std.debug.print(
-            "pool_async_metrics submissions={d} completions={d} queue_full={d}\n",
-            .{ submissions, completions, queue_full },
+            "pool_async_metrics submissions={d} completions={d} queue_full={d} direct_batches={d} direct_bytes={d} bounce_batches={d} bounce_bytes={d}\n",
+            .{ submissions, completions, queue_full, direct_batches, direct_bytes, bounce_batches, bounce_bytes },
         );
     }
     if (pool_storage.capacity() == 0 or pool_storage.capacity() % block_size != 0)
@@ -786,6 +895,7 @@ fn run(
                     .submit = submit_callback,
                     .block_count = pool_storage.capacity() / block_size,
                     .max_io_blocks = max_batch_bytes / block_size,
+                    .read_buffers_unchanged = storage_transport == .synthetic and read_policy == .first_available,
                 };
                 var bdev_name_buffer: [64]u8 = undefined;
                 const bdev_name = try std.fmt.bufPrint(&bdev_name_buffer, "ZettideScheduledPoolData{d}", .{index});
@@ -805,6 +915,12 @@ fn run(
                     },
                 );
                 export_count += 1;
+                if (vhost_coalescing) |coalescing| {
+                    try exports[index].setCoalescing(
+                        coalescing.delay_base_us,
+                        coalescing.iops_threshold,
+                    );
+                }
                 std.debug.print("target-stage export ready frontend=vhost index={d} cpumask={s} socket={s}\n", .{ index, controller_mask, exports[index].socketPath() });
             }
             try publishReadyAndWait(io, ready_path, &signals);

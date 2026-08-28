@@ -1,18 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -ge 6 ]] || {
-    echo "usage: spdk-vhost-user-blk-fio.sh TARGET READY_FILE LOG_DIR POOL_ID READ_POLICY DEVICE..." >&2
-    exit 2
-}
-
-target=$1
-ready_file=$2
-log_dir=$3
-pool_id=$4
-read_policy=$5
-shift 5
-devices=("$@")
+storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
+if [[ $storage_transport == synthetic ]]; then
+    [[ $# -eq 4 ]] || {
+        echo "usage: spdk-vhost-user-blk-fio.sh TARGET READY_FILE LOG_DIR READ_POLICY" >&2
+        exit 2
+    }
+    target=$1
+    ready_file=$2
+    log_dir=$3
+    pool_id=""
+    read_policy=$4
+    devices=()
+else
+    [[ $# -ge 6 ]] || {
+        echo "usage: spdk-vhost-user-blk-fio.sh TARGET READY_FILE LOG_DIR POOL_ID READ_POLICY DEVICE..." >&2
+        exit 2
+    }
+    target=$1
+    ready_file=$2
+    log_dir=$3
+    pool_id=$4
+    read_policy=$5
+    shift 5
+    devices=("$@")
+fi
 
 runtime=${ZETTIDE_VHOST_FIO_RUNTIME:-20}
 ramp_time=${ZETTIDE_VHOST_FIO_RAMP_TIME:-5}
@@ -28,8 +41,11 @@ perf_frequency=${ZETTIDE_VHOST_PERF_FREQUENCY:-199}
 cpu_profile_case=${ZETTIDE_VHOST_CPU_PROFILE_CASE:-}
 cpu_profile_signal=12
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
+target_cpu_list=${ZETTIDE_VHOST_TARGET_CPU_LIST:-}
+guest_mitigations_off=${ZETTIDE_VHOST_GUEST_MITIGATIONS_OFF:-0}
+extra_ssh_pubkey=${ZETTIDE_VHOST_EXTRA_SSH_PUBKEY:-}
+hold_seconds=${ZETTIDE_VHOST_HOLD_SECONDS:-0}
 target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
-storage_transport=${ZETTIDE_POOL_DATA_STORAGE_TRANSPORT:-linux}
 benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
 target_pid=""
@@ -41,13 +57,15 @@ socket_dir=""
 socket_paths=()
 monitor_pids=()
 perf_pid=""
+fio_pid=""
+fio_ready_file=/tmp/zettide-fio-ramp-ready
 perf_data=""
 cpu_profile_active=false
 cpu_profile_path=""
 deferred_signal=0
 
 case $fio_case in
-    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16 | randread-4k-qd256-j1-per-device) ;;
+    "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd16-j32 | randread-4k-qd32-j16 | randread-4k-qd32-j32 | randread-4k-qd64-j32 | randread-4k-qd128-j16 | randread-4k-qd256-j1-per-device) ;;
     *)
         echo "unknown vhost-user-blk fio case: $fio_case" >&2
         exit 2
@@ -57,6 +75,14 @@ esac
     echo "benchmark mode must be pool or raw_nvme" >&2
     exit 2
 }
+[[ $storage_transport == linux || $storage_transport == spdk_nvme_pcie || $storage_transport == synthetic ]] || {
+    echo "storage transport must be linux, spdk_nvme_pcie, or synthetic" >&2
+    exit 2
+}
+if [[ $storage_transport == synthetic && $benchmark_mode != pool ]]; then
+    echo "synthetic storage requires Pool benchmark mode" >&2
+    exit 2
+fi
 if [[ $benchmark_mode == raw_nvme ]]; then
     [[ $storage_transport == spdk_nvme_pcie && $controller_count -eq 2 &&
         ($fio_case == randread-4k-qd32-j16 ||
@@ -83,6 +109,8 @@ fi
 }
 [[ $runtime =~ ^[1-9][0-9]*$ ]] || { echo "invalid fio runtime: $runtime" >&2; exit 2; }
 [[ $ramp_time =~ ^[0-9]+$ ]] || { echo "invalid fio ramp time: $ramp_time" >&2; exit 2; }
+((runtime <= 86400)) || { echo "fio runtime exceeds 86400 seconds: $runtime" >&2; exit 2; }
+((ramp_time <= 3600)) || { echo "fio ramp time exceeds 3600 seconds: $ramp_time" >&2; exit 2; }
 [[ $fio_size =~ ^[1-9][0-9]*([kKmMgGtTpP][iI]?[bB]?)?$ ]] || { echo "invalid fio size: $fio_size" >&2; exit 2; }
 [[ $guest_vcpus =~ ^[1-9][0-9]*$ ]] || { echo "invalid guest vCPU count: $guest_vcpus" >&2; exit 2; }
 [[ $queues =~ ^[1-9][0-9]*$ ]] || { echo "invalid vhost queue count: $queues" >&2; exit 2; }
@@ -240,7 +268,6 @@ stop_monitors() {
 start_monitors() {
     local name=$1
 
-    cp /proc/softirqs "$log_dir/host-softirqs-$name-before.txt"
     begin_deferred_signals
     pidstat -t -u -r -w -p "$target_pid,$qemu_pid" 1 >"$log_dir/host-pidstat-$name.log" &
     monitor_pids+=("$!")
@@ -249,6 +276,54 @@ start_monitors() {
     iostat -dx -y 1 >"$log_dir/host-iostat-$name.log" &
     monitor_pids+=("$!")
     end_deferred_signals
+}
+
+record_pid_threads() {
+    local role=$1 pid=$2 task_path tid comm status_line allowed voluntary nonvoluntary
+    local stat_line stat_fields processor
+    local -a fields=()
+
+    [[ -d /proc/$pid/task ]] || return 0
+    for task_path in "/proc/$pid/task"/*; do
+        tid=${task_path##*/}
+        IFS= read -r comm <"$task_path/comm" 2>/dev/null || continue
+        allowed=unknown
+        voluntary=unknown
+        nonvoluntary=unknown
+        [[ -r $task_path/status ]] || continue
+        while IFS= read -r status_line; do
+            case $status_line in
+                Cpus_allowed_list:*) allowed=${status_line#*:} ;;
+                voluntary_ctxt_switches:*) voluntary=${status_line#*:} ;;
+                nonvoluntary_ctxt_switches:*) nonvoluntary=${status_line#*:} ;;
+            esac
+        done <"$task_path/status" 2>/dev/null || continue
+        allowed=${allowed//$'\t'/}
+        voluntary=${voluntary//$'\t'/}
+        nonvoluntary=${nonvoluntary//$'\t'/}
+        IFS= read -r stat_line <"$task_path/stat" 2>/dev/null || continue
+        stat_fields=${stat_line##*) }
+        read -r -a fields <<<"$stat_fields"
+        processor=${fields[36]:-unknown}
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$role" "$pid" "$tid" "$processor" "$allowed" "$voluntary" "$nonvoluntary" "$comm"
+    done
+}
+
+record_thread_snapshot() {
+    local name=$1
+    {
+        printf 'role\tpid\ttid\tprocessor\tallowed_cpus\tvoluntary_switches\tnonvoluntary_switches\tcomm\n'
+        record_pid_threads target "$target_pid"
+        record_pid_threads qemu "$qemu_pid"
+    } >"$log_dir/host-threads-$name.txt"
+}
+
+fio_jobs_ready() {
+    local expected_jobs=$1
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+        "count=\$(wc -c < $fio_ready_file 2>/dev/null) || exit 1; test \"\$count\" -ge $expected_jobs" \
+        2>/dev/null
 }
 
 first_cpu_profile_file() {
@@ -285,6 +360,11 @@ cleanup() {
     set +e
 
     stop_monitors
+    if [[ -n $fio_pid ]]; then
+        kill -TERM "$fio_pid" 2>/dev/null || true
+        wait "$fio_pid" 2>/dev/null || true
+        fio_pid=""
+    fi
     if [[ -n $perf_pid ]]; then
         kill -INT "$perf_pid" 2>/dev/null || true
         wait "$perf_pid" 2>/dev/null || true
@@ -318,6 +398,12 @@ cleanup() {
         if ! grep -Eq 'provider_worker_metrics .*queue_full_rejects=0([[:space:]]|$)' "$log_dir/target.log" ||
             grep -Eq 'provider_worker_metrics .*queue_full_rejects=[1-9][0-9]*([[:space:]]|$)' "$log_dir/target.log"; then
             echo "target reported missing or nonzero queue-full metrics" >&2
+            result=1
+        fi
+        if [[ $storage_transport == synthetic ]] &&
+            { ! grep -Eq 'pool_read_path_metrics .*async_submitted=[1-9][0-9]* async_fallbacks=0 async_submit_errors=0([[:space:]]|$)' "$log_dir/target.log" ||
+                ! grep -Eq 'pool_async_metrics submissions=[1-9][0-9]* completions=[1-9][0-9]* queue_full=0([[:space:]]|$)' "$log_dir/target.log"; }; then
+            echo "synthetic storage reported missing, fallback, or queue-full async reads" >&2
             result=1
         fi
     fi
@@ -368,6 +454,14 @@ public_key=$(<"$ssh_key.pub")
     echo "generated SSH public key is not one line" >&2
     exit 1
 }
+extra_key_yaml=""
+if [[ -n $extra_ssh_pubkey ]]; then
+    [[ $extra_ssh_pubkey != *$'\n'* && $extra_ssh_pubkey != *$'\r'* ]] || {
+        echo "extra SSH public key is not one line" >&2
+        exit 1
+    }
+    extra_key_yaml="      - $extra_ssh_pubkey"
+fi
 cat >"$user_data" <<EOF
 #cloud-config
 write_files:
@@ -396,6 +490,7 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - $public_key
+$extra_key_yaml
 runcmd:
   - [sh, -c, "dnf config-manager setopt fedora.enabled=0 updates.enabled=0 && dnf install -y fio jq pciutils && install -o zettide -g zettide -m 0644 /dev/null /home/zettide/.zettide-fio-ready"]
 EOF
@@ -427,13 +522,21 @@ scp_options=(
 )
 
 rm -f "$ready_file"
-target_command=("$target" "$ready_file" "$pool_id" "$read_policy" "${devices[@]}")
+if [[ $storage_transport == synthetic ]]; then
+    target_command=("$target" "$ready_file" "$read_policy")
+else
+    target_command=("$target" "$ready_file" "$pool_id" "$read_policy" "${devices[@]}")
+fi
 if [[ $target_gdb == 1 ]]; then
     target_command=(gdb --batch --return-child-result -ex run -ex "thread apply all bt full" --args "${target_command[@]}")
 fi
 if [[ $storage_transport == spdk_nvme_pcie ]]; then
     command -v prlimit >/dev/null || { echo "prlimit is required for SPDK NVMe PCIe" >&2; exit 2; }
     target_command=(prlimit --memlock=unlimited:unlimited -- "${target_command[@]}")
+fi
+if [[ -n $target_cpu_list ]]; then
+    command -v taskset >/dev/null || { echo "taskset is required for target CPU pinning" >&2; exit 2; }
+    target_command=(taskset -c "$target_cpu_list" "${target_command[@]}")
 fi
 begin_deferred_signals
 target_member_windows=${ZETTIDE_POOL_DATA_MEMBER_WINDOWS:-}
@@ -442,6 +545,7 @@ target_environment=(
     env
     ZETTIDE_POOL_DATA_FRONTEND=vhost
     ZETTIDE_POOL_DATA_BENCHMARK_MODE="$benchmark_mode"
+    ZETTIDE_POOL_DATA_STORAGE_TRANSPORT="$storage_transport"
     ZETTIDE_POOL_DATA_MEMBER_WINDOWS="$target_member_windows"
     ZETTIDE_VHOST_SOCKET_DIR="$socket_dir"
     ZETTIDE_VHOST_CONTROLLER_COUNT="$controller_count"
@@ -509,6 +613,12 @@ if [[ $storage_transport == spdk_nvme_pcie ]]; then
 fi
 
 begin_deferred_signals
+qemu_reboot_args=(-no-reboot)
+if [[ $guest_mitigations_off == 1 ]]; then
+    # The guest reboots once to apply mitigations=off; poweroff still terminates
+    # QEMU because -no-shutdown is not set.
+    qemu_reboot_args=()
+fi
 "$qemu_command" \
     -name zettide-vhost-fio,debug-threads=on \
     -machine q35,accel=kvm \
@@ -527,7 +637,7 @@ begin_deferred_signals
     -device virtio-net-pci,netdev=net0 \
     -display none \
     -nographic \
-    -no-reboot \
+    "${qemu_reboot_args[@]}" \
     >"$log_dir/qemu-serial.log" 2>&1 &
 qemu_pid=$!
 end_deferred_signals
@@ -536,7 +646,7 @@ if [[ -n $vcpu_cpu_base ]]; then
     for ((index = 0; index < guest_vcpus; index++)); do
         vcpu_tid=""
         for ((attempt = 0; attempt < 1000; attempt++)); do
-            for task_path in /proc/$qemu_pid/task/*; do
+            for task_path in "/proc/$qemu_pid/task"/*; do
                 read -r task_name <"$task_path/comm" || continue
                 if [[ $task_name == "CPU $index/KVM" ]]; then
                     vcpu_tid=${task_path##*/}
@@ -573,6 +683,31 @@ done
     echo "guest did not install fio and become ready after 180 seconds" >&2
     exit 1
 }
+
+if [[ $guest_mitigations_off == 1 ]]; then
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+        'sudo grubby --update-kernel=ALL --args="mitigations=off" && sudo reboot' >/dev/null 2>&1 || true
+    sleep 5
+    guest_ready=false
+    deadline=$((SECONDS + 180))
+    while ((SECONDS < deadline)); do
+        process_running "$qemu_pid" || {
+            wait "$qemu_pid" || true
+            echo "QEMU exited during the mitigations=off reboot; see $log_dir/qemu-serial.log" >&2
+            exit 1
+        }
+        if ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+            'test -f ~/.zettide-fio-ready && command -v fio >/dev/null' 2>/dev/null; then
+            guest_ready=true
+            break
+        fi
+        sleep 2
+    done
+    [[ $guest_ready == true ]] || {
+        echo "guest did not come back after the mitigations=off reboot" >&2
+        exit 1
+    }
+fi
 
 cat >"$work_dir/guest-identify.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -625,6 +760,36 @@ ssh "${ssh_options[@]}" zettide@127.0.0.1 'lsblk -o NAME,KNAME,TYPE,SIZE,RO,MODE
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'lspci -nn' >"$log_dir/guest-lspci.txt"
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'uname -a' >"$log_dir/guest-uname.txt"
 ssh "${ssh_options[@]}" zettide@127.0.0.1 'fio --version' >"$log_dir/guest-fio-version.txt"
+ssh "${ssh_options[@]}" zettide@127.0.0.1 'cat /proc/cmdline' >"$log_dir/guest-cmdline.txt"
+ssh "${ssh_options[@]}" zettide@127.0.0.1 'lscpu; lscpu -e=CPU,NODE,SOCKET,CORE,CACHE,ONLINE' \
+    >"$log_dir/guest-cpu-topology.txt"
+ssh "${ssh_options[@]}" zettide@127.0.0.1 '
+    for path in /sys/devices/system/cpu/vulnerabilities/*; do
+        test -r "$path" || continue
+        printf "%s: " "${path##*/}"
+        cat "$path"
+    done
+' >"$log_dir/guest-vulnerabilities.txt"
+ssh "${ssh_options[@]}" zettide@127.0.0.1 '
+    for pair in \
+        isolated_cpus:/sys/devices/system/cpu/isolated \
+        nohz_full:/sys/devices/system/cpu/nohz_full \
+        nmi_watchdog:/proc/sys/kernel/nmi_watchdog \
+        numa_balancing:/proc/sys/kernel/numa_balancing; do
+        label=${pair%%:*}
+        path=${pair#*:}
+        test -r "$path" || continue
+        value=$(cat "$path")
+        printf "%s=%s\n" "$label" "$value"
+    done
+    if command -v systemctl >/dev/null; then
+        printf "irqbalance_active="
+        systemctl is-active irqbalance || true
+        printf "irqbalance_enabled="
+        systemctl is-enabled irqbalance || true
+    fi
+' >"$log_dir/guest-scheduling.txt"
+record_thread_snapshot initial
 
 run_case() {
     local name=$1
@@ -650,13 +815,14 @@ group_reporting=1
 time_based=1
 runtime=$runtime
 ramp_time=$ramp_time
+exec_prerun=/bin/sh -c 'printf x >> $fio_ready_file'
 randrepeat=0
 norandommap=1
 percentile_list=50:95:99:99.9
 
 [$name]
 EOF
-    execute_case "$name" "$job_file"
+    execute_case "$name" "$job_file" "$jobs"
 }
 
 run_raw_nvme_case() {
@@ -676,6 +842,7 @@ invalidate=1
 time_based=1
 runtime=$runtime
 ramp_time=$ramp_time
+exec_prerun=/bin/sh -c 'printf x >> $fio_ready_file'
 randrepeat=0
 norandommap=1
 percentile_list=50:95:99:99.9
@@ -687,17 +854,49 @@ EOF
 filename=${guest_devices[index]}
 EOF
     done
-    execute_case "$name" "$job_file"
+    execute_case "$name" "$job_file" "${#guest_devices[@]}"
+}
+
+normalize_fio_json_output() {
+    local result=$1
+    local preamble=${result%.json}-preamble.log
+    local clean=$result.clean
+    local line
+    local json_started=false
+
+    : >"$preamble"
+    : >"$clean"
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $json_started == false ]]; then
+            if [[ $line == \{ ]]; then
+                json_started=true
+            else
+                printf '%s\n' "$line" >>"$preamble"
+                continue
+            fi
+        fi
+        printf '%s\n' "$line" >>"$clean"
+    done <"$result"
+    if [[ $json_started == false ]]; then
+        rm -f "$clean"
+        echo "fio output did not contain JSON: $result" >&2
+        return 1
+    fi
+    mv "$clean" "$result"
 }
 
 execute_case() {
     local name=$1
     local job_file=$2
+    local expected_jobs=$3
     local result=$log_dir/fio-$name.json
     local status
     local deadline
+    local measurement_started=false
+    local attempt
 
     scp "${scp_options[@]}" "$job_file" zettide@127.0.0.1:/tmp/zettide-fio.job
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 "sudo rm -f $fio_ready_file"
     start_monitors "$name"
     if [[ -n $perf_case && $name == "$perf_case" ]]; then
         perf_data=$log_dir/perf-$name.data
@@ -726,13 +925,54 @@ execute_case() {
     set +e
     if [[ $benchmark_mode == raw_nvme ]]; then
         ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-            'sudo fio --readonly --eta=never --output-format=json+ /tmp/zettide-fio.job'
+            'sudo fio --readonly --eta=never --output-format=json+ /tmp/zettide-fio.job' >"$result" &
     else
         ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-            'sudo fio --readonly --eta=never --output-format=json /tmp/zettide-fio.job'
-    fi >"$result"
-    status=$?
+            'sudo fio --readonly --eta=never --output-format=json /tmp/zettide-fio.job' >"$result" &
+    fi
+    fio_pid=$!
     set -e
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        process_running "$fio_pid" || break
+        fio_jobs_ready "$expected_jobs" && break
+        sleep 0.1
+    done
+    if process_running "$fio_pid" && fio_jobs_ready "$expected_jobs"; then
+        for ((attempt = 0; attempt < ramp_time * 10; attempt++)); do
+            process_running "$fio_pid" || break
+            sleep 0.1
+        done
+        if process_running "$fio_pid"; then
+            cp /proc/interrupts "$log_dir/host-interrupts-$name-before.txt"
+            cp /proc/softirqs "$log_dir/host-softirqs-$name-before.txt"
+            ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+                'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-before.txt"
+            ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+                'cat /proc/softirqs' >"$log_dir/guest-softirqs-$name-before.txt"
+            record_thread_snapshot "$name-before"
+            measurement_started=true
+        fi
+    elif process_running "$fio_pid"; then
+        echo "fio did not report ramp start after 30 seconds" >&2
+        kill -TERM "$fio_pid" 2>/dev/null || true
+    fi
+    set +e
+    wait "$fio_pid"
+    status=$?
+    fio_pid=""
+    set -e
+    if [[ $measurement_started == true ]]; then
+        cp /proc/interrupts "$log_dir/host-interrupts-$name-after.txt"
+        cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
+        ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+            'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-after.txt"
+        ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+            'cat /proc/softirqs' >"$log_dir/guest-softirqs-$name-after.txt"
+        record_thread_snapshot "$name-after"
+    elif ((status == 0)); then
+        echo "fio completed before the measured phase started" >&2
+        status=1
+    fi
     stop_cpu_profile
     if [[ -n $perf_pid ]]; then
         kill -INT "$perf_pid" 2>/dev/null || true
@@ -744,8 +984,8 @@ execute_case() {
             --sort=comm,dso,symbol --input "$perf_data" >"$log_dir/perf-$name-inclusive.txt"
     fi
     stop_monitors
-    cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
     ((status == 0)) || return "$status"
+    normalize_fio_json_output "$result"
     jq -e '.jobs | length > 0 and all(.error == 0)' "$result" >/dev/null
     if [[ $benchmark_mode == raw_nvme ]]; then
         jq -r --arg name "$name" '
@@ -794,6 +1034,29 @@ run_selected_case seq-read-128k-qd1-j1 read 128k 1 1 "$fio_size"
 run_selected_case randread-4k-qd1-j1 randread 4k 1 1 "$fio_size"
 run_selected_case randread-4k-qd32-j1 randread 4k 32 1 "$fio_size"
 run_selected_case randread-4k-qd32-j4 randread 4k 32 4 "$fio_size"
+run_selected_case randread-4k-qd16-j32 randread 4k 16 32 "$fio_size"
 run_selected_case randread-4k-qd32-j16 randread 4k 32 16 "$fio_size"
+run_selected_case randread-4k-qd32-j32 randread 4k 32 32 "$fio_size"
+run_selected_case randread-4k-qd64-j32 randread 4k 64 32 "$fio_size"
+run_selected_case randread-4k-qd128-j16 randread 4k 128 16 "$fio_size"
 [[ $fio_case != randread-4k-qd256-j1-per-device ]] || run_raw_nvme_case
+
+if ((hold_seconds > 0)); then
+    hold_release=/tmp/zettide-vhost-hold-release
+    rm -f "$hold_release"
+    {
+        echo "vhost guest hold: up to ${hold_seconds}s from $(date -Is)"
+        echo "ssh: ssh -p $ssh_port zettide@127.0.0.1"
+        echo "guest devices: $guest_device"
+        echo "sample fio:"
+        echo "  sudo fio --name=manual --filename=$guest_device --rw=randread --bs=4k --size=1G --offset_increment=1G --ioengine=io_uring --iodepth=32 --numjobs=32 --direct=1 --invalidate=1 --group_reporting --time_based --runtime=20 --ramp_time=5 --randrepeat=0 --norandommap=1"
+        echo "release early: touch $hold_release"
+    } | tee "$log_dir/guest-hold.txt" >&2
+    deadline=$((SECONDS + hold_seconds))
+    while ((SECONDS < deadline)); do
+        [[ -e $hold_release ]] && break
+        process_running "$qemu_pid" || break
+        sleep 5
+    done
+fi
 benchmark_completed=true
