@@ -77,11 +77,14 @@ const Worker = struct {
         count: usize = 0,
     };
 
-    // DispatchSlot carries a ReadGroup by pointer so std.Io.Group.concurrent
-    // only allocates a small task header instead of copying the whole batch
-    // (and paying ReleaseSafe undefined-fill poison on both alloc and free).
+    // DispatchSlot carries everything an in-flight read group needs so the
+    // group can be submitted asynchronously and completed from the storage
+    // completion callback without any thread handoff.
     const DispatchSlot = struct {
+        worker: *Worker,
         batch: ReadGroup = undefined,
+        reads: [max_batch_requests]zettide.v3.storage.Read = undefined,
+        results: [max_batch_requests]zettide.v3.storage.ReadResult = undefined,
         in_use: std.atomic.Value(bool) = .init(false),
     };
 
@@ -91,6 +94,10 @@ const Worker = struct {
     inline_batches: bool,
     slots: [queue_capacity]Slot,
     read_slots: []DispatchSlot,
+    async_submit: bool = true,
+    inflight: std.atomic.Value(usize) = .init(0),
+    slot_free: std.Io.Event = .unset,
+    slot_waiting: std.atomic.Value(bool) = .init(false),
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
     wake: std.Io.Event = .unset,
@@ -120,9 +127,12 @@ const Worker = struct {
         self.storage = storage;
         self.concurrent_group_count = concurrent_group_count;
         self.inline_batches = inline_batches;
-        self.read_slots = try std.heap.c_allocator.alloc(DispatchSlot, concurrent_group_count);
+        self.read_slots = try std.heap.c_allocator.alloc(
+            DispatchSlot,
+            @max(concurrent_group_count, 64),
+        );
         errdefer std.heap.c_allocator.free(self.read_slots);
-        for (self.read_slots) |*slot| slot.* = .{};
+        for (self.read_slots) |*slot| slot.* = .{ .worker = self };
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
@@ -272,13 +282,11 @@ const Worker = struct {
     }
 
     fn run(self: *Worker) void {
-        var groups: std.Io.Group = .init;
-        var permits: std.Io.Semaphore = .{ .permits = self.concurrent_group_count };
         var pending: ?Queued = null;
         while (pending orelse self.next()) |queued| {
             pending = null;
             if (queued.request.operation != c.ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
-                groups.await(self.io) catch unreachable;
+                self.drainInflight();
                 self.completeQueued(queued, 0);
                 continue;
             }
@@ -305,42 +313,121 @@ const Worker = struct {
             _ = self.read_group_count.fetchAdd(1, .monotonic);
             _ = self.grouped_request_count.fetchAdd(batch.count, .monotonic);
             _ = self.grouped_bytes.fetchAdd(total_bytes, .monotonic);
-            if (self.inline_batches) {
+            if (!self.async_submit) {
                 self.executeReadBatch(&batch);
                 continue;
             }
-            permits.waitUncancelable(self.io);
-            const slot = self.acquireDispatchSlot();
-            slot.batch = batch;
-            groups.concurrent(self.io, executeReadGroup, .{ self, &permits, slot }) catch {
-                executeReadGroup(self, &permits, slot) catch {};
-            };
+            self.submitReadBatchAsync(batch);
         }
-        groups.await(self.io) catch unreachable;
+        self.drainInflight();
     }
 
     fn acquireDispatchSlot(self: *Worker) *DispatchSlot {
-        // The permits semaphore bounds in-flight groups to read_slots.len, so a
-        // free slot always exists by the time this runs.
         while (true) {
-            for (self.read_slots) |*slot| {
-                if (!slot.in_use.load(.acquire) and
-                    slot.in_use.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
-                    return slot;
+            if (self.tryAcquireDispatchSlot()) |slot| return slot;
+            self.slot_free.reset();
+            if (self.tryAcquireDispatchSlot()) |slot| return slot;
+            // Same announcement protocol as next(): the releasing callback
+            // stores in_use=false before swapping this flag (both seq_cst), so
+            // a missed rescan implies the releaser observed the flag.
+            self.slot_waiting.store(true, .seq_cst);
+            if (self.tryAcquireDispatchSlot()) |slot| {
+                _ = self.slot_waiting.swap(false, .seq_cst);
+                return slot;
             }
+            self.slot_free.waitUncancelable(self.io);
+            _ = self.slot_waiting.swap(false, .seq_cst);
         }
     }
 
-    fn executeReadGroup(
-        self: *Worker,
-        permits: *std.Io.Semaphore,
-        slot: *DispatchSlot,
-    ) std.Io.Cancelable!void {
-        defer {
-            slot.in_use.store(false, .release);
-            permits.post(self.io);
+    fn tryAcquireDispatchSlot(self: *Worker) ?*DispatchSlot {
+        for (self.read_slots) |*slot| {
+            if (!slot.in_use.load(.acquire) and
+                slot.in_use.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
+                return slot;
         }
-        self.executeReadBatch(&slot.batch);
+        return null;
+    }
+
+    fn releaseDispatchSlot(self: *Worker, slot: *DispatchSlot) void {
+        slot.in_use.store(false, .release);
+        if (self.slot_waiting.swap(false, .seq_cst)) self.slot_free.set(self.io);
+    }
+
+    fn drainInflight(self: *Worker) void {
+        while (self.inflight.load(.acquire) != 0) {
+            self.slot_free.reset();
+            if (self.inflight.load(.acquire) == 0) break;
+            self.slot_waiting.store(true, .seq_cst);
+            if (self.inflight.load(.acquire) == 0) {
+                _ = self.slot_waiting.swap(false, .seq_cst);
+                break;
+            }
+            self.slot_free.waitUncancelable(self.io);
+            _ = self.slot_waiting.swap(false, .seq_cst);
+        }
+    }
+
+    fn submitReadBatchAsync(self: *Worker, batch: ReadGroup) void {
+        const slot = self.acquireDispatchSlot();
+        slot.batch = batch;
+        const count = batch.count;
+        for (slot.batch.queued[0..count], slot.reads[0..count]) |queued, *read| {
+            const request = queued.request;
+            read.* = .{
+                .buffer = if (request.length == 0)
+                    @as([]u8, &.{})
+                else
+                    @as([*]u8, @ptrCast(request.buffer.?))[0..request.length],
+                .offset = request.offset,
+            };
+        }
+        _ = self.inflight.fetchAdd(1, .monotonic);
+        const submitted = self.storage.submitReadManyAt(
+            self.io,
+            slot.reads[0..count],
+            slot.results[0..count],
+            .{ .context = slot, .complete = readGroupComplete },
+        ) catch |err| {
+            _ = self.inflight.fetchSub(1, .monotonic);
+            const status = errorStatus(err);
+            var statuses = uninitialized([max_batch_requests]c_int);
+            @memset(statuses[0..count], status);
+            self.completeReadBatch(&slot.batch, statuses[0..count]);
+            self.releaseDispatchSlot(slot);
+            return;
+        };
+        switch (submitted) {
+            .submitted => {},
+            .unsupported => {
+                // Storage without an async path (e.g. synthetic): fall back to
+                // the blocking executor for this and all later groups.
+                _ = self.inflight.fetchSub(1, .monotonic);
+                slot.in_use.store(false, .release);
+                self.async_submit = false;
+                self.executeReadBatch(&batch);
+            },
+        }
+    }
+
+    fn readGroupComplete(context: *anyopaque, failure: ?anyerror) void {
+        const slot: *DispatchSlot = @ptrCast(@alignCast(context));
+        const self = slot.worker;
+        const count = slot.batch.count;
+        var statuses = uninitialized([max_batch_requests]c_int);
+        for (slot.batch.queued[0..count], slot.results[0..count], statuses[0..count]) |queued, result, *status| {
+            status.* = if (failure) |err|
+                errorStatus(err)
+            else if (result.failure) |err|
+                errorStatus(err)
+            else if (result.amount != queued.request.length)
+                -c.EIO
+            else
+                0;
+        }
+        self.completeReadBatch(&slot.batch, statuses[0..count]);
+        _ = self.inflight.fetchSub(1, .monotonic);
+        self.releaseDispatchSlot(slot);
     }
 
     fn executeReadBatch(self: *Worker, batch: *const ReadGroup) void {
