@@ -43,6 +43,8 @@ cpu_profile_signal=12
 vcpu_cpu_base=${ZETTIDE_VHOST_VCPU_CPU_BASE:-}
 target_cpu_list=${ZETTIDE_VHOST_TARGET_CPU_LIST:-}
 guest_mitigations_off=${ZETTIDE_VHOST_GUEST_MITIGATIONS_OFF:-0}
+extra_ssh_pubkey=${ZETTIDE_VHOST_EXTRA_SSH_PUBKEY:-}
+hold_seconds=${ZETTIDE_VHOST_HOLD_SECONDS:-0}
 target_gdb=${ZETTIDE_VHOST_TARGET_GDB:-0}
 benchmark_mode=${ZETTIDE_POOL_DATA_BENCHMARK_MODE:-pool}
 base_image=${ZETTIDE_VHOST_BASE_IMAGE:?ZETTIDE_VHOST_BASE_IMAGE is required}
@@ -452,6 +454,14 @@ public_key=$(<"$ssh_key.pub")
     echo "generated SSH public key is not one line" >&2
     exit 1
 }
+extra_key_yaml=""
+if [[ -n $extra_ssh_pubkey ]]; then
+    [[ $extra_ssh_pubkey != *$'\n'* && $extra_ssh_pubkey != *$'\r'* ]] || {
+        echo "extra SSH public key is not one line" >&2
+        exit 1
+    }
+    extra_key_yaml="      - $extra_ssh_pubkey"
+fi
 cat >"$user_data" <<EOF
 #cloud-config
 write_files:
@@ -480,6 +490,7 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
       - $public_key
+$extra_key_yaml
 runcmd:
   - [sh, -c, "dnf config-manager setopt fedora.enabled=0 updates.enabled=0 && dnf install -y fio jq pciutils && install -o zettide -g zettide -m 0644 /dev/null /home/zettide/.zettide-fio-ready"]
 EOF
@@ -1027,4 +1038,23 @@ run_selected_case randread-4k-qd16-j32 randread 4k 16 32 "$fio_size"
 run_selected_case randread-4k-qd32-j16 randread 4k 32 16 "$fio_size"
 run_selected_case randread-4k-qd32-j32 randread 4k 32 32 "$fio_size"
 [[ $fio_case != randread-4k-qd256-j1-per-device ]] || run_raw_nvme_case
+
+if ((hold_seconds > 0)); then
+    hold_release=/tmp/zettide-vhost-hold-release
+    rm -f "$hold_release"
+    {
+        echo "vhost guest hold: up to ${hold_seconds}s from $(date -Is)"
+        echo "ssh: ssh -p $ssh_port zettide@127.0.0.1"
+        echo "guest devices: $guest_device"
+        echo "sample fio:"
+        echo "  sudo fio --name=manual --filename=$guest_device --rw=randread --bs=4k --size=1G --offset_increment=1G --ioengine=io_uring --iodepth=32 --numjobs=32 --direct=1 --invalidate=1 --group_reporting --time_based --runtime=20 --ramp_time=5 --randrepeat=0 --norandommap=1"
+        echo "release early: touch $hold_release"
+    } | tee "$log_dir/guest-hold.txt" >&2
+    deadline=$((SECONDS + hold_seconds))
+    while ((SECONDS < deadline)); do
+        [[ -e $hold_release ]] && break
+        process_running "$qemu_pid" || break
+        sleep 5
+    done
+fi
 benchmark_completed=true
