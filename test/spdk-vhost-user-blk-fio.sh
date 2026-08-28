@@ -809,6 +809,34 @@ EOF
     execute_case "$name" "$job_file" "${#guest_devices[@]}"
 }
 
+normalize_fio_json_output() {
+    local result=$1
+    local preamble=${result%.json}-preamble.log
+    local clean=$result.clean
+    local line
+    local json_started=false
+
+    : >"$preamble"
+    : >"$clean"
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $json_started == false ]]; then
+            if [[ $line == \{ ]]; then
+                json_started=true
+            else
+                printf '%s\n' "$line" >>"$preamble"
+                continue
+            fi
+        fi
+        printf '%s\n' "$line" >>"$clean"
+    done <"$result"
+    if [[ $json_started == false ]]; then
+        rm -f "$clean"
+        echo "fio output did not contain JSON: $result" >&2
+        return 1
+    fi
+    mv "$clean" "$result"
+}
+
 execute_case() {
     local name=$1
     local job_file=$2
@@ -909,6 +937,7 @@ execute_case() {
     fi
     stop_monitors
     ((status == 0)) || return "$status"
+    normalize_fio_json_output "$result"
     jq -e '.jobs | length > 0 and all(.error == 0)' "$result" >/dev/null
     if [[ $benchmark_mode == raw_nvme ]]; then
         jq -r --arg name "$name" '
