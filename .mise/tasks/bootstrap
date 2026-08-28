@@ -1,0 +1,6 @@
+#!/bin/sh
+#MISE description="Initialize submodules and project dependencies"
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+git -C "$root" submodule update --init --recursive -- vendor/grpc-lite vendor/raftz vendor/spdk

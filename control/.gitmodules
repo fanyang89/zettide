@@ -1,3 +1,0 @@
-[submodule "vendor/zettide-node-protocol"]
-	path = vendor/zettide-node-protocol
-	url = https://github.com/fanyang89/zettide-node-protocol.git

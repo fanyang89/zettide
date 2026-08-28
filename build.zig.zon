@@ -8,6 +8,20 @@
             .url = "https://codeload.github.com/google/crc32c/tar.gz/2bbb3be42e20a0e6c0f7b39dc07dc863d9ffbc07",
             .hash = "N-V-__8AAPSAAQAtvOlJae6eMS2dtyeTGalfGt9JsXB9mYZj",
         },
+        .clap = .{
+            .url = "https://github.com/fanyang89/zig-clap/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
+        },
+        .raftz = .{
+            .path = "vendor/raftz",
+        },
+        .uuid = .{
+            .url = "https://codeberg.org/r4gus/uuid-zig/archive/0.5.0.tar.gz",
+            .hash = "uuid-0.5.0-oOieIQx-AABtc9U3ihv_bf9pZAYoKp4UMsNFHBr-cn-w",
+        },
+        .zettide_node_protocol = .{
+            .path = "node-protocol",
+        },
         .zbench = .{
             .url = "https://github.com/hendriknielaender/zBench/archive/f12a2262bcd9d300207890555c577da5e29de453.tar.gz",
             .hash = "zbench-0.14.1-YTdc781OAQCR6wxqkgAwm9bG4TnFGzm8c9aE-ZPiTAU1",
@@ -24,9 +38,13 @@
         ".github",
         "README.md",
         "benchmarks",
+        "cawfs",
+        "control",
         "docs",
+        "node-protocol",
         "src",
         "test",
+        "vendor/raftz",
         "vendor/utf8proc",
         "vendor/libfuse-tests",
         "vendor/xfstests",

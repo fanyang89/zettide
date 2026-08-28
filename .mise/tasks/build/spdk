@@ -1,0 +1,37 @@
+#!/bin/sh
+#MISE description="Build the shared SPDK libraries"
+#MISE depends=["bootstrap"]
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+cd "$root/vendor/spdk"
+options="--with-shared --with-rdma --with-uring --with-vhost --disable-tests --disable-unit-tests --disable-examples --disable-apps --without-nvme-cuse --without-virtio --without-fsdev"
+build_path="$(pwd)/build"
+source_revision=$(git rev-parse HEAD)
+revision_file="$build_path/.zettide-source-revision"
+revision_changed=false
+if ! grep -Fqx "$source_revision" "$revision_file" 2>/dev/null; then
+  revision_changed=true
+fi
+if [ "$revision_changed" = true ] || \
+   ! grep -Fqx "# configure options: $options" mk/config.mk 2>/dev/null || \
+   ! grep -Fq "$build_path/include" build/lib/pkgconfig/spdk_event.pc 2>/dev/null || \
+   ! grep -Fq "$(pwd)/isa-l/.libs" build/lib/pkgconfig/spdk_syslibs.pc 2>/dev/null; then
+  if [ "$revision_changed" = true ] && \
+     { [ ! -f isa-l/Makefile ] || [ ! -f isa-l-crypto/Makefile ]; }; then
+    PATH=/usr/bin:$PATH ./configure $options
+  fi
+  if [ -f mk/config.mk ]; then
+    PATH=/usr/bin:$PATH make clean
+  fi
+  if [ "$revision_changed" = true ]; then
+    for dependency in isa-l isa-l-crypto; do
+      if [ -f "$dependency/Makefile" ]; then
+        PATH=/usr/bin:$PATH make -C "$dependency" distclean
+      fi
+    done
+  fi
+  PATH=/usr/bin:$PATH ./configure $options
+fi
+PATH=/usr/bin:$PATH make -j"$(nproc)"
+printf '%s\n' "$source_revision" > "$revision_file"

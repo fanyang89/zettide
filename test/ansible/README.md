@@ -244,7 +244,7 @@ directories. It never writes raw block devices.
 
 ## NVMe-oF/TCP fio
 
-The NVMe-oF profile builds the pinned `third_party/spdk` source on the remote
+The NVMe-oF profile builds the pinned `vendor/spdk` source on the remote
 host, exports a 64 GiB memory-backed provider bdev over loopback TCP, connects
 it through the Linux kernel NVMe/TCP initiator, and runs read-only fio cases.
 It measures the provider, SPDK NVMe-oF, and kernel initiator ceiling rather

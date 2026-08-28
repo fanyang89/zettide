@@ -1,0 +1,10 @@
+#!/bin/sh
+#MISE description="Build Zettide storage components"
+#MISE depends=["build:spdk"]
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+cd "$root"
+zig build -Doptimize=ReleaseFast
+PKG_CONFIG_PATH="$root/vendor/spdk/build/lib/pkgconfig" \
+  zig build test-spdk-link -Doptimize=ReleaseFast

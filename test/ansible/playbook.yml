@@ -431,7 +431,7 @@
       ansible.builtin.command:
         argv: [git, rev-parse, HEAD]
       args:
-        chdir: "{{ zettide_controller_root }}/../third_party/spdk"
+        chdir: "{{ zettide_controller_root }}/vendor/spdk"
       delegate_to: localhost
       become: false
       run_once: true
