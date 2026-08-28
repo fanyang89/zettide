@@ -4,4 +4,4 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root"
-exec zig build --watch -fincremental
+exec zig build dev --watch -fincremental

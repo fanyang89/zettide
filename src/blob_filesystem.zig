@@ -319,17 +319,18 @@ pub const Filesystem = struct {
         try self.transaction_mutex.lock(io);
         defer self.transaction_mutex.unlock(io);
         try self.requireMutable();
+        if (self.dirty_files.getPtr(inode)) |dirty_file| {
+            try self.authorizeDirectInode(io, inode, dirty_file.record);
+            const previous = dirty_file.record.metadata;
+            applyMetadataPatch(&dirty_file.record.metadata, patch, io);
+            if (!std.meta.eql(previous, dirty_file.record.metadata)) self.dirty = true;
+            return dirty_file.record.metadata;
+        }
+
         var record = (try self.loadInode(io, inode)) orelse return error.FileNotFound;
         try self.authorizeDirectInode(io, inode, record);
-
         const previous = record.metadata;
-        if (patch.mode) |mode|
-            record.metadata.mode = (record.metadata.mode & 0o170000) | (mode & 0o7777);
-        if (patch.uid) |uid| record.metadata.uid = uid;
-        if (patch.gid) |gid| record.metadata.gid = gid;
-        if (patch.atime_ns) |atime_ns| record.metadata.atime_ns = atime_ns;
-        if (patch.mtime_ns) |mtime_ns| record.metadata.mtime_ns = mtime_ns;
-        if (patch.update_ctime) record.metadata.ctime_ns = timestamp(io);
+        applyMetadataPatch(&record.metadata, patch, io);
         if (std.meta.eql(previous, record.metadata)) return record.metadata;
 
         try self.publishInodeMetadata(io, inode, record);
@@ -1849,6 +1850,15 @@ const MutationAccumulator = struct {
     }
 };
 
+fn applyMetadataPatch(value: *metadata.Metadata, patch: metadata.Patch, io: Io) void {
+    if (patch.mode) |mode| value.mode = (value.mode & 0o170000) | (mode & 0o7777);
+    if (patch.uid) |uid| value.uid = uid;
+    if (patch.gid) |gid| value.gid = gid;
+    if (patch.atime_ns) |atime_ns| value.atime_ns = atime_ns;
+    if (patch.mtime_ns) |mtime_ns| value.mtime_ns = mtime_ns;
+    if (patch.update_ctime) value.ctime_ns = timestamp(io);
+}
+
 fn timestamp(io: Io) i64 {
     return @intCast(Io.Clock.real.now(io).nanoseconds);
 }
@@ -3299,6 +3309,24 @@ test "blob filesystem inode metadata mutations preserve invariants and persist" 
     const ctime_updated = try filesystem.patchMetadata(std.testing.io, inode, .{ .uid = patched.uid });
     try std.testing.expect(ctime_updated.ctime_ns != patched.ctime_ns);
     try std.testing.expectEqual(generation_before_patch_noop + 1, filesystem.root.generation);
+
+    try std.testing.expectEqual(
+        @as(usize, 4),
+        try filesystem.write(std.testing.io, inode, "data", 0),
+    );
+    const generation_before_dirty_patch = filesystem.root.generation;
+    const dirty_patched = try filesystem.patchMetadata(std.testing.io, inode, .{
+        .uid = 12,
+        .mtime_ns = 42,
+        .update_ctime = false,
+    });
+    try std.testing.expectEqual(@as(u32, 12), dirty_patched.uid);
+    try std.testing.expectEqual(@as(i64, 42), dirty_patched.mtime_ns);
+    try std.testing.expectEqual(generation_before_dirty_patch, filesystem.root.generation);
+    try std.testing.expectEqual(@as(u64, 4), (try filesystem.stat(std.testing.io, inode)).data.?.logical_size);
+    try filesystem.sync(std.testing.io);
+    try std.testing.expectEqual(generation_before_dirty_patch + 1, filesystem.root.generation);
+    try std.testing.expectEqual(@as(u32, 12), (try filesystem.stat(std.testing.io, inode)).metadata.uid);
 
     const orphan = try filesystem.createFile(std.testing.io, root_inode, "Orphan", 0o600, 3, 4);
     try filesystem.retainInode(std.testing.io, orphan);

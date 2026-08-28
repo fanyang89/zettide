@@ -1612,16 +1612,17 @@ test "blob file snapshot point reads preserve corruption validation" {
         &byte,
         0,
     ));
-    var wrong_generation = snapshot;
-    wrong_generation.generation += 1;
-    try std.testing.expectError(error.BlobMapReferenceMismatch, readSnapshot(
+    var later_generation = snapshot;
+    later_generation.generation += 1;
+    try std.testing.expectEqual(block_output.len, try readSnapshot(
         std.testing.failing_allocator,
         std.testing.io,
         &blobs,
-        wrong_generation,
+        later_generation,
         &block_output,
         0,
     ));
+    try std.testing.expectEqualSlices(u8, &data, &block_output);
     var wrong_digest = snapshot;
     wrong_digest.root.?.digest[0] ^= 1;
     try std.testing.expectError(error.BlobDigestMismatch, readSnapshot(

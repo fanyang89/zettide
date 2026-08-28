@@ -36,6 +36,8 @@ pub fn build(b: *std.Build) void {
     if (enable_spdk) _ = configureSpdk(b, app_core, target, optimize);
     const exe = createExecutable(b, "zettide", target, optimize, app_core, enable_spdk);
     b.installArtifact(exe);
+    const dev_step = b.step("dev", "Build the primary Zettide executable for watch mode");
+    dev_step.dependOn(&exe.step);
 
     const pool_data_benchmark_core = createCoreModule(
         b,
