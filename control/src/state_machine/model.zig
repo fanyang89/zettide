@@ -1,9 +1,10 @@
 const std = @import("std");
 const pb = @import("control_proto");
+const schema = @import("schema.zig");
 
-pub const volume_target_replica_count: u32 = 3;
-
-pub const Fingerprint = [std.crypto.hash.sha2.Sha256.digest_length]u8;
+const Fingerprint = schema.Fingerprint;
+const RequestKind = schema.RequestKind;
+const volume_target_replica_count = schema.volume_target_replica_count;
 
 pub const Pool = struct {
     id: []u8,
@@ -548,26 +549,6 @@ pub const PrimaryFailover = struct {
             .resource_version = self.resource_version,
         };
     }
-};
-
-pub const RequestKind = enum {
-    create_pool,
-    register_node,
-    register_member,
-    create_volume,
-    update_volume,
-    delete_volume,
-    reserve_volume_resources,
-    activate_replica,
-    finalize_volume_deletion,
-    propose_primary_authority,
-    activate_primary_authority,
-    commit_primary_authority_ready,
-    commit_primary_authority_renewal_ready,
-    abort_primary_authority_candidate,
-    begin_primary_failover,
-    commit_primary_authority_failover_ready,
-    complete_primary_failover_lease_wait,
 };
 
 pub const Request = struct {

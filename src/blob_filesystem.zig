@@ -8,6 +8,10 @@ const metadata_map_store = @import("blob_metadata_map_store.zig");
 const blob_store = @import("blob_store.zig");
 const metadata = @import("metadata.zig");
 const name_profile = @import("name_profile.zig");
+const prepared_name = @import("blob_filesystem/prepared_name.zig");
+const reservation_ops = @import("blob_filesystem/reservations.zig");
+
+const PreparedName = prepared_name.PreparedName;
 
 const Io = std.Io;
 
@@ -1682,33 +1686,6 @@ fn inodeCacheSet(root_generation: u64, inode: u64) usize {
     return @as(usize, @intCast(mixed % inode_cache_sets)) * inode_cache_ways;
 }
 
-const PreparedName = struct {
-    spelling: []const u8,
-    key: []const u8,
-    portable: ?name_profile.PreparedComponent = null,
-
-    fn init(allocator: std.mem.Allocator, profile: name_profile.Profile, input: []const u8) !PreparedName {
-        return switch (profile) {
-            .legacy_raw => legacy: {
-                if (input.len == 0 or input.len > filesystem_format.max_name_bytes or
-                    std.mem.eql(u8, input, ".") or std.mem.eql(u8, input, "..") or
-                    std.mem.indexOfAny(u8, input, &.{ 0, '/' }) != null)
-                    return error.InvalidName;
-                break :legacy .{ .spelling = input, .key = input };
-            },
-            .portable_v1 => portable: {
-                const value = try name_profile.preparePortableV1(allocator, input);
-                break :portable .{ .spelling = value.spelling, .key = value.key, .portable = value };
-            },
-        };
-    }
-
-    fn deinit(self: *PreparedName, allocator: std.mem.Allocator) void {
-        if (self.portable) |value| value.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
 const OwnedMutation = struct {
     key: []u8,
     value: ?[]u8,
@@ -1863,12 +1840,8 @@ fn timestamp(io: Io) i64 {
     return @intCast(Io.Clock.real.now(io).nanoseconds);
 }
 
-fn reservationContains(reservations: []const Filesystem.Reservation, block: u64) bool {
-    for (reservations) |reservation| {
-        if (block < reservation.start) return false;
-        if (block < reservation.end) return true;
-    }
-    return false;
+fn reservationContains(current: []const Filesystem.Reservation, block: u64) bool {
+    return reservation_ops.contains(Filesystem.Reservation, current, block);
 }
 
 fn mergeReservation(
@@ -1876,27 +1849,7 @@ fn mergeReservation(
     current: []const Filesystem.Reservation,
     added: Filesystem.Reservation,
 ) ![]Filesystem.Reservation {
-    std.debug.assert(added.start < added.end);
-    var result: std.ArrayList(Filesystem.Reservation) = .empty;
-    defer result.deinit(allocator);
-    var merged = added;
-    var inserted = false;
-    for (current) |reservation| {
-        if (reservation.end < merged.start) {
-            try result.append(allocator, reservation);
-        } else if (merged.end < reservation.start) {
-            if (!inserted) {
-                try result.append(allocator, merged);
-                inserted = true;
-            }
-            try result.append(allocator, reservation);
-        } else {
-            merged.start = @min(merged.start, reservation.start);
-            merged.end = @max(merged.end, reservation.end);
-        }
-    }
-    if (!inserted) try result.append(allocator, merged);
-    return result.toOwnedSlice(allocator);
+    return reservation_ops.merge(Filesystem.Reservation, allocator, current, added);
 }
 
 fn clipReservations(
@@ -1904,17 +1857,7 @@ fn clipReservations(
     current: []const Filesystem.Reservation,
     size: u64,
 ) ![]Filesystem.Reservation {
-    const end_block = try std.math.divCeil(u64, size, blob_file.block_size);
-    var result: std.ArrayList(Filesystem.Reservation) = .empty;
-    defer result.deinit(allocator);
-    for (current) |reservation| {
-        if (reservation.start >= end_block) break;
-        try result.append(allocator, .{
-            .start = reservation.start,
-            .end = @min(reservation.end, end_block),
-        });
-    }
-    return result.toOwnedSlice(allocator);
+    return reservation_ops.clip(Filesystem.Reservation, allocator, current, size);
 }
 
 fn reservationOutstandingBytes(
