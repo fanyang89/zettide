@@ -130,9 +130,12 @@ const Worker = struct {
         self.storage = storage;
         self.concurrent_group_count = concurrent_group_count;
         self.inline_batches = inline_batches;
+        // Bound in-flight groups so the provider queue accumulates under load
+        // and groups stay large; an unthrottled worker drains the queue into
+        // tiny groups, which raises per-IO reactor and device cost.
         self.read_slots = try std.heap.c_allocator.alloc(
             DispatchSlot,
-            @max(concurrent_group_count, 64),
+            @max(concurrent_group_count, 8),
         );
         errdefer std.heap.c_allocator.free(self.read_slots);
         for (self.read_slots) |*slot| slot.* = .{ .worker = self };
