@@ -101,6 +101,7 @@
         ['', 'seq-read-1m-qd32-j1', 'seq-read-128k-qd1-j1',
         'randread-4k-qd1-j1', 'randread-4k-qd32-j1', 'randread-4k-qd32-j4',
         'randread-4k-qd16-j32', 'randread-4k-qd32-j16', 'randread-4k-qd32-j32',
+        'randread-4k-qd64-j32', 'randread-4k-qd128-j16',
         'randread-4k-qd256-j1-per-device']
       - >-
         ansible_facts.processor_vcpus is not defined or

@@ -14,7 +14,7 @@ fn uninitialized(comptime T: type) T {
 const block_size = 4096;
 const max_batch_requests = 32;
 const max_batch_bytes = 1024 * 1024;
-const queue_capacity = 1024;
+const queue_capacity = 2048;
 const Frontend = enum { nvmf, vhost };
 const runtime_config =
     \\{"subsystems":[
