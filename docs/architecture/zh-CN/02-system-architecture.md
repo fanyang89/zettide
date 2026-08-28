@@ -206,7 +206,7 @@ Host-facing NVMf 使用标准 NVMe block commands。内部 Replica NVMf 必须�
 
 - Tier 1 block path 是标准 NVMf-first、iSCSI fallback 到 Catalog Volume；filesystem path 是 NFS 或 FUSE 到 BlobFilesystem。Raft 不进入逐 I/O 路径。
 - Tier 3 host publication 将请求交给共置 primary；primary 再用 vendor-specific Replica protocol 访问本地/远程 Replica。默认 3/2 profile 只有在两个 Replica 都持久化 prepare/payload 和同一 commit certificate 后才确认写入。
-- CAWFS shared qcow2 是并列方向，不是 BlobFilesystem backend 或 Catalog Volume Replica protocol。其 image owner epoch 只隔离 image writer；接管前仍需外部 hard fence。CAWFS owner epoch、Volume write epoch 和 publication generation 不可互换。
+- TxFS shared qcow2 是并列方向，不是 BlobFilesystem backend 或 Catalog Volume Replica protocol。其 image owner epoch 只隔离 image writer；接管前仍需外部 hard fence。TxFS owner epoch、Volume write epoch 和 publication generation 不可互换。
 
 ## 关键版本域
 
@@ -218,6 +218,6 @@ Host-facing NVMf 使用标准 NVMe block commands。内部 Replica NVMf 必须�
 | Replica generation | Tier 3 Replica | 隔离重建前数据实例 |
 | Lease ID | 单次 Tier 3 primary 授权 | 区分具体授权实例 |
 | Raft term/revision | Tier 3 控制面 | leader 任期与已 apply 权威版本 |
-| CAWFS owner epoch | shared qcow2 image | 隔离旧文件 writer |
+| TxFS owner epoch | shared qcow2 image | 隔离旧文件 writer |
 
 这些版本不得相互替代。

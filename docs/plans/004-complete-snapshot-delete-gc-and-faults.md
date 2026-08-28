@@ -11,7 +11,7 @@
 - **优先级**: P1
 - **工作量**: L
 - **风险**: HIGH
-- **依赖**: `plans/003-connect-crash-consistent-snapshot-data-plane.md`
+- **依赖**: `docs/plans/003-connect-crash-consistent-snapshot-data-plane.md`
 - **类别**: direction, tests
 - **Status**: BLOCKED（等待计划 003 完成并按实际文件刷新）
 - **计划生成于**: `zettide` commit `6515277`, `zettide-control` commit `c25ed1d`, 2026-07-29

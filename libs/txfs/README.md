@@ -1,6 +1,6 @@
-# zettide-cawfs
+# zettide-txfs
 
-`zettide-cawfs` is a transactional storage engine for filesystems that share a
+`zettide-txfs` is a transactional storage engine for filesystems that share a
 single storage namespace across multiple writers. It publishes immutable state
 through one conditionally replaced anchor.
 
@@ -18,10 +18,10 @@ A future object-store backend can map the same contract to conditional writes
 such as Amazon S3 `If-Match` without exposing LBAs, CDBs, ETags, or HTTP status
 codes to the transaction engine.
 
-CAWFS owns the minimal persistent metadata model for shared writable volumes:
+TxFS owns the minimal persistent metadata model for shared writable volumes:
 an immutable filesystem root references inode, directory-entry, and extent
 B+trees. Zettide's backend-neutral FUSE and POSIX frontend uses BlobFilesystem
-for local single-writer volumes and CAWFS for shared writable volumes.
+for local single-writer volumes and TxFS for shared writable volumes.
 
 Current file data support is deliberately narrow: one non-empty immutable
 object and opaque extent reference may be written once to an existing empty

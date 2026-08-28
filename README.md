@@ -25,7 +25,7 @@ repositories retain their histories here as merged directory trees:
 | `services/control/` | Raft-replicated metadata and cluster coordination |
 | `services/csi/` | CSI node service and container image |
 | `services/nfs-fsal/` | NFS-Ganesha FSAL adapter |
-| `libs/cawfs/` | Conditional-write transaction engine for shared writable filesystems |
+| `libs/txfs/` | Conditional-write transaction engine for shared writable filesystems |
 | `libs/data-service-contracts/` | Shared data-service API and authority/fencing contracts |
 | `tests/` | Zig, C, shell, conformance, and integration tests |
 | `tests/automation/` | Isolated uv/Ansible project for remote and hardware test automation |
@@ -118,7 +118,7 @@ The equivalent focused Zig gates include:
 zig build
 zig build test
 zig build test-control
-zig build test-cawfs
+zig build test-txfs
 zig build ci
 ```
 
@@ -201,7 +201,7 @@ zig build -j1 test-posix-nightly -Dfuse-tests=required -Dexternal-tests=required
 zig build ci
 ```
 
-`zig build test` runs the portable unit, CLI, control-plane, and cawfs suites. FUSE tests
+`zig build test` runs the portable unit, CLI, control-plane, and TxFS suites. FUSE tests
 perform real Linux syscalls and require writable `/dev/fuse`, `fusermount3`,
 and `mountpoint`. Use `-Dfuse-tests=auto` to skip them when those capabilities
 are unavailable.

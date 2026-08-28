@@ -2,7 +2,7 @@
 //!
 //! The insertion and split control flow is adapted from xitdb's SortedMap at
 //! commit 97f5d68962a70cbf9d3bbaf0a087271e5da642b7. Storage, page encoding,
-//! references, and publication are native to zettide-cawfs.
+//! references, and publication are native to zettide-txfs.
 
 const std = @import("std");
 const page = @import("page.zig");

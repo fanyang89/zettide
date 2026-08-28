@@ -36,7 +36,7 @@ Tier 1 不承诺 storage node 故障后的服务连续性。它的故障边界�
 - qtr 是 Tier 1 阻塞性一等消费者。
 - PVE 与其他虚拟化平台是一等后续集成目标，优先于 CSI，但不阻塞 Tier 1。
 - CSI 是次级、非阻塞集成目标；它只映射 Kubernetes 生命周期到既有 Zettide 资源与 frontend。
-- CAWFS shared qcow2 是独立 filesystem profile，不改变 Catalog Volume 路线。
+- TxFS shared qcow2 是独立 filesystem profile，不改变 Catalog Volume 路线。
 
 ## 设计原则
 

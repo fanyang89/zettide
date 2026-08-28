@@ -4,7 +4,7 @@
 
 This repository contains the complete Zettide storage project. Storage-owned
 components live in `services/zettide/`, `services/control/`, `services/csi/`,
-`services/nfs-fsal/`, `libs/cawfs/`, and `libs/data-service-contracts/`. Tests live under
+`services/nfs-fsal/`, `libs/txfs/`, and `libs/data-service-contracts/`. Tests live under
 `tests/`. External source dependencies are pinned as submodules under `vendor/`.
 
 `qtr` and `etz` are separate projects and are not part of this repository's

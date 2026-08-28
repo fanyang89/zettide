@@ -81,7 +81,7 @@ pub const DataBlockTransport = struct {
 };
 
 /// The maximum supported logical block size is also sufficient for Linux
-/// direct-I/O buffers on supported CAWFS devices.
+/// direct-I/O buffers on supported TxFS devices.
 pub fn allocateBuffer(
     allocator: std.mem.Allocator,
     byte_count: usize,

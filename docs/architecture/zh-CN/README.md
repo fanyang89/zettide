@@ -31,7 +31,7 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 - `zettide-control`：Tier 3 权威元数据与协调基础。
 - `raftz` 与 `grpc-lite`：共识、恢复和控制 RPC。
 - qtr/PVE/CSI：消费者 adapter、publication、attachment 与 mount 生命周期边界。
-- `zettide-cawfs`：独立 shared qcow2 文件路径，不替代 Catalog block publication。
+- `zettide-txfs`：独立 shared qcow2 文件路径，不替代 Catalog block publication。
 
 本书覆盖存储系统及其与 qtr、PVE、CSI 的直接 publication、attachment、export 和 mount 边界。除这些存储接入外，计算调度、VM 生命周期、自动 VM 重启、覆盖网络、Web UI、计费和完整发行版生命周期不在本书范围内。Tier 3 可以把 Volume republish 到调用方指定的 host，但不负责选择该 host 或重启 workload。
 
@@ -49,7 +49,7 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 10. [部署与网络](09-deployment-and-networking.md)
 11. [安全边界](10-security.md)
 12. [演进路线图](11-evolution-roadmap.md)
-13. [CAWFS 共享 qcow2 接入](12-cawfs-shared-qcow2.md)
+13. [TxFS 共享 qcow2 接入](12-txfs-shared-qcow2.md)
 14. [虚拟化与 CSI](13-virtualization-and-csi.md)
 15. [术语表](glossary.md)
 16. [源码映射](source-map.md)

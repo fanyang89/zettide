@@ -702,6 +702,7 @@ fn makeClaimId(
     payload: []const u8,
 ) [16]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    // Stable digest domain inherited from CAWFS volumes; never rename.
     hasher.update("CAWFS immutable extent claim v2");
     hasher.update(&volume_id);
     var generation_bytes: [8]u8 = undefined;

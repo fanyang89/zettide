@@ -106,7 +106,7 @@ merge pages or raise stale separator lower bounds; empty leaves remain valid.
 This keeps updates local while preserving lookup and ordered-scan correctness.
 
 Insertion and split control flow is adapted from xitdb's `SortedMap` at commit
-`97f5d68962a70cbf9d3bbaf0a087271e5da642b7`. The CAWFS fork is available at
+`97f5d68962a70cbf9d3bbaf0a087271e5da642b7`. The TxFS fork is available at
 <https://github.com/fanyang89/xitdb>; licensing details are in
 `THIRD_PARTY.md`.
 
@@ -282,7 +282,7 @@ loss of the LUN stops both voting and filesystem service.
 
 ## Filesystem Semantics
 
-CAWFS owns the minimal persistent metadata model for shared writable volumes.
+TxFS owns the minimal persistent metadata model for shared writable volumes.
 Each filesystem root references three immutable B+trees: inode records keyed by
 inode ID, directory entries keyed by parent inode ID and raw component name, and
 extent mappings keyed by inode ID and logical offset. Inode 1 is always the root
@@ -308,7 +308,7 @@ metadata objects, crosses one durability barrier, activates every object as
 live, and only then permits anchor publication.
 
 Zettide's backend-neutral FUSE and POSIX frontend uses BlobFilesystem for local
-single-writer volumes and CAWFS for shared writable volumes. Overwrite, append,
+single-writer volumes and TxFS for shared writable volumes. Overwrite, append,
 truncate, holes, multiple extents, mutable `.data` allocations, orphan reclaim,
 garbage collection, and general POSIX data semantics remain unsupported.
 Deletion, rename, symlinks, Unicode policy, and clocks are also outside the

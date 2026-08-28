@@ -11,7 +11,7 @@
 | Tier 1 阻塞性一等消费者 | qtr | 原生 managed backend 是 Tier 1 完成门槛 |
 | 一等后续产品目标 | PVE 与其他虚拟化平台 | 优先于 CSI，但不阻塞 Tier 1 |
 | 次级集成目标 | CSI | 不阻塞 Tier 1/2；复用既有 frontend/lifecycle |
-| 独立 profile | CAWFS shared qcow2 | 面向 shared-file VM disk，不替代 Catalog block publication |
+| 独立 profile | TxFS shared qcow2 | 面向 shared-file VM disk，不替代 Catalog block publication |
 
 “一等后续”表示产品方向和架构契约是一等公民，不表示其实现必须早于 Tier 1 qtr gate。
 

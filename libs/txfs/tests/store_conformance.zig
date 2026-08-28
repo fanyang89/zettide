@@ -1,15 +1,15 @@
 const std = @import("std");
-const cawfs = @import("zettide_cawfs");
+const txfs = @import("zettide_txfs");
 
-const ModelStore = cawfs.model_store.ModelStore;
-const ObjectRef = cawfs.store.ObjectRef;
-const Anchor = cawfs.store.Anchor;
+const ModelStore = txfs.model_store.ModelStore;
+const ObjectRef = txfs.store.ObjectRef;
+const Anchor = txfs.store.Anchor;
 
 const txn_a: [16]u8 = .{ 0xa1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 const txn_b: [16]u8 = .{ 0xb2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
 
 fn makeAnchor(generation: u64, label: []const u8) Anchor {
-    std.debug.assert(label.len <= cawfs.store.anchor_size - 8);
+    std.debug.assert(label.len <= txfs.store.anchor_size - 8);
     var anchor: Anchor = @splat(0);
     std.mem.writeInt(u64, anchor[0..8], generation, .big);
     @memcpy(anchor[8 .. 8 + label.len], label);
@@ -19,10 +19,10 @@ fn makeAnchor(generation: u64, label: []const u8) Anchor {
 const initial_anchor = makeAnchor(1, "anchor-0");
 
 fn beginCurrentBatch(
-    store: cawfs.store.ConditionalStore,
+    store: txfs.store.ConditionalStore,
     allocator: std.mem.Allocator,
-    transaction_id: cawfs.store.TransactionId,
-) !cawfs.store.WriteBatch {
+    transaction_id: txfs.store.TransactionId,
+) !txfs.store.WriteBatch {
     var snapshot = try store.readAnchor(allocator);
     defer snapshot.deinit();
     return store.beginBatch(allocator, transaction_id, snapshot.version.bytes);
@@ -68,12 +68,12 @@ test "only one publisher can replace an anchor version" {
 
     const first_anchor = makeAnchor(2, "anchor-1");
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try first.publish(initial.version.bytes, &first_anchor),
     );
     try first.stabilize();
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.conflict,
+        txfs.store.PublishResult.conflict,
         try second.publish(initial.version.bytes, &makeAnchor(2, "anchor-2")),
     );
     try std.testing.expectError(
@@ -98,7 +98,7 @@ test "stabilized publication survives a crash" {
     try batch.prepare();
     const next_anchor = makeAnchor(2, "anchor-1");
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch.publish(initial.version.bytes, &next_anchor),
     );
     try batch.stabilize();
@@ -121,7 +121,7 @@ test "indeterminate publication can occur before or after replacement" {
     try before.prepare();
     model.injectNextPublishFault(.indeterminate_before);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.indeterminate,
+        txfs.store.PublishResult.indeterminate,
         try before.publish(initial.version.bytes, &makeAnchor(2, "anchor-before")),
     );
     var unchanged = try store.readAnchor(std.testing.allocator);
@@ -134,7 +134,7 @@ test "indeterminate publication can occur before or after replacement" {
     model.injectNextPublishFault(.indeterminate_after);
     const after_anchor = makeAnchor(2, "anchor-after");
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.indeterminate,
+        txfs.store.PublishResult.indeterminate,
         try after.publish(unchanged.version.bytes, &after_anchor),
     );
     var visible = try store.readAnchor(std.testing.allocator);
@@ -219,7 +219,7 @@ test "an indeterminate applied publication can be stabilized" {
     const next_anchor = makeAnchor(2, "anchor-1");
     model.injectNextPublishFault(.indeterminate_after);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.indeterminate,
+        txfs.store.PublishResult.indeterminate,
         try batch.publish(initial.version.bytes, &next_anchor),
     );
     try batch.stabilize();
@@ -232,11 +232,11 @@ test "an indeterminate applied publication can be stabilized" {
 
 test "concurrent publishers have exactly one winner" {
     const Worker = struct {
-        store: cawfs.store.ConditionalStore,
+        store: txfs.store.ConditionalStore,
         version: []const u8,
         transaction_id: [16]u8,
         anchor: Anchor,
-        result: ?cawfs.store.PublishResult = null,
+        result: ?txfs.store.PublishResult = null,
 
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {

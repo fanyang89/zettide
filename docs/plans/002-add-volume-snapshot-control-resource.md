@@ -19,7 +19,7 @@
 - **优先级**: P1
 - **工作量**: L
 - **风险**: HIGH
-- **依赖**: `plans/001-freeze-volume-snapshot-contract.md`、Volume baseline
+- **依赖**: `docs/plans/001-freeze-volume-snapshot-contract.md`、Volume baseline
 - **类别**: direction, tech-debt
 - **Status**: BLOCKED（等待 Volume baseline，并在其落地后刷新文件路径与符号）
 - **计划生成于**: `zettide-control` commit `c25ed1d`, 2026-07-29

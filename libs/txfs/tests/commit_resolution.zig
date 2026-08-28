@@ -1,12 +1,12 @@
 const std = @import("std");
-const cawfs = @import("zettide_cawfs");
+const txfs = @import("zettide_txfs");
 
-const Anchor = cawfs.store.Anchor;
-const ModelStore = cawfs.model_store.ModelStore;
-const ObjectRef = cawfs.store.ObjectRef;
-const PublishFault = cawfs.model_store.PublishFault;
-const PublishResult = cawfs.store.PublishResult;
-const TransactionId = cawfs.store.TransactionId;
+const Anchor = txfs.store.Anchor;
+const ModelStore = txfs.model_store.ModelStore;
+const ObjectRef = txfs.store.ObjectRef;
+const PublishFault = txfs.model_store.PublishFault;
+const PublishResult = txfs.store.PublishResult;
+const TransactionId = txfs.store.TransactionId;
 
 const txn_a: TransactionId = .{ 0xa1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 const txn_b: TransactionId = .{ 0xb2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
@@ -18,7 +18,7 @@ const Published = struct {
 };
 
 fn initialAnchor() Anchor {
-    return cawfs.anchor.encode(.{
+    return txfs.anchor.encode(.{
         .revision = 0,
         .generation = 0,
         .transaction_id = @splat(0),
@@ -44,7 +44,7 @@ fn publishCommit(
         previous.version.bytes,
     );
     defer batch.deinit();
-    const encoded = cawfs.commit.encode(.{
+    const encoded = txfs.commit.encode(.{
         .generation = generation,
         .transaction_id = transaction_id,
         .parent = parent,
@@ -53,8 +53,8 @@ fn publishCommit(
     const head = try batch.putImmutable(&encoded);
     try batch.prepare();
     model.injectNextPublishFault(fault);
-    const previous_state = try cawfs.anchor.decode(&previous.anchor);
-    const next = cawfs.anchor.encode(.{
+    const previous_state = try txfs.anchor.decode(&previous.anchor);
+    const next = txfs.anchor.encode(.{
         .revision = @max(previous_state.revision + 1, generation),
         .generation = generation,
         .transaction_id = transaction_id,
@@ -74,8 +74,8 @@ test "resolution recognizes an indeterminate current publication" {
     try std.testing.expectEqual(PublishResult.indeterminate, published.result);
 
     try std.testing.expectEqual(
-        cawfs.resolution.Resolution.committed,
-        try cawfs.resolution.resolve(
+        txfs.resolution.Resolution.committed,
+        try txfs.resolution.resolve(
             model.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -93,8 +93,8 @@ test "resolution finds a publication below a newer head" {
     try std.testing.expectEqual(PublishResult.committed, second.result);
 
     try std.testing.expectEqual(
-        cawfs.resolution.Resolution.committed,
-        try cawfs.resolution.resolve(
+        txfs.resolution.Resolution.committed,
+        try txfs.resolution.resolve(
             model.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -109,8 +109,8 @@ test "resolution remains pending while the base anchor is current" {
     const uncertain = try publishCommit(&unchanged, txn_a, 1, null, .indeterminate_before);
     try std.testing.expectEqual(PublishResult.indeterminate, uncertain.result);
     try std.testing.expectEqual(
-        cawfs.resolution.Resolution.pending,
-        try cawfs.resolution.resolve(
+        txfs.resolution.Resolution.pending,
+        try txfs.resolution.resolve(
             unchanged.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -126,7 +126,7 @@ test "resolution rejects impossible revision and mode epoch successors" {
 
     try std.testing.expectError(
         error.InvalidAnchorState,
-        cawfs.resolution.resolve(
+        txfs.resolution.resolve(
             model.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 5, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -135,7 +135,7 @@ test "resolution rejects impossible revision and mode epoch successors" {
     );
     try std.testing.expectError(
         error.RevisionOverflow,
-        cawfs.resolution.resolve(
+        txfs.resolution.resolve(
             model.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = std.math.maxInt(u64), .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -144,7 +144,7 @@ test "resolution rejects impossible revision and mode epoch successors" {
     );
     try std.testing.expectError(
         error.ModeEpochRegression,
-        cawfs.resolution.resolve(
+        txfs.resolution.resolve(
             model.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 2, .transaction_id = txn_a },
@@ -158,8 +158,8 @@ test "resolution distinguishes a publication replaced by another writer" {
     defer replaced.deinit();
     _ = try publishCommit(&replaced, txn_b, 1, null, .none);
     try std.testing.expectEqual(
-        cawfs.resolution.Resolution.not_committed,
-        try cawfs.resolution.resolve(
+        txfs.resolution.Resolution.not_committed,
+        try txfs.resolution.resolve(
             replaced.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -175,7 +175,7 @@ test "resolution rejects broken and excessively deep ancestry" {
 
     try std.testing.expectError(
         error.AncestryTooDeep,
-        cawfs.resolution.resolve(
+        txfs.resolution.resolve(
             model.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -184,7 +184,7 @@ test "resolution rejects broken and excessively deep ancestry" {
     );
     try std.testing.expectError(
         error.BrokenAncestry,
-        cawfs.resolution.resolve(
+        txfs.resolution.resolve(
             model.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -203,7 +203,7 @@ test "resolution rejects a malformed commit object" {
     defer batch.deinit();
     const head = try batch.putImmutable("not-a-commit");
     try batch.prepare();
-    const next = cawfs.anchor.encode(.{
+    const next = txfs.anchor.encode(.{
         .revision = 2,
         .generation = 2,
         .transaction_id = txn_b,
@@ -219,7 +219,7 @@ test "resolution rejects a malformed commit object" {
 
     try std.testing.expectError(
         error.InvalidSize,
-        cawfs.resolution.resolve(
+        txfs.resolution.resolve(
             store,
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },
@@ -236,7 +236,7 @@ test "resolution validates the current anchor against its commit" {
     defer previous.deinit();
     var batch = try store.beginBatch(std.testing.allocator, txn_b, previous.version.bytes);
     defer batch.deinit();
-    const encoded = cawfs.commit.encode(.{
+    const encoded = txfs.commit.encode(.{
         .generation = 1,
         .transaction_id = txn_c,
         .parent = null,
@@ -244,7 +244,7 @@ test "resolution validates the current anchor against its commit" {
     });
     const head = try batch.putImmutable(&encoded);
     try batch.prepare();
-    const next = cawfs.anchor.encode(.{
+    const next = txfs.anchor.encode(.{
         .revision = 1,
         .generation = 1,
         .transaction_id = txn_b,
@@ -260,7 +260,7 @@ test "resolution validates the current anchor against its commit" {
 
     try std.testing.expectError(
         error.AnchorCommitMismatch,
-        cawfs.resolution.resolve(
+        txfs.resolution.resolve(
             store,
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_b },
@@ -277,7 +277,7 @@ test "resolution rejects a transaction at the wrong generation" {
 
     try std.testing.expectError(
         error.TransactionGenerationMismatch,
-        cawfs.resolution.resolve(
+        txfs.resolution.resolve(
             model.conditionalStore(),
             std.testing.allocator,
             .{ .base_revision = 0, .base_generation = 0, .base_mode_epoch = 1, .transaction_id = txn_a },

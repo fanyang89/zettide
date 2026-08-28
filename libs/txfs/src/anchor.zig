@@ -36,6 +36,7 @@ pub const Error = error{
     InvalidGenerationState,
 };
 
+// Stable on-disk identifier inherited from CAWFS volumes; never rename.
 const magic = "ZCAWFS\x00\x00";
 const magic_start = 0;
 const magic_end = magic_start + magic.len;

@@ -1,20 +1,20 @@
 const std = @import("std");
-const cawfs = @import("zettide_cawfs");
+const txfs = @import("zettide_txfs");
 
-const ModelStore = cawfs.model_store.ModelStore;
-const ObjectRef = cawfs.store.ObjectRef;
-const Transaction = cawfs.transaction.Transaction;
-const TransactionId = cawfs.store.TransactionId;
+const ModelStore = txfs.model_store.ModelStore;
+const ObjectRef = txfs.store.ObjectRef;
+const Transaction = txfs.transaction.Transaction;
+const TransactionId = txfs.store.TransactionId;
 
 const LoadFaultStore = struct {
-    delegate: cawfs.store.ConditionalStore,
+    delegate: txfs.store.ConditionalStore,
     fail_loads: bool = false,
 
-    fn conditionalStore(self: *LoadFaultStore) cawfs.store.ConditionalStore {
+    fn conditionalStore(self: *LoadFaultStore) txfs.store.ConditionalStore {
         return .{ .context = self, .vtable = &vtable };
     }
 
-    fn readAnchor(context: *anyopaque, allocator: std.mem.Allocator) !cawfs.store.AnchorSnapshot {
+    fn readAnchor(context: *anyopaque, allocator: std.mem.Allocator) !txfs.store.AnchorSnapshot {
         const self: *LoadFaultStore = @ptrCast(@alignCast(context));
         return self.delegate.readAnchor(allocator);
     }
@@ -23,7 +23,7 @@ const LoadFaultStore = struct {
         context: *anyopaque,
         object_ref: ObjectRef,
         allocator: std.mem.Allocator,
-    ) !cawfs.store.OwnedBytes {
+    ) !txfs.store.OwnedBytes {
         const self: *LoadFaultStore = @ptrCast(@alignCast(context));
         if (self.fail_loads) return error.InjectedLoadFailure;
         return self.delegate.loadImmutable(object_ref, allocator);
@@ -34,7 +34,7 @@ const LoadFaultStore = struct {
         allocator: std.mem.Allocator,
         transaction_id: TransactionId,
         base_version: []const u8,
-    ) !cawfs.store.WriteBatch {
+    ) !txfs.store.WriteBatch {
         const self: *LoadFaultStore = @ptrCast(@alignCast(context));
         return self.delegate.beginBatch(allocator, transaction_id, base_version);
     }
@@ -44,12 +44,12 @@ const LoadFaultStore = struct {
         allocator: std.mem.Allocator,
         operation_id: TransactionId,
         base_version: []const u8,
-    ) !cawfs.store.WriteBatch {
+    ) !txfs.store.WriteBatch {
         const self: *LoadFaultStore = @ptrCast(@alignCast(context));
         return self.delegate.beginControlBatch(allocator, operation_id, base_version);
     }
 
-    const vtable = cawfs.store.ConditionalStore.VTable{
+    const vtable = txfs.store.ConditionalStore.VTable{
         .read_anchor = readAnchor,
         .load_immutable = loadImmutable,
         .begin_batch = beginBatch,
@@ -61,8 +61,8 @@ const txn_a: TransactionId = .{ 0xa1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 const txn_b: TransactionId = .{ 0xb2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
 const txn_c: TransactionId = .{ 0xc3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 };
 
-fn initialAnchor() cawfs.store.Anchor {
-    return cawfs.anchor.encode(.{
+fn initialAnchor() txfs.store.Anchor {
+    return txfs.anchor.encode(.{
         .revision = 0,
         .generation = 0,
         .transaction_id = @splat(0),
@@ -72,31 +72,31 @@ fn initialAnchor() cawfs.store.Anchor {
     });
 }
 
-fn currentRoot(store: cawfs.store.ConditionalStore) !ObjectRef {
+fn currentRoot(store: txfs.store.ConditionalStore) !ObjectRef {
     var snapshot = try store.readAnchor(std.testing.allocator);
     defer snapshot.deinit();
-    const state = try cawfs.anchor.decode(&snapshot.anchor);
+    const state = try txfs.anchor.decode(&snapshot.anchor);
     var bytes = try store.loadImmutable(state.head.?, std.testing.allocator);
     defer bytes.deinit();
-    return (try cawfs.commit.decode(bytes.bytes)).root;
+    return (try txfs.commit.decode(bytes.bytes)).root;
 }
 
 fn expectValue(
-    store: cawfs.store.ConditionalStore,
+    store: txfs.store.ConditionalStore,
     root: ObjectRef,
     key: []const u8,
     expected: ?[]const u8,
 ) !void {
-    var actual = try cawfs.tree.get(store, std.testing.allocator, root, key);
+    var actual = try txfs.tree.get(store, std.testing.allocator, root, key);
     defer if (actual) |*value| value.deinit();
     if (expected) |value| {
         try std.testing.expectEqualStrings(value, actual.?.bytes);
     } else {
-        try std.testing.expectEqual(@as(?cawfs.store.OwnedBytes, null), actual);
+        try std.testing.expectEqual(@as(?txfs.store.OwnedBytes, null), actual);
     }
 }
 
-fn expectNext(cursor: *cawfs.tree.Cursor, key: []const u8, value: []const u8) !void {
+fn expectNext(cursor: *txfs.tree.Cursor, key: []const u8, value: []const u8) !void {
     var entry = (try cursor.next()).?;
     defer entry.deinit();
     try std.testing.expectEqualStrings(key, entry.key.bytes);
@@ -109,11 +109,11 @@ test "tree inserts replaces and publishes a root" {
     const store = model.conditionalStore();
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
 
     var root = try mutator.createEmpty();
-    try std.testing.expectEqual(@as(?cawfs.store.OwnedBytes, null), try mutator.get(root, "missing"));
+    try std.testing.expectEqual(@as(?txfs.store.OwnedBytes, null), try mutator.get(root, "missing"));
     root = try mutator.put(root, "beta", "two");
     root = try mutator.put(root, "alpha", "one");
     const historical_root = root;
@@ -126,11 +126,11 @@ test "tree inserts replaces and publishes a root" {
     defer historical.deinit();
     try std.testing.expectEqualStrings("two", historical.bytes);
     try std.testing.expectEqual(
-        @as(?cawfs.store.OwnedBytes, null),
+        @as(?txfs.store.OwnedBytes, null),
         try mutator.get(historical_root, "delta"),
     );
 
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
     try expectValue(store, root, "alpha", "one");
     try expectValue(store, root, "beta", "updated");
     try expectValue(store, root, "charlie", null);
@@ -142,7 +142,7 @@ test "tree splits leaves and internal pages" {
     const store = model.conditionalStore();
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
     const value = "v" ** 900;
@@ -162,11 +162,11 @@ test "tree splits leaves and internal pages" {
     defer last.deinit();
     try std.testing.expectEqualStrings(value, last.bytes);
 
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
     var root_bytes = try store.loadImmutable(root, std.testing.allocator);
     defer root_bytes.deinit();
-    const root_page = try cawfs.page.decode(root_bytes.bytes);
-    try std.testing.expectEqual(cawfs.page.Kind.internal, root_page.kind);
+    const root_page = try txfs.page.decode(root_bytes.bytes);
+    try std.testing.expectEqual(txfs.page.Kind.internal, root_page.kind);
     try std.testing.expect(root_page.level >= 2);
     try expectValue(store, root, "k0119", value);
 }
@@ -177,7 +177,7 @@ test "tree matches a randomized replacement model" {
     const store = model.conditionalStore();
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
 
@@ -192,7 +192,7 @@ test "tree matches a randomized replacement model" {
         const value = try std.fmt.bufPrint(&value_buffer, "value-{d}", .{operation});
         root = try mutator.put(root, key, value);
     }
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
 
     for (expected, 0..) |operation, key_index| {
         const key = try std.fmt.bufPrint(&key_buffer, "key-{d:0>3}", .{key_index});
@@ -211,7 +211,7 @@ test "tree splits correctly under randomized insertion order" {
     const store = model.conditionalStore();
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
 
@@ -232,22 +232,22 @@ test "tree splits correctly under randomized insertion order" {
         const key = try std.fmt.bufPrint(&key_buffer, "r{d:0>4}", .{key_index});
         try expectNext(&speculative, key, value);
     }
-    try std.testing.expectEqual(@as(?cawfs.tree.Entry, null), try speculative.next());
+    try std.testing.expectEqual(@as(?txfs.tree.Entry, null), try speculative.next());
 
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
 
     for (0..order.len) |key_index| {
         const key = try std.fmt.bufPrint(&key_buffer, "r{d:0>4}", .{key_index});
         try expectValue(store, root, key, value);
     }
 
-    var stored = try cawfs.tree.scan(store, std.testing.allocator, root, "r0175-extra");
+    var stored = try txfs.tree.scan(store, std.testing.allocator, root, "r0175-extra");
     defer stored.deinit();
     for (176..order.len) |key_index| {
         const key = try std.fmt.bufPrint(&key_buffer, "r{d:0>4}", .{key_index});
         try expectNext(&stored, key, value);
     }
-    try std.testing.expectEqual(@as(?cawfs.tree.Entry, null), try stored.next());
+    try std.testing.expectEqual(@as(?txfs.tree.Entry, null), try stored.next());
 }
 
 test "tree delete preserves historical roots and empty leaves" {
@@ -256,7 +256,7 @@ test "tree delete preserves historical roots and empty leaves" {
     const store = model.conditionalStore();
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
     root = try mutator.put(root, "alpha", "one");
@@ -271,7 +271,7 @@ test "tree delete preserves historical roots and empty leaves" {
     try std.testing.expect(!missing.removed);
     try std.testing.expect(ObjectRef.eql(root, missing.root));
     try expectValueFromMutator(&mutator, historical_root, "beta", "two");
-    try std.testing.expectEqual(@as(?cawfs.store.OwnedBytes, null), try mutator.get(root, "beta"));
+    try std.testing.expectEqual(@as(?txfs.store.OwnedBytes, null), try mutator.get(root, "beta"));
 
     for ([_][]const u8{ "alpha", "delta" }) |key| {
         const result = try mutator.delete(root, key);
@@ -280,9 +280,9 @@ test "tree delete preserves historical roots and empty leaves" {
     }
     var empty = try mutator.scan(root, "");
     defer empty.deinit();
-    try std.testing.expectEqual(@as(?cawfs.tree.Entry, null), try empty.next());
+    try std.testing.expectEqual(@as(?txfs.tree.Entry, null), try empty.next());
 
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
     try expectValue(store, historical_root, "beta", "two");
     try expectValue(store, root, "alpha", null);
     try expectValue(store, root, "beta", null);
@@ -295,7 +295,7 @@ test "tree delete retains an empty internal structure" {
     const store = model.conditionalStore();
     var initial_transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer initial_transaction.deinit();
-    var initial_mutator = cawfs.tree.Mutator.init(&initial_transaction);
+    var initial_mutator = txfs.tree.Mutator.init(&initial_transaction);
     defer initial_mutator.deinit();
     var historical_root = try initial_mutator.createEmpty();
     const value = "d" ** 900;
@@ -305,14 +305,14 @@ test "tree delete retains an empty internal structure" {
         historical_root = try initial_mutator.put(historical_root, key, value);
     }
     try std.testing.expectEqual(
-        cawfs.transaction.Outcome.committed,
+        txfs.transaction.Outcome.committed,
         try initial_transaction.commit(historical_root),
     );
 
     var historical_bytes = try store.loadImmutable(historical_root, std.testing.allocator);
     defer historical_bytes.deinit();
-    const historical_page = try cawfs.page.decode(historical_bytes.bytes);
-    try std.testing.expectEqual(cawfs.page.Kind.internal, historical_page.kind);
+    const historical_page = try txfs.page.decode(historical_bytes.bytes);
+    try std.testing.expectEqual(txfs.page.Kind.internal, historical_page.kind);
     const separator = try std.testing.allocator.dupe(
         u8,
         (try historical_page.internalEntry(0)).key,
@@ -322,13 +322,13 @@ test "tree delete retains an empty internal structure" {
 
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_b);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     const removed_separator = try mutator.delete(historical_root, separator);
     try std.testing.expect(removed_separator.removed);
     var root = removed_separator.root;
     try expectValue(store, historical_root, separator, value);
-    try std.testing.expectEqual(@as(?cawfs.store.OwnedBytes, null), try mutator.get(root, separator));
+    try std.testing.expectEqual(@as(?txfs.store.OwnedBytes, null), try mutator.get(root, separator));
     var after_separator = try mutator.scan(root, separator);
     defer after_separator.deinit();
     const next_key = try std.fmt.bufPrint(&key_buffer, "d{d:0>3}", .{separator_index + 1});
@@ -344,17 +344,17 @@ test "tree delete retains an empty internal structure" {
 
     var empty = try mutator.scan(root, "");
     defer empty.deinit();
-    try std.testing.expectEqual(@as(?cawfs.tree.Entry, null), try empty.next());
+    try std.testing.expectEqual(@as(?txfs.tree.Entry, null), try empty.next());
 
     root = try mutator.put(root, separator, "restored");
     var restored = try mutator.scan(root, separator);
     defer restored.deinit();
     try expectNext(&restored, separator, "restored");
-    try std.testing.expectEqual(@as(?cawfs.tree.Entry, null), try restored.next());
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(@as(?txfs.tree.Entry, null), try restored.next());
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
     var root_bytes = try store.loadImmutable(root, std.testing.allocator);
     defer root_bytes.deinit();
-    try std.testing.expectEqual(cawfs.page.Kind.internal, (try cawfs.page.decode(root_bytes.bytes)).kind);
+    try std.testing.expectEqual(txfs.page.Kind.internal, (try txfs.page.decode(root_bytes.bytes)).kind);
 }
 
 test "tree cursor is invalid after a cross-leaf load failure" {
@@ -363,7 +363,7 @@ test "tree cursor is invalid after a cross-leaf load failure" {
     const store = model.conditionalStore();
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
     const value = "f" ** 900;
@@ -372,10 +372,10 @@ test "tree cursor is invalid after a cross-leaf load failure" {
         const key = try std.fmt.bufPrint(&key_buffer, "f{d:0>3}", .{index});
         root = try mutator.put(root, key, value);
     }
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
 
     var fault_store = LoadFaultStore{ .delegate = store };
-    var cursor = try cawfs.tree.scan(
+    var cursor = try txfs.tree.scan(
         fault_store.conditionalStore(),
         std.testing.allocator,
         root,
@@ -399,7 +399,7 @@ test "tree insert delete and scan match a randomized model" {
     const store = model.conditionalStore();
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
 
@@ -421,9 +421,9 @@ test "tree insert delete and scan match a randomized model" {
             expected[key_index] = null;
         }
     }
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
 
-    var cursor = try cawfs.tree.scan(store, std.testing.allocator, root, "item-025-extra");
+    var cursor = try txfs.tree.scan(store, std.testing.allocator, root, "item-025-extra");
     defer cursor.deinit();
     for (26..expected.len) |key_index| {
         if (expected[key_index]) |operation| {
@@ -432,7 +432,7 @@ test "tree insert delete and scan match a randomized model" {
             try expectNext(&cursor, key, value);
         }
     }
-    try std.testing.expectEqual(@as(?cawfs.tree.Entry, null), try cursor.next());
+    try std.testing.expectEqual(@as(?txfs.tree.Entry, null), try cursor.next());
 }
 
 test "tree conflict is replayed from the winning root" {
@@ -442,28 +442,28 @@ test "tree conflict is replayed from the winning root" {
 
     var initial_transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer initial_transaction.deinit();
-    var initial_mutator = cawfs.tree.Mutator.init(&initial_transaction);
+    var initial_mutator = txfs.tree.Mutator.init(&initial_transaction);
     defer initial_mutator.deinit();
     const empty = try initial_mutator.createEmpty();
     try std.testing.expectEqual(
-        cawfs.transaction.Outcome.committed,
+        txfs.transaction.Outcome.committed,
         try initial_transaction.commit(empty),
     );
 
     var first = try Transaction.begin(store, std.testing.allocator, txn_b);
     defer first.deinit();
-    var first_mutator = cawfs.tree.Mutator.init(&first);
+    var first_mutator = txfs.tree.Mutator.init(&first);
     defer first_mutator.deinit();
     const first_root = try first_mutator.put(empty, "alpha", "one");
 
     var loser = try Transaction.begin(store, std.testing.allocator, txn_c);
     defer loser.deinit();
-    var loser_mutator = cawfs.tree.Mutator.init(&loser);
+    var loser_mutator = txfs.tree.Mutator.init(&loser);
     defer loser_mutator.deinit();
     const losing_root = try loser_mutator.put(empty, "beta", "two");
 
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try first.commit(first_root));
-    try std.testing.expectEqual(cawfs.transaction.Outcome.conflict, try loser.commit(losing_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try first.commit(first_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.conflict, try loser.commit(losing_root));
 
     var replay = try Transaction.begin(
         store,
@@ -471,10 +471,10 @@ test "tree conflict is replayed from the winning root" {
         .{ 0xd4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4 },
     );
     defer replay.deinit();
-    var replay_mutator = cawfs.tree.Mutator.init(&replay);
+    var replay_mutator = txfs.tree.Mutator.init(&replay);
     defer replay_mutator.deinit();
     const replayed_root = try replay_mutator.put(try currentRoot(store), "beta", "two");
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try replay.commit(replayed_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try replay.commit(replayed_root));
 
     try expectValue(store, replayed_root, "alpha", "one");
     try expectValue(store, replayed_root, "beta", "two");
@@ -489,17 +489,17 @@ test "tree enforces key and inline entry limits" {
         txn_a,
     );
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     const root = try mutator.createEmpty();
 
     try std.testing.expectError(
         error.KeyTooLarge,
-        mutator.put(root, "k" ** (cawfs.tree.max_key_size + 1), "value"),
+        mutator.put(root, "k" ** (txfs.tree.max_key_size + 1), "value"),
     );
     try std.testing.expectError(
         error.EntryTooLarge,
-        mutator.put(root, "key", "v" ** cawfs.tree.max_entry_payload),
+        mutator.put(root, "key", "v" ** txfs.tree.max_entry_payload),
     );
 }
 
@@ -512,7 +512,7 @@ test "tree enforces the speculative page budget" {
         txn_a,
     );
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.initOptions(&transaction, .{ .max_staged_pages = 1 });
+    var mutator = txfs.tree.Mutator.initOptions(&transaction, .{ .max_staged_pages = 1 });
     defer mutator.deinit();
     const root = try mutator.createEmpty();
 
@@ -525,44 +525,44 @@ test "tree rejects inconsistent and excessive levels" {
     const store = model.conditionalStore();
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    var mutator = cawfs.tree.Mutator.init(&transaction);
+    var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     const leaf = try mutator.createEmpty();
-    const inconsistent_page = try cawfs.page.encodeInternal(2, leaf, &.{.{
+    const inconsistent_page = try txfs.page.encodeInternal(2, leaf, &.{.{
         .key = "m",
         .child = leaf,
     }});
     const inconsistent = try transaction.putImmutable(&inconsistent_page);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(inconsistent));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(inconsistent));
     try std.testing.expectError(
         error.LevelMismatch,
-        cawfs.tree.get(store, std.testing.allocator, inconsistent, "a"),
+        txfs.tree.get(store, std.testing.allocator, inconsistent, "a"),
     );
     try std.testing.expectError(
         error.LevelMismatch,
-        cawfs.tree.scan(store, std.testing.allocator, inconsistent, "a"),
+        txfs.tree.scan(store, std.testing.allocator, inconsistent, "a"),
     );
 
     var second = try Transaction.begin(store, std.testing.allocator, txn_b);
     defer second.deinit();
-    const excessive_page = try cawfs.page.encodeInternal(cawfs.tree.max_height + 1, leaf, &.{.{
+    const excessive_page = try txfs.page.encodeInternal(txfs.tree.max_height + 1, leaf, &.{.{
         .key = "m",
         .child = leaf,
     }});
     const excessive = try second.putImmutable(&excessive_page);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try second.commit(excessive));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try second.commit(excessive));
     try std.testing.expectError(
         error.TreeTooDeep,
-        cawfs.tree.get(store, std.testing.allocator, excessive, "a"),
+        txfs.tree.get(store, std.testing.allocator, excessive, "a"),
     );
     try std.testing.expectError(
         error.TreeTooDeep,
-        cawfs.tree.scan(store, std.testing.allocator, excessive, "a"),
+        txfs.tree.scan(store, std.testing.allocator, excessive, "a"),
     );
 }
 
 fn expectValueFromMutator(
-    mutator: *cawfs.tree.Mutator,
+    mutator: *txfs.tree.Mutator,
     root: ObjectRef,
     key: []const u8,
     expected: []const u8,

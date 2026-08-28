@@ -1,6 +1,6 @@
 const std = @import("std");
 const benchmarks = @import("build/benchmarks.zig");
-const cawfs_build = @import("libs/cawfs/build.zig");
+const txfs_build = @import("libs/txfs/build.zig");
 const control_build = @import("services/control/build.zig");
 const support = @import("build/support.zig");
 const tests = @import("build/tests.zig");
@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
         "benchmark-cpu-profiler",
         "Link the gperftools CPU profiler into the scheduled Pool benchmark",
     ) orelse false;
-    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer for cawfs tests");
+    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer for TxFS tests");
     const crc32c_dependency = b.dependency("crc32c", .{});
     if (enable_spdk and target.result.os.tag != .linux) @panic("SPDK support requires Linux");
     if (enable_benchmark_cpu_profiler and !enable_spdk) {
@@ -203,20 +203,20 @@ pub fn build(b: *std.Build) void {
         .run = "run-control",
         .tests = "test-control",
     });
-    const cawfs_test_step = cawfs_build.addComponent(
+    const txfs_test_step = txfs_build.addComponent(
         b,
         target,
         optimize,
         sanitize_thread,
-        "libs/cawfs",
-        "test-cawfs",
+        "libs/txfs",
+        "test-txfs",
     );
 
-    const test_step = b.step("test", "Run unit, CLI, control, and cawfs tests");
+    const test_step = b.step("test", "Run unit, CLI, control, and TxFS tests");
     test_step.dependOn(unit_step);
     test_step.dependOn(test_suites.cli);
     test_step.dependOn(control_test_step);
-    test_step.dependOn(cawfs_test_step);
+    test_step.dependOn(txfs_test_step);
 
     const fmt = b.addFmt(.{
         .paths = &.{
@@ -229,10 +229,10 @@ pub fn build(b: *std.Build) void {
             "services/control/build.zig",
             "services/control/build.zig.zon",
             "services/control/src",
-            "libs/cawfs/build.zig",
-            "libs/cawfs/build.zig.zon",
-            "libs/cawfs/src",
-            "libs/cawfs/tests",
+            "libs/txfs/build.zig",
+            "libs/txfs/build.zig.zon",
+            "libs/txfs/src",
+            "libs/txfs/tests",
             "libs/data-service-contracts/build.zig",
             "libs/data-service-contracts/build.zig.zon",
             "libs/data-service-contracts/src",
@@ -241,8 +241,8 @@ pub fn build(b: *std.Build) void {
     });
     const fmt_step = b.step("fmt-check", "Check all Zig formatting");
     fmt_step.dependOn(&fmt.step);
-    const cawfs_fmt_step = b.step("fmt-check-cawfs", "Check cawfs Zig formatting");
-    cawfs_fmt_step.dependOn(fmt_step);
+    const txfs_fmt_step = b.step("fmt-check-txfs", "Check TxFS Zig formatting");
+    txfs_fmt_step.dependOn(fmt_step);
 
     const ci_step = b.step("ci", "Run formatting, default tests, and cross-compilation checks");
     ci_step.dependOn(fmt_step);

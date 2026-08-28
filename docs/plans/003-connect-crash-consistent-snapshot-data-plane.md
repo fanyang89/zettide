@@ -13,7 +13,7 @@
 - **优先级**: P1
 - **工作量**: L
 - **风险**: HIGH
-- **依赖**: `plans/002-add-volume-snapshot-control-resource.md`、Replica protocol、2/3 commit、lease/epoch/fencing baseline
+- **依赖**: `docs/plans/002-add-volume-snapshot-control-resource.md`、Replica protocol、2/3 commit、lease/epoch/fencing baseline
 - **类别**: direction
 - **Status**: BLOCKED（等待计划 001 的精确磁盘格式及阶段 5-8 baseline）
 - **计划生成于**: `zettide` commit `6515277`, `zettide-control` commit `c25ed1d`, 2026-07-29

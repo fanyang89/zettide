@@ -26,7 +26,7 @@ pub fn addComponent(
     base_dir: []const u8,
     test_step_name: []const u8,
 ) *std.Build.Step {
-    const module = b.addModule("zettide_cawfs", .{
+    const module = b.addModule("zettide_txfs", .{
         .root_source_file = componentPath(b, base_dir, "src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -34,7 +34,7 @@ pub fn addComponent(
     });
 
     const library = b.addLibrary(.{
-        .name = "zettide-cawfs",
+        .name = "zettide-txfs",
         .root_module = module,
     });
     b.installArtifact(library);
@@ -43,7 +43,7 @@ pub fn addComponent(
         .root_module = module,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    const test_step = b.step(test_step_name, "Run cawfs tests");
+    const test_step = b.step(test_step_name, "Run TxFS tests");
     test_step.dependOn(&run_unit_tests.step);
 
     const integration_tests = b.addTest(.{
@@ -52,7 +52,7 @@ pub fn addComponent(
             .target = target,
             .optimize = optimize,
             .sanitize_thread = sanitize_thread,
-            .imports = &.{.{ .name = "zettide_cawfs", .module = module }},
+            .imports = &.{.{ .name = "zettide_txfs", .module = module }},
         }),
     });
     test_step.dependOn(&b.addRunArtifact(integration_tests).step);

@@ -1,19 +1,19 @@
 const std = @import("std");
-const cawfs = @import("zettide_cawfs");
+const txfs = @import("zettide_txfs");
 
 const txn_a: [16]u8 = .{ 0xa1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 const txn_b: [16]u8 = .{ 0xb2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
 const txn_c: [16]u8 = .{ 0xc3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 };
 const txn_d: [16]u8 = .{ 0xd4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4 };
 
-const filesystem_format_options = cawfs.filesystem.FormatOptions{
+const filesystem_format_options = txfs.filesystem.FormatOptions{
     .mode = 0o40755,
     .uid = 1000,
     .gid = 1001,
     .now_ns = 1,
 };
 
-const filesystem_file_options = cawfs.filesystem.CreateFileOptions{
+const filesystem_file_options = txfs.filesystem.CreateFileOptions{
     .mode = 0o100640,
     .uid = 2000,
     .gid = 2001,
@@ -22,36 +22,36 @@ const filesystem_file_options = cawfs.filesystem.CreateFileOptions{
 
 const Fixture = struct {
     allocator: std.mem.Allocator,
-    model: *cawfs.model_block_device.ModelBlockDevice,
-    header: cawfs.volume_format.Header,
-    extent_allocator: cawfs.extent_allocator.ExtentAllocator,
-    backend: *cawfs.scsi_store.ScsiStore,
+    model: *txfs.model_block_device.ModelBlockDevice,
+    header: txfs.volume_format.Header,
+    extent_allocator: txfs.extent_allocator.ExtentAllocator,
+    backend: *txfs.scsi_store.ScsiStore,
 
     fn init(allocator: std.mem.Allocator, block_size: u32) !Fixture {
-        const geometry = cawfs.conditional_block.Geometry{
+        const geometry = txfs.conditional_block.Geometry{
             .logical_block_size = block_size,
             .block_count = 1024,
         };
-        const model = try allocator.create(cawfs.model_block_device.ModelBlockDevice);
+        const model = try allocator.create(txfs.model_block_device.ModelBlockDevice);
         errdefer allocator.destroy(model);
-        model.* = try cawfs.model_block_device.ModelBlockDevice.init(allocator, geometry);
+        model.* = try txfs.model_block_device.ModelBlockDevice.init(allocator, geometry);
         errdefer model.deinit();
-        const header = try cawfs.volume_format.Header.init(
+        const header = try txfs.volume_format.Header.init(
             patternedId(0x40),
             123,
             geometry,
             8192,
         );
-        const extents = try cawfs.extent_allocator.ExtentAllocator.init(
+        const extents = try txfs.extent_allocator.ExtentAllocator.init(
             allocator,
             model.conditionalTransport(),
             header,
             .{},
         );
         _ = try extents.format();
-        const backend = try allocator.create(cawfs.scsi_store.ScsiStore);
+        const backend = try allocator.create(txfs.scsi_store.ScsiStore);
         errdefer allocator.destroy(backend);
-        backend.* = try cawfs.scsi_store.ScsiStore.init(
+        backend.* = try txfs.scsi_store.ScsiStore.init(
             extents,
             model.dataTransport(),
             model.conditionalTransport(),
@@ -64,7 +64,7 @@ const Fixture = struct {
         );
         const initial = initialAnchor();
         try std.testing.expectEqual(
-            cawfs.scsi_store.AnchorFormatResult.formatted,
+            txfs.scsi_store.AnchorFormatResult.formatted,
             try backend.formatAnchor(&initial),
         );
         return .{
@@ -83,14 +83,14 @@ const Fixture = struct {
         self.* = undefined;
     }
 
-    fn reopened(self: *Fixture) !cawfs.scsi_store.ScsiStore {
-        const extents = try cawfs.extent_allocator.ExtentAllocator.init(
+    fn reopened(self: *Fixture) !txfs.scsi_store.ScsiStore {
+        const extents = try txfs.extent_allocator.ExtentAllocator.init(
             self.allocator,
             self.model.conditionalTransport(),
             self.header,
             .{},
         );
-        return cawfs.scsi_store.ScsiStore.init(
+        return txfs.scsi_store.ScsiStore.init(
             extents,
             self.model.dataTransport(),
             self.model.conditionalTransport(),
@@ -110,8 +110,8 @@ fn patternedId(seed: u8) [16]u8 {
     return result;
 }
 
-fn initialAnchor() cawfs.store.Anchor {
-    return cawfs.anchor.encode(.{
+fn initialAnchor() txfs.store.Anchor {
+    return txfs.anchor.encode(.{
         .revision = 0,
         .generation = 0,
         .transaction_id = @splat(0),
@@ -122,10 +122,10 @@ fn initialAnchor() cawfs.store.Anchor {
 }
 
 fn nextAnchor(
-    transaction_id: cawfs.store.TransactionId,
-    head: cawfs.store.ObjectRef,
-) cawfs.store.Anchor {
-    return cawfs.anchor.encode(.{
+    transaction_id: txfs.store.TransactionId,
+    head: txfs.store.ObjectRef,
+) txfs.store.Anchor {
+    return txfs.anchor.encode(.{
         .revision = 1,
         .generation = 1,
         .transaction_id = transaction_id,
@@ -136,40 +136,40 @@ fn nextAnchor(
 }
 
 fn beginCurrentBatch(
-    store: cawfs.store.ConditionalStore,
+    store: txfs.store.ConditionalStore,
     allocator: std.mem.Allocator,
-    transaction_id: cawfs.store.TransactionId,
-) !cawfs.store.WriteBatch {
+    transaction_id: txfs.store.TransactionId,
+) !txfs.store.WriteBatch {
     var snapshot = try store.readAnchor(allocator);
     defer snapshot.deinit();
     return store.beginBatch(allocator, transaction_id, snapshot.version.bytes);
 }
 
-fn formatFilesystem(store: cawfs.store.ConditionalStore) !cawfs.filesystem.Snapshot {
-    var transaction = try cawfs.transaction.Transaction.begin(store, std.testing.allocator, txn_a);
+fn formatFilesystem(store: txfs.store.ConditionalStore) !txfs.filesystem.Snapshot {
+    var transaction = try txfs.transaction.Transaction.begin(store, std.testing.allocator, txn_a);
     defer transaction.deinit();
-    const root = try cawfs.filesystem.format(&transaction, filesystem_format_options);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
-    return cawfs.filesystem.open(store, std.testing.allocator);
+    const root = try txfs.filesystem.format(&transaction, filesystem_format_options);
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
+    return txfs.filesystem.open(store, std.testing.allocator);
 }
 
 fn createFilesystemFile(
-    store: cawfs.store.ConditionalStore,
-    snapshot: cawfs.filesystem.Snapshot,
-) !struct { snapshot: cawfs.filesystem.Snapshot, inode_id: cawfs.filesystem_format.InodeId } {
-    var transaction = try cawfs.transaction.Transaction.begin(store, std.testing.allocator, txn_b);
+    store: txfs.store.ConditionalStore,
+    snapshot: txfs.filesystem.Snapshot,
+) !struct { snapshot: txfs.filesystem.Snapshot, inode_id: txfs.filesystem_format.InodeId } {
+    var transaction = try txfs.transaction.Transaction.begin(store, std.testing.allocator, txn_b);
     defer transaction.deinit();
-    var mutator = try cawfs.filesystem.Mutator.init(&transaction, snapshot);
+    var mutator = try txfs.filesystem.Mutator.init(&transaction, snapshot);
     defer mutator.deinit();
     const inode_id = try mutator.createEmptyFile(
-        cawfs.filesystem_format.root_inode_id,
+        txfs.filesystem_format.root_inode_id,
         "alpha",
         filesystem_file_options,
     );
     const root = try mutator.finish();
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
     return .{
-        .snapshot = try cawfs.filesystem.open(store, std.testing.allocator),
+        .snapshot = try txfs.filesystem.open(store, std.testing.allocator),
         .inode_id = inode_id,
     };
 }
@@ -206,44 +206,44 @@ test "filesystem whole-file data reopens through SCSI at 512 and 4096" {
         const formatted = try formatFilesystem(store);
         const empty = try createFilesystemFile(store, formatted);
 
-        var transaction = try cawfs.transaction.Transaction.begin(
+        var transaction = try txfs.transaction.Transaction.begin(
             store,
             std.testing.allocator,
             txn_c,
         );
         defer transaction.deinit();
-        var mutator = try cawfs.filesystem.Mutator.init(&transaction, empty.snapshot);
+        var mutator = try txfs.filesystem.Mutator.init(&transaction, empty.snapshot);
         defer mutator.deinit();
         const payload = "whole-file payload across SCSI";
         try mutator.writeWholeFileOnce(empty.inode_id, payload, .{ .now_ns = 3 });
         const root = try mutator.finish();
         try std.testing.expectEqual(
-            cawfs.transaction.Outcome.committed,
+            txfs.transaction.Outcome.committed,
             try transaction.commit(root),
         );
 
         fixture.model.crash();
         var reopened = try fixture.reopened();
         const reopened_store = reopened.conditionalStore();
-        const snapshot = try cawfs.filesystem.open(reopened_store, std.testing.allocator);
+        const snapshot = try txfs.filesystem.open(reopened_store, std.testing.allocator);
         var data = try snapshot.readWholeFile(std.testing.allocator, empty.inode_id);
         defer data.deinit();
         try std.testing.expectEqualStrings(payload, data.bytes);
 
-        const key = try cawfs.filesystem_format.encodeExtentKey(empty.inode_id, 0);
-        var encoded_mapping = (try cawfs.tree.get(
+        const key = try txfs.filesystem_format.encodeExtentKey(empty.inode_id, 0);
+        var encoded_mapping = (try txfs.tree.get(
             reopened_store,
             std.testing.allocator,
             snapshot.root.extent_tree_root,
             &key,
         )).?;
         defer encoded_mapping.deinit();
-        const mapping = try cawfs.filesystem_format.decodeExtentMapping(encoded_mapping.bytes);
-        try cawfs.filesystem_format.validateExtentKeyValue(&key, mapping);
-        const identity = try cawfs.immutable_extent.decodeObjectRef(mapping.data_ref);
+        const mapping = try txfs.filesystem_format.decodeExtentMapping(encoded_mapping.bytes);
+        try txfs.filesystem_format.validateExtentKeyValue(&key, mapping);
+        const identity = try txfs.immutable_extent.decodeObjectRef(mapping.data_ref);
         const entry = try fixture.extent_allocator.readEntry(identity.extent_index);
-        try std.testing.expectEqual(cawfs.allocation_format.State.live, entry.state);
-        try std.testing.expectEqual(cawfs.allocation_format.Kind.immutable, entry.kind);
+        try std.testing.expectEqual(txfs.allocation_format.State.live, entry.state);
+        try std.testing.expectEqual(txfs.allocation_format.Kind.immutable, entry.kind);
         try std.testing.expectEqual(identity.claim_epoch, entry.claim_epoch);
         try std.testing.expectEqual(identity.claim_id, entry.claim_id);
 
@@ -264,54 +264,54 @@ test "indeterminate filesystem data write leaves old metadata and retains claim"
     const empty = try createFilesystemFile(store, formatted);
     var anchor_before = try store.readAnchor(std.testing.allocator);
     defer anchor_before.deinit();
-    const generation_before = (try cawfs.anchor.decode(&anchor_before.anchor)).generation;
+    const generation_before = (try txfs.anchor.decode(&anchor_before.anchor)).generation;
 
-    var poisoned_identity: cawfs.immutable_extent.Identity = undefined;
+    var poisoned_identity: txfs.immutable_extent.Identity = undefined;
     {
-        var transaction = try cawfs.transaction.Transaction.begin(
+        var transaction = try txfs.transaction.Transaction.begin(
             store,
             std.testing.allocator,
             txn_c,
         );
         defer transaction.deinit();
-        var mutator = try cawfs.filesystem.Mutator.init(&transaction, empty.snapshot);
+        var mutator = try txfs.filesystem.Mutator.init(&transaction, empty.snapshot);
         defer mutator.deinit();
         try mutator.writeWholeFileOnce(empty.inode_id, "uncertain payload", .{ .now_ns = 3 });
-        poisoned_identity = try cawfs.immutable_extent.decodeObjectRef(transaction.staged.items[0]);
+        poisoned_identity = try txfs.immutable_extent.decodeObjectRef(transaction.staged.items[0]);
         const root = try mutator.finish();
         fixture.model.injectNextDataFault(.indeterminate_after_write);
         try std.testing.expectError(error.DataWriteIndeterminate, transaction.commit(root));
     }
 
     const poisoned_entry = try fixture.extent_allocator.readEntry(poisoned_identity.extent_index);
-    try std.testing.expectEqual(cawfs.allocation_format.State.claimed, poisoned_entry.state);
+    try std.testing.expectEqual(txfs.allocation_format.State.claimed, poisoned_entry.state);
     var anchor_after = try store.readAnchor(std.testing.allocator);
     defer anchor_after.deinit();
     try std.testing.expectEqual(
         generation_before,
-        (try cawfs.anchor.decode(&anchor_after.anchor)).generation,
+        (try txfs.anchor.decode(&anchor_after.anchor)).generation,
     );
     var authoritative = try empty.snapshot.readWholeFile(std.testing.allocator, empty.inode_id);
     defer authoritative.deinit();
     try std.testing.expectEqual(@as(usize, 0), authoritative.bytes.len);
 
     {
-        var retry = try cawfs.transaction.Transaction.begin(store, std.testing.allocator, txn_d);
+        var retry = try txfs.transaction.Transaction.begin(store, std.testing.allocator, txn_d);
         defer retry.deinit();
-        var retry_mutator = try cawfs.filesystem.Mutator.init(&retry, empty.snapshot);
+        var retry_mutator = try txfs.filesystem.Mutator.init(&retry, empty.snapshot);
         defer retry_mutator.deinit();
         try retry_mutator.writeWholeFileOnce(empty.inode_id, "replacement", .{ .now_ns = 4 });
-        const replacement = try cawfs.immutable_extent.decodeObjectRef(retry.staged.items[0]);
+        const replacement = try txfs.immutable_extent.decodeObjectRef(retry.staged.items[0]);
         try std.testing.expect(replacement.extent_index != poisoned_identity.extent_index);
     }
     try std.testing.expectEqual(
-        cawfs.allocation_format.State.claimed,
+        txfs.allocation_format.State.claimed,
         (try fixture.extent_allocator.readEntry(poisoned_identity.extent_index)).state,
     );
 
     fixture.model.crash();
     var reopened = try fixture.reopened();
-    const recovered = try cawfs.filesystem.open(reopened.conditionalStore(), std.testing.allocator);
+    const recovered = try txfs.filesystem.open(reopened.conditionalStore(), std.testing.allocator);
     var recovered_data = try recovered.readWholeFile(std.testing.allocator, empty.inode_id);
     defer recovered_data.deinit();
     try std.testing.expectEqual(@as(usize, 0), recovered_data.bytes.len);
@@ -328,9 +328,9 @@ test "indeterminate ordinary write poisons the batch and retains its claim" {
     try std.testing.expectError(error.DataWriteIndeterminate, batch.prepare());
     try std.testing.expectError(error.InvalidState, batch.prepare());
 
-    const identity = try cawfs.immutable_extent.decodeObjectRef(reference);
+    const identity = try txfs.immutable_extent.decodeObjectRef(reference);
     const entry = try fixture.extent_allocator.readEntry(identity.extent_index);
-    try std.testing.expectEqual(cawfs.allocation_format.State.claimed, entry.state);
+    try std.testing.expectEqual(txfs.allocation_format.State.claimed, entry.state);
     try std.testing.expectError(
         error.ObjectNotFound,
         store.loadImmutable(reference, std.testing.allocator),
@@ -354,10 +354,10 @@ test "prepare retries only its failed durability barrier" {
 
 test "concurrent anchor publishers have one winner and one CAW each" {
     const Worker = struct {
-        batch: *cawfs.store.WriteBatch,
+        batch: *txfs.store.WriteBatch,
         version: []const u8,
-        anchor: cawfs.store.Anchor,
-        result: ?cawfs.store.PublishResult = null,
+        anchor: txfs.store.Anchor,
+        result: ?txfs.store.PublishResult = null,
 
         fn run(self: *@This()) void {
             self.result = self.batch.publish(self.version, &self.anchor) catch |err|
@@ -404,7 +404,7 @@ test "concurrent anchor publishers have one winner and one CAW each" {
 }
 
 test "anchor indeterminate outcomes are not retried inside publish" {
-    for ([_]cawfs.model_block_device.CawFault{
+    for ([_]txfs.model_block_device.CawFault{
         .indeterminate_no_write,
         .indeterminate_after_write,
     }) |fault| {
@@ -421,14 +421,14 @@ test "anchor indeterminate outcomes are not retried inside publish" {
         const before = fixture.model.cawCount();
         const next = nextAnchor(txn_a, head);
         try std.testing.expectEqual(
-            cawfs.store.PublishResult.indeterminate,
+            txfs.store.PublishResult.indeterminate,
             try batch.publish(snapshot.version.bytes, &next),
         );
         try std.testing.expectEqual(before + 1, fixture.model.cawCount());
 
         var observed = try store.readAnchor(std.testing.allocator);
         defer observed.deinit();
-        const state = try cawfs.anchor.decode(&observed.anchor);
+        const state = try txfs.anchor.decode(&observed.anchor);
         try std.testing.expectEqual(
             @as(u64, if (fault == .indeterminate_after_write) 1 else 0),
             state.generation,
@@ -449,7 +449,7 @@ test "non-applied indeterminate publication cannot stabilize" {
     const next = nextAnchor(txn_a, head);
     fixture.model.injectNextCawFault(.indeterminate_no_write);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.indeterminate,
+        txfs.store.PublishResult.indeterminate,
         try batch.publish(snapshot.version.bytes, &next),
     );
     try std.testing.expectError(error.PublicationRequiresResolution, batch.stabilize());
@@ -467,14 +467,14 @@ test "publish rejects noncanonical anchor state before CAW" {
     try batch.prepare();
     const before = fixture.model.cawCount();
 
-    snapshot.version.bytes[cawfs.store.anchor_size] = 1;
+    snapshot.version.bytes[txfs.store.anchor_size] = 1;
     const canonical = nextAnchor(txn_a, head);
     try std.testing.expectError(
         error.BatchBaseVersionMismatch,
         batch.publish(snapshot.version.bytes, &canonical),
     );
-    snapshot.version.bytes[cawfs.store.anchor_size] = 0;
-    const wrong_generation = cawfs.anchor.encode(.{
+    snapshot.version.bytes[txfs.store.anchor_size] = 0;
+    const wrong_generation = txfs.anchor.encode(.{
         .revision = 2,
         .generation = 2,
         .transaction_id = txn_a,
@@ -491,7 +491,7 @@ test "publish rejects noncanonical anchor state before CAW" {
         error.InvalidAnchorTransaction,
         batch.publish(snapshot.version.bytes, &wrong_transaction),
     );
-    const wrong_revision = cawfs.anchor.encode(.{
+    const wrong_revision = txfs.anchor.encode(.{
         .revision = 2,
         .generation = 1,
         .transaction_id = txn_a,
@@ -503,7 +503,7 @@ test "publish rejects noncanonical anchor state before CAW" {
         error.InvalidAnchorRevision,
         batch.publish(snapshot.version.bytes, &wrong_revision),
     );
-    const wrong_mode = cawfs.anchor.encode(.{
+    const wrong_mode = txfs.anchor.encode(.{
         .revision = 2,
         .generation = 1,
         .transaction_id = txn_a,
@@ -532,9 +532,9 @@ test "data barrier failure followed by reset cannot activate lost data" {
 
     fixture.model.crash();
     try std.testing.expectError(error.DeviceReset, batch.prepare());
-    const identity = try cawfs.immutable_extent.decodeObjectRef(reference);
+    const identity = try txfs.immutable_extent.decodeObjectRef(reference);
     const entry = try fixture.extent_allocator.readEntry(identity.extent_index);
-    try std.testing.expectEqual(cawfs.allocation_format.State.claimed, entry.state);
+    try std.testing.expectEqual(txfs.allocation_format.State.claimed, entry.state);
     try std.testing.expectError(
         error.ObjectNotFound,
         store.loadImmutable(reference, std.testing.allocator),
@@ -553,7 +553,7 @@ test "publication reset requires commit resolution instead of false stabilizatio
     try batch.prepare();
     const next = nextAnchor(txn_a, head);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch.publish(snapshot.version.bytes, &next),
     );
     fixture.model.injectNextStabilizeFailure();
@@ -564,7 +564,7 @@ test "publication reset requires commit resolution instead of false stabilizatio
     try std.testing.expectError(error.DeviceReset, batch.stabilize());
     var recovered = try store.readAnchor(std.testing.allocator);
     defer recovered.deinit();
-    try std.testing.expectEqual(@as(u64, 0), (try cawfs.anchor.decode(&recovered.anchor)).generation);
+    try std.testing.expectEqual(@as(u64, 0), (try txfs.anchor.decode(&recovered.anchor)).generation);
 }
 
 test "publication reset racing its barrier cannot stabilize" {
@@ -579,7 +579,7 @@ test "publication reset racing its barrier cannot stabilize" {
     try batch.prepare();
     const next = nextAnchor(txn_a, head);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch.publish(snapshot.version.bytes, &next),
     );
 
@@ -587,7 +587,7 @@ test "publication reset racing its barrier cannot stabilize" {
     try std.testing.expectError(error.DeviceReset, batch.stabilize());
     var recovered = try store.readAnchor(std.testing.allocator);
     defer recovered.deinit();
-    try std.testing.expectEqual(@as(u64, 0), (try cawfs.anchor.decode(&recovered.anchor)).generation);
+    try std.testing.expectEqual(@as(u64, 0), (try txfs.anchor.decode(&recovered.anchor)).generation);
 }
 
 test "publish can retry a known pre-dispatch transport error" {
@@ -607,7 +607,7 @@ test "publish can retry a known pre-dispatch transport error" {
         batch.publish(snapshot.version.bytes, &next),
     );
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch.publish(snapshot.version.bytes, &next),
     );
     try batch.stabilize();
@@ -625,8 +625,8 @@ test "claim identity separates payloads from a reused transaction id" {
     const second_ref = try second.putImmutable("second payload");
     try first.prepare();
     try second.prepare();
-    const first_identity = try cawfs.immutable_extent.decodeObjectRef(first_ref);
-    const second_identity = try cawfs.immutable_extent.decodeObjectRef(second_ref);
+    const first_identity = try txfs.immutable_extent.decodeObjectRef(first_ref);
+    const second_identity = try txfs.immutable_extent.decodeObjectRef(second_ref);
     try std.testing.expect(first_identity.extent_index != second_identity.extent_index);
     var first_bytes = try store.loadImmutable(first_ref, std.testing.allocator);
     defer first_bytes.deinit();
@@ -641,16 +641,16 @@ test "second generation objects retain allocator publication generations" {
     defer fixture.deinit();
     const store = fixture.backend.conditionalStore();
     {
-        var first = try cawfs.transaction.Transaction.begin(store, std.testing.allocator, txn_a);
+        var first = try txfs.transaction.Transaction.begin(store, std.testing.allocator, txn_a);
         defer first.deinit();
         const root = try first.putImmutable("first root");
         _ = try first.commit(root);
     }
-    var second = try cawfs.transaction.Transaction.begin(store, std.testing.allocator, txn_b);
+    var second = try txfs.transaction.Transaction.begin(store, std.testing.allocator, txn_b);
     defer second.deinit();
     const root = try second.putImmutable("second root");
     _ = try second.commit(root);
-    const identity = try cawfs.immutable_extent.decodeObjectRef(root);
+    const identity = try txfs.immutable_extent.decodeObjectRef(root);
     const entry = try fixture.extent_allocator.readEntry(identity.extent_index);
     try std.testing.expectEqual(@as(u64, 1), entry.base_generation);
     try std.testing.expectEqual(@as(u64, 2), entry.transition_generation);
@@ -661,13 +661,13 @@ test "physical anchors are bound to one volume" {
     defer fixture.deinit();
     var other_header = fixture.header;
     other_header.volume_id = patternedId(0x90);
-    const other_allocator = try cawfs.extent_allocator.ExtentAllocator.init(
+    const other_allocator = try txfs.extent_allocator.ExtentAllocator.init(
         std.testing.allocator,
         fixture.model.conditionalTransport(),
         other_header,
         .{},
     );
-    var other = try cawfs.scsi_store.ScsiStore.init(
+    var other = try txfs.scsi_store.ScsiStore.init(
         other_allocator,
         fixture.model.dataTransport(),
         fixture.model.conditionalTransport(),
@@ -685,29 +685,29 @@ test "physical anchors are bound to one volume" {
 }
 
 test "anchor formatting verifies replacement after reset races its barrier" {
-    const geometry = cawfs.conditional_block.Geometry{
+    const geometry = txfs.conditional_block.Geometry{
         .logical_block_size = 512,
         .block_count = 1024,
     };
-    var model = try cawfs.model_block_device.ModelBlockDevice.init(
+    var model = try txfs.model_block_device.ModelBlockDevice.init(
         std.testing.allocator,
         geometry,
     );
     defer model.deinit();
-    const header = try cawfs.volume_format.Header.init(
+    const header = try txfs.volume_format.Header.init(
         patternedId(0x40),
         123,
         geometry,
         8192,
     );
-    const extents = try cawfs.extent_allocator.ExtentAllocator.init(
+    const extents = try txfs.extent_allocator.ExtentAllocator.init(
         std.testing.allocator,
         model.conditionalTransport(),
         header,
         .{},
     );
     _ = try extents.format();
-    var backend = try cawfs.scsi_store.ScsiStore.init(
+    var backend = try txfs.scsi_store.ScsiStore.init(
         extents,
         model.dataTransport(),
         model.conditionalTransport(),
@@ -721,11 +721,11 @@ test "anchor formatting verifies replacement after reset races its barrier" {
     const initial = initialAnchor();
     model.injectResetBeforeNextStabilize();
     try std.testing.expectEqual(
-        cawfs.scsi_store.AnchorFormatResult.indeterminate,
+        txfs.scsi_store.AnchorFormatResult.indeterminate,
         try backend.formatAnchor(&initial),
     );
     try std.testing.expectEqual(
-        cawfs.scsi_store.AnchorFormatResult.formatted,
+        txfs.scsi_store.AnchorFormatResult.formatted,
         try backend.formatAnchor(&initial),
     );
 }
@@ -742,7 +742,7 @@ test "publication durability barrier can be retried without another CAW" {
     try batch.prepare();
     const next = nextAnchor(txn_a, head);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch.publish(snapshot.version.bytes, &next),
     );
     const after_publish = fixture.model.cawCount();
@@ -754,7 +754,7 @@ test "publication durability barrier can be retried without another CAW" {
     var reopened = try fixture.reopened();
     var recovered = try reopened.conditionalStore().readAnchor(std.testing.allocator);
     defer recovered.deinit();
-    try std.testing.expectEqual(@as(u64, 1), (try cawfs.anchor.decode(&recovered.anchor)).generation);
+    try std.testing.expectEqual(@as(u64, 1), (try txfs.anchor.decode(&recovered.anchor)).generation);
 }
 
 test "an earlier publication stabilizes through a durable descendant" {
@@ -767,7 +767,7 @@ test "an earlier publication stabilizes through a durable descendant" {
     var batch_a = try store.beginBatch(std.testing.allocator, txn_a, snapshot_a.version.bytes);
     defer batch_a.deinit();
     const root_a = try batch_a.putImmutable("root A");
-    const record_a = cawfs.commit.encode(.{
+    const record_a = txfs.commit.encode(.{
         .generation = 1,
         .transaction_id = txn_a,
         .parent = null,
@@ -777,7 +777,7 @@ test "an earlier publication stabilizes through a durable descendant" {
     try batch_a.prepare();
     const anchor_a = nextAnchor(txn_a, commit_a);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch_a.publish(snapshot_a.version.bytes, &anchor_a),
     );
     fixture.model.injectNextStabilizeFailure();
@@ -788,7 +788,7 @@ test "an earlier publication stabilizes through a durable descendant" {
     var batch_b = try store.beginBatch(std.testing.allocator, txn_b, snapshot_b.version.bytes);
     defer batch_b.deinit();
     const root_b = try batch_b.putImmutable("root B");
-    const record_b = cawfs.commit.encode(.{
+    const record_b = txfs.commit.encode(.{
         .generation = 2,
         .transaction_id = txn_b,
         .parent = commit_a,
@@ -796,7 +796,7 @@ test "an earlier publication stabilizes through a durable descendant" {
     });
     const commit_b = try batch_b.putImmutable(&record_b);
     try batch_b.prepare();
-    const anchor_b = cawfs.anchor.encode(.{
+    const anchor_b = txfs.anchor.encode(.{
         .revision = 2,
         .generation = 2,
         .transaction_id = txn_b,
@@ -805,7 +805,7 @@ test "an earlier publication stabilizes through a durable descendant" {
         .mode_epoch = 1,
     });
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch_b.publish(snapshot_b.version.bytes, &anchor_b),
     );
     try batch_b.stabilize();
@@ -815,10 +815,10 @@ test "an earlier publication stabilizes through a durable descendant" {
     var reopened = try fixture.reopened();
     var recovered = try reopened.conditionalStore().readAnchor(std.testing.allocator);
     defer recovered.deinit();
-    const recovered_state = try cawfs.anchor.decode(&recovered.anchor);
+    const recovered_state = try txfs.anchor.decode(&recovered.anchor);
     try std.testing.expectEqual(@as(u64, 2), recovered_state.generation);
     try std.testing.expectEqual(txn_b, recovered_state.transaction_id);
-    try std.testing.expect(cawfs.store.ObjectRef.eql(commit_b, recovered_state.head.?));
+    try std.testing.expect(txfs.store.ObjectRef.eql(commit_b, recovered_state.head.?));
 }
 
 test "stabilization rejects malformed descendant ancestry" {
@@ -831,7 +831,7 @@ test "stabilization rejects malformed descendant ancestry" {
     var batch_a = try store.beginBatch(std.testing.allocator, txn_a, snapshot_a.version.bytes);
     defer batch_a.deinit();
     const root_a = try batch_a.putImmutable("root A");
-    const record_a = cawfs.commit.encode(.{
+    const record_a = txfs.commit.encode(.{
         .generation = 1,
         .transaction_id = txn_a,
         .parent = null,
@@ -841,7 +841,7 @@ test "stabilization rejects malformed descendant ancestry" {
     try batch_a.prepare();
     const anchor_a = nextAnchor(txn_a, commit_a);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch_a.publish(snapshot_a.version.bytes, &anchor_a),
     );
 
@@ -850,7 +850,7 @@ test "stabilization rejects malformed descendant ancestry" {
     var batch_b = try store.beginBatch(std.testing.allocator, txn_b, snapshot_b.version.bytes);
     defer batch_b.deinit();
     const root_b = try batch_b.putImmutable("root B");
-    const malformed_record_b = cawfs.commit.encode(.{
+    const malformed_record_b = txfs.commit.encode(.{
         .generation = 3,
         .transaction_id = txn_b,
         .parent = commit_a,
@@ -858,7 +858,7 @@ test "stabilization rejects malformed descendant ancestry" {
     });
     const commit_b = try batch_b.putImmutable(&malformed_record_b);
     try batch_b.prepare();
-    const anchor_b = cawfs.anchor.encode(.{
+    const anchor_b = txfs.anchor.encode(.{
         .revision = 2,
         .generation = 2,
         .transaction_id = txn_b,
@@ -867,7 +867,7 @@ test "stabilization rejects malformed descendant ancestry" {
         .mode_epoch = 1,
     });
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.committed,
+        txfs.store.PublishResult.committed,
         try batch_b.publish(snapshot_b.version.bytes, &anchor_b),
     );
     try batch_b.stabilize();
@@ -880,19 +880,19 @@ test "transaction and tree reopen through the SCSI extent store" {
     defer fixture.deinit();
     const store = fixture.backend.conditionalStore();
     {
-        var transaction = try cawfs.transaction.Transaction.begin(
+        var transaction = try txfs.transaction.Transaction.begin(
             store,
             std.testing.allocator,
             txn_a,
         );
         defer transaction.deinit();
-        var mutator = cawfs.tree.Mutator.init(&transaction);
+        var mutator = txfs.tree.Mutator.init(&transaction);
         defer mutator.deinit();
         var root = try mutator.createEmpty();
         root = try mutator.put(root, "alpha", "one");
         root = try mutator.put(root, "beta", "two");
         try std.testing.expectEqual(
-            cawfs.transaction.Outcome.committed,
+            txfs.transaction.Outcome.committed,
             try transaction.commit(root),
         );
     }
@@ -902,11 +902,11 @@ test "transaction and tree reopen through the SCSI extent store" {
     const reopened_store = reopened.conditionalStore();
     var snapshot = try reopened_store.readAnchor(std.testing.allocator);
     defer snapshot.deinit();
-    const state = try cawfs.anchor.decode(&snapshot.anchor);
+    const state = try txfs.anchor.decode(&snapshot.anchor);
     var commit_bytes = try reopened_store.loadImmutable(state.head.?, std.testing.allocator);
     defer commit_bytes.deinit();
-    const record = try cawfs.commit.decode(commit_bytes.bytes);
-    var value = (try cawfs.tree.get(
+    const record = try txfs.commit.decode(commit_bytes.bytes);
+    var value = (try txfs.tree.get(
         reopened_store,
         std.testing.allocator,
         record.root,
@@ -921,8 +921,8 @@ test "maintenance transitions persist through the SCSI extent store" {
     defer fixture.deinit();
     const store = fixture.backend.conditionalStore();
 
-    for ([_]cawfs.anchor.Mode{ .quiescing, .maintenance, .active }) |mode| {
-        var transition = try cawfs.maintenance.Transition.begin(
+    for ([_]txfs.anchor.Mode{ .quiescing, .maintenance, .active }) |mode| {
+        var transition = try txfs.maintenance.Transition.begin(
             store,
             std.testing.allocator,
             txn_a,
@@ -930,7 +930,7 @@ test "maintenance transitions persist through the SCSI extent store" {
         );
         defer transition.deinit();
         try std.testing.expectEqual(
-            cawfs.maintenance.Outcome.committed,
+            txfs.maintenance.Outcome.committed,
             try transition.commit(),
         );
     }
@@ -940,16 +940,16 @@ test "maintenance transitions persist through the SCSI extent store" {
     const reopened_store = reopened.conditionalStore();
     var snapshot = try reopened_store.readAnchor(std.testing.allocator);
     defer snapshot.deinit();
-    const state = try cawfs.anchor.decode(&snapshot.anchor);
+    const state = try txfs.anchor.decode(&snapshot.anchor);
     try std.testing.expectEqual(@as(u64, 3), state.revision);
     try std.testing.expectEqual(@as(u64, 0), state.generation);
-    try std.testing.expectEqual(cawfs.anchor.Mode.active, state.mode);
+    try std.testing.expectEqual(txfs.anchor.Mode.active, state.mode);
     try std.testing.expectEqual(@as(u64, 2), state.mode_epoch);
     var control = try reopened_store.loadImmutable(state.control_ref.?, std.testing.allocator);
     defer control.deinit();
-    const record = try cawfs.maintenance.decode(control.bytes);
-    try std.testing.expectEqual(cawfs.anchor.Mode.maintenance, record.previous_mode);
-    try std.testing.expectEqual(cawfs.anchor.Mode.active, record.mode);
+    const record = try txfs.maintenance.decode(control.bytes);
+    try std.testing.expectEqual(txfs.anchor.Mode.maintenance, record.previous_mode);
+    try std.testing.expectEqual(txfs.anchor.Mode.active, record.mode);
 }
 
 test "SCSI maintenance stabilization resolves a durable descendant after reset" {
@@ -964,7 +964,7 @@ test "SCSI maintenance stabilization resolves a durable descendant after reset" 
         snapshot.version.bytes,
     );
     defer quiescing.deinit();
-    const encoded = cawfs.maintenance.encode(.{
+    const encoded = txfs.maintenance.encode(.{
         .revision = 1,
         .generation = 0,
         .mode_epoch = 2,
@@ -977,8 +977,8 @@ test "SCSI maintenance stabilization resolves a durable descendant after reset" 
     try quiescing.prepare();
     fixture.model.injectNextCawFault(.indeterminate_after_write);
     try std.testing.expectEqual(
-        cawfs.store.PublishResult.indeterminate,
-        try quiescing.publish(snapshot.version.bytes, &cawfs.anchor.encode(.{
+        txfs.store.PublishResult.indeterminate,
+        try quiescing.publish(snapshot.version.bytes, &txfs.anchor.encode(.{
             .revision = 1,
             .generation = 0,
             .transaction_id = @splat(0),
@@ -990,7 +990,7 @@ test "SCSI maintenance stabilization resolves a durable descendant after reset" 
         })),
     );
 
-    var maintenance = try cawfs.maintenance.Transition.begin(
+    var maintenance = try txfs.maintenance.Transition.begin(
         store,
         std.testing.allocator,
         txn_a,
@@ -998,7 +998,7 @@ test "SCSI maintenance stabilization resolves a durable descendant after reset" 
     );
     defer maintenance.deinit();
     try std.testing.expectEqual(
-        cawfs.maintenance.Outcome.committed,
+        txfs.maintenance.Outcome.committed,
         try maintenance.commit(),
     );
     fixture.model.crash();

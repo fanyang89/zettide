@@ -1,4 +1,4 @@
-//! Stable CAWFS volume header and physical region layout.
+//! Stable TxFS volume header and physical region layout.
 
 const std = @import("std");
 const allocation = @import("allocation_format.zig");

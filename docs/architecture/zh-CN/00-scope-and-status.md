@@ -16,7 +16,7 @@ publication/attachment 治理和更完整的平台生命周期；基本 qtr mana
 attachment 已属于 Tier 1 门槛。Tier 3 才增加跨 storage node Replica、
 fencing、failover、repair 和 republish。
 
-独立 CAWFS shared-file profile 见 [CAWFS 共享 qcow2 接入](12-cawfs-shared-qcow2.md)；它不替代 Catalog block publication。
+独立 TxFS shared-file profile 见 [TxFS 共享 qcow2 接入](12-txfs-shared-qcow2.md)；它不替代 Catalog block publication。
 
 ## Tier 完成标准
 
@@ -49,7 +49,7 @@ fencing、failover、repair 和 republish。
 | SPDK | 部分 | managed runtime、provider bdev、Catalog NVMf TCP/RDMA export、vhost-user-blk 与 initiator wrapper 有 focused tests |
 | `zettide-control` | 部分 | Pool/Node/Member/Volume metadata、heartbeat、Raft/WAL/snapshot/ReadIndex 与恢复测试存在；placement、lease、reconciliation 不存在 |
 | Tier 3 Replica NVMf | 目标 | 尚无 vendor-specific commands、Replica namespace authority、commit evidence 或 epoch gate |
-| CAWFS shared qcow2 | 部分 | transaction、SCSI CAW/data transport、voting 和 allocator 基础存在；POSIX/FUSE 与 qtr 未接线 |
+| TxFS shared qcow2 | 部分 | transaction、SCSI CAW/data transport、voting 和 allocator 基础存在；POSIX/FUSE 与 qtr 未接线 |
 
 ## 两种 Pool
 

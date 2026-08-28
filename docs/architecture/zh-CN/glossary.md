@@ -20,7 +20,7 @@ Catalog Pool 中具有稳定 Volume ID、固定逻辑 block address space 与 ex
 
 ## BlobFilesystem
 
-由 Blob stores 持久化 inode/blob/COW metadata 的 filesystem model，可位于 regular Blob file 或 Blob Pool。NFS 与 FUSE 访问它。CAWFS 是独立 shared-file direction，不是 BlobFilesystem backend。
+由 Blob stores 持久化 inode/blob/COW metadata 的 filesystem model，可位于 regular Blob file 或 Blob Pool。NFS 与 FUSE 访问它。TxFS 是独立 shared-file direction，不是 BlobFilesystem backend。
 
 ## Data Mode
 
@@ -105,7 +105,7 @@ Authority 是从持久控制记录和对应 quorum evidence 中选择出的可�
 
 ## Fencing
 
-阻止旧 writer 继续写入。Host publication 使用 access generation；Tier 3 primary 使用 lease、write epoch 与 Replica persistent enforcement；CAWFS image 使用独立 owner epoch 与 external hard fence。
+阻止旧 writer 继续写入。Host publication 使用 access generation；Tier 3 primary 使用 lease、write epoch 与 Replica persistent enforcement；TxFS image 使用独立 owner epoch 与 external hard fence。
 
 ## qtr / PVE / CSI
 

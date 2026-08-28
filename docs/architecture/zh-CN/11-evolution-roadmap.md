@@ -119,18 +119,18 @@ CSI 不阻塞 Tier 1/2，也不新增数据 plane。
 
 完成标准：repair 中断可恢复且不污染 current protection；生产 profile 在真实故障域完成 power-cut/partition/corruption/stale-host/long-soak/resource-exhaustion matrix，并具有可演练的升级、回滚、凭据轮换和灾难恢复程序。
 
-## Shared-file 支线：CAWFS qcow2
+## Shared-file 支线：TxFS qcow2
 
 该支线不替代 protocol-neutral block publication route，按以下依赖顺序推进：
 
 1. 完成 SCSI-backed immutable object store、统一 fault model 和 mount recovery。
-2. 完成 backend-neutral filesystem interface 与 CAWFS POSIX backend。
+2. 完成 backend-neutral filesystem interface 与 TxFS POSIX backend。
 3. 实现受管 FUSE lifecycle，验证多 host shared mount。
 4. 通过 `qemu-img`/QEMU cache、locking、sparse 和 durability profile。
-5. qtr 持久化 CAWFS volume/image identity、ownership intent 和 libvirt reconciliation。
+5. qtr 持久化 TxFS volume/image identity、ownership intent 和 libvirt reconciliation。
 6. 接入 power fence 或 LUN revoke，验证 fenced takeover 和旧 host 恢复。
 
-完成标准：两台 host 可在同一 CAWFS LUN 上并发运行不同 qcow2；同一 qcow2 的第二个 writable start 被拒绝；clean transfer 和 externally fenced takeover 均不产生旧 epoch 写入或已确认写丢失。详细契约见 [CAWFS 共享 qcow2 接入](12-cawfs-shared-qcow2.md)。
+完成标准：两台 host 可在同一 TxFS LUN 上并发运行不同 qcow2；同一 qcow2 的第二个 writable start 被拒绝；clean transfer 和 externally fenced takeover 均不产生旧 epoch 写入或已确认写丢失。详细契约见 [TxFS 共享 qcow2 接入](12-txfs-shared-qcow2.md)。
 
 ## 路线图约束
 
@@ -138,7 +138,7 @@ CSI 不阻塞 Tier 1/2，也不新增数据 plane。
 - 不用单文件、单盘、loop 或 synthetic member 代替 Tier 1 真实多盘 gate。
 - 不把 Member count 当成 Volume current protection。
 - 不把标准 host-facing NVMf 与 internal Replica NVMf 混写。
-- 不把 CSI、PVE 或 CAWFS 定义为新数据一致性模型。
+- 不把 CSI、PVE 或 TxFS 定义为新数据一致性模型。
 - 不在 commit evidence/fencing 前声明 storage failover。
 - 不把 republish 描述为 VM 调度或自动重启。
 - 不在认证授权完成前放宽可信隔离网络。

@@ -13,7 +13,7 @@
 | Raft API、安全与恢复 | [`../../../vendor/raftz/README.md`](../../../vendor/raftz/README.md), [`../../../vendor/raftz/src/root.zig`](../../../vendor/raftz/src/root.zig) |
 | grpc-lite API 与限制 | [`../../../vendor/grpc-lite/README.md`](../../../vendor/grpc-lite/README.md), [`../../../vendor/grpc-lite/src/root.zig`](../../../vendor/grpc-lite/src/root.zig) |
 | 虚拟化/CSI 目标契约 | [`13-virtualization-and-csi.md`](13-virtualization-and-csi.md) |
-| CAWFS 契约 | [`12-cawfs-shared-qcow2.md`](12-cawfs-shared-qcow2.md), [`../../../libs/cawfs/README.md`](../../../libs/cawfs/README.md) |
+| TxFS 契约 | [`12-txfs-shared-qcow2.md`](12-txfs-shared-qcow2.md), [`../../../libs/txfs/README.md`](../../../libs/txfs/README.md) |
 
 ## Pool、BlobFilesystem 与 Catalog
 
@@ -121,15 +121,15 @@ Vendored API/target 只证明依赖中存在相应原语，不证明 Zettide 已
 
 当前 control Volume 是 metadata intent；无 placement、Replica/Allocation mutation、lease、publication authority 或 reconciliation。
 
-## CAWFS
+## TxFS
 
 | 主题 | 文件 |
 | --- | --- |
-| Transaction/Store | [`../../../libs/cawfs/src/transaction.zig`](../../../libs/cawfs/src/transaction.zig), [`../../../libs/cawfs/src/store.zig`](../../../libs/cawfs/src/store.zig) |
-| SCSI CAW/whole-LUN transport | [`../../../libs/cawfs/src/scsi.zig`](../../../libs/cawfs/src/scsi.zig), [`../../../libs/cawfs/src/linux_sg_io.zig`](../../../libs/cawfs/src/linux_sg_io.zig) |
-| Mutable data/allocator | [`../../../libs/cawfs/src/data_block.zig`](../../../libs/cawfs/src/data_block.zig), [`../../../libs/cawfs/src/extent_allocator.zig`](../../../libs/cawfs/src/extent_allocator.zig) |
-| Filesystem/format/maintenance | [`../../../libs/cawfs/src/filesystem.zig`](../../../libs/cawfs/src/filesystem.zig), [`../../../libs/cawfs/src/filesystem_format.zig`](../../../libs/cawfs/src/filesystem_format.zig), [`../../../libs/cawfs/src/maintenance.zig`](../../../libs/cawfs/src/maintenance.zig) |
-| SCSI immutable Store | [`../../../libs/cawfs/src/scsi_store.zig`](../../../libs/cawfs/src/scsi_store.zig), [`../../../libs/cawfs/src/immutable_extent.zig`](../../../libs/cawfs/src/immutable_extent.zig) |
+| Transaction/Store | [`../../../libs/txfs/src/transaction.zig`](../../../libs/txfs/src/transaction.zig), [`../../../libs/txfs/src/store.zig`](../../../libs/txfs/src/store.zig) |
+| SCSI CAW/whole-LUN transport | [`../../../libs/txfs/src/scsi.zig`](../../../libs/txfs/src/scsi.zig), [`../../../libs/txfs/src/linux_sg_io.zig`](../../../libs/txfs/src/linux_sg_io.zig) |
+| Mutable data/allocator | [`../../../libs/txfs/src/data_block.zig`](../../../libs/txfs/src/data_block.zig), [`../../../libs/txfs/src/extent_allocator.zig`](../../../libs/txfs/src/extent_allocator.zig) |
+| Filesystem/format/maintenance | [`../../../libs/txfs/src/filesystem.zig`](../../../libs/txfs/src/filesystem.zig), [`../../../libs/txfs/src/filesystem_format.zig`](../../../libs/txfs/src/filesystem_format.zig), [`../../../libs/txfs/src/maintenance.zig`](../../../libs/txfs/src/maintenance.zig) |
+| SCSI immutable Store | [`../../../libs/txfs/src/scsi_store.zig`](../../../libs/txfs/src/scsi_store.zig), [`../../../libs/txfs/src/immutable_extent.zig`](../../../libs/txfs/src/immutable_extent.zig) |
 
 ## 尚无实现
 

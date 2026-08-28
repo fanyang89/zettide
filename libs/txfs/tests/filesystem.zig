@@ -1,12 +1,12 @@
 const std = @import("std");
-const cawfs = @import("zettide_cawfs");
+const txfs = @import("zettide_txfs");
 
-const filesystem = cawfs.filesystem;
-const format = cawfs.filesystem_format;
-const ModelStore = cawfs.model_store.ModelStore;
+const filesystem = txfs.filesystem;
+const format = txfs.filesystem_format;
+const ModelStore = txfs.model_store.ModelStore;
 const Snapshot = filesystem.Snapshot;
-const Transaction = cawfs.transaction.Transaction;
-const TransactionId = cawfs.store.TransactionId;
+const Transaction = txfs.transaction.Transaction;
+const TransactionId = txfs.store.TransactionId;
 
 const txn_format: TransactionId = .{ 0xf0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 const txn_a: TransactionId = .{ 0xfa, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 };
@@ -31,8 +31,8 @@ const file_options = filesystem.CreateFileOptions{
     .now_ns = 2_000_000,
 };
 
-fn initialAnchor() cawfs.store.Anchor {
-    return cawfs.anchor.encode(.{
+fn initialAnchor() txfs.store.Anchor {
+    return txfs.anchor.encode(.{
         .revision = 0,
         .generation = 0,
         .transaction_id = @splat(0),
@@ -47,7 +47,7 @@ fn formatStore(model: *ModelStore) !Snapshot {
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_format);
     defer transaction.deinit();
     const root = try filesystem.format(&transaction, format_options);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
     return filesystem.open(store, std.testing.allocator);
 }
 
@@ -55,7 +55,7 @@ fn stageEmptyFile(
     transaction: *Transaction,
     snapshot: Snapshot,
     name: []const u8,
-) !cawfs.store.ObjectRef {
+) !txfs.store.ObjectRef {
     var mutator = try filesystem.Mutator.init(transaction, snapshot);
     defer mutator.deinit();
     _ = try mutator.createEmptyFile(format.root_inode_id, name, file_options);
@@ -75,7 +75,7 @@ fn createCommittedEmptyFile(
     );
     defer transaction.deinit();
     const root = try stageEmptyFile(&transaction, snapshot, name);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
     return filesystem.open(model.conditionalStore(), std.testing.allocator);
 }
 
@@ -85,7 +85,7 @@ fn inodeForName(snapshot: Snapshot, name: []const u8) !format.Inode {
 }
 
 fn stageInode(
-    trees: *cawfs.tree.Mutator,
+    trees: *txfs.tree.Mutator,
     root: *format.FilesystemRoot,
     inode: format.Inode,
 ) !void {
@@ -95,7 +95,7 @@ fn stageInode(
 }
 
 fn stageMapping(
-    trees: *cawfs.tree.Mutator,
+    trees: *txfs.tree.Mutator,
     root: *format.FilesystemRoot,
     key: []const u8,
     mapping: format.ExtentMapping,
@@ -159,7 +159,7 @@ test "empty file survives commit crash and reopen" {
         mutator.createEmptyFile(999, "missing", file_options),
     );
     const root = try mutator.finish();
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
 
     model.crash();
     const reopened = try filesystem.open(store, std.testing.allocator);
@@ -203,7 +203,7 @@ test "whole-file write commits reopens and preserves inode metadata" {
     defer mutator.deinit();
     try mutator.writeWholeFileOnce(before.inode_id, "immutable contents", .{ .now_ns = 3_000_000 });
     const root = try mutator.finish();
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root));
 
     model.crash();
     const reopened = try filesystem.open(model.conditionalStore(), std.testing.allocator);
@@ -308,8 +308,8 @@ test "competing whole-file writers preserve the winner and reject replay" {
     try second_mutator.writeWholeFileOnce(inode.inode_id, "loser", .{ .now_ns = 4 });
     const second_root = try second_mutator.finish();
 
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try first.commit(first_root));
-    try std.testing.expectEqual(cawfs.transaction.Outcome.conflict, try second.commit(second_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try first.commit(first_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.conflict, try second.commit(second_root));
     const winner = try filesystem.open(model.conditionalStore(), std.testing.allocator);
     var winner_data = try winner.readWholeFile(std.testing.allocator, inode.inode_id);
     defer winner_data.deinit();
@@ -339,8 +339,8 @@ test "indeterminate whole-file commit resolves stabilizes and preserves payload"
     try mutator.writeWholeFileOnce(inode.inode_id, "resolved payload", .{ .now_ns = 3 });
     const root = try mutator.finish();
     model.injectNextPublishFault(.indeterminate_after);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.indeterminate, try transaction.commit(root));
-    try std.testing.expectEqual(cawfs.resolution.Resolution.committed, try transaction.resolve(.{}));
+    try std.testing.expectEqual(txfs.transaction.Outcome.indeterminate, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.resolution.Resolution.committed, try transaction.resolve(.{}));
     try transaction.stabilize();
 
     model.crash();
@@ -362,16 +362,16 @@ test "stale transaction conflicts and replays from winner snapshot" {
     defer second.deinit();
     const first_root = try stageEmptyFile(&first, initial, "alpha");
     const second_root = try stageEmptyFile(&second, initial, "beta");
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try first.commit(first_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try first.commit(first_root));
 
     const winner = try filesystem.open(store, std.testing.allocator);
     try std.testing.expectError(error.StaleSnapshot, filesystem.Mutator.init(&second, winner));
-    try std.testing.expectEqual(cawfs.transaction.Outcome.conflict, try second.commit(second_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.conflict, try second.commit(second_root));
 
     var replay = try Transaction.begin(store, std.testing.allocator, txn_c);
     defer replay.deinit();
     const replay_root = try stageEmptyFile(&replay, winner, "beta");
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try replay.commit(replay_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try replay.commit(replay_root));
 
     const final = try filesystem.open(store, std.testing.allocator);
     try expectName(final, "alpha", true);
@@ -385,7 +385,7 @@ test "filesystem mutator rejects an equivalent snapshot from another backend" {
     defer second_model.deinit();
     const first_snapshot = try formatStore(&first_model);
     const second_snapshot = try formatStore(&second_model);
-    try std.testing.expect(cawfs.store.ObjectRef.eql(
+    try std.testing.expect(txfs.store.ObjectRef.eql(
         first_snapshot.commit_ref,
         second_snapshot.commit_ref,
     ));
@@ -411,7 +411,7 @@ test "empty file creation rejects a colliding next inode without staging" {
     var create = try Transaction.begin(store, std.testing.allocator, txn_a);
     defer create.deinit();
     const create_root = try stageEmptyFile(&create, initial, "alpha");
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try create.commit(create_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try create.commit(create_root));
 
     const current = try filesystem.open(store, std.testing.allocator);
     const entry = (try current.lookup(std.testing.allocator, format.root_inode_id, "alpha")).?;
@@ -441,7 +441,7 @@ test "extent scan rejects a malformed key at the inode prefix" {
 
     var transaction = try Transaction.begin(store, std.testing.allocator, txn_g);
     defer transaction.deinit();
-    var trees = cawfs.tree.Mutator.init(&transaction);
+    var trees = txfs.tree.Mutator.init(&transaction);
     defer trees.deinit();
     const malformed_key = try format.encodeInodeKey(format.root_inode_id);
     const mapping = try format.encodeExtentMapping(.{
@@ -454,7 +454,7 @@ test "extent scan rejects a malformed key at the inode prefix" {
     root.extent_tree_root = try trees.put(root.extent_tree_root, &malformed_key, &mapping);
     const encoded_root = try format.encodeFilesystemRoot(root);
     const root_ref = try transaction.putImmutable(&encoded_root);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try transaction.commit(root_ref));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try transaction.commit(root_ref));
 
     const malformed = try filesystem.open(store, std.testing.allocator);
     try std.testing.expectError(
@@ -494,12 +494,12 @@ test "whole-file reads reject malformed mapping layouts and lengths" {
         );
     }
     const create_root = try create_mutator.finish();
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try create.commit(create_root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try create.commit(create_root));
     const empty = try filesystem.open(store, std.testing.allocator);
 
     var corrupt = try Transaction.begin(store, std.testing.allocator, txn_b);
     defer corrupt.deinit();
-    var trees = cawfs.tree.Mutator.init(&corrupt);
+    var trees = txfs.tree.Mutator.init(&corrupt);
     defer trees.deinit();
     var root = empty.root;
     const data_ref = try corrupt.putImmutable("data");
@@ -594,7 +594,7 @@ test "whole-file reads reject malformed mapping layouts and lengths" {
 
     const encoded_root = try format.encodeFilesystemRoot(root);
     const root_ref = try corrupt.putImmutable(&encoded_root);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.committed, try corrupt.commit(root_ref));
+    try std.testing.expectEqual(txfs.transaction.Outcome.committed, try corrupt.commit(root_ref));
     const malformed = try filesystem.open(store, std.testing.allocator);
 
     try std.testing.expectError(
@@ -649,9 +649,9 @@ test "indeterminate applied filesystem commit resolves and survives crash" {
     defer transaction.deinit();
     const root = try stageEmptyFile(&transaction, initial, "applied");
     model.injectNextPublishFault(.indeterminate_after);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.indeterminate, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.transaction.Outcome.indeterminate, try transaction.commit(root));
     try std.testing.expectEqual(
-        cawfs.resolution.Resolution.committed,
+        txfs.resolution.Resolution.committed,
         try transaction.resolve(.{}),
     );
     try transaction.stabilize();
@@ -671,12 +671,12 @@ test "indeterminate unapplied filesystem commit remains pending then is absent" 
     defer transaction.deinit();
     const root = try stageEmptyFile(&transaction, initial, "unapplied");
     model.injectNextPublishFault(.indeterminate_before);
-    try std.testing.expectEqual(cawfs.transaction.Outcome.indeterminate, try transaction.commit(root));
-    try std.testing.expectEqual(cawfs.resolution.Resolution.pending, try transaction.resolve(.{}));
+    try std.testing.expectEqual(txfs.transaction.Outcome.indeterminate, try transaction.commit(root));
+    try std.testing.expectEqual(txfs.resolution.Resolution.pending, try transaction.resolve(.{}));
 
     model.crash();
     try std.testing.expectEqual(
-        cawfs.resolution.Resolution.not_committed,
+        txfs.resolution.Resolution.not_committed,
         try transaction.resolve(.{}),
     );
     const reopened = try filesystem.open(store, std.testing.allocator);
@@ -694,7 +694,7 @@ test "filesystem commit retries stabilization without republishing" {
     const root = try stageEmptyFile(&transaction, initial, "stable");
     model.injectNextStabilizeFailure();
     try std.testing.expectError(error.InjectedStabilizeFailure, transaction.commit(root));
-    try std.testing.expectEqual(cawfs.transaction.Status.published, transaction.status());
+    try std.testing.expectEqual(txfs.transaction.Status.published, transaction.status());
     try transaction.stabilize();
 
     model.crash();
