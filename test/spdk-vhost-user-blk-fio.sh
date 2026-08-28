@@ -53,6 +53,8 @@ socket_dir=""
 socket_paths=()
 monitor_pids=()
 perf_pid=""
+fio_pid=""
+fio_ready_file=/tmp/zettide-fio-ramp-ready
 perf_data=""
 cpu_profile_active=false
 cpu_profile_path=""
@@ -103,6 +105,8 @@ fi
 }
 [[ $runtime =~ ^[1-9][0-9]*$ ]] || { echo "invalid fio runtime: $runtime" >&2; exit 2; }
 [[ $ramp_time =~ ^[0-9]+$ ]] || { echo "invalid fio ramp time: $ramp_time" >&2; exit 2; }
+((runtime <= 86400)) || { echo "fio runtime exceeds 86400 seconds: $runtime" >&2; exit 2; }
+((ramp_time <= 3600)) || { echo "fio ramp time exceeds 3600 seconds: $ramp_time" >&2; exit 2; }
 [[ $fio_size =~ ^[1-9][0-9]*([kKmMgGtTpP][iI]?[bB]?)?$ ]] || { echo "invalid fio size: $fio_size" >&2; exit 2; }
 [[ $guest_vcpus =~ ^[1-9][0-9]*$ ]] || { echo "invalid guest vCPU count: $guest_vcpus" >&2; exit 2; }
 [[ $queues =~ ^[1-9][0-9]*$ ]] || { echo "invalid vhost queue count: $queues" >&2; exit 2; }
@@ -260,8 +264,6 @@ stop_monitors() {
 start_monitors() {
     local name=$1
 
-    cp /proc/interrupts "$log_dir/host-interrupts-$name-before.txt"
-    cp /proc/softirqs "$log_dir/host-softirqs-$name-before.txt"
     begin_deferred_signals
     pidstat -t -u -r -w -p "$target_pid,$qemu_pid" 1 >"$log_dir/host-pidstat-$name.log" &
     monitor_pids+=("$!")
@@ -280,7 +282,7 @@ record_pid_threads() {
     [[ -d /proc/$pid/task ]] || return 0
     for task_path in "/proc/$pid/task"/*; do
         tid=${task_path##*/}
-        IFS= read -r comm <"$task_path/comm" || continue
+        IFS= read -r comm <"$task_path/comm" 2>/dev/null || continue
         allowed=unknown
         voluntary=unknown
         nonvoluntary=unknown
@@ -291,11 +293,11 @@ record_pid_threads() {
                 voluntary_ctxt_switches:*) voluntary=${status_line#*:} ;;
                 nonvoluntary_ctxt_switches:*) nonvoluntary=${status_line#*:} ;;
             esac
-        done <"$task_path/status"
+        done <"$task_path/status" 2>/dev/null || continue
         allowed=${allowed//$'\t'/}
         voluntary=${voluntary//$'\t'/}
         nonvoluntary=${nonvoluntary//$'\t'/}
-        IFS= read -r stat_line <"$task_path/stat" || continue
+        IFS= read -r stat_line <"$task_path/stat" 2>/dev/null || continue
         stat_fields=${stat_line##*) }
         read -r -a fields <<<"$stat_fields"
         processor=${fields[36]:-unknown}
@@ -311,6 +313,13 @@ record_thread_snapshot() {
         record_pid_threads target "$target_pid"
         record_pid_threads qemu "$qemu_pid"
     } >"$log_dir/host-threads-$name.txt"
+}
+
+fio_jobs_ready() {
+    local expected_jobs=$1
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+        "count=\$(wc -c < $fio_ready_file 2>/dev/null) || exit 1; test \"\$count\" -ge $expected_jobs" \
+        2>/dev/null
 }
 
 first_cpu_profile_file() {
@@ -347,6 +356,11 @@ cleanup() {
     set +e
 
     stop_monitors
+    if [[ -n $fio_pid ]]; then
+        kill -TERM "$fio_pid" 2>/dev/null || true
+        wait "$fio_pid" 2>/dev/null || true
+        fio_pid=""
+    fi
     if [[ -n $perf_pid ]]; then
         kill -INT "$perf_pid" 2>/dev/null || true
         wait "$perf_pid" 2>/dev/null || true
@@ -753,13 +767,14 @@ group_reporting=1
 time_based=1
 runtime=$runtime
 ramp_time=$ramp_time
+exec_prerun=/bin/sh -c 'printf x >> $fio_ready_file'
 randrepeat=0
 norandommap=1
 percentile_list=50:95:99:99.9
 
 [$name]
 EOF
-    execute_case "$name" "$job_file"
+    execute_case "$name" "$job_file" "$jobs"
 }
 
 run_raw_nvme_case() {
@@ -779,6 +794,7 @@ invalidate=1
 time_based=1
 runtime=$runtime
 ramp_time=$ramp_time
+exec_prerun=/bin/sh -c 'printf x >> $fio_ready_file'
 randrepeat=0
 norandommap=1
 percentile_list=50:95:99:99.9
@@ -790,22 +806,21 @@ EOF
 filename=${guest_devices[index]}
 EOF
     done
-    execute_case "$name" "$job_file"
+    execute_case "$name" "$job_file" "${#guest_devices[@]}"
 }
 
 execute_case() {
     local name=$1
     local job_file=$2
+    local expected_jobs=$3
     local result=$log_dir/fio-$name.json
     local status
     local deadline
+    local measurement_started=false
+    local attempt
 
     scp "${scp_options[@]}" "$job_file" zettide@127.0.0.1:/tmp/zettide-fio.job
-    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-        'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-before.txt"
-    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-        'cat /proc/softirqs' >"$log_dir/guest-softirqs-$name-before.txt"
-    record_thread_snapshot "$name-before"
+    ssh "${ssh_options[@]}" zettide@127.0.0.1 "sudo rm -f $fio_ready_file"
     start_monitors "$name"
     if [[ -n $perf_case && $name == "$perf_case" ]]; then
         perf_data=$log_dir/perf-$name.data
@@ -834,13 +849,54 @@ execute_case() {
     set +e
     if [[ $benchmark_mode == raw_nvme ]]; then
         ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-            'sudo fio --readonly --eta=never --output-format=json+ /tmp/zettide-fio.job'
+            'sudo fio --readonly --eta=never --output-format=json+ /tmp/zettide-fio.job' >"$result" &
     else
         ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-            'sudo fio --readonly --eta=never --output-format=json /tmp/zettide-fio.job'
-    fi >"$result"
-    status=$?
+            'sudo fio --readonly --eta=never --output-format=json /tmp/zettide-fio.job' >"$result" &
+    fi
+    fio_pid=$!
     set -e
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        process_running "$fio_pid" || break
+        fio_jobs_ready "$expected_jobs" && break
+        sleep 0.1
+    done
+    if process_running "$fio_pid" && fio_jobs_ready "$expected_jobs"; then
+        for ((attempt = 0; attempt < ramp_time * 10; attempt++)); do
+            process_running "$fio_pid" || break
+            sleep 0.1
+        done
+        if process_running "$fio_pid"; then
+            cp /proc/interrupts "$log_dir/host-interrupts-$name-before.txt"
+            cp /proc/softirqs "$log_dir/host-softirqs-$name-before.txt"
+            ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+                'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-before.txt"
+            ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+                'cat /proc/softirqs' >"$log_dir/guest-softirqs-$name-before.txt"
+            record_thread_snapshot "$name-before"
+            measurement_started=true
+        fi
+    elif process_running "$fio_pid"; then
+        echo "fio did not report ramp start after 30 seconds" >&2
+        kill -TERM "$fio_pid" 2>/dev/null || true
+    fi
+    set +e
+    wait "$fio_pid"
+    status=$?
+    fio_pid=""
+    set -e
+    if [[ $measurement_started == true ]]; then
+        cp /proc/interrupts "$log_dir/host-interrupts-$name-after.txt"
+        cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
+        ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+            'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-after.txt"
+        ssh "${ssh_options[@]}" zettide@127.0.0.1 \
+            'cat /proc/softirqs' >"$log_dir/guest-softirqs-$name-after.txt"
+        record_thread_snapshot "$name-after"
+    elif ((status == 0)); then
+        echo "fio completed before the measured phase started" >&2
+        status=1
+    fi
     stop_cpu_profile
     if [[ -n $perf_pid ]]; then
         kill -INT "$perf_pid" 2>/dev/null || true
@@ -852,13 +908,6 @@ execute_case() {
             --sort=comm,dso,symbol --input "$perf_data" >"$log_dir/perf-$name-inclusive.txt"
     fi
     stop_monitors
-    cp /proc/interrupts "$log_dir/host-interrupts-$name-after.txt"
-    cp /proc/softirqs "$log_dir/host-softirqs-$name-after.txt"
-    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-        'cat /proc/interrupts' >"$log_dir/guest-interrupts-$name-after.txt"
-    ssh "${ssh_options[@]}" zettide@127.0.0.1 \
-        'cat /proc/softirqs' >"$log_dir/guest-softirqs-$name-after.txt"
-    record_thread_snapshot "$name-after"
     ((status == 0)) || return "$status"
     jq -e '.jobs | length > 0 and all(.error == 0)' "$result" >/dev/null
     if [[ $benchmark_mode == raw_nvme ]]; then

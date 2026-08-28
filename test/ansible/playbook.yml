@@ -644,7 +644,8 @@
                     'coalescing_iops_threshold': zettide_vhost_scheduled_pool_coalescing_iops_threshold | default(''),
                     'cpu_profile_case': zettide_vhost_scheduled_pool_cpu_profile_case | default(''),
                     'perf_case': zettide_vhost_scheduled_pool_perf_case | default(''),
-                    'perf_frequency': zettide_vhost_scheduled_pool_perf_frequency | default(199)}
+                    'perf_frequency': zettide_vhost_scheduled_pool_perf_frequency | default(199),
+                    'target_gdb': zettide_vhost_scheduled_pool_target_gdb | default(0)}
                     if zettide_test_profile in ['vhost-scheduled-pool-fio', 'vhost-spdk-nvme-fio'] else {} }}
               spdk_nvme_perf: >-
                 {{ {'io_size': 4096,

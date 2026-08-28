@@ -22,6 +22,7 @@ bdfs=()
 association_lines=()
 declare -A associated_names=()
 perf_pid=""
+monitor_pid=""
 deferred_signal=0
 
 [[ $EUID -eq 0 ]] || { echo "SPDK NVMe perf requires root" >&2; exit 2; }
@@ -35,6 +36,7 @@ deferred_signal=0
 ((runtime <= 86400)) || { echo "SPDK NVMe perf runtime exceeds 86400 seconds: $runtime" >&2; exit 2; }
 ((warmup_time <= 3600)) || { echo "SPDK NVMe perf warmup exceeds 3600 seconds: $warmup_time" >&2; exit 2; }
 command -v prlimit >/dev/null || { echo "prlimit is required" >&2; exit 2; }
+command -v stdbuf >/dev/null || { echo "stdbuf is required" >&2; exit 2; }
 
 IFS=, read -r -a namespaces <<<"$namespace_text"
 [[ ${#namespaces[@]} -eq 2 ]] || { echo "SPDK NVMe perf requires two PCIe namespaces" >&2; exit 2; }
@@ -80,7 +82,71 @@ cleanup() {
         fi
     fi
     [[ -z $perf_pid ]] || wait "$perf_pid" 2>/dev/null || true
+    [[ -z $monitor_pid ]] || wait "$monitor_pid" 2>/dev/null || true
     exit "$result"
+}
+
+record_active_state() {
+    local name=$1
+    local interrupts_tmp=$log_dir/.host-interrupts-$name.$BASHPID
+    local softirqs_tmp=$log_dir/.host-softirqs-$name.$BASHPID
+    local pcie_tmp=$log_dir/.host-pcie-$name.$BASHPID
+    local bdf pci_path irq_path irq affinity effective
+
+    cp /proc/interrupts "$interrupts_tmp" || return 0
+    cp /proc/softirqs "$softirqs_tmp" || {
+        rm -f "$interrupts_tmp"
+        return 0
+    }
+    {
+        for bdf in "${bdfs[@]}"; do
+            pci_path=/sys/bus/pci/devices/$bdf
+            echo "== $bdf =="
+            for irq_path in "$pci_path"/msi_irqs/*; do
+                [[ -e $irq_path ]] || continue
+                irq=${irq_path##*/}
+                affinity=unavailable
+                effective=unavailable
+                [[ -r /proc/irq/$irq/smp_affinity_list ]] && affinity=$(<"/proc/irq/$irq/smp_affinity_list")
+                [[ -r /proc/irq/$irq/effective_affinity_list ]] && effective=$(<"/proc/irq/$irq/effective_affinity_list")
+                printf 'irq=%s affinity=%s effective=%s\n' "$irq" "$affinity" "$effective"
+            done
+        done
+    } >"$pcie_tmp" || true
+    if process_running "$perf_pid"; then
+        mv "$interrupts_tmp" "$log_dir/host-interrupts-$name.txt"
+        mv "$softirqs_tmp" "$log_dir/host-softirqs-$name.txt"
+        mv "$pcie_tmp" "$log_dir/host-pcie-$name.txt"
+    else
+        rm -f "$interrupts_tmp" "$softirqs_tmp" "$pcie_tmp"
+    fi
+}
+
+monitor_active_state() {
+    local attempt start_epoch
+    set +e
+    while process_running "$perf_pid" &&
+        ! grep -q '^Initialization complete\. Launching workers\.$' "$log_dir/perf.log"; do
+        sleep 0.01
+    done
+    process_running "$perf_pid" || return 0
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        process_running "$perf_pid" || return 0
+        sleep 0.1
+    done
+    for ((attempt = 0; attempt < warmup_time * 10; attempt++)); do
+        process_running "$perf_pid" || return 0
+        sleep 0.1
+    done
+    process_running "$perf_pid" || return 0
+    record_active_state measured-before
+    start_epoch=$EPOCHREALTIME
+    while process_running "$perf_pid"; do
+        record_active_state measured-after-latest
+        printf 'start_epoch=%s\nlatest_epoch=%s\n' "$start_epoch" "$EPOCHREALTIME" \
+            >"$log_dir/host-measured-window.txt"
+        sleep 1
+    done
 }
 
 restore_signal_traps() {
@@ -109,6 +175,7 @@ restore_signal_traps
 mkdir -p "$log_dir"
 : >"$ready_file"
 command=(
+    stdbuf --output=L --
     "$perf_binary"
     -q "$io_depth"
     -o 4096
@@ -142,10 +209,14 @@ done
 begin_deferred_signals
 prlimit --memlock=unlimited:unlimited -- "${command[@]}" >"$log_dir/perf.log" 2>&1 &
 perf_pid=$!
+monitor_active_state &
+monitor_pid=$!
 end_deferred_signals
 perf_status=0
 wait "$perf_pid" || perf_status=$?
 perf_pid=""
+wait "$monitor_pid" 2>/dev/null || true
+monitor_pid=""
 ((perf_status == 0)) || exit "$perf_status"
 [[ $(grep -c '^Attached to NVMe Controller at ' "$log_dir/perf.log") -eq 2 ]] || {
     echo "SPDK NVMe perf did not attach exactly two controllers" >&2

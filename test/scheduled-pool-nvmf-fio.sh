@@ -141,7 +141,7 @@ if [[ $benchmark_mode == raw_nvme ]] &&
     echo "raw NVMe vhost requires SPDK PCIe, validation-only Pool preparation, an expected Pool ID, and the vhost benchmark driver" >&2
     exit 2
 fi
-for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink sleep tr udevadm umount wipefs; do
+for command in blkdiscard blockdev date fuser grep jq losetup lsblk mkdir mktemp readlink setsid sleep tr udevadm umount wipefs; do
     command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 2; }
 done
 [[ -x $cli && -x $target ]] || {
@@ -530,7 +530,7 @@ prepare_pcie_pool() {
         expected_id=$expected_pool_id
     fi
     begin_attach_deferred_signals
-    env -u ZETTIDE_POOL_DATA_PCIE_PROBE \
+    setsid --wait env -u ZETTIDE_POOL_DATA_PCIE_PROBE \
         ZETTIDE_POOL_DATA_BENCHMARK_MODE=pool \
         ZETTIDE_POOL_DATA_STORAGE_TRANSPORT=spdk_nvme_pcie \
         ZETTIDE_POOL_DATA_PREPARATION_MODE="$pcie_preparation_mode" \
@@ -541,7 +541,11 @@ prepare_pcie_pool() {
     benchmark_pid=$!
     end_attach_deferred_signals
     wait "$benchmark_pid" || prepare_status=$?
-    benchmark_pid=""
+    if benchmark_group_running; then
+        echo "SPDK NVMe PCIe Pool preparation left running descendants" >&2
+        prepare_status=1
+    fi
+    stop_benchmark || prepare_status=1
     if ((prepare_status != 0)); then
         echo "SPDK NVMe PCIe Pool preparation failed; inspect $log_dir/spdk-pcie-prepare.log" >&2
         return 1
@@ -862,21 +866,67 @@ detach_loops() {
     return "$status"
 }
 
+benchmark_group_running() {
+    local stat_path stat_line stat_fields state pgrp
+    [[ -n $benchmark_pid ]] || return 1
+    for stat_path in /proc/[0-9]*/stat; do
+        IFS= read -r stat_line <"$stat_path" 2>/dev/null || continue
+        stat_fields=${stat_line##*) }
+        read -r state _ pgrp _ <<<"$stat_fields"
+        [[ $pgrp == "$benchmark_pid" && $state != Z ]] && return 0
+    done
+    return 1
+}
+
+stop_benchmark() {
+    local deadline status=0
+    [[ -n $benchmark_pid ]] || return 0
+    if benchmark_group_running; then
+        kill -TERM -- "-$benchmark_pid" 2>/dev/null || true
+        deadline=$((SECONDS + 45))
+        while benchmark_group_running && ((SECONDS < deadline)); do
+            sleep 0.1
+        done
+        if benchmark_group_running; then
+            kill -KILL -- "-$benchmark_pid" 2>/dev/null || true
+            deadline=$((SECONDS + 3))
+            while benchmark_group_running && ((SECONDS < deadline)); do
+                sleep 0.1
+            done
+        fi
+        if benchmark_group_running; then
+            echo "benchmark process group remains running; refusing storage cleanup" >&2
+            status=1
+        fi
+    fi
+    if ((status == 0)); then
+        wait "$benchmark_pid" 2>/dev/null || true
+        benchmark_pid=""
+    fi
+    return "$status"
+}
+
 finish() {
-    local command_rc=$? cleanup_rc=0 physical_index restore_attempt restore_rc=1
+    local command_rc=$? cleanup_rc=0 physical_index restore_attempt restore_rc=1 benchmark_stopped=true
     trap - EXIT
     trap '' HUP INT TERM
     set +e
-    for restore_attempt in 1 2 3; do
-        if restore_pcie_devices; then
-            restore_rc=0
-            break
-        fi
-        sleep 1
-    done
-    ((restore_rc == 0)) || cleanup_rc=1
-    record_pcie_state restored || cleanup_rc=1
-    detach_loops || cleanup_rc=1
+    if stop_benchmark; then
+        for restore_attempt in 1 2 3; do
+            if restore_pcie_devices; then
+                restore_rc=0
+                break
+            fi
+            sleep 1
+        done
+        ((restore_rc == 0)) || cleanup_rc=1
+        record_pcie_state restored || cleanup_rc=1
+        detach_loops || cleanup_rc=1
+    else
+        benchmark_stopped=false
+        cleanup_rc=1
+        record_event "cleanup-blocked reason=benchmark-process-group-running pid=$benchmark_pid"
+    fi
     {
         echo "profile=$lifecycle_profile"
         echo "physical_devices=$physical_device_count"
@@ -895,6 +945,7 @@ finish() {
         echo "benchmark_mode=$benchmark_mode"
         echo "pcie_namespaces=$pcie_namespace_text"
         echo "loops_detached=$loops_detached"
+        echo "benchmark_stopped=$benchmark_stopped"
         echo "test_succeeded=$test_succeeded"
         echo "command_rc=$command_rc"
         echo "cleanup_rc=$cleanup_rc"
@@ -923,11 +974,7 @@ fi
 handle_signal() {
     local status=$1
     trap '' HUP INT TERM
-    if [[ -n $benchmark_pid ]] && kill -0 "$benchmark_pid" 2>/dev/null; then
-        kill -TERM "$benchmark_pid" 2>/dev/null || true
-        wait "$benchmark_pid" 2>/dev/null || true
-        benchmark_pid=""
-    fi
+    stop_benchmark || true
     exit "$status"
 }
 
@@ -1246,7 +1293,7 @@ rm -f "$benchmark_ready_file"
 cp /proc/interrupts "$log_dir/host-interrupts-benchmark-before.txt"
 cp /proc/softirqs "$log_dir/host-softirqs-benchmark-before.txt"
 begin_attach_deferred_signals
-bash "$benchmark_driver" "$target" "$benchmark_ready_file" "$log_dir/$benchmark_log_name" \
+setsid --wait bash "$benchmark_driver" "$target" "$benchmark_ready_file" "$log_dir/$benchmark_log_name" \
     "$pool_id" "$read_policy" "${benchmark_devices[@]}" &
 benchmark_pid=$!
 end_attach_deferred_signals
@@ -1261,7 +1308,11 @@ if [[ -e $benchmark_ready_file ]]; then
 fi
 benchmark_status=0
 wait "$benchmark_pid" || benchmark_status=$?
-benchmark_pid=""
+if benchmark_group_running; then
+    echo "benchmark driver left running descendants" >&2
+    benchmark_status=1
+fi
+stop_benchmark || benchmark_status=1
 cp /proc/interrupts "$log_dir/host-interrupts-benchmark-after.txt"
 cp /proc/softirqs "$log_dir/host-softirqs-benchmark-after.txt"
 record_pcie_state completed
