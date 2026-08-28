@@ -137,6 +137,9 @@ const Worker = struct {
         errdefer std.heap.c_allocator.free(self.read_slots);
         for (self.read_slots) |*slot| slot.* = .{ .worker = self };
         for (&self.slots, 0..) |*slot, index| slot.* = .{ .sequence = .init(index) };
+        self.async_submit = true;
+        self.inflight = .init(0);
+        self.complete_head = .init(null);
         self.enqueue_position = .init(0);
         self.dequeue_position = 0;
         self.wake = .unset;
