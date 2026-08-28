@@ -602,6 +602,12 @@ if [[ $storage_transport == spdk_nvme_pcie ]]; then
 fi
 
 begin_deferred_signals
+qemu_reboot_args=(-no-reboot)
+if [[ $guest_mitigations_off == 1 ]]; then
+    # The guest reboots once to apply mitigations=off; poweroff still terminates
+    # QEMU because -no-shutdown is not set.
+    qemu_reboot_args=()
+fi
 "$qemu_command" \
     -name zettide-vhost-fio,debug-threads=on \
     -machine q35,accel=kvm \
@@ -620,7 +626,7 @@ begin_deferred_signals
     -device virtio-net-pci,netdev=net0 \
     -display none \
     -nographic \
-    -no-reboot \
+    "${qemu_reboot_args[@]}" \
     >"$log_dir/qemu-serial.log" 2>&1 &
 qemu_pid=$!
 end_deferred_signals
