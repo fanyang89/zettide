@@ -5,3 +5,4 @@ zig-pkg/
 test/external/.prepared/
 test-results/
 test/ansible/inventory.ini
+.pi/
