@@ -20,7 +20,7 @@
             .hash = "uuid-0.5.0-oOieIQx-AABtc9U3ihv_bf9pZAYoKp4UMsNFHBr-cn-w",
         },
         .zettide_node_protocol = .{
-            .path = "node-protocol",
+            .path = "libs/node-protocol",
         },
         .zbench = .{
             // v0.13.0 is the latest release compatible with Zig 0.16.
@@ -40,12 +40,10 @@
         ".github",
         "README.md",
         "benchmarks",
-        "cawfs",
-        "control",
+        "libs",
+        "services",
+        "tests",
         "docs",
-        "node-protocol",
-        "src",
-        "test",
         "vendor/raftz",
         "vendor/utf8proc",
         "vendor/libfuse-tests",

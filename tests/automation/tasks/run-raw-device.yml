@@ -1,0 +1,88 @@
+---
+- name: Initialize raw-device configuration | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_raw_config: "{{ zettide_raw_device | default({}) }}"
+
+- name: Require explicit raw-device configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_raw_config.path is defined
+      - zettide_raw_config.serial is defined
+      - zettide_raw_config.mountpoint is defined
+      - zettide_raw_config.backup_dir is defined
+      - zettide_raw_config.path | length > 0
+      - zettide_raw_config.serial | length > 0
+      - ansible_play_hosts_all | length == 1
+      - zettide_raw_device_confirm | default('') == 'DESTROY:' ~ zettide_raw_config.path ~ ':' ~ zettide_raw_config.serial
+    fail_msg: >-
+      Configure path, serial, mountpoint, and backup_dir, then pass
+      -e zettide_raw_device_confirm=DESTROY:<path>:<serial>.
+
+- name: Create raw-device result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/raw-device"
+    state: directory
+    mode: "0755"
+
+- name: Build Zettide for raw-device testing | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+
+- name: Run destructive raw-device lifecycle | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-raw-device.lock
+      - bash
+      - tests/physical-block.sh
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
+      - "{{ zettide_raw_config.path }}"
+      - "{{ zettide_raw_config.serial }}"
+      - "{{ zettide_raw_config.mountpoint }}"
+      - "{{ zettide_raw_config.backup_dir }}/zettide-raw-{{ inventory_hostname }}-{{ ansible_facts['date_time']['iso8601_basic_short'] }}-{{ zettide_source_revision.stdout[:12] }}.img"
+      - "{{ zettide_raw_test_mebibytes }}"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    ZETTIDE_RAW_DEVICE_CONFIRM: "{{ zettide_raw_device_confirm }}"
+    ZETTIDE_RAW_KEEP_BACKUP: "{{ '1' if zettide_raw_keep_backup | bool else '0' }}"
+    ZETTIDE_RAW_RESTORE_ORIGINAL: "{{ '1' if zettide_raw_restore_original | bool else '0' }}"
+    ZETTIDE_RAW_FIO: "{{ '1' if zettide_raw_fio | bool else '0' }}"
+    ZETTIDE_RAW_FIO_SIZE: "{{ zettide_raw_fio_size }}"
+    ZETTIDE_RAW_FIO_RUNTIME: "{{ zettide_raw_fio_runtime }}"
+    ZETTIDE_RAW_FIO_RAMP_TIME: "{{ zettide_raw_fio_ramp_time }}"
+    ZETTIDE_RAW_FUSE_FIO: "{{ '1' if zettide_raw_fuse_fio | bool else '0' }}"
+    ZETTIDE_RAW_FUSE_FIO_SINGLE_SIZE: "{{ zettide_raw_fuse_fio_single_size }}"
+    ZETTIDE_RAW_FUSE_FIO_MULTI_SIZE: "{{ zettide_raw_fuse_fio_multi_size }}"
+    ZETTIDE_RAW_FUSE_FIO_RUNTIME: "{{ zettide_raw_fuse_fio_runtime }}"
+    ZETTIDE_RAW_FUSE_FIO_RAMP_TIME: "{{ zettide_raw_fuse_fio_ramp_time }}"
+    ZETTIDE_TEST_LOG_DIR: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/raw-device"
+  async: "{{ zettide_raw_timeout }}"
+  poll: 15
+  changed_when: true
+  failed_when: false
+  register: zettide_raw_result
+
+- name: Record destructive raw-device lifecycle | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_raw_result.rc | default(1) }}
+      {{ zettide_raw_result.stdout | default('') }}
+      {{ zettide_raw_result.stderr | default(zettide_raw_result.msg | default('')) }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/raw-device/ansible.log"
+    mode: "0644"
+
+- name: Require destructive raw-device lifecycle | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_raw_result.rc | default(1) == 0
+    fail_msg: >-
+      Physical raw-device testing failed. The full-device backup is retained;
+      inspect the fetched raw-device logs before intervening.

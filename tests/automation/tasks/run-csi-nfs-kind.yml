@@ -1,0 +1,116 @@
+---
+- name: Require the supported CSI test architecture | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.architecture == 'x86_64'
+      - ansible_play_hosts_all | length == 1
+    fail_msg: "The CSI NFS kind profile requires one x86_64 Linux host."
+
+- name: Create CSI NFS kind result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/csi-nfs-kind"
+    state: directory
+    mode: "0755"
+
+- name: Build Zettide for CSI NFS kind | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+
+- name: Prepare NFS-Ganesha and verify RPC | {{ zettide_optimize }}
+  ansible.builtin.include_tasks: prepare-nfs-ganesha.yml
+
+- name: Verify Docker for kind | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - info
+  changed_when: false
+
+- name: Prepare pinned kind tools | {{ zettide_optimize }}
+  ansible.builtin.include_tasks: prepare-kind.yml
+
+- name: Download pinned NFS CSI manifests | {{ zettide_optimize }}
+  ansible.builtin.get_url:
+    url: >-
+      https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/v4.13.4/deploy/v4.13.4/{{ item.name }}
+    dest: "{{ zettide_controller_staging.path }}/{{ item.name }}"
+    checksum: "sha256:{{ item.sha256 }}"
+    mode: "0644"
+  loop:
+    - name: rbac-csi-nfs.yaml
+      sha256: 312de689d07627330d8280e50d7b51357e0b5f5ca0d8aa75794aec460ee4cff0
+    - name: csi-nfs-driverinfo.yaml
+      sha256: fa2bba4674821b3317d1e016f3c9d54abe04fcdc6fed3fce9e58994c8311c4a0
+    - name: csi-nfs-node.yaml
+      sha256: b66104b44d4569c926e11af5c6c3858fbc38fd16099b206fc4a0dc0f7fcd94d2
+  delegate_to: localhost
+  become: false
+  register: zettide_csi_manifest_download
+  retries: 3
+  delay: 5
+  until: zettide_csi_manifest_download is succeeded
+
+- name: Create remote CSI manifest directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/csi-manifests"
+    state: directory
+    mode: "0755"
+
+- name: Copy pinned NFS CSI manifests to the remote host | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    src: "{{ zettide_controller_staging.path }}/{{ item }}"
+    dest: "{{ zettide_remote_workspace.path }}/csi-manifests/{{ item }}"
+    mode: "0644"
+  loop:
+    - rbac-csi-nfs.yaml
+    - csi-nfs-driverinfo.yaml
+    - csi-nfs-node.yaml
+
+- name: Run CSI NFS kind lifecycle | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-nfs-ganesha.lock
+      - bash
+      - tests/nfs-csi-kind.sh
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
+      - "{{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build"
+      - "{{ zettide_remote_workspace.path }}/csi-tools/kind"
+      - "{{ zettide_remote_workspace.path }}/csi-tools/kubectl"
+      - "{{ zettide_remote_workspace.path }}/csi-manifests"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    ZETTIDE_NFS_NCONNECT: "{{ zettide_nfs_nconnect | default(8) }}"
+    ZETTIDE_NFS_RPC_IOQ_THRD_MIN: "{{ zettide_nfs_rpc_ioq_thrd_min | default(2) }}"
+    ZETTIDE_NFS_RPC_IOQ_THRD_MAX: "{{ zettide_nfs_rpc_ioq_thrd_max | default(16) }}"
+    ZETTIDE_TEST_LOG_DIR: >-
+      {{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/csi-nfs-kind
+  async: 7200
+  poll: 10
+  changed_when: true
+  failed_when: false
+  register: zettide_csi_nfs_kind_result
+
+- name: Record CSI NFS kind lifecycle | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_csi_nfs_kind_result.rc | default(1) }}
+      {{ zettide_csi_nfs_kind_result.stdout | default('') }}
+      {{ zettide_csi_nfs_kind_result.stderr | default(zettide_csi_nfs_kind_result.msg | default('')) }}
+    dest: >-
+      {{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/csi-nfs-kind/ansible.log
+    mode: "0644"
+
+- name: Require CSI NFS kind lifecycle | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_csi_nfs_kind_result.rc | default(1) == 0
+    fail_msg: "CSI NFS kind verification failed; inspect the fetched csi-nfs-kind logs."

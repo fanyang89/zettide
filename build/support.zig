@@ -8,7 +8,7 @@ pub fn createNameProfileCrossTest(
 ) *std.Build.Step.Compile {
     return b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("test/name-profile-cross.zig"),
+            .root_source_file = b.path("tests/name-profile-cross.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -25,7 +25,7 @@ pub fn createCoreModule(
     crc32c_dependency: *std.Build.Dependency,
 ) *std.Build.Module {
     const core = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("services/zettide/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -39,7 +39,7 @@ pub fn createCoreModule(
     core.addImport("linux_c", unavailable_c);
     core.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
     core.addIncludePath(b.path("vendor/utf8proc"));
-    core.addIncludePath(b.path("src"));
+    core.addIncludePath(b.path("services/zettide"));
     core.addCMacro("UTF8PROC_STATIC", "1");
     core.addCSourceFiles(.{
         .files = &.{"vendor/utf8proc/utf8proc.c"},
@@ -58,7 +58,7 @@ pub fn createCoreModule(
     utf8proc_translate.defineCMacro("UTF8PROC_STATIC", "1");
     core.addImport("utf8proc_c", utf8proc_translate.createModule());
     const crc32c = b.createModule(.{
-        .root_source_file = b.path("src/crc32c.zig"),
+        .root_source_file = b.path("services/zettide/crc32c.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -89,7 +89,7 @@ pub fn createCoreModule(
             .target = target,
             .optimize = optimize,
         });
-        linux_translate.addIncludePath(b.path("src"));
+        linux_translate.addIncludePath(b.path("services/zettide"));
         linux_translate.defineCMacro("_FORTIFY_SOURCE", "0");
         linux_translate.defineCMacro("FUSE_USE_VERSION", "35");
         linux_translate.linkSystemLibrary("fuse3", .{});
@@ -99,7 +99,7 @@ pub fn createCoreModule(
         core.addCMacro("FUSE_USE_VERSION", "35");
         core.linkSystemLibrary("fuse3", .{});
         core.addCSourceFiles(.{
-            .files = &.{"src/fuse_shim.c"},
+            .files = &.{"services/zettide/fuse_shim.c"},
             .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-DFUSE_USE_VERSION=35" },
         });
     }
@@ -219,7 +219,7 @@ pub fn createExecutable(
     const options = b.addOptions();
     options.addOption(bool, "spdk", enable_spdk);
     const module = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("services/zettide/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -240,11 +240,11 @@ pub fn configureSpdk(
 ) *std.Build.Module {
     module.addCSourceFiles(.{
         .files = &.{
-            "src/spdk/runtime.c",
-            "src/spdk/bdev_provider.c",
-            "src/spdk/iscsi_export.c",
-            "src/spdk/nvmf_tcp_export.c",
-            "src/spdk/vhost_blk_controller.c",
+            "services/zettide/spdk/runtime.c",
+            "services/zettide/spdk/bdev_provider.c",
+            "services/zettide/spdk/iscsi_export.c",
+            "services/zettide/spdk/nvmf_tcp_export.c",
+            "services/zettide/spdk/vhost_blk_controller.c",
         },
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
@@ -300,8 +300,8 @@ pub fn createSpdkCModule(
         .target = target,
         .optimize = optimize,
     });
-    spdk_translate.addIncludePath(b.path("src"));
-    spdk_translate.addIncludePath(b.path("test"));
+    spdk_translate.addIncludePath(b.path("services/zettide"));
+    spdk_translate.addIncludePath(b.path("tests"));
     return spdk_translate.createModule();
 }
 
@@ -314,7 +314,7 @@ pub fn createLinuxBlockProbe(
     return b.addExecutable(.{
         .name = "zettide-linux-block-probe",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("test/linux_block.zig"),
+            .root_source_file = b.path("tests/linux_block.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zettide", .module = core }},
@@ -329,7 +329,7 @@ pub fn createSpdkStorageTest(
     core: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
-        .root_source_file = b.path("test/spdk_storage.zig"),
+        .root_source_file = b.path("tests/spdk_storage.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -338,8 +338,8 @@ pub fn createSpdkStorageTest(
             .{ .name = "spdk_c", .module = createSpdkCModule(b, target, optimize, true) },
         },
     });
-    module.addIncludePath(b.path("src"));
-    module.addIncludePath(b.path("test"));
+    module.addIncludePath(b.path("services/zettide"));
+    module.addIncludePath(b.path("tests"));
     return b.addLibrary(.{
         .name = "zettide-spdk-storage-test",
         .root_module = module,
@@ -353,13 +353,13 @@ pub fn createSpdkNvmfExportTest(
     core: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
-        .root_source_file = b.path("test/spdk_nvmf_export.zig"),
+        .root_source_file = b.path("tests/spdk_nvmf_export.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{.{ .name = "zettide", .module = core }},
     });
-    module.addIncludePath(b.path("src"));
+    module.addIncludePath(b.path("services/zettide"));
     return b.addLibrary(.{
         .name = "zettide-spdk-nvmf-export-test",
         .root_module = module,
@@ -373,13 +373,13 @@ pub fn createSpdkVhostExportTest(
     core: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
-        .root_source_file = b.path("test/spdk_vhost_export.zig"),
+        .root_source_file = b.path("tests/spdk_vhost_export.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{.{ .name = "zettide", .module = core }},
     });
-    module.addIncludePath(b.path("src"));
+    module.addIncludePath(b.path("services/zettide"));
     return b.addLibrary(.{
         .name = "zettide-spdk-vhost-export-test",
         .root_module = module,
@@ -400,7 +400,7 @@ pub fn createFsProbe(
         }),
     });
     probe.root_module.addCSourceFile(.{
-        .file = b.path("test/fs_probe.c"),
+        .file = b.path("tests/fs_probe.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     return probe;
@@ -419,7 +419,7 @@ pub fn createLibfuseProbe(
             .link_libc = true,
         }),
     });
-    probe.root_module.addIncludePath(b.path("test/external"));
+    probe.root_module.addIncludePath(b.path("tests/external"));
     probe.root_module.addCSourceFile(.{
         .file = b.path("vendor/libfuse-tests/test_syscalls.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
@@ -441,7 +441,7 @@ pub fn createDurabilityProbe(
         }),
     });
     probe.root_module.addCSourceFile(.{
-        .file = b.path("test/durability_probe.c"),
+        .file = b.path("tests/durability_probe.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     return probe;
@@ -461,7 +461,7 @@ pub fn createSignalMaskExec(
         }),
     });
     executable.root_module.addCSourceFile(.{
-        .file = b.path("test/signal_mask_exec.c"),
+        .file = b.path("tests/signal_mask_exec.c"),
         .flags = &.{"-std=c11"},
     });
     return executable;
@@ -481,7 +481,7 @@ pub fn createPosixProbe(
         }),
     });
     probe.root_module.addCSourceFile(.{
-        .file = b.path("test/posix_probe.c"),
+        .file = b.path("tests/posix_probe.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     return probe;
@@ -500,7 +500,7 @@ pub fn createFsxProbe(
             .link_libc = true,
         }),
     });
-    probe.root_module.addIncludePath(b.path("test/external"));
+    probe.root_module.addIncludePath(b.path("tests/external"));
     probe.root_module.addIncludePath(b.path("vendor/xfstests/src"));
     probe.root_module.addCSourceFile(.{
         .file = b.path("vendor/xfstests/ltp/fsx.c"),
@@ -523,7 +523,7 @@ pub fn createPermissionProbe(
         }),
     });
     probe.root_module.addCSourceFile(.{
-        .file = b.path("test/conformance/permission_probe.c"),
+        .file = b.path("tests/conformance/permission_probe.c"),
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     return probe;

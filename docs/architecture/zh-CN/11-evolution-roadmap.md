@@ -113,7 +113,7 @@ CSI 不阻塞 Tier 1/2，也不新增数据 plane。
 ## Milestone 11：Repair 与 Production Admission
 
 - 实现增量/全量 rebuild、scrub、限速、进度上报和 Replica relocation。
-- 增加 control/DataService 双向认证、per-host NVMf/iSCSI/NFS authorization 和 adapter/CSI identity binding。
+- 增加 services/control/DataService 双向认证、per-host NVMf/iSCSI/NFS authorization 和 adapter/CSI identity binding。
 - 建立 credential/certificate rotation、滚动升级、回滚、格式兼容和灾难恢复流程。
 - 通过断电、网络分区、介质损坏、旧 host 恢复、长稳和资源耗尽测试。
 

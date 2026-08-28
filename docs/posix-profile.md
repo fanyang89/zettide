@@ -75,7 +75,7 @@ concurrent lock and namespace workloads.
 `test-posix-privileged` covers sticky directories, ownership changes, set-id
 clearing, and setgid inheritance using multiple real Linux identities. The
 nightly selection and every intentional non-applicable case are recorded as
-exact case IDs in the TSV manifests under `test/external/`; wildcard and group
+exact case IDs in the TSV manifests under `tests/external/`; wildcard and group
 exclusions are not accepted.
 
 The profile is complete only when every required manifest entry executes and

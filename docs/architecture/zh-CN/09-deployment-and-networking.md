@@ -72,7 +72,7 @@ Host-facing storage network 与内部 Replica fabric 具有不同 identity、ACL
 
 ## 隔离与 QoS
 
-共享交换机/NIC 时使用 VLAN/VRF、QoS 和防火墙隔离 management、Raft/control、host block、NFS、internal Replica 和 tenant traffic。业务突发不得饿死 Raft heartbeat/lease renewal、同步 Replica commit 或 NFS stable write。只暴露每个平面需要的 endpoint；tenant 网络不得直接访问 control/internal Replica port。
+共享交换机/NIC 时使用 VLAN/VRF、QoS 和防火墙隔离 management、Raft/control、host block、NFS、internal Replica 和 tenant traffic。业务突发不得饿死 Raft heartbeat/lease renewal、同步 Replica commit 或 NFS stable write。只暴露每个平面需要的 endpoint；tenant 网络不得直接访问 services/control/internal Replica port。
 
 Control path 可达不表示数据 path 可用。分别观测 grpc-lite/heartbeat、每个 NVMf/iSCSI path、RDMA qpair、NFS path、介质健康和 host session；不能用一个综合“node up”位替代路径独立事实。
 
@@ -110,7 +110,7 @@ Tier 1/2：
 
 Tier 3 启动顺序：
 
-1. 验证 control/storage/host 网络隔离；按实际路径完成 TCP/RDMA capability 和 memory-registration gate。
+1. 验证 services/control/storage/host 网络隔离；按实际路径完成 TCP/RDMA capability 和 memory-registration gate。
 2. 启动保留既有持久状态的 control voters，恢复 WAL、snapshot、membership 和 Raft quorum；禁止 fresh bootstrap 覆盖。
 3. 选出 leader并完成 ReadIndex；leader heartbeat view 从空开始。
 4. DataService 恢复 stable identity、Replica generation/epoch/manifest 和最高 installed publication generation，在取得当前 authority 前保持 publication/Replica write closed。

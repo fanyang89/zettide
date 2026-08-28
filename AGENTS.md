@@ -3,8 +3,9 @@
 ## Repository Scope
 
 This repository contains the complete Zettide storage project. Storage-owned
-components live in `src/`, `control/`, `cawfs/`, and `node-protocol/`.
-External source dependencies are pinned as submodules under `vendor/`.
+components live in `services/zettide/`, `services/control/`, `services/csi/`,
+`services/nfs-fsal/`, `libs/cawfs/`, and `libs/node-protocol/`. Tests live under
+`tests/`. External source dependencies are pinned as submodules under `vendor/`.
 
 `qtr` and `etz` are separate projects and are not part of this repository's
 build or test lifecycle.

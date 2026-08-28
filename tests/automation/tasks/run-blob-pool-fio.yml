@@ -1,0 +1,242 @@
+---
+- name: Initialize physical Blob Pool fio configuration | {{ zettide_optimize }}
+  ansible.builtin.set_fact:
+    zettide_blob_pool_fio_config: "{{ zettide_raw_device | default({}) }}"
+
+- name: Require explicit physical Blob Pool configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        (zettide_blob_pool_fio_backup_original | default(true) | string | lower)
+        in ['true', 'false', '1', '0']
+      - zettide_blob_pool_fio_config.path is defined
+      - zettide_blob_pool_fio_config.serial is defined
+      - not (zettide_blob_pool_fio_backup_original | default(true) | bool) or zettide_blob_pool_fio_config.pool_id is defined
+      - not (zettide_blob_pool_fio_backup_original | default(true) | bool) or zettide_blob_pool_fio_config.backup_dir is defined
+      - zettide_blob_pool_fio_config.path | length > 0
+      - zettide_blob_pool_fio_config.serial | length > 0
+      - not (zettide_blob_pool_fio_backup_original | default(true) | bool) or zettide_blob_pool_fio_config.pool_id | default('') | length == 32
+      - not (zettide_blob_pool_fio_backup_original | default(true) | bool) or zettide_blob_pool_fio_config.backup_dir | default('') | length > 0
+      - ansible_play_hosts_all | length == 1
+      - zettide_blob_pool_fio_confirm | default('') ==
+        'DESTROY:' ~ zettide_blob_pool_fio_config.path ~ ':' ~ zettide_blob_pool_fio_config.serial
+    fail_msg: >-
+      Configure path and serial, plus pool_id and backup_dir when backups are enabled, then pass
+      -e zettide_blob_pool_fio_confirm=DESTROY:<path>:<serial>.
+
+- name: Create physical Blob Pool fio result directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/blob-pool-fio"
+    state: directory
+    mode: "0755"
+
+- name: Build Zettide for physical Blob Pool fio | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+
+- name: Download pinned NFS-Ganesha V13 source | {{ zettide_optimize }}
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/nfs-ganesha/nfs-ganesha/archive/429463bc77a4654a4f00e0109b8c1496c272abb4.tar.gz
+    dest: "{{ zettide_controller_staging.path }}/nfs-ganesha-v13.tar.gz"
+    checksum: sha256:b2550f8c74134980ebd264b4d0d242439f88f89d7cdae30e56367a767b10aaae
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  register: zettide_nfs_ganesha_download
+  retries: 3
+  delay: 5
+  until: zettide_nfs_ganesha_download is succeeded
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Extract pinned NFS-Ganesha V13 source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/nfs-ganesha-v13.tar.gz"
+    dest: "{{ zettide_remote_workspace.path }}"
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Download pinned libkmip source | {{ zettide_optimize }}
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/ceph/libkmip/archive/4f553ecaf8e57cc3019222b8551d17888f0a1e66.tar.gz
+    dest: "{{ zettide_controller_staging.path }}/libkmip.tar.gz"
+    checksum: sha256:372d54e3a25c9d3f5c442714f93ddac263b68d993a27647853a377cdf7e94432
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  register: zettide_libkmip_download
+  retries: 3
+  delay: 5
+  until: zettide_libkmip_download is succeeded
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Create pinned libkmip source directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libkmip
+    state: directory
+    mode: "0755"
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Extract pinned libkmip source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/libkmip.tar.gz"
+    dest: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libkmip
+    extra_opts:
+      - --strip-components=1
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Download pinned NTIRPC source | {{ zettide_optimize }}
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/nfs-ganesha/ntirpc/archive/96e980def1c2d4538ff4708b0908670dd6a8946d.tar.gz
+    dest: "{{ zettide_controller_staging.path }}/ntirpc.tar.gz"
+    checksum: sha256:39775a5404cf78e1327020154ed9f3e370a6b235adbff47d0726ef1c30a20e71
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  register: zettide_ntirpc_download
+  retries: 3
+  delay: 5
+  until: zettide_ntirpc_download is succeeded
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Create pinned NTIRPC source directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libntirpc
+    state: directory
+    mode: "0755"
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Extract pinned NTIRPC source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/ntirpc.tar.gz"
+    dest: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libntirpc
+    extra_opts:
+      - --strip-components=1
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Attach FSAL_ZETTIDE to NFS-Ganesha | {{ zettide_optimize }}
+  ansible.builtin.lineinfile:
+    path: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/FSAL/CMakeLists.txt
+    line: >-
+      add_subdirectory("{{ zettide_remote_workspace.path }}/services/nfs-fsal" FSAL_ZETTIDE)
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Configure pinned NFS-Ganesha | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - cmake
+      - -S
+      - "{{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src"
+      - -B
+      - "{{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build"
+      - -G
+      - Ninja
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DZETTIDE_SOURCE_DIR={{ zettide_remote_workspace.path }}
+      - -DUSE_9P=OFF
+      - -DUSE_DBUS=ON
+      - -DUSE_GRPC=OFF
+      - -DUSE_GSS=OFF
+      - -DUSE_MONITORING=OFF
+      - -DUSE_NFSACL3=OFF
+      - -DUSE_NFSIDMAP=OFF
+      - -DUSE_NLM=OFF
+      - -DUSE_RQUOTA=OFF
+      - -DUSE_SYSTEM_NTIRPC=OFF
+  changed_when: true
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Build pinned NFS-Ganesha and FSAL_ZETTIDE | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - cmake
+      - --build
+      - "{{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build"
+      - --target
+      - ganesha.nfsd
+      - fsalzettide
+      - -j2
+  changed_when: true
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Verify NFS-Ganesha RPC before physical device access | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - test-nfs-ganesha
+      - -Doptimize={{ zettide_optimize }}
+      - -Dnfs-ganesha-tests=required
+      - -Dganesha-build-dir={{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: true
+  when: zettide_test_profile == 'blob-pool-nfs-fio'
+
+- name: Run destructive physical Blob Pool fio lifecycle | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-raw-device.lock
+      - bash
+      - tests/physical-blob-pool-fio.sh
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
+      - "{{ zettide_blob_pool_fio_config.path }}"
+      - "{{ zettide_blob_pool_fio_config.serial }}"
+      - "{{ zettide_blob_pool_fio_config.pool_id | default('-') if zettide_blob_pool_fio_backup_original | default(true) | bool else '-' }}"
+      - "{{ (zettide_blob_pool_fio_config.backup_dir | default('')) ~ '/zettide-blob-pool-fio-' ~ inventory_hostname ~ '-' ~ ansible_facts['date_time']['iso8601_basic_short'] ~ '-' ~ zettide_source_revision.stdout[:12] ~ '.img' if zettide_blob_pool_fio_backup_original | default(true) | bool else '-' }}"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    ZETTIDE_BLOB_POOL_FIO_CONFIRM: "{{ zettide_blob_pool_fio_confirm }}"
+    ZETTIDE_BLOB_POOL_FIO_BACKUP_ORIGINAL: >-
+      {{ '1' if zettide_blob_pool_fio_backup_original | default(true) | bool else '0' }}
+    ZETTIDE_RAW_KEEP_BACKUP: "{{ '1' if zettide_raw_keep_backup | bool else '0' }}"
+    ZETTIDE_POOL_FIO_SINGLE_SIZE: "{{ zettide_pool_fio_single_size }}"
+    ZETTIDE_POOL_FIO_MULTI_SIZE: "{{ zettide_pool_fio_multi_size }}"
+    ZETTIDE_POOL_FIO_RUNTIME: "{{ zettide_pool_fio_runtime }}"
+    ZETTIDE_POOL_FIO_RAMP_TIME: "{{ zettide_pool_fio_ramp_time }}"
+    ZETTIDE_POOL_FIO_FRONTEND: "{{ 'nfs' if zettide_test_profile == 'blob-pool-nfs-fio' else 'fuse' }}"
+    ZETTIDE_NFS_STABLE_WRITE_BATCH_US: "{{ zettide_nfs_stable_write_batch_us | default(20000) }}"
+    ZETTIDE_NFS_NCONNECT: "{{ zettide_nfs_nconnect | default(1) }}"
+    ZETTIDE_NFS_RPC_IOQ_THRD_MIN: "{{ zettide_nfs_rpc_ioq_thrd_min | default(2) }}"
+    ZETTIDE_NFS_RPC_IOQ_THRD_MAX: "{{ zettide_nfs_rpc_ioq_thrd_max | default(16) }}"
+    ZETTIDE_NFS_PERF_CASE: "{{ zettide_nfs_perf_case | default('') }}"
+    ZETTIDE_NFS_PERF_FREQUENCY: "{{ zettide_nfs_perf_frequency | default(199) }}"
+    ZETTIDE_GANESHA_BUILD_DIR: "{{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build"
+    ZETTIDE_TEST_LOG_DIR: >-
+      {{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/blob-pool-fio
+  changed_when: true
+  failed_when: false
+  register: zettide_blob_pool_fio_result
+
+- name: Record physical Blob Pool fio lifecycle | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_blob_pool_fio_result.rc | default(1) }}
+      {{ zettide_blob_pool_fio_result.stdout | default('') }}
+      {{ zettide_blob_pool_fio_result.stderr | default(zettide_blob_pool_fio_result.msg | default('')) }}
+    dest: >-
+      {{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/blob-pool-fio/ansible.log
+    mode: "0644"
+
+- name: Require physical Blob Pool fio lifecycle | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_blob_pool_fio_result.rc | default(1) == 0
+    fail_msg: >-
+      Physical Blob Pool fio failed. Inspect the fetched blob-pool-fio logs
+      before intervening; a backup exists only when backup mode is enabled.

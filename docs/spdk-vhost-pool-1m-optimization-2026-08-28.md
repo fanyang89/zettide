@@ -150,9 +150,9 @@ threaded 16、inline_batches 0、coalescing threshold 10000、runtime 20 s / ram
 最终配置（破坏性测试，直接接管两块 NVMe）：
 
 ```bash
-uv run ansible-playbook \
+ANSIBLE_CONFIG=tests/automation/ansible.cfg uv run --project tests/automation ansible-playbook \
   -i /tmp/opencode/vm-fc.ini \
-  test/ansible/vhost-scheduled-pool-fio.yml \
+  tests/automation/vhost-scheduled-pool-fio.yml \
   --limit vm-fc \
   -e @/tmp/opencode/vm-fc-vhost-1m-vars.json
 ```

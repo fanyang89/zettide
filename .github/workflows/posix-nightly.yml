@@ -21,7 +21,7 @@ jobs:
       matrix:
         optimize: [Debug, ReleaseSafe]
     env:
-      ZETTIDE_EXTERNAL_ROOT: ${{ github.workspace }}/test/external/.prepared
+      ZETTIDE_EXTERNAL_ROOT: ${{ github.workspace }}/tests/external/.prepared
       ZETTIDE_TEST_LOG_DIR: ${{ github.workspace }}/test-results
       ZETTIDE_KEEP_TEST_ARTIFACTS: "1"
     steps:
@@ -50,7 +50,7 @@ jobs:
         run: |
           mkdir -p "$ZETTIDE_TEST_LOG_DIR"
           set -o pipefail
-          bash test/external/prepare.sh "$ZETTIDE_EXTERNAL_ROOT" \
+          bash tests/external/prepare.sh "$ZETTIDE_EXTERNAL_ROOT" \
             2>&1 | tee "$ZETTIDE_TEST_LOG_DIR/prepare.log"
 
       - name: Run nightly gates including fio verification

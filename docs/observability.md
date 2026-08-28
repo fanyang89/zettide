@@ -467,8 +467,8 @@ history, host/VM correlation, and cross-host comparison.
 Use one public origin, for example:
 
 ```text
-https://console.example.test/          -> qtr
-https://console.example.test/grafana/  -> Grafana
+https://console.example.tests/          -> qtr
+https://console.example.tests/grafana/  -> Grafana
 ```
 
 The ingress authentication layer performs OIDC login before either route. It

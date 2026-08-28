@@ -39,7 +39,7 @@
   quorum 和在两个 Replica 上持久化的 commit certificate。
 - `zettide/docs/v3-multivolume-format.md:163-191`：未来 catalog 必须 COW 写入、由 control
   authority 绑定 root digest，并禁止复用任一 recoverable root 引用的 extent。
-- `control/proto/zettide/control/v1/control.proto:89-93`：现有 `StateSnapshot` 仅含
+- `services/control/proto/zettide/control/v1/control.proto:89-93`：现有 `StateSnapshot` 仅含
   Pool 和 request records。
 
 必须在新文档中固定以下定义：

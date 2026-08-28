@@ -1,0 +1,158 @@
+---
+- name: Require explicit Blob FUSE fio targets | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_blob_fuse_targets is defined
+      - (zettide_blob_fuse_targets | default([])) is sequence
+      - (zettide_blob_fuse_targets | default([])) is not string
+      - zettide_blob_fuse_targets | default([]) | length > 0
+    fail_msg: "Configure one or more zettide_blob_fuse_targets; no default target is permitted."
+
+- name: Validate Blob FUSE fio target configuration | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - item.name is defined
+      - item.tmpdir is defined
+      - item.name | default('') is match('^[A-Za-z0-9._-]+$')
+      - item.tmpdir | default('') is match('^/')
+      - item.tmpdir | default('') != '/'
+    fail_msg: "Each Blob FUSE fio target requires a safe name and an absolute, non-root tmpdir."
+  loop: "{{ zettide_blob_fuse_targets }}"
+  loop_control:
+    label: "{{ item.name | default('invalid-target') }}"
+
+- name: Require unique Blob FUSE fio target names | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - >-
+        zettide_blob_fuse_targets | map(attribute='name') | unique | list | length ==
+        zettide_blob_fuse_targets | length
+    fail_msg: "Blob FUSE fio target names must be unique."
+
+- name: Check Blob FUSE fio target directories | {{ zettide_optimize }}
+  ansible.builtin.stat:
+    path: "{{ item.tmpdir }}"
+  loop: "{{ zettide_blob_fuse_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: zettide_blob_fuse_target_directories
+
+- name: Require Blob FUSE fio target directories | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isdir
+      - item.stat.writeable
+    fail_msg: "Blob FUSE fio target {{ item.item.tmpdir }} must be a writable directory."
+  loop: "{{ zettide_blob_fuse_target_directories.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Read Blob FUSE fio target free space | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - df
+      - --output=avail
+      - -B1
+      - "{{ item.tmpdir }}"
+  loop: "{{ zettide_blob_fuse_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+  register: zettide_blob_fuse_target_space
+
+- name: Require Blob FUSE fio target free space | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - item.stdout_lines[-1] | trim | int >= zettide_blob_fuse_fio_backing_size_effective | int
+    fail_msg: >-
+      Blob FUSE fio target {{ item.item.tmpdir }} requires at least
+      {{ zettide_blob_fuse_fio_backing_size_effective }} bytes free; sparse COW writes may grow the backing file.
+  loop: "{{ zettide_blob_fuse_target_space.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Create Blob FUSE fio result directories | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/blob-fuse-fio/{{ item.name }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ zettide_blob_fuse_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Build Zettide for Blob FUSE fio | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - "{{ zettide_zig }}"
+      - build
+      - -Doptimize={{ zettide_optimize }}
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: false
+  failed_when: false
+  register: zettide_blob_fuse_fio_build
+
+- name: Record Zettide build for Blob FUSE fio | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ zettide_blob_fuse_fio_build.rc }}
+      {{ zettide_blob_fuse_fio_build.stdout }}
+      {{ zettide_blob_fuse_fio_build.stderr }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/blob-fuse-fio/build.log"
+    mode: "0644"
+
+- name: Require Zettide build for Blob FUSE fio | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - zettide_blob_fuse_fio_build.rc == 0
+    fail_msg: "{{ zettide_optimize }} Blob FUSE fio build failed; inspect build.log."
+
+- name: Run Blob FUSE fio targets | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-blob-fuse-fio.lock
+      - bash
+      - tests/blob-fuse-fio.sh
+      - "{{ zettide_remote_workspace.path }}/zig-out/bin/zettide"
+      - "{{ item.tmpdir }}"
+      - "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/blob-fuse-fio/{{ item.name }}"
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  environment:
+    ZETTIDE_BLOB_FUSE_FIO_BACKING_SIZE: "{{ zettide_blob_fuse_fio_backing_size_effective }}"
+    ZETTIDE_BLOB_FUSE_FIO_FILE_SIZE: "{{ zettide_blob_fuse_fio_file_size_effective }}"
+    ZETTIDE_BLOB_FUSE_FIO_RUNTIME: "{{ zettide_blob_fuse_fio_runtime_effective }}"
+    ZETTIDE_BLOB_FUSE_FIO_RAMP_TIME: "{{ zettide_blob_fuse_fio_ramp_time_effective }}"
+  loop: "{{ zettide_blob_fuse_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  async: "{{ zettide_blob_fuse_fio_timeout_effective }}"
+  poll: 15
+  changed_when: true
+  failed_when: false
+  register: zettide_blob_fuse_fio_runs
+
+- name: Record Blob FUSE fio target results | {{ zettide_optimize }}
+  ansible.builtin.copy:
+    content: |-
+      rc={{ item.rc | default(1) }}
+      target={{ item.item.tmpdir }}
+      {{ item.stdout | default('') }}
+      {{ item.stderr | default(item.msg | default('')) }}
+    dest: "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/blob-fuse-fio/{{ item.item.name }}/ansible.log"
+    mode: "0644"
+  loop: "{{ zettide_blob_fuse_fio_runs.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Require Blob FUSE fio target success | {{ zettide_optimize }}
+  ansible.builtin.assert:
+    that:
+      - item.rc | default(1) == 0
+    fail_msg: "Blob FUSE fio failed for {{ item.item.name }}; inspect the fetched logs."
+  loop: "{{ zettide_blob_fuse_fio_runs.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"

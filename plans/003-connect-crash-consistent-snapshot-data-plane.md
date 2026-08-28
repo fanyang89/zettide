@@ -27,12 +27,12 @@ operation ID 收敛到同一结果。
 
 ## 当前状态
 
-- `zettide/src/volume.zig:776-783`：`Volume.sync()` 只 flush 当前 backing，不返回或 pin root。
-- `zettide/src/v3/replica_endpoint.zig:11-17`：当前 endpoint 只有 read/write/sync，没有
+- `services/zettide/volume.zig:776-783`：`Volume.sync()` 只 flush 当前 backing，不返回或 pin root。
+- `services/zettide/v3/replica_endpoint.zig:11-17`：当前 endpoint 只有 read/write/sync，没有
   volume ID、epoch、sequence、snapshot 或 certificate。
-- `zettide/src/v3/control_record.zig:62-89`：control record 能表达 generation、root digest 和
+- `services/zettide/v3/control_record.zig:62-89`：control record 能表达 generation、root digest 和
  两份 attestation，但当前未绑定 Volume snapshot。
-- `zettide/src/v3/pool_replicated_journal.zig:72-150`：generation commit 已有 prepare/commit
+- `services/zettide/v3/pool_replicated_journal.zig:72-150`：generation commit 已有 prepare/commit
   基础和 unknown-outcome freeze，但生产 Volume 未接线。
 - `zettide/docs/v3-multivolume-format.md:70-121`：Volume descriptor 已有 extent-map root。
 - `zettide/docs/v3-multivolume-format.md:163-191`：COW publication、root binding、pinning 和
@@ -78,18 +78,18 @@ generation；不能复用 source Volume lease 或 writable namespace。
 
 ```text
 146c7539c6f5189f950aef963e02e4fe6de22bdac23d95347d82d950d7799a6e  docs/v3-multivolume-format.md
-65a5b364e707c37d394b78b35f1548c75a21290efaee34a67b24a2f09373a383  src/v3/control_record.zig
-a725cca18741e9c2fffbdd8712ff02c2ef9809d290f7029ca4165f01e048d32b  src/v3/replica_endpoint.zig
-74b39865d28ccfa88d516c727c74d6503de457ae49b977d7c60d4d7793d8268e  src/v3/pool_replicated_journal.zig
-c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  src/v3/pool_catalog.zig
-557c6f09fac841580e9b9003d960196e55d84f62a15c58dbb5c2d0527ee23528  src/volume.zig
+65a5b364e707c37d394b78b35f1548c75a21290efaee34a67b24a2f09373a383  services/zettide/v3/control_record.zig
+a725cca18741e9c2fffbdd8712ff02c2ef9809d290f7029ca4165f01e048d32b  services/zettide/v3/replica_endpoint.zig
+74b39865d28ccfa88d516c727c74d6503de457ae49b977d7c60d4d7793d8268e  services/zettide/v3/pool_replicated_journal.zig
+c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  services/zettide/v3/pool_catalog.zig
+557c6f09fac841580e9b9003d960196e55d84f62a15c58dbb5c2d0527ee23528  services/zettide/volume.zig
 ```
 
 ## 需要使用的命令
 
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
-| Control tests | `zig build test --summary all` in `control/` | all pass |
+| Control tests | `zig build test --summary all` in `services/control/` | all pass |
 | Unit tests | `zig build test-unit --summary all` in `zettide/` | all pass |
 | Image tests | `zig build test-image --summary all` in `zettide/` | all pass |
 | Fault tests | `zig build test-fault --summary all` in `zettide/` | all pass |
@@ -106,18 +106,18 @@ c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  src/v3/pool_ca
 
 **范围内**：
 
-- `control/proto/zettide/control/v1/control.proto`
-- `control/src/service.zig`
-- `control/src/root.zig`
-- `control/src/integration_test.zig`
+- `services/control/proto/zettide/control/v1/control.proto`
+- `services/control/src/service.zig`
+- `services/control/src/root.zig`
+- `services/control/src/integration_test.zig`
 - DataService baseline 落地后刷新出的精确 reconciler、observed-state、proto 和 client 文件
-- `zettide/src/v3/replica_endpoint.zig`
-- `zettide/src/v3/control_record.zig`
-- `zettide/src/v3/pool_replicated_journal.zig`
-- `zettide/src/v3/pool_catalog.zig`
-- `zettide/src/v3/snapshot_root.zig`（新建，名称可按现有模块约定调整一次）
-- `zettide/src/v3/volume_snapshot.zig`（新建，名称可按现有模块约定调整一次）
-- `zettide/src/root.zig`
+- `services/zettide/v3/replica_endpoint.zig`
+- `services/zettide/v3/control_record.zig`
+- `services/zettide/v3/pool_replicated_journal.zig`
+- `services/zettide/v3/pool_catalog.zig`
+- `services/zettide/v3/snapshot_root.zig`（新建，名称可按现有模块约定调整一次）
+- `services/zettide/v3/volume_snapshot.zig`（新建，名称可按现有模块约定调整一次）
+- `services/zettide/root.zig`
 - 与上述模块直接对应的 unit/image/fault tests
 
 **范围外**：
@@ -257,7 +257,7 @@ completion 或 stale action 在 state machine 中必须被拒绝。
 只有端到端 tests 证明 READY 证据链后，才在 `VolumeSnapshotService.register()` 注册 public
 Create/Get/List routes。Create 仍只返回 CREATING；客户端通过 Get/List 观察 READY。
 
-**验证**：`zig build test --summary all` 在 `control/` exit 0；三 voter failover + primary
+**验证**：`zig build test --summary all` 在 `services/control/` exit 0；三 voter failover + primary
 response loss 最终只产生一个 READY snapshot。Route grep 至少命中 register 与测试 expectation。
 
 ## 测试计划

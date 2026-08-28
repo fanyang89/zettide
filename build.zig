@@ -1,7 +1,7 @@
 const std = @import("std");
 const benchmarks = @import("build/benchmarks.zig");
-const cawfs_build = @import("cawfs/build.zig");
-const control_build = @import("control/build.zig");
+const cawfs_build = @import("libs/cawfs/build.zig");
+const control_build = @import("services/control/build.zig");
 const support = @import("build/support.zig");
 const tests = @import("build/tests.zig");
 
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
         crc32c_dependency,
     );
     const pool_data_nvmf_args_test_module = b.createModule(.{
-        .root_source_file = b.path("test/spdk_pool_data_nvmf_args.zig"),
+        .root_source_file = b.path("tests/spdk_pool_data_nvmf_args.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
     });
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_pool_data_nvmf_args_tests = b.addRunArtifact(pool_data_nvmf_args_tests);
     const pool_data_synthetic_storage_test_module = b.createModule(.{
-        .root_source_file = b.path("test/spdk_pool_data_synthetic_storage.zig"),
+        .root_source_file = b.path("tests/spdk_pool_data_synthetic_storage.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = true,
@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
 
     if (enable_spdk) {
         const catalog_nvmf_benchmark_module = b.createModule(.{
-            .root_source_file = b.path("test/spdk_catalog_nvmf_benchmark.zig"),
+            .root_source_file = b.path("tests/spdk_catalog_nvmf_benchmark.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "spdk_c", .module = support.createSpdkCModule(b, target, optimize, true) },
             },
         });
-        catalog_nvmf_benchmark_module.addIncludePath(b.path("test"));
+        catalog_nvmf_benchmark_module.addIncludePath(b.path("tests"));
         const catalog_nvmf_benchmark = b.addLibrary(.{
             .name = "zettide-spdk-catalog-nvmf-benchmark",
             .linkage = .static,
@@ -83,7 +83,7 @@ pub fn build(b: *std.Build) void {
         catalog_nvmf_benchmark_step.dependOn(&install_catalog_nvmf_benchmark.step);
 
         const pool_data_nvmf_benchmark_module = b.createModule(.{
-            .root_source_file = b.path("test/spdk_pool_data_nvmf_benchmark.zig"),
+            .root_source_file = b.path("tests/spdk_pool_data_nvmf_benchmark.zig"),
             .target = target,
             .optimize = .ReleaseSafe,
             .link_libc = true,
@@ -92,8 +92,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "spdk_c", .module = support.createSpdkCModule(b, target, .ReleaseSafe, true) },
             },
         });
-        pool_data_nvmf_benchmark_module.addIncludePath(b.path("src"));
-        pool_data_nvmf_benchmark_module.addIncludePath(b.path("test"));
+        pool_data_nvmf_benchmark_module.addIncludePath(b.path("services/zettide"));
+        pool_data_nvmf_benchmark_module.addIncludePath(b.path("tests"));
         const benchmark_cpu_profiler = if (enable_benchmark_cpu_profiler) blk: {
             const gperftools_dependency = b.lazyDependency("gperftools", .{}) orelse return;
             pool_data_benchmark_core.omit_frame_pointer = false;
@@ -151,7 +151,7 @@ pub fn build(b: *std.Build) void {
 
     if (target.result.os.tag == .linux) {
         const nfs_backend_module = b.createModule(.{
-            .root_source_file = b.path("src/nfs_backend.zig"),
+            .root_source_file = b.path("services/zettide/nfs_backend.zig"),
             .target = target,
             .optimize = optimize,
             .pic = true,
@@ -167,7 +167,7 @@ pub fn build(b: *std.Build) void {
         nfs_backend_library.bundle_compiler_rt = true;
         b.installArtifact(nfs_backend_library);
         b.getInstallStep().dependOn(&b.addInstallHeaderFile(
-            b.path("src/nfs_backend.h"),
+            b.path("services/zettide/nfs_backend.h"),
             "zettide/nfs_backend.h",
         ).step);
         const nfs_backend_tests = b.addTest(.{ .root_module = nfs_backend_module });
@@ -180,9 +180,9 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
-        nfs_backend_c_test.root_module.addIncludePath(b.path("src"));
+        nfs_backend_c_test.root_module.addIncludePath(b.path("services/zettide"));
         nfs_backend_c_test.root_module.addCSourceFile(.{
-            .file = b.path("test/nfs_backend_abi.c"),
+            .file = b.path("tests/nfs_backend_abi.c"),
             .flags = &.{"-std=c11"},
         });
         nfs_backend_c_test.root_module.linkLibrary(nfs_backend_library);
@@ -198,7 +198,7 @@ pub fn build(b: *std.Build) void {
 
     const test_suites = tests.add(b, target, optimize, portable_core, exe, crc32c_dependency);
 
-    const control_test_step = control_build.addComponent(b, target, optimize, "control", .{
+    const control_test_step = control_build.addComponent(b, target, optimize, "services/control", .{
         .generate = "gen-control-proto",
         .run = "run-control",
         .tests = "test-control",
@@ -208,7 +208,7 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         sanitize_thread,
-        "cawfs",
+        "libs/cawfs",
         "test-cawfs",
     );
 
@@ -223,19 +223,19 @@ pub fn build(b: *std.Build) void {
             "build.zig",
             "build.zig.zon",
             "build",
-            "src",
-            "test",
+            "services/zettide",
+            "tests",
             "benchmarks",
-            "control/build.zig",
-            "control/build.zig.zon",
-            "control/src",
-            "cawfs/build.zig",
-            "cawfs/build.zig.zon",
-            "cawfs/src",
-            "cawfs/tests",
-            "node-protocol/build.zig",
-            "node-protocol/build.zig.zon",
-            "node-protocol/src",
+            "services/control/build.zig",
+            "services/control/build.zig.zon",
+            "services/control/src",
+            "libs/cawfs/build.zig",
+            "libs/cawfs/build.zig.zon",
+            "libs/cawfs/src",
+            "libs/cawfs/tests",
+            "libs/node-protocol/build.zig",
+            "libs/node-protocol/build.zig.zon",
+            "libs/node-protocol/src",
         },
         .check = true,
     });

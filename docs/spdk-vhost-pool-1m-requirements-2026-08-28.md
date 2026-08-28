@@ -34,10 +34,10 @@ PCIe）所必需的全部条件。项目 re-org 时，"代码机制"一节中的
 
 ### 2. Pool 异步批量读路径
 
-- 位置：`src/v3/pool_scheduled_data_device.zig`（`readBatchFirstAvailable` /
-  `submitReadManyAtAsync`，上限 `max_read_count=32`）、`src/v3/member.zig`
-  （`submitReadMany`）、`src/v3/pool_data_storage.zig`（`claimedSubmitReadDataMany`）、
-  `src/spdk/storage.zig`（`submitReadManyAt`）。
+- 位置：`services/zettide/v3/pool_scheduled_data_device.zig`（`readBatchFirstAvailable` /
+  `submitReadManyAtAsync`，上限 `max_read_count=32`）、`services/zettide/v3/member.zig`
+  （`submitReadMany`）、`services/zettide/v3/pool_data_storage.zig`（`claimedSubmitReadDataMany`）、
+  `services/zettide/spdk/storage.zig`（`submitReadManyAt`）。
 - 作用：把 ~17-28 个 guest 请求聚成一组、再按成员盘拆成异步批下发。聚合是
   吞吐的结构性来源——实测"去掉分组节流"的实验（全异步直发）在所有深度
   回退 ~20%（已回滚，commit `0bd1f9f`）。
@@ -46,7 +46,7 @@ PCIe）所必需的全部条件。项目 re-org 时，"代码机制"一节中的
 
 ### 3. AsyncReadTask 回收池
 
-- 位置：`src/spdk/storage.zig`（`task_pool` / `allocTask` / `freeTask`，
+- 位置：`services/zettide/spdk/storage.zig`（`task_pool` / `allocTask` / `freeTask`，
   容量 1024，自旋锁保护）。
 - 作用：Zig 0.16 ReleaseSafe 下 `std.mem.Allocator` 的 create/free 会对整个
   对象做 0xAA 毒化 memset；回收池消除每批一次的 create/destroy，否则 memset
@@ -56,7 +56,7 @@ PCIe）所必需的全部条件。项目 re-org 时，"代码机制"一节中的
 
 ### 4. worker 无锁队列 + 唤醒门控 + dispatch slot 预分配
 
-- 位置：`test/spdk_pool_data_nvmf_benchmark.zig`
+- 位置：`tests/spdk_pool_data_nvmf_benchmark.zig`
   （`slots[2048]` SPMC 队列 + 序列号、`waiting` 标志 + seq_cst 协议、
   `DispatchSlot` 按指针传给 `std.Io.Group.concurrent`、`queue_capacity=2048`）。
 - 作用：逐 IO `wake.set` 消除（futex 唤醒曾占 ~8%）；每组 1.9KB Task 分配
@@ -67,9 +67,9 @@ PCIe）所必需的全部条件。项目 re-org 时，"代码机制"一节中的
 
 ### 5. provider 零拷贝直写（direct path）
 
-- 位置：`src/spdk/bdev_provider.c`（`single_iov_buffer` 单 iov 直通）、
-  `src/spdk/bdev_dispatcher.c`（DMA-capable 判定，失败才走 bounce memcpy）、
-  `src/spdk/bdev_endpoint.c`。
+- 位置：`services/zettide/spdk/bdev_provider.c`（`single_iov_buffer` 单 iov 直通）、
+  `services/zettide/spdk/bdev_dispatcher.c`（DMA-capable 判定，失败才走 bounce memcpy）、
+  `services/zettide/spdk/bdev_endpoint.c`。
 - 作用：guest RAM 直接作为 NVMe DMA 目标，数据面零拷贝。实测
   `direct_batches` 占 99.99% 以上；bounce 一旦成为主路径，memcpy 会立刻
   成为热点（历史 profile 的 11-12% 即来源于此）。
@@ -78,8 +78,8 @@ PCIe）所必需的全部条件。项目 re-org 时，"代码机制"一节中的
 
 ### 6. vhost 控制器/队列映射约束
 
-- 位置：`test/spdk-vhost-user-blk-fio.sh`（每控制器 `queues/controllers`
-  条 virtqueue，`queue-size=256`）、`test/spdk_pool_data_nvmf_args.zig`
+- 位置：`tests/spdk-vhost-user-blk-fio.sh`（每控制器 `queues/controllers`
+  条 virtqueue，`queue-size=256`）、`tests/spdk_pool_data_nvmf_args.zig`
   （`worker_count ≤ controller_count ≤ reactor_count`）。
 - 作用：2 控制器 × 7 队列是当前甜点；每控制器队列数影响聚合与 reactor
   轮询成本。

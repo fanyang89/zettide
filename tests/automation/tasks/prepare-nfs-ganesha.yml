@@ -1,0 +1,136 @@
+---
+- name: Download pinned NFS-Ganesha V13 source | {{ zettide_optimize }}
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/nfs-ganesha/nfs-ganesha/archive/429463bc77a4654a4f00e0109b8c1496c272abb4.tar.gz
+    dest: "{{ zettide_controller_staging.path }}/nfs-ganesha-v13.tar.gz"
+    checksum: sha256:b2550f8c74134980ebd264b4d0d242439f88f89d7cdae30e56367a767b10aaae
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  register: zettide_nfs_ganesha_download
+  retries: 3
+  delay: 5
+  until: zettide_nfs_ganesha_download is succeeded
+
+- name: Extract pinned NFS-Ganesha V13 source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/nfs-ganesha-v13.tar.gz"
+    dest: "{{ zettide_remote_workspace.path }}"
+
+- name: Download pinned libkmip source | {{ zettide_optimize }}
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/ceph/libkmip/archive/4f553ecaf8e57cc3019222b8551d17888f0a1e66.tar.gz
+    dest: "{{ zettide_controller_staging.path }}/libkmip.tar.gz"
+    checksum: sha256:372d54e3a25c9d3f5c442714f93ddac263b68d993a27647853a377cdf7e94432
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  register: zettide_libkmip_download
+  retries: 3
+  delay: 5
+  until: zettide_libkmip_download is succeeded
+
+- name: Create pinned libkmip source directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libkmip
+    state: directory
+    mode: "0755"
+
+- name: Extract pinned libkmip source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/libkmip.tar.gz"
+    dest: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libkmip
+    extra_opts:
+      - --strip-components=1
+
+- name: Download pinned NTIRPC source | {{ zettide_optimize }}
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/nfs-ganesha/ntirpc/archive/96e980def1c2d4538ff4708b0908670dd6a8946d.tar.gz
+    dest: "{{ zettide_controller_staging.path }}/ntirpc.tar.gz"
+    checksum: sha256:39775a5404cf78e1327020154ed9f3e370a6b235adbff47d0726ef1c30a20e71
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  register: zettide_ntirpc_download
+  retries: 3
+  delay: 5
+  until: zettide_ntirpc_download is succeeded
+
+- name: Create pinned NTIRPC source directory | {{ zettide_optimize }}
+  ansible.builtin.file:
+    path: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libntirpc
+    state: directory
+    mode: "0755"
+
+- name: Extract pinned NTIRPC source | {{ zettide_optimize }}
+  ansible.builtin.unarchive:
+    src: "{{ zettide_controller_staging.path }}/ntirpc.tar.gz"
+    dest: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libntirpc
+    extra_opts:
+      - --strip-components=1
+
+- name: Attach FSAL_ZETTIDE to NFS-Ganesha | {{ zettide_optimize }}
+  ansible.builtin.lineinfile:
+    path: >-
+      {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/FSAL/CMakeLists.txt
+    line: >-
+      add_subdirectory("{{ zettide_remote_workspace.path }}/services/nfs-fsal" FSAL_ZETTIDE)
+
+- name: Configure pinned NFS-Ganesha | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - cmake
+      - -S
+      - "{{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src"
+      - -B
+      - "{{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build"
+      - -G
+      - Ninja
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DZETTIDE_SOURCE_DIR={{ zettide_remote_workspace.path }}
+      - -DUSE_9P=OFF
+      - -DUSE_DBUS=ON
+      - -DUSE_GRPC=OFF
+      - -DUSE_GSS=OFF
+      - -DUSE_MONITORING=OFF
+      - -DUSE_NFSACL3=OFF
+      - -DUSE_NFSIDMAP=OFF
+      - -DUSE_NLM=OFF
+      - -DUSE_RQUOTA=OFF
+      - -DUSE_SYSTEM_NTIRPC=OFF
+  changed_when: true
+
+- name: Build pinned NFS-Ganesha and FSAL_ZETTIDE | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - cmake
+      - --build
+      - "{{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build"
+      - --target
+      - ganesha.nfsd
+      - fsalzettide
+      - -j2
+  changed_when: true
+
+- name: Verify NFS-Ganesha RPC | {{ zettide_optimize }}
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --nonblock
+      - /var/lock/zettide-nfs-ganesha.lock
+      - "{{ zettide_zig }}"
+      - build
+      - test-nfs-ganesha
+      - -Doptimize={{ zettide_optimize }}
+      - -Dnfs-ganesha-tests=required
+      - -Dganesha-build-dir={{ zettide_remote_workspace.path }}/nfs-ganesha-v13-build
+  args:
+    chdir: "{{ zettide_remote_workspace.path }}"
+  changed_when: true

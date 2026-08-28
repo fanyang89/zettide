@@ -2,7 +2,7 @@
 
 ## Suite Pins
 
-`test/external/suites.tsv` is the machine-readable source of truth. The current
+`tests/external/suites.tsv` is the machine-readable source of truth. The current
 pins are:
 
 - pjdfstest `ededbeb2b44929972898afb87474b0937f78a877`
@@ -18,11 +18,11 @@ The upstream suites are too large for minimal source snapshots. Fetch and build
 them explicitly:
 
 ```sh
-bash test/external/prepare.sh
+bash tests/external/prepare.sh
 ```
 
 The script initializes one checkout per suite under
-`test/external/.prepared/`, fetches only the explicit commit, checks detached
+`tests/external/.prepared/`, fetches only the explicit commit, checks detached
 HEAD, and builds the required tools. Set `ZETTIDE_PREPARE_JOBS` to control
 parallel builds or pass another destination as the first argument. Set
 `ZETTIDE_EXTERNAL_ROOT` to that destination when running tests.
@@ -39,9 +39,9 @@ FUSE3, `findmnt`, `fio`, `mountpoint`, `runuser`, `timeout`, and `xfs_io`.
 
 The selected cases are listed in:
 
-- `test/external/pjdfstest-cases.tsv`
-- `test/external/xfstests-cases.tsv`
-- `test/external/ltp-open-posix-cases.tsv`
+- `tests/external/pjdfstest-cases.tsv`
+- `tests/external/xfstests-cases.tsv`
+- `tests/external/ltp-open-posix-cases.tsv`
 
 Every row has a classification, exact case ID, contract, and reason. The only
 valid classifications are `required` and `not-applicable`. Required skips fail;

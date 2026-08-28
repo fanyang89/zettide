@@ -21,10 +21,15 @@ repositories retain their histories here as merged directory trees:
 
 | Path | Role |
 | --- | --- |
-| `src/` | Pool, Volume, BlobFilesystem, frontend, and endpoint implementation |
-| `control/` | Raft-replicated metadata and cluster coordination |
-| `cawfs/` | Conditional-write transaction engine for shared writable filesystems |
-| `node-protocol/` | Shared node data-service protocol and fencing contracts |
+| `services/zettide/` | Pool, Volume, BlobFilesystem, frontend, and endpoint implementation |
+| `services/control/` | Raft-replicated metadata and cluster coordination |
+| `services/csi/` | CSI node service and container image |
+| `services/nfs-fsal/` | NFS-Ganesha FSAL adapter |
+| `libs/cawfs/` | Conditional-write transaction engine for shared writable filesystems |
+| `libs/node-protocol/` | Shared node data-service protocol and fencing contracts |
+| `tests/` | Zig, C, shell, conformance, and integration tests |
+| `tests/automation/` | Isolated uv/Ansible project for remote and hardware test automation |
+| `benchmarks/` | Buildable benchmark entry points |
 | `vendor/grpc-lite/` | Zig RPC runtime submodule |
 | `vendor/raftz/` | Consensus runtime submodule |
 | `vendor/spdk/` | Managed SPDK fork submodule |
@@ -59,7 +64,7 @@ The later tiers remain cumulative:
 | Tier 2 | Dynamic Pool membership, recoverable online capacity/protection migration, multi-Volume service governance, attachment governance, and fuller platform lifecycle |
 | Tier 3 | Cross-node replication, fencing, storage failover, repair, and caller-directed republication |
 
-Tier 3 control metadata foundations exist in the integrated `control/` module,
+Tier 3 control metadata foundations exist in the integrated `services/control/` module,
 but the distributed data path does not.
 
 The current raw Pool product commands accept one unprotected device, three
@@ -251,7 +256,7 @@ The remote physical-Pool profile separately exercises one Pool member. It verifi
 stable file IDs, hard links, symlinks, rename, truncate, persistence across a
 server restart, and read-only reopening. It requires mount tools, rpcbind,
 passwordless sudo, and `-Dganesha-build-dir` pointing to the build described in
-`fsal/zettide/README.md`.
+`services/nfs-fsal/README.md`.
 
 `test-fio` runs deterministic CRC32C verification over buffered synchronous I/O
 to small files and multi-chunk sequential and random files. It verifies every
@@ -265,7 +270,7 @@ The privileged and nightly gates use pinned upstream suites prepared by an
 explicit networked step. Test execution itself never downloads dependencies:
 
 ```sh
-bash test/external/prepare.sh
+bash tests/external/prepare.sh
 zig build -j1 test-posix-nightly \
   -Dfuse-tests=required -Dexternal-tests=required -Dprivileged-tests=required
 ```
@@ -395,4 +400,4 @@ Its pinned source, Unicode version, and license are in `vendor/utf8proc`.
 Vendored libfuse and xfstests test sources are GPL-2.0 and are only compiled as
 test executables. Their source commits and licenses are recorded under `vendor/`.
 Fetched pjdfstest, xfstests, and LTP source licenses and commits are recorded in
-`test/external/suites.tsv`.
+`tests/external/suites.tsv`.

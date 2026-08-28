@@ -202,9 +202,9 @@ native SPDK measured window 内没有可见的 NVMe 完成 MSI-X 增量；IO 完
 scheduled Pool：
 
 ```bash
-uv run ansible-playbook \
+ANSIBLE_CONFIG=tests/automation/ansible.cfg uv run --project tests/automation ansible-playbook \
   -i /tmp/opencode/vm-fc.ini \
-  test/ansible/vhost-scheduled-pool-fio.yml \
+  tests/automation/vhost-scheduled-pool-fio.yml \
   --limit vm-fc \
   -e @/tmp/opencode/vm-fc-vhost-baseline-vars.json
 ```
@@ -212,9 +212,9 @@ uv run ansible-playbook \
 raw vhost：
 
 ```bash
-uv run ansible-playbook \
+ANSIBLE_CONFIG=tests/automation/ansible.cfg uv run --project tests/automation ansible-playbook \
   -i /tmp/opencode/vm-fc.ini \
-  test/ansible/vhost-spdk-nvme-fio.yml \
+  tests/automation/vhost-spdk-nvme-fio.yml \
   --limit vm-fc \
   -e @/tmp/opencode/vm-fc-vhost-baseline-vars.json
 ```
@@ -222,9 +222,9 @@ uv run ansible-playbook \
 native SPDK：
 
 ```bash
-uv run ansible-playbook \
+ANSIBLE_CONFIG=tests/automation/ansible.cfg uv run --project tests/automation ansible-playbook \
   -i /tmp/opencode/vm-fc.ini \
-  test/ansible/spdk-nvme-perf.yml \
+  tests/automation/spdk-nvme-perf.yml \
   --limit vm-fc \
   -e @/tmp/opencode/vm-fc-vhost-baseline-vars.json
 ```

@@ -29,7 +29,7 @@
   namespace/session，再 tombstone、quarantine，最后才能重分配 extent。
 - `zettide/docs/v3-multivolume-format.md:163-173`：任一 recoverable root 引用的 extent 不得
   复用，unknown outcome 必须 freeze。
-- `control/src/state_machine.zig:499-612`：当前 request restore 校验假定 CreatePool
+- `services/control/src/state_machine.zig:499-612`：当前 request restore 校验假定 CreatePool
   对应 live Pool；删除资源后必须改为 live-or-tombstone 证明。
 - 计划 003 应已提供 snapshot ID/root digest/certificate 和持久 extent ownership。
 
@@ -37,7 +37,7 @@
 
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
-| Control tests | `zig build test --summary all` in `control/` | all pass |
+| Control tests | `zig build test --summary all` in `services/control/` | all pass |
 | Unit tests | `zig build test-unit --summary all` in `zettide/` | all pass |
 | Image tests | `zig build test-image --summary all` in `zettide/` | all pass |
 | Fault tests | `zig build test-fault --summary all` in `zettide/` | all pass |
@@ -59,14 +59,14 @@ optional 后宣称完成。
 **范围内**：
 
 - 计划 002/003 新增的 VolumeSnapshot proto、state machine、service、reconciler 和 DataService 文件
-- `control/src/integration_test.zig`
-- `zettide/src/v3/pool_catalog.zig`
-- `zettide/src/v3/snapshot_root.zig`
-- `zettide/src/v3/volume_snapshot.zig`
-- `zettide/src/v3/pool_replicated_journal.zig`
-- `zettide/test/fault.zig`
-- `zettide/test/image.zig`
-- `zettide/test/linux-block.sh`
+- `services/control/src/integration_test.zig`
+- `services/zettide/v3/pool_catalog.zig`
+- `services/zettide/v3/snapshot_root.zig`
+- `services/zettide/v3/volume_snapshot.zig`
+- `services/zettide/v3/pool_replicated_journal.zig`
+- `zettide/tests/fault.zig`
+- `zettide/tests/image.zig`
+- `zettide/tests/linux-block.sh`
 - `zettide/build.zig`
 - 与 snapshot 对应的新测试文件
 - `docs/architecture/zh-CN/12-volume-snapshots.md`
@@ -240,7 +240,7 @@ free-list 无重叠。不能只检查 API 状态。
 - 当前计划状态仍为 BLOCKED，或尚未按计划 003 的实际文件刷新范围。
 - 无法枚举所有 recoverable roots，因而无法证明 extent 已无引用。
 - 删除需要立即复用 extent 才能满足 API 契约。
-- tombstone 无法跨 control/data node restart 持久。
+- tombstone 无法跨 services/control/data node restart 持久。
 - stale Replica 可以在没有更高 generation/epoch fencing 的情况下重新加入 authority。
 - privileged block test 环境不可用且 operator 不接受计划保持 BLOCKED。
 
