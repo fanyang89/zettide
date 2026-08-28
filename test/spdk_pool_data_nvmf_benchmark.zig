@@ -78,13 +78,17 @@ const Worker = struct {
     };
 
     // DispatchSlot carries everything an in-flight read group needs so the
-    // group can be submitted asynchronously and completed from the storage
-    // completion callback without any thread handoff.
+    // group can be submitted asynchronously and handed back to the worker
+    // through a lock-free completion stack. The storage callback only pushes
+    // the slot; all result processing runs on the worker thread, keeping the
+    // reactor out of the completion critical path.
     const DispatchSlot = struct {
         worker: *Worker,
         batch: ReadGroup = undefined,
         reads: [max_batch_requests]zettide.v3.storage.Read = undefined,
         results: [max_batch_requests]zettide.v3.storage.ReadResult = undefined,
+        failure: ?anyerror = null,
+        next_complete: ?*DispatchSlot = null,
         in_use: std.atomic.Value(bool) = .init(false),
     };
 
@@ -96,8 +100,7 @@ const Worker = struct {
     read_slots: []DispatchSlot,
     async_submit: bool = true,
     inflight: std.atomic.Value(usize) = .init(0),
-    slot_free: std.Io.Event = .unset,
-    slot_waiting: std.atomic.Value(bool) = .init(false),
+    complete_head: std.atomic.Value(?*DispatchSlot) = .init(null),
     enqueue_position: std.atomic.Value(usize) = .init(0),
     dequeue_position: usize = 0,
     wake: std.Io.Event = .unset,
@@ -262,19 +265,25 @@ const Worker = struct {
         return .{ .request = request };
     }
 
-    fn next(self: *Worker) ?Queued {
+    fn hasQueued(self: *Worker) bool {
+        const position = self.dequeue_position;
+        return self.slots[position % queue_capacity].sequence.load(.acquire) == position + 1;
+    }
+
+    fn waitForWork(self: *Worker) void {
         while (true) {
-            if (self.dequeue()) |queued| return queued;
+            if (self.hasQueued() or self.complete_head.load(.acquire) != null) return;
             self.wake.reset();
-            if (self.dequeue()) |queued| return queued;
-            if (self.stopping.load(.acquire)) return null;
-            // Announce the wait before the final dequeue check. Submit publishes
-            // the slot before swapping this flag (both seq_cst), so a missed
-            // dequeue implies the submitter observed the flag and will set wake.
+            if (self.hasQueued() or self.complete_head.load(.acquire) != null) return;
+            if (self.stopping.load(.acquire)) return;
+            // Announce the wait before the final check. Producers (provider
+            // submit and the storage callback) publish before swapping this
+            // flag (both seq_cst), so a missed check implies the producer
+            // observed the flag and will set wake.
             self.waiting.store(true, .seq_cst);
-            if (self.dequeue()) |queued| {
+            if (self.hasQueued() or self.complete_head.load(.acquire) != null) {
                 _ = self.waiting.swap(false, .seq_cst);
-                return queued;
+                return;
             }
             self.wake.waitUncancelable(self.io);
             _ = self.waiting.swap(false, .seq_cst);
@@ -283,8 +292,15 @@ const Worker = struct {
 
     fn run(self: *Worker) void {
         var pending: ?Queued = null;
-        while (pending orelse self.next()) |queued| {
+        while (true) {
+            self.processCompletions();
+            const maybe = pending orelse self.dequeue();
             pending = null;
+            const queued = maybe orelse {
+                if (self.stopping.load(.acquire)) break;
+                self.waitForWork();
+                continue;
+            };
             if (queued.request.operation != c.ZETTIDE_SPDK_BDEV_PROVIDER_READ) {
                 self.drainInflight();
                 self.completeQueued(queued, 0);
@@ -325,18 +341,11 @@ const Worker = struct {
     fn acquireDispatchSlot(self: *Worker) *DispatchSlot {
         while (true) {
             if (self.tryAcquireDispatchSlot()) |slot| return slot;
-            self.slot_free.reset();
+            // Slots are only released by processCompletions on this thread, so
+            // reap finished groups first and then wait for more to arrive.
+            self.processCompletions();
             if (self.tryAcquireDispatchSlot()) |slot| return slot;
-            // Same announcement protocol as next(): the releasing callback
-            // stores in_use=false before swapping this flag (both seq_cst), so
-            // a missed rescan implies the releaser observed the flag.
-            self.slot_waiting.store(true, .seq_cst);
-            if (self.tryAcquireDispatchSlot()) |slot| {
-                _ = self.slot_waiting.swap(false, .seq_cst);
-                return slot;
-            }
-            self.slot_free.waitUncancelable(self.io);
-            _ = self.slot_waiting.swap(false, .seq_cst);
+            self.waitForWork();
         }
     }
 
@@ -349,22 +358,11 @@ const Worker = struct {
         return null;
     }
 
-    fn releaseDispatchSlot(self: *Worker, slot: *DispatchSlot) void {
-        slot.in_use.store(false, .release);
-        if (self.slot_waiting.swap(false, .seq_cst)) self.slot_free.set(self.io);
-    }
-
     fn drainInflight(self: *Worker) void {
         while (self.inflight.load(.acquire) != 0) {
-            self.slot_free.reset();
+            self.processCompletions();
             if (self.inflight.load(.acquire) == 0) break;
-            self.slot_waiting.store(true, .seq_cst);
-            if (self.inflight.load(.acquire) == 0) {
-                _ = self.slot_waiting.swap(false, .seq_cst);
-                break;
-            }
-            self.slot_free.waitUncancelable(self.io);
-            _ = self.slot_waiting.swap(false, .seq_cst);
+            self.waitForWork();
         }
     }
 
@@ -394,7 +392,7 @@ const Worker = struct {
             var statuses = uninitialized([max_batch_requests]c_int);
             @memset(statuses[0..count], status);
             self.completeReadBatch(&slot.batch, statuses[0..count]);
-            self.releaseDispatchSlot(slot);
+            slot.in_use.store(false, .release);
             return;
         };
         switch (submitted) {
@@ -410,24 +408,42 @@ const Worker = struct {
         }
     }
 
+    /// Runs on the storage completion thread (reactor). Keep it minimal: push
+    /// the slot onto the worker completion stack and signal the worker.
     fn readGroupComplete(context: *anyopaque, failure: ?anyerror) void {
         const slot: *DispatchSlot = @ptrCast(@alignCast(context));
-        const self = slot.worker;
-        const count = slot.batch.count;
-        var statuses = uninitialized([max_batch_requests]c_int);
-        for (slot.batch.queued[0..count], slot.results[0..count], statuses[0..count]) |queued, result, *status| {
-            status.* = if (failure) |err|
-                errorStatus(err)
-            else if (result.failure) |err|
-                errorStatus(err)
-            else if (result.amount != queued.request.length)
-                -c.EIO
-            else
-                0;
+        const worker = slot.worker;
+        slot.failure = failure;
+        var head = worker.complete_head.load(.monotonic);
+        while (true) {
+            slot.next_complete = head;
+            if (worker.complete_head.cmpxchgWeak(head, slot, .release, .monotonic)) |observed| {
+                head = observed;
+            } else break;
         }
-        self.completeReadBatch(&slot.batch, statuses[0..count]);
-        _ = self.inflight.fetchSub(1, .monotonic);
-        self.releaseDispatchSlot(slot);
+        if (worker.waiting.swap(false, .seq_cst)) worker.wake.set(worker.io);
+    }
+
+    fn processCompletions(self: *Worker) void {
+        var head = self.complete_head.swap(null, .acq_rel);
+        while (head) |slot| {
+            head = slot.next_complete;
+            const count = slot.batch.count;
+            var statuses = uninitialized([max_batch_requests]c_int);
+            for (slot.batch.queued[0..count], slot.results[0..count], statuses[0..count]) |queued, result, *status| {
+                status.* = if (slot.failure) |err|
+                    errorStatus(err)
+                else if (result.failure) |err|
+                    errorStatus(err)
+                else if (result.amount != queued.request.length)
+                    -c.EIO
+                else
+                    0;
+            }
+            self.completeReadBatch(&slot.batch, statuses[0..count]);
+            _ = self.inflight.fetchSub(1, .monotonic);
+            slot.in_use.store(false, .release);
+        }
     }
 
     fn executeReadBatch(self: *Worker, batch: *const ReadGroup) void {
