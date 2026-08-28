@@ -23,8 +23,9 @@
             .path = "node-protocol",
         },
         .zbench = .{
-            .url = "https://github.com/hendriknielaender/zBench/archive/f12a2262bcd9d300207890555c577da5e29de453.tar.gz",
-            .hash = "zbench-0.14.1-YTdc781OAQCR6wxqkgAwm9bG4TnFGzm8c9aE-ZPiTAU1",
+            // v0.13.0 is the latest release compatible with Zig 0.16.
+            .url = "https://codeload.github.com/hendriknielaender/zBench/tar.gz/b2b89c475e3ef1bb2bd71255c80478a82d3e0ca8",
+            .hash = "zbench-0.13.0-YTdc7xVBAQCCMC-IdLLuotBeiNNNm8k9Pi2V4VYqrwfI",
         },
         .gperftools = .{
             .url = "https://codeload.github.com/fanyang89/gperftools/tar.gz/1a01cd2cf8f7000845d343fa8e0bbac70378858b",
