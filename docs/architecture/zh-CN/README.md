@@ -28,7 +28,7 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 ## 范围
 
 - `zettide`：Pool、本地数据模型、FUSE/NFS frontend、Catalog endpoint daemon 与标准 NVMf publication。
-- `zettide-control`：Tier 3 权威元数据与协调基础。
+- `zettide-controller`：Tier 3 权威元数据与协调基础。
 - `raftz` 与 `grpc-lite`：共识、恢复和控制 RPC。
 - qtr/PVE/CSI：消费者 adapter、publication、attachment 与 mount 生命周期边界。
 - `zettide-txfs`：独立 shared qcow2 文件路径，不替代 Catalog block publication。

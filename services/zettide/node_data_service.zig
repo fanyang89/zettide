@@ -265,7 +265,7 @@ fn fail(allocator: std.mem.Allocator, code: grpc.StatusCode, message: []const u8
 }
 
 fn methodPath(comptime method: []const u8) []const u8 {
-    return "/zettide.control.v1.DataService/" ++ method;
+    return "/zettide.controller.v1.DataService/" ++ method;
 }
 
 test "node service stages and inspects a fresh candidate without claiming readiness" {

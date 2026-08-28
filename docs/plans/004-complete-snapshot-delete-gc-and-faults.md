@@ -29,7 +29,7 @@
   namespace/session，再 tombstone、quarantine，最后才能重分配 extent。
 - `zettide/docs/v3-multivolume-format.md:163-173`：任一 recoverable root 引用的 extent 不得
   复用，unknown outcome 必须 freeze。
-- `services/control/src/state_machine.zig:499-612`：当前 request restore 校验假定 CreatePool
+- `services/controller/src/state_machine.zig:499-612`：当前 request restore 校验假定 CreatePool
   对应 live Pool；删除资源后必须改为 live-or-tombstone 证明。
 - 计划 003 应已提供 snapshot ID/root digest/certificate 和持久 extent ownership。
 
@@ -37,13 +37,13 @@
 
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
-| Control tests | `zig build test --summary all` in `services/control/` | all pass |
+| Controller tests | `zig build test --summary all` in `services/controller/` | all pass |
 | Unit tests | `zig build test-unit --summary all` in `zettide/` | all pass |
 | Image tests | `zig build test-image --summary all` in `zettide/` | all pass |
 | Fault tests | `zig build test-fault --summary all` in `zettide/` | all pass |
 | Linux block | `zig build test-linux-block -Dblock-tests=required --summary all` in `zettide/` | all pass on configured host |
 | CI gate | `zig build ci --summary all` in `zettide/` | all pass |
-| Control diff | `git -C zettide-control diff --check -- proto src README.md` | exit 0 |
+| Controller diff | `git -C zettide-control diff --check -- proto src README.md` | exit 0 |
 | Data diff | `git -C zettide diff --check -- src docs build.zig test` | exit 0 |
 
 若执行环境没有配置 privileged Linux block test，必须报告 BLOCKED，不得把该项静默改为
@@ -59,7 +59,7 @@ optional 后宣称完成。
 **范围内**：
 
 - 计划 002/003 新增的 VolumeSnapshot proto、state machine、service、reconciler 和 DataService 文件
-- `services/control/src/integration_test.zig`
+- `services/controller/src/integration_test.zig`
 - `services/zettide/v3/pool_catalog.zig`
 - `services/zettide/v3/snapshot_root.zig`
 - `services/zettide/v3/volume_snapshot.zig`
@@ -139,7 +139,7 @@ Control 只在 deletion attestations 的 allocation ID 集合与 Raft-frozen `de
 source placement。失联 Replica 上的旧 root 必须由
 snapshot protection generation、epoch 和 quarantine 防止未来重新变为当前 authority。
 
-**验证**：删除 response loss、DataService restart、control leader change 和 stale old Replica
+**验证**：删除 response loss、DataService restart、controller leader change 和 stale old Replica
 rejoin 都不能让 tombstoned snapshot 重新可见。
 
 ### 步骤 3：实现延迟 extent reclaim
@@ -196,7 +196,7 @@ Fault suite 必须遍历：
 
 - capture 的 data/page/root/prepare/certificate/control READY 前后。
 - delete 的 revoke/tombstone/root/retire/free/finalize 前后。
-- primary crash、control leader stepdown、单 Replica loss、两 Replica loss。
+- primary crash、controller leader stepdown、单 Replica loss、两 Replica loss。
 - stale epoch writer、旧 Replica generation rejoin、response loss、request retry。
 - active writes 跨 snapshot barrier、snapshot 后 overwrite、源 Volume 删除。
 - snapshot reader 正在进行 I/O 时并发 Delete，证明先 drain 后 reclaim。
@@ -240,7 +240,7 @@ free-list 无重叠。不能只检查 API 状态。
 - 当前计划状态仍为 BLOCKED，或尚未按计划 003 的实际文件刷新范围。
 - 无法枚举所有 recoverable roots，因而无法证明 extent 已无引用。
 - 删除需要立即复用 extent 才能满足 API 契约。
-- tombstone 无法跨 services/control/data node restart 持久。
+- tombstone 无法跨 controller/data-node restart 持久。
 - stale Replica 可以在没有更高 generation/epoch fencing 的情况下重新加入 authority。
 - privileged block test 环境不可用且 operator 不接受计划保持 BLOCKED。
 

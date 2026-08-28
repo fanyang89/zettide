@@ -10,7 +10,7 @@
 | NFS client 到 BlobFilesystem | NFSv3 当前部分实现 |
 | 本地应用到 BlobFilesystem | FUSE/POSIX |
 | Adapter 到 Zettide lifecycle | 目标 versioned management API |
-| Tier 3 services/control/node RPC | grpc-lite |
+| Tier 3 services/controller/node RPC | grpc-lite |
 | Tier 3 Replica I/O | 目标 vendor-specific NVMf，不是标准 publication |
 
 ## qtr Managed NVMf Attachment
@@ -55,7 +55,7 @@ sequenceDiagram
     participant N as Zettide Node
     participant D as DataService
     participant S as SPDK Runtime
-    participant C as Control Leader
+    participant C as Controller Leader
     participant R as Raft
 
     N->>N: read stable node ID + local Replica facts

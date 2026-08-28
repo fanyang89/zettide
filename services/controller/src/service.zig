@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const grpc = @import("grpc_lite");
-const pb = @import("control_proto");
+const pb = @import("controller_proto");
 const raft = @import("raftz");
 const uuid = @import("uuid");
 const heartbeat = @import("heartbeat.zig");
@@ -1643,22 +1643,22 @@ pub const PoolRpc = struct {
     }
 
     pub fn register(self: *PoolRpc, server: *grpc.Server) !void {
-        try server.registerStream("/zettide.control.v1.PoolService/CreatePool", handler(self, .create));
-        try server.registerStream("/zettide.control.v1.PoolService/GetPool", handler(self, .get));
-        try server.registerStream("/zettide.control.v1.PoolService/ListPools", handler(self, .list));
-        try server.registerStream("/zettide.control.v1.NodeService/RegisterNode", handler(self, .register_node));
-        try server.registerStream("/zettide.control.v1.NodeService/GetNode", handler(self, .get_node));
-        try server.registerStream("/zettide.control.v1.NodeService/ListNodes", handler(self, .list_nodes));
-        try server.registerStream("/zettide.control.v1.MemberService/RegisterMember", handler(self, .register_member));
-        try server.registerStream("/zettide.control.v1.MemberService/GetMember", handler(self, .get_member));
-        try server.registerStream("/zettide.control.v1.MemberService/ListMembers", handler(self, .list_members));
-        try server.registerStream("/zettide.control.v1.HeartbeatService/ReportHeartbeat", handler(self, .report_heartbeat));
-        try server.registerStream("/zettide.control.v1.HeartbeatService/GetHeartbeat", handler(self, .get_heartbeat));
-        try server.registerStream("/zettide.control.v1.VolumeService/CreateVolume", handler(self, .create_volume));
-        try server.registerStream("/zettide.control.v1.VolumeService/GetVolume", handler(self, .get_volume));
-        try server.registerStream("/zettide.control.v1.VolumeService/UpdateVolume", handler(self, .update_volume));
-        try server.registerStream("/zettide.control.v1.VolumeService/ListVolumes", handler(self, .list_volumes));
-        try server.registerStream("/zettide.control.v1.VolumeService/DeleteVolume", handler(self, .delete_volume));
+        try server.registerStream("/zettide.controller.v1.PoolService/CreatePool", handler(self, .create));
+        try server.registerStream("/zettide.controller.v1.PoolService/GetPool", handler(self, .get));
+        try server.registerStream("/zettide.controller.v1.PoolService/ListPools", handler(self, .list));
+        try server.registerStream("/zettide.controller.v1.NodeService/RegisterNode", handler(self, .register_node));
+        try server.registerStream("/zettide.controller.v1.NodeService/GetNode", handler(self, .get_node));
+        try server.registerStream("/zettide.controller.v1.NodeService/ListNodes", handler(self, .list_nodes));
+        try server.registerStream("/zettide.controller.v1.MemberService/RegisterMember", handler(self, .register_member));
+        try server.registerStream("/zettide.controller.v1.MemberService/GetMember", handler(self, .get_member));
+        try server.registerStream("/zettide.controller.v1.MemberService/ListMembers", handler(self, .list_members));
+        try server.registerStream("/zettide.controller.v1.HeartbeatService/ReportHeartbeat", handler(self, .report_heartbeat));
+        try server.registerStream("/zettide.controller.v1.HeartbeatService/GetHeartbeat", handler(self, .get_heartbeat));
+        try server.registerStream("/zettide.controller.v1.VolumeService/CreateVolume", handler(self, .create_volume));
+        try server.registerStream("/zettide.controller.v1.VolumeService/GetVolume", handler(self, .get_volume));
+        try server.registerStream("/zettide.controller.v1.VolumeService/UpdateVolume", handler(self, .update_volume));
+        try server.registerStream("/zettide.controller.v1.VolumeService/ListVolumes", handler(self, .list_volumes));
+        try server.registerStream("/zettide.controller.v1.VolumeService/DeleteVolume", handler(self, .delete_volume));
     }
 
     pub fn pendingCallCount(self: *const PoolRpc) usize {
@@ -3595,7 +3595,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(request);
     var result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.PoolService/CreatePool",
+        "/zettide.controller.v1.PoolService/CreatePool",
         request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3614,7 +3614,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(create_volume_request);
     var create_volume_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.VolumeService/CreateVolume",
+        "/zettide.controller.v1.VolumeService/CreateVolume",
         create_volume_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3631,7 +3631,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(get_volume_request);
     var get_volume_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.VolumeService/GetVolume",
+        "/zettide.controller.v1.VolumeService/GetVolume",
         get_volume_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3650,7 +3650,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(delete_volume_request);
     var delete_volume_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.VolumeService/DeleteVolume",
+        "/zettide.controller.v1.VolumeService/DeleteVolume",
         delete_volume_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3671,7 +3671,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(register_node_request);
     var register_node_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.NodeService/RegisterNode",
+        "/zettide.controller.v1.NodeService/RegisterNode",
         register_node_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3686,7 +3686,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(get_node_request);
     var get_node_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.NodeService/GetNode",
+        "/zettide.controller.v1.NodeService/GetNode",
         get_node_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3701,7 +3701,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(list_nodes_request);
     var list_nodes_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.NodeService/ListNodes",
+        "/zettide.controller.v1.NodeService/ListNodes",
         list_nodes_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3723,7 +3723,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(register_member_request);
     var register_member_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.MemberService/RegisterMember",
+        "/zettide.controller.v1.MemberService/RegisterMember",
         register_member_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3738,7 +3738,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(get_member_request);
     var get_member_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.MemberService/GetMember",
+        "/zettide.controller.v1.MemberService/GetMember",
         get_member_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3753,7 +3753,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(list_members_request);
     var list_members_result = try channel.callUnary(
         allocator,
-        "/zettide.control.v1.MemberService/ListMembers",
+        "/zettide.controller.v1.MemberService/ListMembers",
         list_members_request,
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
@@ -3772,7 +3772,7 @@ test "raw unary client reaches asynchronous Pool Node Member and Volume RPCs" {
     defer allocator.free(multi_request);
     var stream_probe = StreamProbe{};
     var stream = try channel.openStream(
-        "/zettide.control.v1.PoolService/CreatePool",
+        "/zettide.controller.v1.PoolService/CreatePool",
         .{ .timeout_ns = 5 * std.time.ns_per_s },
         .{
             .context = &stream_probe,

@@ -1,5 +1,5 @@
 const std = @import("std");
-const pb = @import("control_proto");
+const pb = @import("controller_proto");
 const schema = @import("schema.zig");
 
 const Fingerprint = schema.Fingerprint;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const benchmarks = @import("build/benchmarks.zig");
 const txfs_build = @import("libs/txfs/build.zig");
-const control_build = @import("services/control/build.zig");
+const controller_build = @import("services/controller/build.zig");
 const support = @import("build/support.zig");
 const tests = @import("build/tests.zig");
 
@@ -198,10 +198,10 @@ pub fn build(b: *std.Build) void {
 
     const test_suites = tests.add(b, target, optimize, portable_core, exe, crc32c_dependency);
 
-    const control_test_step = control_build.addComponent(b, target, optimize, "services/control", .{
-        .generate = "gen-control-proto",
-        .run = "run-control",
-        .tests = "test-control",
+    const controller_test_step = controller_build.addComponent(b, target, optimize, "services/controller", .{
+        .generate = "gen-controller-proto",
+        .run = "run-controller",
+        .tests = "test-controller",
     });
     const txfs_test_step = txfs_build.addComponent(
         b,
@@ -212,10 +212,10 @@ pub fn build(b: *std.Build) void {
         "test-txfs",
     );
 
-    const test_step = b.step("test", "Run unit, CLI, control, and TxFS tests");
+    const test_step = b.step("test", "Run unit, CLI, controller, and TxFS tests");
     test_step.dependOn(unit_step);
     test_step.dependOn(test_suites.cli);
-    test_step.dependOn(control_test_step);
+    test_step.dependOn(controller_test_step);
     test_step.dependOn(txfs_test_step);
 
     const fmt = b.addFmt(.{
@@ -226,9 +226,9 @@ pub fn build(b: *std.Build) void {
             "services/zettide",
             "tests",
             "benchmarks",
-            "services/control/build.zig",
-            "services/control/build.zig.zon",
-            "services/control/src",
+            "services/controller/build.zig",
+            "services/controller/build.zig.zon",
+            "services/controller/src",
             "libs/txfs/build.zig",
             "libs/txfs/build.zig.zon",
             "libs/txfs/src",

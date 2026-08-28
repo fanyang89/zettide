@@ -23,7 +23,7 @@
 | Publication | 对 consumer 的协议中立发布身份、access generation 与 locator | 目标统一模型；当前 endpoint 是局部前身 |
 | AttachmentIntent | consumer 对 Volume/publication 的持久期望 | qtr/PVE/CSI adapter 目标状态 |
 | MountIntent | consumer 对 BlobFilesystem/export/mount 的持久期望 | 平台 adapter/CSI 目标状态 |
-| NodeRegistration | 节点身份、services/control/NVMf endpoint、能力和故障域 | Tier 3 Raft 状态机 |
+| NodeRegistration | 节点身份、services/controller/NVMf endpoint、能力和故障域 | Tier 3 Raft 状态机 |
 | MemberRegistration | 持久 Member 与控制面 Pool/Node 的绑定 | Tier 3 Raft 状态机 |
 | ReplicaPlacement | Volume Replica 的目标 Node、角色和 generation | schema 当前存在；mutation 为目标 |
 | ReplicaAllocation | Replica 在 Member 上不重叠的 extent/range | schema 当前存在；mutation 为目标 |
@@ -203,9 +203,9 @@ Availability 由当前 protection policy 的 read/write threshold 参数化。�
 
 当前 `zettide` 已有 BlobFilesystem/FUSE 多成员路径、NFSv3 单成员路径、Catalog/extent mapping、endpoint registry/daemon 和标准 NVMf TCP/RDMA export。统一 Publication、consumer-bound access generation、iSCSI target、qtr/PVE/CSI intent 与多前端真实多盘 gate 尚未完成。
 
-`zettide-control` 的 Volume 仍是固定 3/2/1 `PROVISIONING` metadata intent；Replica/Allocation/Attachment schema 没有 mutation，placement、lease、epoch enforcement 和 reconciliation 尚未实现。
+`zettide-controller` 的 Volume 仍是固定 3/2/1 `PROVISIONING` metadata intent；Replica/Allocation/Attachment schema 没有 mutation，placement、lease、epoch enforcement 和 reconciliation 尚未实现。
 
-当前 NodeRegistration 是 create-only，保存 stable Node ID、cluster binding、services/control/NVMf endpoint、failure domain、capability bits、protocol version、注册时间和 revision；不保存 heartbeat、容量或在线状态。MemberRegistration 使用介质原生 16-byte Member ID，绑定 control Pool、hosting Node 和 16-byte local set ID，并保存 slot、birth topology digest、metadata/data capacity 与 extent size；设备路径、当前 authority、使用量和健康属于 observation/facts。
+当前 NodeRegistration 是 create-only，保存 stable Node ID、cluster binding、services/controller/NVMf endpoint、failure domain、capability bits、protocol version、注册时间和 revision；不保存 heartbeat、容量或在线状态。MemberRegistration 使用介质原生 16-byte Member ID，绑定 control Pool、hosting Node 和 16-byte local set ID，并保存 slot、birth topology digest、metadata/data capacity 与 extent size；设备路径、当前 authority、使用量和健康属于 observation/facts。
 
 当前 create-only Register/Get/List 已覆盖 Node 和 Member。CreateVolume 保存 Pool、容量、固定 3/2/1 参数、`Provisioning + Unknown + None`、初始 generation/write epoch、revision 和 resource version，不执行 placement、extent reservation 或 DataService RPC。DeleteVolume 要求 expected resource version，只允许无 Replica/Attachment 引用时删除，并永久保留有界 tombstone；名称可复用，Volume ID 不复用。
 

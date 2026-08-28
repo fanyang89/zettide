@@ -9,7 +9,7 @@
 - Catalog、extent mapping、writable backend、endpoint registry/daemon。
 - 标准 Catalog NVMf TCP/RDMA export 与 focused/physical-device test harness。
 - vhost-user-blk 与 NVMe-oF initiator library paths。
-- `zettide-control` metadata、heartbeat、Raft/WAL/snapshot/ReadIndex。
+- `zettide-controller` metadata、heartbeat、Raft/WAL/snapshot/ReadIndex。
 - qtr 手动外部 iSCSI discovery/login/logout/device discovery。
 
 这些能力仍只使 Tier 1 状态为“部分”。
@@ -113,7 +113,7 @@ CSI 不阻塞 Tier 1/2，也不新增数据 plane。
 ## Milestone 11：Repair 与 Production Admission
 
 - 实现增量/全量 rebuild、scrub、限速、进度上报和 Replica relocation。
-- 增加 services/control/DataService 双向认证、per-host NVMf/iSCSI/NFS authorization 和 adapter/CSI identity binding。
+- 增加 services/controller/DataService 双向认证、per-host NVMf/iSCSI/NFS authorization 和 adapter/CSI identity binding。
 - 建立 credential/certificate rotation、滚动升级、回滚、格式兼容和灾难恢复流程。
 - 通过断电、网络分区、介质损坏、旧 host 恢复、长稳和资源耗尽测试。
 

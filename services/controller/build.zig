@@ -51,41 +51,41 @@ pub fn addComponent(
         .optimize = optimize,
     });
 
-    const generated_control_dir = createGeneratedDirectory(b, ".zettide-control-proto");
+    const generated_controller_dir = createGeneratedDirectory(b, ".zettide-controller-proto");
     const generate_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
-        .destination_directory = generated_control_dir,
-        .source_files = &.{componentPath(b, base_dir, "proto/zettide/control/v1/control.proto")},
+        .destination_directory = generated_controller_dir,
+        .source_files = &.{componentPath(b, base_dir, "proto/zettide/controller/v1/controller.proto")},
         .include_directories = &.{componentPath(b, base_dir, "proto")},
     });
-    generated_control_dir.addStepDependencies(&generate_proto.step);
+    generated_controller_dir.addStepDependencies(&generate_proto.step);
 
     const generated_node_dir = createGeneratedDirectory(b, ".zettide-node-proto");
     const generate_node_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
         .destination_directory = generated_node_dir,
-        .source_files = &.{data_service_contracts_dependency.path("proto/zettide/control/v1/data_service.proto")},
+        .source_files = &.{data_service_contracts_dependency.path("proto/zettide/controller/v1/data_service.proto")},
         .include_directories = &.{data_service_contracts_dependency.path("proto")},
     });
     generated_node_dir.addStepDependencies(&generate_node_proto.step);
 
-    const control_proto_output = ProtoOutput.create(
+    const controller_proto_output = ProtoOutput.create(
         b,
         &generate_proto.step,
-        generated_control_dir,
-        "zettide/control/v1.pb.zig",
+        generated_controller_dir,
+        "zettide/controller/v1.pb.zig",
     );
     const node_proto_output = ProtoOutput.create(
         b,
         &generate_node_proto.step,
         generated_node_dir,
-        "zettide/control/v1.pb.zig",
+        "zettide/controller/v1.pb.zig",
     );
 
-    const generate_proto_step = b.step(step_names.generate, "Generate control-plane Zig protobuf sources");
-    generate_proto_step.dependOn(&control_proto_output.step);
+    const generate_proto_step = b.step(step_names.generate, "Generate controller Zig protobuf sources");
+    generate_proto_step.dependOn(&controller_proto_output.step);
     generate_proto_step.dependOn(&node_proto_output.step);
 
-    const control_proto = b.createModule(.{
-        .root_source_file = control_proto_output.getOutput(),
+    const controller_proto = b.createModule(.{
+        .root_source_file = controller_proto_output.getOutput(),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
@@ -97,13 +97,13 @@ pub fn addComponent(
         .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
     });
 
-    const control = b.addModule("zettide_control", .{
+    const controller = b.addModule("zettide_controller", .{
         .root_source_file = componentPath(b, base_dir, "src/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "clap", .module = clap_dependency.module("clap") },
-            .{ .name = "control_proto", .module = control_proto },
+            .{ .name = "controller_proto", .module = controller_proto },
             .{ .name = "grpc_lite", .module = grpc_module },
             .{ .name = "node_proto", .module = node_proto },
             .{ .name = "raftz", .module = raft_dependency.module("raftz") },
@@ -113,8 +113,8 @@ pub fn addComponent(
     });
 
     const library = b.addLibrary(.{
-        .name = "zettide-control",
-        .root_module = control,
+        .name = "zettide-controller",
+        .root_module = controller,
     });
     b.installArtifact(library);
 
@@ -122,22 +122,22 @@ pub fn addComponent(
         .root_source_file = componentPath(b, base_dir, "src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "zettide_control", .module = control }},
+        .imports = &.{.{ .name = "zettide_controller", .module = controller }},
     });
     const executable = b.addExecutable(.{
-        .name = "zettide-control",
+        .name = "zettide-controller",
         .root_module = executable_module,
     });
     b.installArtifact(executable);
 
     const run_executable = b.addRunArtifact(executable);
     if (b.args) |args| run_executable.addArgs(args);
-    const run_step = b.step(step_names.run, "Run the metadata control plane");
+    const run_step = b.step(step_names.run, "Run the metadata controller");
     run_step.dependOn(&run_executable.step);
 
-    const tests = b.addTest(.{ .root_module = control });
+    const tests = b.addTest(.{ .root_module = controller });
     const run_tests = b.addRunArtifact(tests);
-    const test_step = b.step(step_names.tests, "Run control-plane unit tests");
+    const test_step = b.step(step_names.tests, "Run controller unit tests");
     test_step.dependOn(&run_tests.step);
     return test_step;
 }

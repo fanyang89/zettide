@@ -1,5 +1,5 @@
 const std = @import("std");
-const pb = @import("control_proto");
+const pb = @import("controller_proto");
 const raft = @import("raftz");
 
 pub fn decodeApplyResponse(allocator: std.mem.Allocator, bytes: []const u8) !pb.ApplyResponse {

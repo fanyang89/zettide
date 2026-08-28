@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const pb = @import("control_proto");
+const pb = @import("controller_proto");
 
 pub const max_nodes: usize = 10_000;
 pub const max_member_observations: usize = 10_000;

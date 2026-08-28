@@ -47,7 +47,7 @@ fencing、failover、repair 和 republish。
 | 本地 Pool 与格式 | 当前/部分 | Member v3、authority scan、control journal、Blob data mode、多成员复制和 scheduled layout 已有路径；动态生命周期未产品化 |
 | Catalog | 部分 | multi-Volume catalog、extent mapping、writable backend 和 endpoint registry 已存在；在线扩容/保护迁移未接线 |
 | SPDK | 部分 | managed runtime、provider bdev、Catalog NVMf TCP/RDMA export、vhost-user-blk 与 initiator wrapper 有 focused tests |
-| `zettide-control` | 部分 | Pool/Node/Member/Volume metadata、heartbeat、Raft/WAL/snapshot/ReadIndex 与恢复测试存在；placement、lease、reconciliation 不存在 |
+| `zettide-controller` | 部分 | Pool/Node/Member/Volume metadata、heartbeat、Raft/WAL/snapshot/ReadIndex 与恢复测试存在；placement、lease、reconciliation 不存在 |
 | Tier 3 Replica NVMf | 目标 | 尚无 vendor-specific commands、Replica namespace authority、commit evidence 或 epoch gate |
 | TxFS shared qcow2 | 部分 | transaction、SCSI CAW/data transport、voting 和 allocator 基础存在；POSIX/FUSE 与 qtr 未接线 |
 
@@ -71,12 +71,12 @@ fencing、failover、repair 和 republish。
 
 - `zettide` 当前拥有本地 Pool、BlobFilesystem、FUSE、NFS backend、Catalog endpoint daemon 与标准 NVMf export。
 - `qtr` 当前只拥有手动外部 iSCSI initiator；managed adapter 为目标。
-- `zettide-control` 当前拥有部分 durable metadata 和 Raft runtime；不与当前 endpoint daemon 形成产品 E2E。
+- `zettide-controller` 当前拥有部分 durable metadata 和 Raft runtime；不与当前 endpoint daemon 形成产品 E2E。
 - PVE plugin 与 CSI driver 均尚无实现。
 
 ## 当前实现边界
 
-### zettide-control
+### zettide-controller
 
 当前具备：
 

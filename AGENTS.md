@@ -3,7 +3,7 @@
 ## Repository Scope
 
 This repository contains the complete Zettide storage project. Storage-owned
-components live in `services/zettide/`, `services/control/`, `services/csi/`,
+components live in `services/zettide/`, `services/controller/`, `services/csi/`,
 `services/nfs-fsal/`, `libs/txfs/`, and `libs/data-service-contracts/`. Tests live under
 `tests/`. External source dependencies are pinned as submodules under `vendor/`.
 

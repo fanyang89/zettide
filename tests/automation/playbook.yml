@@ -5,12 +5,12 @@
   become: true
 
   vars:
-    zettide_controller_root: "{{ playbook_dir }}/../.."
+    zettide_repository_root: "{{ playbook_dir }}/../.."
     zettide_test_profile: "{{ zettide_test_profile_override | default('tier1') }}"
     zettide_optimize_modes: "{{ zettide_optimize_modes_override | default(['Debug', 'ReleaseSafe']) }}"
     zettide_zig: zig
     zettide_zig_version: 0.16.0
-    zettide_results_root: "{{ zettide_controller_root }}/test-results/ansible"
+    zettide_results_root: "{{ zettide_repository_root }}/test-results/ansible"
     zettide_keep_remote_workspace: false
     zettide_keep_test_artifacts: false
     zettide_io_timeout: 5400
@@ -348,7 +348,7 @@
           - rev-parse
           - HEAD
       args:
-        chdir: "{{ zettide_controller_root }}"
+        chdir: "{{ zettide_repository_root }}"
       delegate_to: localhost
       become: false
       run_once: true
@@ -362,7 +362,7 @@
           - status
           - --short
       args:
-        chdir: "{{ zettide_controller_root }}"
+        chdir: "{{ zettide_repository_root }}"
       delegate_to: localhost
       become: false
       run_once: true
@@ -376,7 +376,7 @@
       delegate_to: localhost
       become: false
       run_once: true
-      register: zettide_controller_staging
+      register: zettide_repository_staging
 
     - name: Archive the current controller working tree
       ansible.builtin.command:
@@ -391,9 +391,9 @@
           - --exclude=test-results
           - --exclude=tests/automation/inventory.ini
           - -C
-          - "{{ zettide_controller_root }}"
+          - "{{ zettide_repository_root }}"
           - -czf
-          - "{{ zettide_controller_staging.path }}/source.tar.gz"
+          - "{{ zettide_repository_staging.path }}/source.tar.gz"
           - .
       delegate_to: localhost
       become: false
@@ -402,7 +402,7 @@
 
     - name: Hash the staged source archive
       ansible.builtin.stat:
-        path: "{{ zettide_controller_staging.path }}/source.tar.gz"
+        path: "{{ zettide_repository_staging.path }}/source.tar.gz"
         checksum_algorithm: sha256
       delegate_to: localhost
       become: false
@@ -417,9 +417,9 @@
           - --exclude=build
           - --exclude=build-tmp
           - -C
-          - "{{ zettide_controller_root }}/../third_party"
+          - "{{ zettide_repository_root }}/../third_party"
           - -czf
-          - "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
+          - "{{ zettide_repository_staging.path }}/spdk-source.tar.gz"
           - spdk
       delegate_to: localhost
       become: false
@@ -431,7 +431,7 @@
       ansible.builtin.command:
         argv: [git, rev-parse, HEAD]
       args:
-        chdir: "{{ zettide_controller_root }}/vendor/spdk"
+        chdir: "{{ zettide_repository_root }}/vendor/spdk"
       delegate_to: localhost
       become: false
       run_once: true
@@ -441,7 +441,7 @@
 
     - name: Hash the staged SPDK source archive
       ansible.builtin.stat:
-        path: "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
+        path: "{{ zettide_repository_staging.path }}/spdk-source.tar.gz"
         checksum_algorithm: sha256
       delegate_to: localhost
       become: false
@@ -557,7 +557,7 @@
 
         - name: Extract the current working tree
           ansible.builtin.unarchive:
-            src: "{{ zettide_controller_staging.path }}/source.tar.gz"
+            src: "{{ zettide_repository_staging.path }}/source.tar.gz"
             dest: "{{ zettide_remote_workspace.path }}"
 
         - name: Record the test manifest
@@ -743,7 +743,7 @@
 
         - name: Remove the controller staging directory
           ansible.builtin.file:
-            path: "{{ zettide_controller_staging.path }}"
+            path: "{{ zettide_repository_staging.path }}"
             state: absent
           delegate_to: localhost
           become: false

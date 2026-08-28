@@ -180,7 +180,7 @@ pub fn parseHolder(response: pb.IdentifyHolderResponse) !reconciler.Id {
 }
 
 pub fn methodPath(comptime method: []const u8) []const u8 {
-    return "/zettide.control.v1.DataService/" ++ method;
+    return "/zettide.controller.v1.DataService/" ++ method;
 }
 
 fn parseUuidText(text: []const u8) ![16]u8 {
@@ -288,10 +288,10 @@ test "fence wire model rejects malformed fixed-width evidence" {
 }
 
 test "DataService authority method paths are stable" {
-    try std.testing.expectEqualStrings("/zettide.control.v1.DataService/IdentifyHolder", methodPath("IdentifyHolder"));
-    try std.testing.expectEqualStrings("/zettide.control.v1.DataService/StagePrimary", methodPath("StagePrimary"));
-    try std.testing.expectEqualStrings("/zettide.control.v1.DataService/FenceReplica", methodPath("FenceReplica"));
-    try std.testing.expectEqualStrings("/zettide.control.v1.DataService/RecoverPrimary", methodPath("RecoverPrimary"));
-    try std.testing.expectEqualStrings("/zettide.control.v1.DataService/MarkPrimaryReady", methodPath("MarkPrimaryReady"));
-    try std.testing.expectEqualStrings("/zettide.control.v1.DataService/InspectPrimary", methodPath("InspectPrimary"));
+    try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/IdentifyHolder", methodPath("IdentifyHolder"));
+    try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/StagePrimary", methodPath("StagePrimary"));
+    try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/FenceReplica", methodPath("FenceReplica"));
+    try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/RecoverPrimary", methodPath("RecoverPrimary"));
+    try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/MarkPrimaryReady", methodPath("MarkPrimaryReady"));
+    try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/InspectPrimary", methodPath("InspectPrimary"));
 }

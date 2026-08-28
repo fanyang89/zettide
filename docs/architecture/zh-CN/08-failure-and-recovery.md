@@ -124,7 +124,7 @@ Candidate 必须属于当前 placement、registration 有效且未管理隔离�
 
 ## Control Recovery
 
-`zettide-control` 按以下顺序恢复：
+`zettide-controller` 按以下顺序恢复：
 
 1. 验证 durable cluster/node identity。
 2. 加载最新完整、兼容且校验通过的 snapshot。

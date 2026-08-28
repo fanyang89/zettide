@@ -6,7 +6,7 @@
 > **漂移检查（首先运行）**：
 > `git -C zettide-control diff --stat c25ed1d..HEAD -- proto src README.md build.zig`
 > 执行前运行
-> `sha256sum services/control/proto/zettide/control/v1/control.proto services/control/src/state_machine.zig services/control/src/service.zig services/control/src/root.zig`
+> `sha256sum services/controller/proto/zettide/controller/v1/controller.proto services/controller/src/state_machine.zig services/controller/src/service.zig services/controller/src/root.zig`
 > 并确认结果分别为
 > `2f390f2338626d2c28250957ba98ba6f19fefca4d4f03b2794ec81b1c8e899b2`、
 > `4fa351a90b955ccc0d6b64e7fa300ca75774b56b91f11df5ec08ba78543ebee8`、
@@ -26,26 +26,26 @@
 
 ## 为什么重要
 
-快照必须是 Raft 中的第一类 durable resource，才能在 control leader 切换、响应丢失和
+快照必须是 Raft 中的第一类 durable resource，才能在 controller leader 切换、响应丢失和
 reconciler 重试后保持同一 identity。该计划只表达 desired state 和经过验证的结果，不在
 Raft apply 中调用 DataService。这样可以保持状态机确定性，并让 public API 明确区分
 “已接受创建”与“数据已 READY”。
 
 ## 当前状态
 
-- `services/control/proto/zettide/control/v1/control.proto:5-9`：只有 `PoolService`。
-- `services/control/proto/zettide/control/v1/control.proto:50-79`：command/result 只支持
+- `services/controller/proto/zettide/controller/v1/controller.proto:5-9`：只有 `PoolService`。
+- `services/controller/proto/zettide/controller/v1/controller.proto:50-79`：command/result 只支持
   `CreatePool`。
-- `services/control/proto/zettide/control/v1/control.proto:89-93`：Raft snapshot 只保存 Pool
+- `services/controller/proto/zettide/controller/v1/controller.proto:89-93`：Raft snapshot 只保存 Pool
   与 request history。
-- `services/control/src/state_machine.zig:78-95`：内存状态只有 Pool 索引和 requests。
-- `services/control/src/state_machine.zig:187-272`：apply 硬编码单一 CreatePool command。
-- `services/control/src/state_machine.zig:499-612`：restore request 与 response 校验也硬编码
+- `services/controller/src/state_machine.zig:78-95`：内存状态只有 Pool 索引和 requests。
+- `services/controller/src/state_machine.zig:187-272`：apply 硬编码单一 CreatePool command。
+- `services/controller/src/state_machine.zig:499-612`：restore request 与 response 校验也硬编码
   CreatePool；未来 delete 不能假设 created resource 永远仍在 live map。
-- `services/control/src/state_machine.zig:630-707`：command/snapshot preflight 严格拒绝未知
+- `services/controller/src/state_machine.zig:630-707`：command/snapshot preflight 严格拒绝未知
   internal fields。
-- `services/control/src/service.zig:51-186`：mutation 走 propose，Get/List 走 ReadIndex。
-- `services/control/src/service.zig:368-372`：RPC route 当前仅注册 Pool 三个方法。
+- `services/controller/src/service.zig:51-186`：mutation 走 propose，Get/List 走 ReadIndex。
+- `services/controller/src/service.zig:368-372`：RPC route 当前仅注册 Pool 三个方法。
 
 必须沿用现有模式：leader 在 proposal 前生成 UUIDv7 和时间；apply 只做有界内存状态变更；
 业务冲突编码为 deterministic result；Get/List 走 ReadIndex；输入先经过严格 wire preflight。
@@ -93,9 +93,9 @@ failure_code
 | Generate | `zig build gen-proto` | exit 0 |
 | Tests | `zig build test --summary all` | all tests pass |
 | Diff | `git diff --check -- proto src README.md build.zig` | exit 0 |
-| Routes | `grep -n "VolumeSnapshotService/CreateVolumeSnapshot" services/control/src/service.zig` | no match before plan 003 |
+| Routes | `grep -n "VolumeSnapshotService/CreateVolumeSnapshot" services/controller/src/service.zig` | no match before plan 003 |
 
-命令工作目录均为 `services/control/`。
+命令工作目录均为 `services/controller/`。
 
 ## 临时目录约定
 
@@ -106,13 +106,13 @@ failure_code
 
 **范围内**：
 
-- `services/control/proto/zettide/control/v1/control.proto`
-- `services/control/src/state_machine.zig`
-- `services/control/src/service.zig`
-- `services/control/src/protobuf_wire.zig`
-- `services/control/src/root.zig`
-- `services/control/src/integration_test.zig`
-- `services/control/README.md`
+- `services/controller/proto/zettide/controller/v1/controller.proto`
+- `services/controller/src/state_machine.zig`
+- `services/controller/src/service.zig`
+- `services/controller/src/protobuf_wire.zig`
+- `services/controller/src/root.zig`
+- `services/controller/src/integration_test.zig`
+- `services/controller/README.md`
 
 **范围外**：
 
@@ -271,10 +271,10 @@ stale volume revision 和 pagination；`zig build test --summary all` exit 0，R
 
 ## 测试计划
 
-- 以 `services/control/src/state_machine.zig` 现有 idempotency、deterministic snapshot、corruption 和 failing
+- 以 `services/controller/src/state_machine.zig` 现有 idempotency、deterministic snapshot、corruption 和 failing
   allocator tests 为结构模板。
-- 以 `services/control/src/service.zig` 现有 Pool Create/Get/List tests 为 service 模板。
-- 以 `services/control/src/integration_test.zig` 的 snapshot + WAL suffix replay 为恢复模板。
+- 以 `services/controller/src/service.zig` 现有 Pool Create/Get/List tests 为 service 模板。
+- 以 `services/controller/src/integration_test.zig` 的 snapshot + WAL suffix replay 为恢复模板。
 - 至少覆盖 Create happy path、name conflict、request conflict、source state conflict、stale
   completion、wrong operation ID、one-Replica certificate rejection、deterministic restore、v2
   snapshot migration 和 pagination token tampering。

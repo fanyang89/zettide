@@ -22,7 +22,7 @@ repositories retain their histories here as merged directory trees:
 | Path | Role |
 | --- | --- |
 | `services/zettide/` | Pool, Volume, BlobFilesystem, frontend, and endpoint implementation |
-| `services/control/` | Raft-replicated metadata and cluster coordination |
+| `services/controller/` | Raft-replicated metadata and cluster coordination |
 | `services/csi/` | CSI node service and container image |
 | `services/nfs-fsal/` | NFS-Ganesha FSAL adapter |
 | `libs/txfs/` | Conditional-write transaction engine for shared writable filesystems |
@@ -64,7 +64,7 @@ The later tiers remain cumulative:
 | Tier 2 | Dynamic Pool membership, recoverable online capacity/protection migration, multi-Volume service governance, attachment governance, and fuller platform lifecycle |
 | Tier 3 | Cross-node replication, fencing, storage failover, repair, and caller-directed republication |
 
-Tier 3 control metadata foundations exist in the integrated `services/control/` module,
+Tier 3 controller metadata foundations exist in the integrated `services/controller/` module,
 but the distributed data path does not.
 
 The current raw Pool product commands accept one unprotected device, three
@@ -117,7 +117,7 @@ The equivalent focused Zig gates include:
 ```sh
 zig build
 zig build test
-zig build test-control
+zig build test-controller
 zig build test-txfs
 zig build ci
 ```

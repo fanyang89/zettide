@@ -107,7 +107,7 @@ flowchart LR
     Client[管理客户端]
     Host[qtr / PVE / CSI node]
 
-    subgraph CP[zettide-control 集群]
+    subgraph CP[zettide-controller 集群]
         API[grpc-lite API]
         Loop[Control Loop]
         Barrier[ReadIndex Barrier]
@@ -172,7 +172,7 @@ Host-facing NVMf 使用标准 NVMe block commands。内部 Replica NVMf 必须�
 - 目标补齐 iSCSI target、动态 Pool/product lifecycle、统一四前端 publication/export control 和平台 adapter 所需接口。
 - `zettide` 不自行决定 Tier 3 placement/lease/epoch 权威，不把标准 host NVMf 当作 Replica protocol，也不承担 VM host 调度。
 
-### `zettide-control`
+### `zettide-controller`
 
 - 当前保存 Pool/Node/Member/Volume metadata intent，提供 leader-local heartbeat、静态多 voter Raft runtime、WAL、snapshot、ReadIndex、grpc-lite transport 和恢复基础。
 - 目标保存 Replica placement/allocation、primary、lease ID、write epoch 和 publication authority，执行节点注册、placement、reconciliation、fencing 协调和 Tier 3 failover。
@@ -194,7 +194,7 @@ Host-facing NVMf 使用标准 NVMe block commands。内部 Replica NVMf 必须�
 
 ## 控制路径
 
-1. 请求到达当前 `zettide-control` leader。
+1. 请求到达当前 `zettide-controller` leader。
 2. Leader 在 proposal 前完成权限、参数和幂等校验，并生成包含 ID、时间、随机值和 placement 结果的确定性 command。
 3. Raft 多数派持久化并提交 command。
 4. 本地状态机按日志顺序 apply 后返回确定性结果；proposal 入队或本地 append 不算成功。

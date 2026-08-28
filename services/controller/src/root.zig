@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const pb = @import("control_proto");
+pub const pb = @import("controller_proto");
 pub const node_pb = @import("node_proto");
 pub const data_service_contracts = @import("zettide_data_service_contracts");
 pub const grpc = @import("grpc_lite");

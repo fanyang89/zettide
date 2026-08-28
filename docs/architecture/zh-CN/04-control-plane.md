@@ -14,7 +14,7 @@ Tier 1/2 单节点控制面负责 Pool、Catalog Volume、BlobFilesystem export�
 
 它尚未提供统一 Pool/Volume API、consumer-bound Publication、iSCSI、NFS/FUSE lifecycle 或 qtr adapter，因此只能标为部分。
 
-Tier 3 的 `zettide-control` 负责跨节点权威状态，并通过 Raft/WAL/snapshot 复制。当前两级控制面尚未端到端接通。
+Tier 3 的 `zettide-controller` 负责跨节点权威状态，并通过 Raft/WAL/snapshot 复制。当前两级控制面尚未端到端接通。
 
 ## 目标结构
 
@@ -28,7 +28,7 @@ flowchart TB
     Obs --> R
     E --> Facts[On-media Pool facts]
     Facts --> R
-    CP[zettide-control Raft] -. Tier 3 authority .-> R
+    CP[zettide-controller Raft] -. Tier 3 authority .-> R
 ```
 
 ## API 资源
@@ -58,9 +58,9 @@ flowchart TB
 - intent 在第一个外部副作用前持久化；
 - observed state 不能覆盖 desired state 或介质事实。
 
-当前 endpoint registry 和 `zettide-control` 各自在局部实现了持久 desired state 或 request ID 幂等，但尚无共享 API。
+当前 endpoint registry 和 `zettide-controller` 各自在局部实现了持久 desired state 或 request ID 幂等，但尚无共享 API。
 
-在 `zettide-control` 中，Pool、Node、Member、Volume 共享全局 request-ID 域；相同 ID 即使跨资源类型重用也按 fingerprint 冲突。状态机保存最终 apply response，以便响应丢失后返回原结果。Heartbeat 的 incarnation/sequence ordering tuple 是 observation 去重键，不等同于 management operation ID。
+在 `zettide-controller` 中，Pool、Node、Member、Volume 共享全局 request-ID 域；相同 ID 即使跨资源类型重用也按 fingerprint 冲突。状态机保存最终 apply response，以便响应丢失后返回原结果。Heartbeat 的 incarnation/sequence ordering tuple 是 observation 去重键，不等同于 management operation ID。
 
 ## Raft 写入与读取
 
@@ -129,7 +129,7 @@ qtr 当前只实现手动外部 iSCSI 操作，上述 managed contract 全部仍
 
 ## Tier 3 Raft
 
-当前 `zettide-control` 已实现 Pool/Node/Member/Volume metadata、request history、ReadIndex、leader-local heartbeat、WAL/snapshot 和静态多 voter 恢复。CreateVolume 只提交固定 3/2/1 `PROVISIONING` intent，不执行 placement 或 I/O。
+当前 `zettide-controller` 已实现 Pool/Node/Member/Volume metadata、request history、ReadIndex、leader-local heartbeat、WAL/snapshot 和静态多 voter 恢复。CreateVolume 只提交固定 3/2/1 `PROVISIONING` intent，不执行 placement 或 I/O。
 
 目标 mutation 必须由 leader 构造确定性 command，经 quorum commit 和 apply 后才返回成功。Heartbeat 只提供 observation；leader 切换后清空，不能授予 primary、publication 或 Replica 写权限。
 
@@ -183,5 +183,5 @@ RPC、proposal、ReadIndex、heartbeat、endpoint action、migration 和 repair 
 - 无统一 Tier 1 Pool/Volume/Publication/Export API。
 - endpoint daemon 无 iSCSI、NFS/FUSE 管理和 platform consumer identity。
 - qtr/PVE/CSI 无 managed adapter。
-- `zettide-control` 无 placement、Replica/Allocation mutation、lease、publication authority 或 reconciler。
+- `zettide-controller` 无 placement、Replica/Allocation mutation、lease、publication authority 或 reconciler。
 - 当前控制 RPC 不具备生产级双向认证与授权。

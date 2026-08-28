@@ -89,12 +89,12 @@ c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  services/zetti
 
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
-| Control tests | `zig build test --summary all` in `services/control/` | all pass |
+| Controller tests | `zig build test --summary all` in `services/controller/` | all pass |
 | Unit tests | `zig build test-unit --summary all` in `zettide/` | all pass |
 | Image tests | `zig build test-image --summary all` in `zettide/` | all pass |
 | Fault tests | `zig build test-fault --summary all` in `zettide/` | all pass |
 | CI gate | `zig build ci --summary all` in `zettide/` | all pass |
-| Control diff | `git -C zettide-control diff --check -- proto src README.md` | exit 0 |
+| Controller diff | `git -C zettide-control diff --check -- proto src README.md` | exit 0 |
 | Data diff | `git -C zettide diff --check -- src docs build.zig test` | exit 0 |
 
 ## 临时目录约定
@@ -106,10 +106,10 @@ c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  services/zetti
 
 **范围内**：
 
-- `services/control/proto/zettide/control/v1/control.proto`
-- `services/control/src/service.zig`
-- `services/control/src/root.zig`
-- `services/control/src/integration_test.zig`
+- `services/controller/proto/zettide/controller/v1/controller.proto`
+- `services/controller/src/service.zig`
+- `services/controller/src/root.zig`
+- `services/controller/src/integration_test.zig`
 - DataService baseline 落地后刷新出的精确 reconciler、observed-state、proto 和 client 文件
 - `services/zettide/v3/replica_endpoint.zig`
 - `services/zettide/v3/control_record.zig`
@@ -257,7 +257,7 @@ completion 或 stale action 在 state machine 中必须被拒绝。
 只有端到端 tests 证明 READY 证据链后，才在 `VolumeSnapshotService.register()` 注册 public
 Create/Get/List routes。Create 仍只返回 CREATING；客户端通过 Get/List 观察 READY。
 
-**验证**：`zig build test --summary all` 在 `services/control/` exit 0；三 voter failover + primary
+**验证**：`zig build test --summary all` 在 `services/controller/` exit 0；三 voter failover + primary
 response loss 最终只产生一个 READY snapshot。Route grep 至少命中 register 与测试 expectation。
 
 ## 测试计划

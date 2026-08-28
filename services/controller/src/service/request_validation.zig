@@ -1,5 +1,5 @@
 const std = @import("std");
-const pb = @import("control_proto");
+const pb = @import("controller_proto");
 const uuid = @import("uuid");
 const heartbeat = @import("../heartbeat.zig");
 const state_machine = @import("../state_machine.zig");

@@ -252,7 +252,7 @@
 
 - name: Extract SPDK source | {{ zettide_optimize }}
   ansible.builtin.unarchive:
-    src: "{{ zettide_controller_staging.path }}/spdk-source.tar.gz"
+    src: "{{ zettide_repository_staging.path }}/spdk-source.tar.gz"
     dest: "{{ zettide_remote_workspace.path }}"
 
 - name: Configure shared SPDK without RDMA | {{ zettide_optimize }}

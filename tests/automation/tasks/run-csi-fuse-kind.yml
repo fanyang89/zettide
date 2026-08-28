@@ -24,7 +24,7 @@
       - test
       - ./...
   args:
-    chdir: "{{ zettide_controller_root }}/services/csi"
+    chdir: "{{ zettide_repository_root }}/services/csi"
   delegate_to: localhost
   become: false
   changed_when: false
@@ -39,7 +39,7 @@
       - vet
       - ./...
   args:
-    chdir: "{{ zettide_controller_root }}/services/csi"
+    chdir: "{{ zettide_repository_root }}/services/csi"
   delegate_to: localhost
   become: false
   changed_when: false
@@ -55,10 +55,10 @@
       - -trimpath
       - -ldflags=-s -w -X main.version=v0.1.0
       - -o
-      - "{{ zettide_controller_staging.path }}/zettide-csi-node"
+      - "{{ zettide_repository_staging.path }}/zettide-csi-node"
       - ./cmd/zettide-csi-node
   args:
-    chdir: "{{ zettide_controller_root }}/services/csi"
+    chdir: "{{ zettide_repository_root }}/services/csi"
   environment:
     CGO_ENABLED: "0"
     GOARCH: amd64
@@ -75,7 +75,7 @@
 
 - name: Copy the FUSE CSI node service to the remote host | {{ zettide_optimize }}
   ansible.builtin.copy:
-    src: "{{ zettide_controller_staging.path }}/zettide-csi-node"
+    src: "{{ zettide_repository_staging.path }}/zettide-csi-node"
     dest: "{{ zettide_remote_workspace.path }}/csi/bin/zettide-csi-node"
     mode: "0755"
 

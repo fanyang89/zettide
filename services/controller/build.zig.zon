@@ -1,8 +1,8 @@
 .{
-    .name = .zettide_control,
+    .name = .zettide_controller,
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
-    .fingerprint = 0xfa2f3383beccff5f,
+    .fingerprint = 0xa4c499ee5b0c9281,
     .dependencies = .{
         .clap = .{
             .url = "https://github.com/fanyang89/zig-clap/archive/refs/tags/0.12.0.tar.gz",

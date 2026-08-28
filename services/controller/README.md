@@ -1,4 +1,4 @@
-# zettide-control
+# zettide-controller
 
 Replicated metadata control plane for Zettide.
 
@@ -7,7 +7,7 @@ registrations, and durable local Member bindings. A Pool is a global namespace
 for Volumes. Node
 registration records stable identity, cluster binding, endpoints, failure
 domain, capabilities, and protocol version. Member registration binds a native
-media identity and local set to a control Pool and Node, with immutable slot and
+media identity and local set to a controller-managed Pool and Node, with immutable slot and
 allocation geometry. Leader-local heartbeats currently observe Node
 incarnation/sequence, Member presence, and optional extent capacity. Volume
 creation currently commits a `PROVISIONING` metadata intent with fixed 3/2/1

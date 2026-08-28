@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const pb = @import("control_proto");
+const pb = @import("controller_proto");
 const heartbeat = @import("heartbeat.zig");
 const primary_lease = @import("primary_lease.zig");
 const raft = @import("raftz");

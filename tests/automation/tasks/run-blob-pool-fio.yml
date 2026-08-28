@@ -44,7 +44,7 @@
   ansible.builtin.get_url:
     url: >-
       https://github.com/nfs-ganesha/nfs-ganesha/archive/429463bc77a4654a4f00e0109b8c1496c272abb4.tar.gz
-    dest: "{{ zettide_controller_staging.path }}/nfs-ganesha-v13.tar.gz"
+    dest: "{{ zettide_repository_staging.path }}/nfs-ganesha-v13.tar.gz"
     checksum: sha256:b2550f8c74134980ebd264b4d0d242439f88f89d7cdae30e56367a767b10aaae
     mode: "0644"
   delegate_to: localhost
@@ -57,7 +57,7 @@
 
 - name: Extract pinned NFS-Ganesha V13 source | {{ zettide_optimize }}
   ansible.builtin.unarchive:
-    src: "{{ zettide_controller_staging.path }}/nfs-ganesha-v13.tar.gz"
+    src: "{{ zettide_repository_staging.path }}/nfs-ganesha-v13.tar.gz"
     dest: "{{ zettide_remote_workspace.path }}"
   when: zettide_test_profile == 'blob-pool-nfs-fio'
 
@@ -65,7 +65,7 @@
   ansible.builtin.get_url:
     url: >-
       https://github.com/ceph/libkmip/archive/4f553ecaf8e57cc3019222b8551d17888f0a1e66.tar.gz
-    dest: "{{ zettide_controller_staging.path }}/libkmip.tar.gz"
+    dest: "{{ zettide_repository_staging.path }}/libkmip.tar.gz"
     checksum: sha256:372d54e3a25c9d3f5c442714f93ddac263b68d993a27647853a377cdf7e94432
     mode: "0644"
   delegate_to: localhost
@@ -86,7 +86,7 @@
 
 - name: Extract pinned libkmip source | {{ zettide_optimize }}
   ansible.builtin.unarchive:
-    src: "{{ zettide_controller_staging.path }}/libkmip.tar.gz"
+    src: "{{ zettide_repository_staging.path }}/libkmip.tar.gz"
     dest: >-
       {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libkmip
     extra_opts:
@@ -97,7 +97,7 @@
   ansible.builtin.get_url:
     url: >-
       https://github.com/nfs-ganesha/ntirpc/archive/96e980def1c2d4538ff4708b0908670dd6a8946d.tar.gz
-    dest: "{{ zettide_controller_staging.path }}/ntirpc.tar.gz"
+    dest: "{{ zettide_repository_staging.path }}/ntirpc.tar.gz"
     checksum: sha256:39775a5404cf78e1327020154ed9f3e370a6b235adbff47d0726ef1c30a20e71
     mode: "0644"
   delegate_to: localhost
@@ -118,7 +118,7 @@
 
 - name: Extract pinned NTIRPC source | {{ zettide_optimize }}
   ansible.builtin.unarchive:
-    src: "{{ zettide_controller_staging.path }}/ntirpc.tar.gz"
+    src: "{{ zettide_repository_staging.path }}/ntirpc.tar.gz"
     dest: >-
       {{ zettide_remote_workspace.path }}/nfs-ganesha-429463bc77a4654a4f00e0109b8c1496c272abb4/src/libntirpc
     extra_opts:

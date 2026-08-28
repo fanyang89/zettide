@@ -27,7 +27,7 @@ Tier 1 不承诺 storage node 故障后的服务连续性。它的故障边界�
 
 - 默认三个 Replica 跨 storage node 故障域放置，2/3 持久提交。
 - 每个可写 Volume 只有一个 primary，并由 lease 与 write epoch fencing。
-- `zettide-control` 通过 Raft 保存权威元数据。
+- `zettide-controller` 通过 Raft 保存权威元数据。
 - 内部 vendor-specific Replica NVMf transport 承载带 epoch/sequence/commit evidence 的复制 I/O。
 - storage failover、repair 与 caller-directed republish 不等于 VM 调度或自动重启。
 

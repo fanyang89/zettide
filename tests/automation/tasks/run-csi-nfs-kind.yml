@@ -39,7 +39,7 @@
   ansible.builtin.get_url:
     url: >-
       https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/v4.13.4/deploy/v4.13.4/{{ item.name }}
-    dest: "{{ zettide_controller_staging.path }}/{{ item.name }}"
+    dest: "{{ zettide_repository_staging.path }}/{{ item.name }}"
     checksum: "sha256:{{ item.sha256 }}"
     mode: "0644"
   loop:
@@ -64,7 +64,7 @@
 
 - name: Copy pinned NFS CSI manifests to the remote host | {{ zettide_optimize }}
   ansible.builtin.copy:
-    src: "{{ zettide_controller_staging.path }}/{{ item }}"
+    src: "{{ zettide_repository_staging.path }}/{{ item }}"
     dest: "{{ zettide_remote_workspace.path }}/csi-manifests/{{ item }}"
     mode: "0644"
   loop:

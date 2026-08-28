@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const pb = @import("control_proto");
+const pb = @import("controller_proto");
 const grpc = @import("grpc_lite");
 const raft = @import("raftz");
 const config_mod = @import("config.zig");
@@ -944,7 +944,7 @@ fn createPool(runtime: *runtime_mod.Runtime, request_id: []const u8, name: []con
         .name = name,
     });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.PoolService/CreatePool", request);
+    var result = try call(runtime, "/zettide.controller.v1.PoolService/CreatePool", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -966,7 +966,7 @@ fn createVolume(runtime: *runtime_mod.Runtime, request_id: []const u8, pool_id: 
         .size_bytes = volume_size_bytes,
     });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.VolumeService/CreateVolume", request);
+    var result = try call(runtime, "/zettide.controller.v1.VolumeService/CreateVolume", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -980,7 +980,7 @@ fn createVolume(runtime: *runtime_mod.Runtime, request_id: []const u8, pool_id: 
 fn getVolume(runtime: *runtime_mod.Runtime, volume_id: []const u8) !?OwnedVolume {
     const request = try encodeMessage(pb.GetVolumeRequest{ .volume_id = volume_id });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.VolumeService/GetVolume", request);
+    var result = try call(runtime, "/zettide.controller.v1.VolumeService/GetVolume", request);
     defer result.deinit();
     if (result.status.code == .not_found) return null;
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
@@ -1004,7 +1004,7 @@ fn deleteVolume(
         .expected_resource_version = expected_resource_version,
     });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.VolumeService/DeleteVolume", request);
+    var result = try call(runtime, "/zettide.controller.v1.VolumeService/DeleteVolume", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1058,7 +1058,7 @@ fn registerNode(
         .protocol_version = node_protocol_version,
     });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.NodeService/RegisterNode", request);
+    var result = try call(runtime, "/zettide.controller.v1.NodeService/RegisterNode", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1094,7 +1094,7 @@ fn registerMember(
         .extent_size_bytes = member_extent_size_bytes,
     });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.MemberService/RegisterMember", request);
+    var result = try call(runtime, "/zettide.controller.v1.MemberService/RegisterMember", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1127,7 +1127,7 @@ fn registerReconcileNode(
         .protocol_version = node_protocol_version,
     });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.NodeService/RegisterNode", request);
+    var result = try call(runtime, "/zettide.controller.v1.NodeService/RegisterNode", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1164,7 +1164,7 @@ fn registerReconcileMember(
         .extent_size_bytes = member_extent_size_bytes,
     });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.MemberService/RegisterMember", request);
+    var result = try call(runtime, "/zettide.controller.v1.MemberService/RegisterMember", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1230,7 +1230,7 @@ fn reportHeartbeat(
         .members = .{ .items = &members, .capacity = members.len },
     });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.HeartbeatService/ReportHeartbeat", request);
+    var result = try call(runtime, "/zettide.controller.v1.HeartbeatService/ReportHeartbeat", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1263,7 +1263,7 @@ fn reportHeartbeat(
 fn getHeartbeat(runtime: *runtime_mod.Runtime, node_id: []const u8) !?HeartbeatRead {
     const request = try encodeMessage(pb.GetHeartbeatRequest{ .node_id = node_id });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.HeartbeatService/GetHeartbeat", request);
+    var result = try call(runtime, "/zettide.controller.v1.HeartbeatService/GetHeartbeat", request);
     defer result.deinit();
     if (result.status.code == .not_found) return null;
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
@@ -1294,7 +1294,7 @@ fn expectFreshHeartbeat(reported: HeartbeatObservation, heartbeat: HeartbeatRead
 fn expectPool(runtime: *runtime_mod.Runtime, name: []const u8, expected_id: []const u8) !void {
     const request = try encodeMessage(pb.GetPoolRequest{ .selector = .{ .name = name } });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.PoolService/GetPool", request);
+    var result = try call(runtime, "/zettide.controller.v1.PoolService/GetPool", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1307,7 +1307,7 @@ fn expectPool(runtime: *runtime_mod.Runtime, name: []const u8, expected_id: []co
 fn expectList(runtime: *runtime_mod.Runtime, expected_count: usize) !void {
     const request = try encodeMessage(pb.ListPoolsRequest{});
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.PoolService/ListPools", request);
+    var result = try call(runtime, "/zettide.controller.v1.PoolService/ListPools", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1323,7 +1323,7 @@ fn expectNode(
 ) !void {
     const request = try encodeMessage(pb.GetNodeRequest{ .node_id = expected.id });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.NodeService/GetNode", request);
+    var result = try call(runtime, "/zettide.controller.v1.NodeService/GetNode", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1344,7 +1344,7 @@ fn expectNode(
 fn expectNodeList(runtime: *runtime_mod.Runtime, expected_nodes: []const RegisteredNode) !void {
     const request = try encodeMessage(pb.ListNodesRequest{});
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.NodeService/ListNodes", request);
+    var result = try call(runtime, "/zettide.controller.v1.NodeService/ListNodes", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1366,7 +1366,7 @@ fn expectNodeList(runtime: *runtime_mod.Runtime, expected_nodes: []const Registe
 fn expectMember(runtime: *runtime_mod.Runtime, expected: ExpectedMember) !void {
     const request = try encodeMessage(pb.GetMemberRequest{ .member_id = expected.registered.id });
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.MemberService/GetMember", request);
+    var result = try call(runtime, "/zettide.controller.v1.MemberService/GetMember", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);
@@ -1379,7 +1379,7 @@ fn expectMember(runtime: *runtime_mod.Runtime, expected: ExpectedMember) !void {
 fn expectMemberList(runtime: *runtime_mod.Runtime, expected_members: []const ExpectedMember) !void {
     const request = try encodeMessage(pb.ListMembersRequest{});
     defer runtime_allocator.free(request);
-    var result = try call(runtime, "/zettide.control.v1.MemberService/ListMembers", request);
+    var result = try call(runtime, "/zettide.controller.v1.MemberService/ListMembers", request);
     defer result.deinit();
     try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
     var reader: std.Io.Reader = .fixed(result.payload);

@@ -9,7 +9,7 @@
 | 整体组件与 storage direction | [`../../../README.md`](../../../README.md) |
 | Zettide 当前能力与 gate | [`../../../README.md`](../../../README.md) |
 | qtr external storage/VM | [`../../../qtr/README.md`](../../../qtr/README.md), [`../../../qtr/docs/external-storage.md`](../../../qtr/docs/external-storage.md), [`../../../qtr/docs/vm-configuration.md`](../../../qtr/docs/vm-configuration.md) |
-| 控制面范围 | [`../../../services/control/README.md`](../../../services/control/README.md) |
+| 控制面范围 | [`../../../services/controller/README.md`](../../../services/controller/README.md) |
 | Raft API、安全与恢复 | [`../../../vendor/raftz/README.md`](../../../vendor/raftz/README.md), [`../../../vendor/raftz/src/root.zig`](../../../vendor/raftz/src/root.zig) |
 | grpc-lite API 与限制 | [`../../../vendor/grpc-lite/README.md`](../../../vendor/grpc-lite/README.md), [`../../../vendor/grpc-lite/src/root.zig`](../../../vendor/grpc-lite/src/root.zig) |
 | 虚拟化/CSI 目标契约 | [`13-virtualization-and-csi.md`](13-virtualization-and-csi.md) |
@@ -84,18 +84,18 @@
 
 当前没有 qtr Zettide provider、managed NVMf controller、Publication API client、protocol fallback、persistent attachment intent 或 end-to-end reconciliation。
 
-## zettide-control / raftz / grpc-lite
+## zettide-controller / raftz / grpc-lite
 
 | 主题 | 文件 |
 | --- | --- |
-| Control protobuf | [`../../../services/control/proto/zettide/control/v1/control.proto`](../../../services/control/proto/zettide/control/v1/control.proto) |
-| State machine/snapshot/idempotency | [`../../../services/control/src/state_machine.zig`](../../../services/control/src/state_machine.zig) |
-| Heartbeat | [`../../../services/control/src/heartbeat.zig`](../../../services/control/src/heartbeat.zig) |
-| RPC/ReadIndex | [`../../../services/control/src/service.zig`](../../../services/control/src/service.zig) |
-| Runtime/WAL/transport | [`../../../services/control/src/runtime.zig`](../../../services/control/src/runtime.zig) |
-| Config/data_dir 与进程入口 | [`../../../services/control/src/config.zig`](../../../services/control/src/config.zig), [`../../../services/control/src/main.zig`](../../../services/control/src/main.zig) |
-| Control module/wire/build | [`../../../services/control/src/root.zig`](../../../services/control/src/root.zig), [`../../../services/control/src/protobuf_wire.zig`](../../../services/control/src/protobuf_wire.zig), [`../../../services/control/build.zig`](../../../services/control/build.zig) |
-| Control restart/failover tests | [`../../../services/control/src/runtime_integration_test.zig`](../../../services/control/src/runtime_integration_test.zig), [`../../../services/control/src/integration_test.zig`](../../../services/control/src/integration_test.zig) |
+| Controller protobuf | [`../../../services/controller/proto/zettide/controller/v1/controller.proto`](../../../services/controller/proto/zettide/controller/v1/controller.proto) |
+| State machine/snapshot/idempotency | [`../../../services/controller/src/state_machine.zig`](../../../services/controller/src/state_machine.zig) |
+| Heartbeat | [`../../../services/controller/src/heartbeat.zig`](../../../services/controller/src/heartbeat.zig) |
+| RPC/ReadIndex | [`../../../services/controller/src/service.zig`](../../../services/controller/src/service.zig) |
+| Runtime/WAL/transport | [`../../../services/controller/src/runtime.zig`](../../../services/controller/src/runtime.zig) |
+| Config/data_dir 与进程入口 | [`../../../services/controller/src/config.zig`](../../../services/controller/src/config.zig), [`../../../services/controller/src/main.zig`](../../../services/controller/src/main.zig) |
+| Controller module/wire/build | [`../../../services/controller/src/root.zig`](../../../services/controller/src/root.zig), [`../../../services/controller/src/protobuf_wire.zig`](../../../services/controller/src/protobuf_wire.zig), [`../../../services/controller/build.zig`](../../../services/controller/build.zig) |
+| Controller restart/failover tests | [`../../../services/controller/src/runtime_integration_test.zig`](../../../services/controller/src/runtime_integration_test.zig), [`../../../services/controller/src/integration_test.zig`](../../../services/controller/src/integration_test.zig) |
 | Raftor/WAL/grpc transport | [`../../../vendor/raftz/src/raftor.zig`](../../../vendor/raftz/src/raftor.zig), [`../../../vendor/raftz/src/wal.zig`](../../../vendor/raftz/src/wal.zig), [`../../../vendor/raftz/src/rpc/grpc_lite_transport.zig`](../../../vendor/raftz/src/rpc/grpc_lite_transport.zig) |
 | Raft core/RawNode/Ready | [`../../../vendor/raftz/src/raft.zig`](../../../vendor/raftz/src/raft.zig), [`../../../vendor/raftz/src/raw_node.zig`](../../../vendor/raftz/src/raw_node.zig), [`../../../vendor/raftz/src/ready_processor.zig`](../../../vendor/raftz/src/ready_processor.zig) |
 | Raft StateMachine/membership | [`../../../vendor/raftz/src/state_machine.zig`](../../../vendor/raftz/src/state_machine.zig), [`../../../vendor/raftz/src/cluster_membership.zig`](../../../vendor/raftz/src/cluster_membership.zig) |

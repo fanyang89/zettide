@@ -177,7 +177,7 @@ test "parse persistent three-voter configuration" {
         "--cluster-id",        "0198f54d-5c2a-7000-8000-000000000001",
         "--management-listen", "127.0.0.1:8002",
         "--raft-listen",       "127.0.0.1:9002",
-        "--data-dir",          "/var/lib/zettide-control/node-2",
+        "--data-dir",          "/var/lib/zettide-controller/node-2",
         "--peer",              "1=127.0.0.1:9001",
         "--peer",              "2=127.0.0.1:9002",
         "--peer",              "3=127.0.0.1:9003",
@@ -200,7 +200,7 @@ test "parse explicit advertised Raft address" {
         "--management-listen", "127.0.0.1:8001",
         "--raft-listen",       "0.0.0.0:9001",
         "--raft-advertise",    "127.0.0.1:9001",
-        "--data-dir",          "/tmp/zettide-control",
+        "--data-dir",          "/tmp/zettide-controller",
         "--peer",              "1=127.0.0.1:9001",
     };
     var result = try parseSlice(&arguments);
@@ -222,7 +222,7 @@ test "reject invalid and inconsistent peers" {
         "--cluster-id",        "0198f54d-5c2a-7000-8000-000000000001",
         "--management-listen", "127.0.0.1:8001",
         "--raft-listen",       "127.0.0.1:9001",
-        "--data-dir",          "/tmp/zettide-control",
+        "--data-dir",          "/tmp/zettide-controller",
     };
     const missing_local = base ++ [_][]const u8{ "--peer", "2=127.0.0.1:9002" };
     try std.testing.expectError(error.LocalPeerRequired, parseSlice(&missing_local));
@@ -260,7 +260,7 @@ test "reject missing durable and network configuration" {
         "--cluster-id",        "0198f54d-5c2a-7000-8000-000000000001",
         "--management-listen", "127.0.0.1:0",
         "--raft-listen",       "127.0.0.1:9001",
-        "--data-dir",          "/tmp/zettide-control",
+        "--data-dir",          "/tmp/zettide-controller",
         "--peer",              "1=127.0.0.1:9001",
     };
     try std.testing.expectError(error.InvalidManagementListen, parseSlice(&invalid_port));

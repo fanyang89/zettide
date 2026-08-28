@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package zettide.control.v1;
+package zettide.controller.v1;
 
 service DataService {
   rpc EnsureReplica(EnsureReplicaRequest) returns (EnsureReplicaResponse);
