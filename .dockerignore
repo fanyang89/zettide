@@ -1,0 +1,17 @@
+.git
+.pi
+.mise
+.zig-cache
+zig-out
+zig-pkg
+**/.zig-cache
+**/zig-out
+**/zig-pkg
+!zig-pkg/
+!zig-pkg/**
+**/.venv
+**/test-results
+tests/external/.prepared
+vendor/spdk
+vendor/libfuse-tests
+vendor/xfstests

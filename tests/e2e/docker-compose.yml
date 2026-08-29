@@ -1,0 +1,102 @@
+name: zettide-e2e
+
+services:
+  controller:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+      target: controller
+    command:
+      - --node-id
+      - "1"
+      - --cluster-id
+      - 0198f54d-5c2a-7000-8000-000000000001
+      - --management-listen
+      - 0.0.0.0:8001
+      - --raft-listen
+      - 127.0.0.1:9001
+      - --raft-advertise
+      - 127.0.0.1:9001
+      - --data-dir
+      - /var/lib/zettide-controller
+      - --peer
+      - 1=127.0.0.1:9001
+    security_opt:
+      - seccomp=unconfined
+    ports:
+      - "8001:8001"
+    volumes:
+      - controller-data:/var/lib/zettide-controller
+    networks:
+      zettide:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8001"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    stop_grace_period: 10s
+
+  data-node:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+      target: data-node
+    environment:
+      # grpc-lite requires an explicit resolver runtime for DNS targets. The
+      # prototype daemon intentionally uses the controller's stable E2E IPv4.
+      ZETTIDE_CONTROLLER_ENDPOINT: 172.30.0.10:8001
+      ZETTIDE_DATA_NODE_LISTEN: 0.0.0.0:7001
+      ZETTIDE_DATA_NODE_ADVERTISE: data-node:7001
+      ZETTIDE_CLUSTER_ID: 0198f54d-5c2a-7000-8000-000000000001
+      ZETTIDE_NODE_ID: 0198f54d-5c2a-7000-8000-000000000002
+      ZETTIDE_REQUEST_ID: 0198f54d-5c2a-7000-8000-000000000003
+      ZETTIDE_ISCSI_TARGET: iqn.2026-08.io.zettide:e2e
+      ZETTIDE_ISCSI_LUN: "1"
+      ZETTIDE_ISCSI_SIZE: 64M
+    depends_on:
+      controller:
+        condition: service_healthy
+    security_opt:
+      - seccomp=unconfined
+    ports:
+      - "3260:3260"
+      - "7001:7001"
+    volumes:
+      - data-node-data:/var/lib/zettide-data-node
+    networks:
+      - zettide
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          nc -z 127.0.0.1 7001 &&
+          tgtadm --lld iscsi --op show --mode target | grep -Fq iqn.2026-08.io.zettide:e2e
+      interval: 1s
+      timeout: 2s
+      retries: 60
+    stop_grace_period: 10s
+
+  smoke:
+    profiles: ["smoke"]
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+      target: smoke
+    depends_on:
+      controller:
+        condition: service_healthy
+      data-node:
+        condition: service_healthy
+    networks:
+      - zettide
+
+networks:
+  zettide:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  controller-data:
+  data-node-data:

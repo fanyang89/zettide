@@ -32,6 +32,9 @@ Run `zig build test-data-node` for endpoint/SPDK adapter units,
 `zig build test-compatibility` for CLI/frontend compatibility units, and
 `zig build test-module-roots` for dependency-boundary checks.
 
-`data_node_main.zig` and `data_node_service.zig` contain the DataService prototype;
-installing the final `zettide-data-node` daemon remains a later composition step.
-The repository root build owns product wiring during this migration.
+`data_node_main.zig` and `data_node_service.zig` contain the DataService prototype.
+The repository root build installs `zettide-data-node`; the daemon starts its
+control endpoint and registers its stable identity and advertised data endpoint
+with the controller. Replica/publication reconciliation remains a later
+composition step. See `tests/e2e/README.md` for the local Docker Compose and
+libiscsi smoke profile.

@@ -130,6 +130,36 @@ pub fn addComponent(
     });
     b.installArtifact(executable);
 
+    // The repository root owns the product-level data-node composition while
+    // this component remains independently buildable from services/controller.
+    if (base_dir.len != 0) {
+        const data_node_service = b.createModule(.{
+            .root_source_file = componentPath(b, base_dir, "../data-node/data_node_service.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "data_node_proto", .module = data_node_proto },
+                .{ .name = "grpc_lite", .module = grpc_module },
+                .{ .name = "zettide_data_service_contracts", .module = data_service_contracts_dependency.module("zettide_data_service_contracts") },
+            },
+        });
+        const data_node_executable_module = b.createModule(.{
+            .root_source_file = componentPath(b, base_dir, "../data-node/data_node_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "controller_proto", .module = controller_proto },
+                .{ .name = "data_node_service", .module = data_node_service },
+                .{ .name = "grpc_lite", .module = grpc_module },
+            },
+        });
+        const data_node_executable = b.addExecutable(.{
+            .name = "zettide-data-node",
+            .root_module = data_node_executable_module,
+        });
+        b.installArtifact(data_node_executable);
+    }
+
     const run_executable = b.addRunArtifact(executable);
     if (b.args) |args| run_executable.addArgs(args);
     const run_step = b.step(step_names.run, "Run the metadata controller");
