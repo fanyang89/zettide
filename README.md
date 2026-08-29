@@ -427,6 +427,49 @@ mount commands. Headers without a Blob or Catalog marker are reported as
 not yet support encryption, erasure coding, garbage collection, online
 expansion, or protection changes.
 
+### Cluster administration CLI
+
+`zettidectl` is the Go gRPC client for controller management and read-only
+data-node diagnostics. It is built and released independently from the local
+`zettide` storage command:
+
+```sh
+cd services/cli
+mise trust
+mise install
+mise run check
+mkdir -p bin
+go build -trimpath -o bin/zettidectl ./cmd/zettidectl
+```
+
+Global flags must precede the target and command. Set the endpoint explicitly or
+through `ZETTIDE_ENDPOINT`:
+
+```sh
+# Controller inventory in the default table format.
+bin/zettidectl --endpoint 127.0.0.1:50051 controller pool list
+bin/zettidectl --endpoint 127.0.0.1:50051 controller node list
+bin/zettidectl --endpoint 127.0.0.1:50051 controller volume list
+
+# Machine-readable output.
+bin/zettidectl --endpoint 127.0.0.1:50051 --output json \
+  controller heartbeat get \
+  --node-id 0198f54d-5c2a-7000-8000-000000000002
+
+# Read-only data-node identity diagnostic.
+bin/zettidectl --endpoint 127.0.0.1:50052 data-node holder identify
+```
+
+Connections use plaintext by default for local development. Supplying
+`--tls-ca <pem-file>` enables server-authenticated TLS; use
+`--tls-server-name <name>` when the dial target is not the certificate name.
+Controller commands cover Pool create/get/list, Node register/get/list, Member
+register/get/list, Volume create/get/update/list/delete, and Heartbeat get.
+Data-node replica, fencing, recovery, and primary mutation RPCs remain internal
+to controller reconciliation and are deliberately not exposed. See
+[`services/cli/README.md`](services/cli/README.md) for command examples,
+protobuf regeneration, binary-ID encoding, and pagination details.
+
 ## Format limits
 
 - File names are at most 255 UTF-8 bytes.
