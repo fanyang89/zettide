@@ -1,6 +1,9 @@
 pub const storage = @import("zettide_storage");
 
 pub const data_service = @import("data_node_service.zig");
+pub const replica_io_gate = @import("replica_io_gate.zig");
+pub const write_participant_manager = @import("write_participant_manager.zig");
+pub const member_generation_store = @import("member_generation_store.zig");
 pub const endpoint_registry = @import("endpoint_registry.zig");
 pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("endpoint_control.zig") else struct {};
 pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("endpoint_daemon.zig") else struct {};

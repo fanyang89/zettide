@@ -171,6 +171,21 @@ pub const Service = struct {
         return self.completeEnsure(prepared);
     }
 
+    /// Complete a prepared operation for the exact expected Replica binding.
+    /// Used during daemon startup before the original RPC can be retried.
+    pub fn recoverReplica(self: *Service, expected: Binding) !?Response {
+        self.lockTransaction();
+        defer self.transaction_lock.unlock();
+        try self.store.checkHealthy();
+        const record = self.store.findReplicaRecord(expected.placement_id) orelse return null;
+        if (!std.meta.eql(record.result.attestation.binding, expected)) return null;
+        if (record.status == .completed) return responseOf(record);
+        return switch (record.kind) {
+            .ensure => try self.completeEnsure(record),
+            .delete => try self.completeDelete(record),
+        };
+    }
+
     pub fn inspectReplica(self: *Service, request: Request) !Response {
         self.lockTransaction();
         defer self.transaction_lock.unlock();
@@ -263,6 +278,10 @@ const ParsedRequest = struct {
     operation_id: Id,
     binding: Binding,
 };
+
+pub fn parseBinding(request: Request) !Binding {
+    return (try parseRequest(request)).binding;
+}
 
 fn parseRequest(request: Request) !ParsedRequest {
     if (request.generation == 0 or request.length_bytes == 0) return error.InvalidGeometry;
@@ -703,6 +722,39 @@ pub const FileStore = struct {
         if (self.poisoned) return error.StorePoisoned;
         if (self.capacity_geometry == null) return error.CapacityNotConfigured;
         return self.capacity_snapshot;
+    }
+
+    /// Return the complete current durable Replica after checking exact binding.
+    pub fn validateCurrent(self: *FileStore, expected: Binding) !Replica {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        const record = findReplicaRecord(self.records, expected.placement_id) orelse return error.ReplicaNotFound;
+        if (record.status != .completed) return error.OperationInProgress;
+        if (!std.meta.eql(record.result.attestation.binding, expected)) return error.ReplicaBindingMismatch;
+        if (isZero(&record.result.attestation.backend_digest)) return error.StoreCorrupt;
+        return record.result;
+    }
+
+    pub fn validateRetired(self: *FileStore, expected: Binding) !Attestation {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        const record = findAllocationRecord(self.records, expected.allocation_id) orelse return error.ReplicaNotFound;
+        if (record.status != .completed) return error.OperationInProgress;
+        if (!std.meta.eql(record.result.attestation.binding, expected)) return error.ReplicaBindingMismatch;
+        if (record.result.state != .tombstoned) return error.ReplicaNotRetired;
+        if (isZero(&record.result.attestation.backend_digest)) return error.StoreCorrupt;
+        return record.result.attestation;
+    }
+
+    /// Return the durable attestation only when the complete Replica binding is
+    /// still the current active allocation. Physical data backends must call
+    /// this immediately before applying user data.
+    pub fn validateActive(self: *FileStore, expected: Binding) !Attestation {
+        const replica = try self.validateCurrent(expected);
+        if (replica.state != .active) return error.ReplicaNotActive;
+        return replica.attestation;
     }
 
     pub fn validateFence(self: *FileStore, binding: protocol.FenceBinding) !void {
@@ -1194,6 +1246,38 @@ test "pending operations provide durable at-least-once idempotent recovery" {
         try std.testing.expectEqual(@as(usize, 1), backend.deletes);
         try std.testing.expectEqual(@as(usize, 2), backend.delete_calls);
     }
+}
+
+test "FileStore validates the complete current active Replica binding" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var service = Service.init(store.store(), backend.backend());
+    const ensured = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+    const expected = ensured.replica.attestation.binding;
+    const attestation = try store.validateActive(expected);
+    try std.testing.expectEqual(expected, attestation.binding);
+    try std.testing.expect(!isZero(&attestation.backend_digest));
+
+    inline for (.{ "allocation_id", "member_id", "offset_bytes", "length_bytes" }) |field| {
+        var mismatched = expected;
+        if (comptime std.mem.eql(u8, field, "allocation_id"))
+            mismatched.allocation_id[15] +%= 1
+        else if (comptime std.mem.eql(u8, field, "member_id"))
+            mismatched.member_id[15] +%= 1
+        else if (comptime std.mem.eql(u8, field, "offset_bytes"))
+            mismatched.offset_bytes += 4096
+        else
+            mismatched.length_bytes += 4096;
+        try std.testing.expectError(error.ReplicaBindingMismatch, store.validateActive(mismatched));
+    }
+
+    _ = try service.deleteReplica(testRequest(delete_operation_id, 1));
+    try std.testing.expectError(error.ReplicaNotActive, store.validateActive(expected));
+    const retired = try store.validateRetired(expected);
+    try std.testing.expectEqual(expected, retired.binding);
 }
 
 test "FileStore tracks capacity and rejects configured Member identity drift" {

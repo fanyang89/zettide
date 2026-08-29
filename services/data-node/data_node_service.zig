@@ -8,6 +8,9 @@ const file_member_backend = @import("file_member_backend.zig");
 const fence_service = protocol.fence_service;
 const lease = protocol.primary_lease;
 const replica_service = protocol.replica_service;
+const write_service = protocol.write_service;
+const replica_io_gate = @import("replica_io_gate.zig");
+const write_participant_manager = @import("write_participant_manager.zig");
 
 pub const ReplicaFileStore = replica_service.FileStore;
 pub const ReplicaCapacitySnapshot = replica_service.CapacitySnapshot;
@@ -15,6 +18,8 @@ pub const FenceFileStore = fence_service.FileStore;
 pub const AuthorityFileStore = authority_file_store.FileStore;
 pub const FileMemberBackend = file_member_backend.FileMemberBackend;
 pub const FileFenceBackend = file_member_backend.FileFenceBackend;
+pub const FileWriteBackend = file_member_backend.FileWriteBackend;
+pub const WriteParticipantManager = write_participant_manager.WriteParticipantManager;
 
 pub const Options = struct {
     replica_store: ?replica_service.Store = null,
@@ -22,6 +27,10 @@ pub const Options = struct {
     fence_store: ?fence_service.Store = null,
     fence_backend: ?fence_service.Backend = null,
     authority_store: ?*authority_file_store.FileStore = null,
+    write_parent: ?std.Io.Dir = null,
+    write_replica_store: ?*replica_service.FileStore = null,
+    write_fence_store: ?*fence_service.FileStore = null,
+    write_backend: ?write_service.Backend = null,
 };
 
 pub const DataNodeServer = struct {
@@ -47,10 +56,28 @@ pub const DataNodeServer = struct {
         if ((options.replica_store == null) != (options.replica_backend == null) or
             (options.fence_store == null) != (options.fence_backend == null))
             return error.IncompleteReplicaConfiguration;
+        const write_configured = options.write_parent != null;
+        if (write_configured != (options.write_replica_store != null) or
+            write_configured != (options.write_fence_store != null) or
+            write_configured != (options.write_backend != null) or
+            (write_configured and (options.authority_store == null or
+                options.replica_store == null or options.replica_backend == null or
+                options.fence_store == null or options.fence_backend == null)))
+            return error.IncompleteWriteConfiguration;
+        if (write_configured) {
+            const expected_replica_store = options.write_replica_store.?.store();
+            const expected_fence_store = options.write_fence_store.?.store();
+            if (options.replica_store.?.context != expected_replica_store.context or
+                options.replica_store.?.vtable != expected_replica_store.vtable or
+                options.fence_store.?.context != expected_fence_store.context or
+                options.fence_store.?.vtable != expected_fence_store.vtable)
+                return error.MismatchedWriteConfiguration;
+        }
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
         state.* = try State.init(allocator, io, options);
         errdefer state.deinit();
+        if (write_configured) try state.initWrites(options);
         var server = try grpc.Server.init(allocator, .{ .host = host, .port = port });
         errdefer server.deinit();
         try server.registerUnary(methodPath("EnsureReplica"), grpc.UnaryHandler.bind(State, state, State.ensureReplica));
@@ -102,6 +129,7 @@ const State = struct {
     fences: ?fence_service.Service,
     authority_store: ?*authority_file_store.FileStore,
     authorities: std.AutoHashMapUnmanaged(protocol.Id, Authority) = .empty,
+    writes: ?write_participant_manager.WriteParticipantManager = null,
 
     const Authority = struct {
         binding: protocol.AuthorityBinding,
@@ -125,7 +153,21 @@ const State = struct {
         };
     }
 
+    fn initWrites(self: *State, options: Options) !void {
+        self.writes = try write_participant_manager.WriteParticipantManager.init(
+            self.allocator,
+            self.io,
+            options.write_parent.?,
+            options.write_replica_store.?,
+            &self.replicas.?,
+            options.write_fence_store.?,
+            options.write_backend.?,
+            self.authorityValidator(),
+        );
+    }
+
     fn deinit(self: *State) void {
+        if (self.writes) |*writes| writes.deinit();
         self.authorities.deinit(self.allocator);
         self.* = undefined;
     }
@@ -178,14 +220,27 @@ const State = struct {
         request: replica_service.Request,
         method: ReplicaMethod,
     ) !grpc.UnaryResponse {
+        const service = if (self.replicas) |*replicas| replicas else return fail(allocator, .failed_precondition, "replica backend is not configured");
+        const binding = replica_service.parseBinding(request) catch
+            return fail(allocator, .invalid_argument, "invalid Replica binding");
         self.replica_mutex.lockUncancelable(self.io);
         defer self.replica_mutex.unlock(self.io);
-        const service = if (self.replicas) |*replicas| replicas else return fail(allocator, .failed_precondition, "replica backend is not configured");
+        var control_guard: ?write_participant_manager.WriteParticipantManager.ControlGuard = if (method != .inspect)
+            if (self.writes) |*writes|
+                writes.beginControl(binding.placement_id, binding.generation, method == .delete) catch |err|
+                    return writeControlFailure(allocator, err)
+            else
+                null
+        else
+            null;
+        defer if (control_guard) |*guard| guard.end();
         const response = switch (method) {
             .ensure => service.ensureReplica(request),
             .inspect => service.inspectReplica(request),
             .delete => service.deleteReplica(request),
         } catch |err| return replicaFailure(allocator, err);
+        if (method == .delete) if (control_guard) |*guard|
+            guard.retire() catch |err| return writeControlFailure(allocator, err);
         return encodeReplicaResponse(allocator, ResponseType, response);
     }
 
@@ -250,6 +305,12 @@ const State = struct {
             return fail(allocator, .invalid_argument, "invalid fence binding");
         self.replica_mutex.lockUncancelable(self.io);
         defer self.replica_mutex.unlock(self.io);
+        var control_guard: ?write_participant_manager.WriteParticipantManager.ControlGuard = if (self.writes) |*writes|
+            writes.beginControl(binding.placement_id, binding.replica_generation, false) catch |err|
+                return writeControlFailure(allocator, err)
+        else
+            null;
+        defer if (control_guard) |*guard| guard.end();
         const service = if (self.fences) |*fences| fences else return fail(allocator, .failed_precondition, "fence backend is not configured");
         const result = service.accept(binding) catch |err| return fenceFailure(allocator, err);
         return encodeResponse(allocator, pb.FenceReplicaResponse{
@@ -326,6 +387,24 @@ const State = struct {
         });
     }
 
+    fn authorityValidator(self: *State) replica_io_gate.AuthorityValidator {
+        return .{ .context = self, .validate_fn = validateWriteAuthorityOpaque };
+    }
+
+    fn validateWriteAuthorityOpaque(context: *anyopaque, binding: protocol.AuthorityBinding) !void {
+        const self: *State = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const now_ms = try nowAwakeMs(self.io);
+        const store = self.authority_store orelse return error.AuthorityStoreRequired;
+        const durable = (try store.validate(binding, .ready)) orelse return error.AuthorityNotReady;
+        if (durable.phase != .ready or !std.meta.eql(durable.binding, binding))
+            return error.AuthorityNotReady;
+        const authority = self.authorities.get(binding.volume_id) orelse return error.AuthorityNotStaged;
+        if (!std.meta.eql(authority.binding, binding)) return error.AuthorityConflict;
+        if (!authority.runtime.canAdmit(authorityToken(binding), now_ms)) return error.LeaseExpired;
+    }
+
     fn stage(self: *State, binding: protocol.AuthorityBinding) !void {
         const token = authorityToken(binding);
         const now_ms = try nowAwakeMs(self.io);
@@ -354,6 +433,9 @@ const State = struct {
     }
 
     fn recover(self: *State, binding: protocol.AuthorityBinding) !authority_file_store.Record {
+        if (self.writes) |*writes|
+            if (try writes.hasWriteHistory(binding.volume_id))
+                return error.RecoveryQuorumRequired;
         const now_ms = try nowAwakeMs(self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -379,6 +461,10 @@ const State = struct {
     }
 
     fn markReady(self: *State, binding: protocol.AuthorityBinding) !void {
+        if (try self.currentlyAdmitting(binding)) return;
+        if (self.writes) |*writes|
+            if (try writes.hasWriteHistory(binding.volume_id))
+                return error.RecoveryQuorumRequired;
         const token = authorityToken(binding);
         const now_ms = try nowAwakeMs(self.io);
         self.mutex.lockUncancelable(self.io);
@@ -400,6 +486,15 @@ const State = struct {
             }
         }
         try authority.runtime.markReady(binding.lease_id, now_ms);
+    }
+
+    fn currentlyAdmitting(self: *State, binding: protocol.AuthorityBinding) !bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const authority = self.authorities.get(binding.volume_id) orelse return false;
+        if (!std.meta.eql(authority.binding, binding)) return false;
+        const now_ms = try nowAwakeMs(self.io);
+        return authority.runtime.canAdmit(authorityToken(binding), now_ms);
     }
 
     fn inspect(self: *State, binding: protocol.AuthorityBinding) !protocol.PrimaryLeaseStatus {
@@ -530,6 +625,20 @@ fn fenceFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse
     };
 }
 
+fn writeControlFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
+    return switch (err) {
+        error.WriteInProgress,
+        error.ReplicaRetired,
+        error.AuthorityFenced,
+        error.FenceRequired,
+        error.FenceGenerationMismatch,
+        error.ReplicaNotActive,
+        => fail(allocator, .failed_precondition, "participant control barrier rejected"),
+        error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "participant state exhausted"),
+        else => fail(allocator, .internal, "participant control barrier failed"),
+    };
+}
+
 fn authorityFailure(allocator: std.mem.Allocator, err: anyerror, message: []const u8) !grpc.UnaryResponse {
     return switch (err) {
         error.AuthorityConflict,
@@ -537,6 +646,7 @@ fn authorityFailure(allocator: std.mem.Allocator, err: anyerror, message: []cons
         error.AuthorityNotStaged,
         error.CandidateNotFresh,
         error.RecoveryEvidenceUnavailable,
+        error.RecoveryQuorumRequired,
         error.LeaseConflict,
         error.LeaseMismatch,
         error.NoCandidate,
@@ -708,18 +818,60 @@ test "data-node service persists Replica lifecycle through gRPC" {
         "member.img",
         "/test/member.img",
         member,
+        @splat(0x6a),
         64 * 1024,
         4096,
     );
     defer backend.deinit();
     var fence_store = try FenceFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
     defer fence_store.deinit();
+    var authority_store = try AuthorityFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "authority.state");
+    defer authority_store.deinit();
     var fence_backend = FileFenceBackend.init(&backend, &store);
+    var write_backend = FileWriteBackend.init(&backend, &store);
+    var other_store = try ReplicaFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "other-replicas.state");
+    defer other_store.deinit();
+    try std.testing.expectError(
+        error.MismatchedWriteConfiguration,
+        DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
+            .replica_store = store.store(),
+            .replica_backend = backend.backend(),
+            .fence_store = fence_store.store(),
+            .fence_backend = fence_backend.backend(),
+            .authority_store = &authority_store,
+            .write_parent = tmp.dir,
+            .write_replica_store = &other_store,
+            .write_fence_store = &fence_store,
+            .write_backend = write_backend.backend(),
+        }),
+    );
+    const cloned_replica_vtable = store.store().vtable.*;
+    var forged_replica_store = store.store();
+    forged_replica_store.vtable = &cloned_replica_vtable;
+    try std.testing.expectError(
+        error.MismatchedWriteConfiguration,
+        DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
+            .replica_store = forged_replica_store,
+            .replica_backend = backend.backend(),
+            .fence_store = fence_store.store(),
+            .fence_backend = fence_backend.backend(),
+            .authority_store = &authority_store,
+            .write_parent = tmp.dir,
+            .write_replica_store = &store,
+            .write_fence_store = &fence_store,
+            .write_backend = write_backend.backend(),
+        }),
+    );
     var server = try DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
         .replica_store = store.store(),
         .replica_backend = backend.backend(),
         .fence_store = fence_store.store(),
         .fence_backend = fence_backend.backend(),
+        .authority_store = &authority_store,
+        .write_parent = tmp.dir,
+        .write_replica_store = &store,
+        .write_fence_store = &fence_store,
+        .write_backend = write_backend.backend(),
     });
     defer server.deinit();
     try server.start();
@@ -936,6 +1088,13 @@ test "data-node service recovers and marks a staged primary ready" {
     try std.testing.expect(!active.candidate_fresh);
     try std.testing.expect(active.current_active);
     try std.testing.expect(active.current_admitting);
+    try service.state.authorityValidator().validate(binding);
+    var stale_binding = binding;
+    stale_binding.write_epoch += 1;
+    try std.testing.expectError(
+        error.AuthorityNotStaged,
+        service.state.authorityValidator().validate(stale_binding),
+    );
 
     var unconfigured = try channel.callUnary(std.testing.allocator, methodPath("EnsureReplica"), "", .{});
     defer unconfigured.deinit();

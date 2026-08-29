@@ -17,8 +17,11 @@ bounded rather than performing pairwise history scans.
 internal Replica protocol. It durably stages payload bytes, accepts only a
 canonical two-Member prepare certificate, persists that decision before applying
 and synchronizing the Replica extent, and can finish a decided write after
-restart without reviving an expired lease. Its file snapshot is a development
-baseline, not the final streaming journal or network transport.
+restart without reviving an expired lease. Certified replay carries its original
+authority into the fencing gate. File-backed participants persist an immutable
+Replica/canonical-Member genesis binding before the first PREPARE. Their atomic
+snapshot remains a development baseline, not the final streaming journal or
+network transport.
 Consumers generate protobuf bindings with their own grpc/protobuf toolchain.
 
 ```sh

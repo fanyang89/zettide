@@ -5,6 +5,7 @@ const controller_agent = @import("controller_agent.zig");
 const data_node = @import("data_node_service");
 const grpc = @import("grpc_lite");
 const incarnation_store = @import("incarnation_store.zig");
+const member_generation_store = @import("member_generation_store.zig");
 
 const registration_attempts = 60;
 const registration_retry_delay = std.Io.Duration.fromSeconds(1);
@@ -84,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
     var replica_backend: ?data_node.FileMemberBackend = null;
     defer if (replica_backend) |*backend| backend.deinit();
     var fence_backend: ?data_node.FileFenceBackend = null;
+    var write_backend: ?data_node.FileWriteBackend = null;
     var server_options: data_node.Options = .{};
     if (config.replica) |replica| {
         state_dir = try std.Io.Dir.cwd().openDir(init.io, replica.state_dir, .{});
@@ -99,12 +101,18 @@ pub fn main(init: std.process.Init) !void {
             replica.capacity_bytes,
             replica.extent_size_bytes,
         );
+        const member_generation = try member_generation_store.loadOrCreate(
+            init.io,
+            state_dir.?,
+            "member-generation.state",
+        );
         replica_backend = try data_node.FileMemberBackend.init(
             init.io,
             std.Io.Dir.cwd(),
             replica.member_file,
             replica.member_file,
             replica.member_id,
+            member_generation,
             replica.capacity_bytes,
             replica.extent_size_bytes,
         );
@@ -122,12 +130,17 @@ pub fn main(init: std.process.Init) !void {
             "authority.state",
         );
         fence_backend = data_node.FileFenceBackend.init(&replica_backend.?, &replica_store.?);
+        write_backend = data_node.FileWriteBackend.init(&replica_backend.?, &replica_store.?);
         server_options = .{
             .replica_store = replica_store.?.store(),
             .replica_backend = replica_backend.?.backend(),
             .fence_store = fence_store.?.store(),
             .fence_backend = fence_backend.?.backend(),
             .authority_store = &authority_store.?,
+            .write_parent = state_dir.?,
+            .write_replica_store = &replica_store.?,
+            .write_fence_store = &fence_store.?,
+            .write_backend = write_backend.?.backend(),
         };
     }
     var server = try data_node.DataNodeServer.initWithOptions(

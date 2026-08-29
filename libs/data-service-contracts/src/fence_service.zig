@@ -193,6 +193,7 @@ pub const FileStore = struct {
     parent: std.Io.Dir,
     basename: []const u8,
     records: []Result,
+    mutex: std.Io.Mutex = .init,
     poisoned: bool = false,
     faults: ?*Faults = null,
 
@@ -243,23 +244,38 @@ pub const FileStore = struct {
         return .{ .context = self, .vtable = &vtable };
     }
 
+    pub fn latest(self: *FileStore, volume_id: Id, placement_id: Id) !?Result {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        return findReplica(self.records, volume_id, placement_id);
+    }
+
     fn checkHealthyOpaque(context: *anyopaque) !void {
         const self: *FileStore = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
     }
 
     fn findOperationOpaque(context: *anyopaque, operation_id: Id) ?Result {
         const self: *FileStore = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return findOperation(self.records, operation_id);
     }
 
     fn findReplicaOpaque(context: *anyopaque, volume_id: Id, placement_id: Id) ?Result {
         const self: *FileStore = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return findReplica(self.records, volume_id, placement_id);
     }
 
     fn appendOpaque(context: *anyopaque, result: Result) !void {
         const self: *FileStore = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
         if (self.records.len == max_records) return error.StoreFull;
         const replacement = try self.allocator.alloc(Result, self.records.len + 1);
@@ -520,6 +536,28 @@ test "unknown response is replayed after restart without another drain" {
         _ = try service.accept(testBinding(10, 7));
         try std.testing.expectEqual(@as(usize, 1), backend.calls);
         try std.testing.expectError(error.EpochRegression, service.accept(testBinding(11, 6)));
+    }
+}
+
+test "FileStore latest fence survives restart and selects the newest epoch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{};
+    {
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences");
+        defer file_store.deinit();
+        var service = Service.init(file_store.store(), backend.backend());
+        _ = try service.accept(testBinding(10, 7));
+        _ = try service.accept(testBinding(11, 8));
+        const latest = (try file_store.latest(testId(1), testId(2))).?;
+        try std.testing.expectEqual(@as(u64, 8), latest.binding.write_epoch);
+        try std.testing.expectEqual(@as(?Result, null), try file_store.latest(testId(1), testId(9)));
+    }
+    {
+        var reopened = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences");
+        defer reopened.deinit();
+        const latest = (try reopened.latest(testId(1), testId(2))).?;
+        try std.testing.expectEqual(@as(u64, 8), latest.binding.write_epoch);
     }
 }
 

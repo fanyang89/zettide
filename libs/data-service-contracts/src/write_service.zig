@@ -62,7 +62,13 @@ const CompletedRecord = struct {
     result: CommitResult,
 };
 
+pub const ParticipantBinding = struct {
+    replica: ReplicaBinding,
+    replica_members: [3]Id,
+};
+
 const State = struct {
+    binding: ?ParticipantBinding = null,
     frontier: Frontier = .{},
     pending: ?PreparedRecord = null,
     certificate: ?CommitCertificate = null,
@@ -139,15 +145,15 @@ pub const Backend = struct {
 pub const Admission = struct {
     context: *anyopaque,
     begin_fn: *const fn (*anyopaque, AuthorityBinding) anyerror!void,
-    begin_replay_fn: *const fn (*anyopaque) anyerror!void,
+    begin_replay_fn: *const fn (*anyopaque, AuthorityBinding) anyerror!void,
     end_fn: *const fn (*anyopaque) void,
 
     fn begin(self: Admission, authority: AuthorityBinding) !void {
         try self.begin_fn(self.context, authority);
     }
 
-    fn beginReplay(self: Admission) !void {
-        try self.begin_replay_fn(self.context);
+    fn beginReplay(self: Admission, authority: AuthorityBinding) !void {
+        try self.begin_replay_fn(self.context, authority);
     }
 
     fn end(self: Admission) void {
@@ -164,6 +170,7 @@ pub const Participant = opaque {
         backend: Backend,
         admission: Admission,
     ) !*Participant {
+        try file_store.bind(.{ .replica = replica, .replica_members = replica_members });
         const managed = try allocator.create(ManagedParticipant);
         errdefer allocator.destroy(managed);
         managed.* = .{
@@ -311,7 +318,7 @@ const ParticipantCore = struct {
         try validateCertificate(certificate, pending.attestation, self.replica_members);
         if (state.certificate) |existing| {
             if (!std.meta.eql(existing, certificate)) return error.CertificateConflict;
-            try self.admission.beginReplay();
+            try self.admission.beginReplay(pending.write.authority);
             defer self.admission.end();
             return self.applyCommitted(state);
         }
@@ -333,7 +340,8 @@ const ParticipantCore = struct {
         const state = self.store.current();
         try validateParticipantState(self.replica, self.replica_members, state);
         if (state.pending == null or state.certificate == null) return null;
-        try self.admission.beginReplay();
+        const pending = state.pending.?;
+        try self.admission.beginReplay(pending.write.authority);
         defer self.admission.end();
         return try self.applyCommitted(state);
     }
@@ -396,6 +404,9 @@ fn validateReplicaSet(replica_members: [3]Id, local_member: Id) !void {
 }
 
 fn validateParticipantState(replica: ReplicaBinding, replica_members: [3]Id, state: State) !void {
+    if (state.binding) |binding|
+        if (!std.meta.eql(replica, binding.replica) or !std.meta.eql(replica_members, binding.replica_members))
+            return error.ReplicaStateMismatch;
     if (state.pending) |pending| {
         if (!std.meta.eql(replica, pending.replica) or !std.meta.eql(replica_members, pending.write.replica_members))
             return error.ReplicaStateMismatch;
@@ -621,6 +632,7 @@ const MemoryStore = struct {
         if (self.payload.len != 0) self.allocator.free(self.payload);
         self.payload = &.{};
         self.state = .{
+            .binding = self.state.binding,
             .frontier = .{ .sequence = completed.result.sequence, .history_digest = completed.result.history_digest },
             .last_completed = completed,
         };
@@ -665,6 +677,18 @@ pub const FileStore = opaque {
     pub fn isPoisoned(self: *const FileStore) bool {
         const inner: *const FileStoreInner = @ptrCast(@alignCast(self));
         return inner.poisoned;
+    }
+
+    pub fn binding(self: *FileStore) !?ParticipantBinding {
+        const inner: *FileStoreInner = @ptrCast(@alignCast(self));
+        if (inner.poisoned) return error.StorePoisoned;
+        try validateStoredState(inner.state);
+        return inner.state.binding;
+    }
+
+    fn bind(self: *FileStore, expected: ParticipantBinding) !void {
+        const inner: *FileStoreInner = @ptrCast(@alignCast(self));
+        try inner.bind(expected);
     }
 
     fn store(self: *FileStore) Store {
@@ -746,6 +770,29 @@ const FileStoreInner = struct {
         return .{ .context = self, .vtable = &vtable };
     }
 
+    fn bind(self: *FileStoreInner, expected: ParticipantBinding) !void {
+        if (self.poisoned) return error.StorePoisoned;
+        try validateReplica(expected.replica);
+        try validateReplicaSet(expected.replica_members, expected.replica.member_id);
+        if (self.state.binding) |existing| {
+            if (!std.meta.eql(existing, expected)) return error.ReplicaStateMismatch;
+            return;
+        }
+        if (self.state.pending) |pending| {
+            if (!std.meta.eql(pending.replica, expected.replica) or
+                !std.meta.eql(pending.write.replica_members, expected.replica_members))
+                return error.ReplicaStateMismatch;
+        }
+        if (self.state.last_completed) |completed| {
+            if (!std.meta.eql(completed.replica, expected.replica) or
+                !std.meta.eql(completed.write.replica_members, expected.replica_members))
+                return error.ReplicaStateMismatch;
+        }
+        var next = self.state;
+        next.binding = expected;
+        try self.install(next);
+    }
+
     fn checkHealthyOpaque(context: *anyopaque) !void {
         const self: *FileStoreInner = @ptrCast(@alignCast(context));
         if (self.poisoned) return error.StorePoisoned;
@@ -782,6 +829,7 @@ const FileStoreInner = struct {
         if (self.poisoned) return error.StorePoisoned;
         if (self.state.pending == null or self.state.certificate == null) return error.StoreConflict;
         const next: State = .{
+            .binding = self.state.binding,
             .frontier = .{ .sequence = completed.result.sequence, .history_digest = completed.result.history_digest },
             .last_completed = completed,
         };
@@ -854,6 +902,12 @@ const FileStoreInner = struct {
         if (state.pending) |pending| putPrepared(bytes, &offset, pending) else offset += prepared_encoded_size;
         if (state.certificate) |certificate| putCertificate(bytes, &offset, certificate) else offset += certificate_encoded_size;
         if (state.last_completed) |completed| putCompleted(bytes, &offset, completed) else offset += completed_encoded_size;
+        bytes[offset] = @intFromBool(state.binding != null);
+        offset += 1;
+        if (state.binding) |binding| {
+            putReplica(bytes, &offset, binding.replica);
+            for (binding.replica_members) |member| putBytes(bytes, &offset, &member);
+        } else offset += participant_binding_encoded_size;
         if (offset > metadata_size) return error.StoreEncodingOverflow;
         @memcpy(bytes[metadata_size..][0..payload.len], payload);
         std.mem.writeInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size]), .little);
@@ -882,6 +936,19 @@ const FileStoreInner = struct {
         } else offset += prepared_encoded_size;
         if (phase == 2) state.certificate = getCertificate(bytes, &offset) else offset += certificate_encoded_size;
         if (has_last == 1) state.last_completed = getCompleted(bytes, &offset) else offset += completed_encoded_size;
+        const has_binding = bytes[offset];
+        offset += 1;
+        if (has_binding > 1) return error.StoreCorrupt;
+        if (has_binding == 1) {
+            state.binding = .{
+                .replica = getReplica(bytes, &offset),
+                .replica_members = .{
+                    getArray(16, bytes, &offset),
+                    getArray(16, bytes, &offset),
+                    getArray(16, bytes, &offset),
+                },
+            };
+        } else offset += participant_binding_encoded_size;
         if (!isZero(bytes[offset..metadata_size])) return error.StoreCorrupt;
         try validateStoredState(state);
         return state;
@@ -893,6 +960,7 @@ const FileStoreInner = struct {
 };
 
 const replica_encoded_size: usize = 88;
+const participant_binding_encoded_size: usize = replica_encoded_size + 3 * @sizeOf(Id);
 const authority_encoded_size: usize = 152;
 const write_encoded_size: usize = authority_encoded_size + 3 * @sizeOf(Id) + 104;
 const attestation_encoded_size: usize = 112;
@@ -1084,9 +1152,17 @@ fn getU64(bytes: []const u8, offset: *usize) u64 {
 }
 
 fn validateStoredState(state: State) !void {
+    if (state.binding) |binding| {
+        validateReplica(binding.replica) catch return error.StoreCorrupt;
+        validateReplicaSet(binding.replica_members, binding.replica.member_id) catch return error.StoreCorrupt;
+    }
     if ((state.frontier.sequence == 0) != isZero(&state.frontier.history_digest)) return error.StoreCorrupt;
     if (state.certificate != null and state.pending == null) return error.StoreCorrupt;
     if (state.pending) |pending| {
+        if (state.binding) |binding|
+            if (!std.meta.eql(binding.replica, pending.replica) or
+                !std.meta.eql(binding.replica_members, pending.write.replica_members))
+                return error.StoreCorrupt;
         validateReplica(pending.replica) catch return error.StoreCorrupt;
         validatePrepareRequest(pending.replica, pending.write.replica_members, .{ .write = pending.write, .data = pending.data }) catch return error.StoreCorrupt;
         validateNextWrite(state.frontier, pending.write) catch return error.StoreCorrupt;
@@ -1102,6 +1178,10 @@ fn validateStoredState(state: State) !void {
             validateCertificate(certificate, pending.attestation, pending.write.replica_members) catch return error.StoreCorrupt;
     }
     if (state.last_completed) |completed| {
+        if (state.binding) |binding|
+            if (!std.meta.eql(binding.replica, completed.replica) or
+                !std.meta.eql(binding.replica_members, completed.write.replica_members))
+                return error.StoreCorrupt;
         validateReplica(completed.replica) catch return error.StoreCorrupt;
         validateWriteMetadata(completed.replica, completed.write.replica_members, completed.write) catch return error.StoreCorrupt;
         if (!std.mem.eql(u8, &completed.replica.volume_id, &completed.write.authority.volume_id) or
@@ -1174,7 +1254,10 @@ const FakeAdmission = struct {
         if (!std.meta.eql(self.expected, authority)) return error.StaleAuthority;
     }
 
-    fn beginReplayOpaque(_: *anyopaque) !void {}
+    fn beginReplayOpaque(context: *anyopaque, authority: AuthorityBinding) !void {
+        const self: *FakeAdmission = @ptrCast(@alignCast(context));
+        if (!std.meta.eql(self.expected, authority)) return error.AuthorityRejected;
+    }
 
     fn endOpaque(_: *anyopaque) void {}
 };
@@ -1271,6 +1354,50 @@ test "opaque public Participant exposes metadata without Store state" {
     const inspection = try participant.inspect();
     try std.testing.expect(inspection.pending != null);
     try std.testing.expect(!inspection.pending.?.commit_decided);
+}
+
+test "public Participant persists immutable binding before the first PREPARE" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{};
+    var admission: FakeAdmission = .{ .expected = testAuthority() };
+    {
+        const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
+        defer store.deinit();
+        const participant = try Participant.initFile(
+            std.testing.allocator,
+            testReplica(1),
+            testReplicaMembers(),
+            store,
+            backend.backend(),
+            admission.admission(),
+        );
+        defer participant.deinit();
+        try std.testing.expectEqual(
+            ParticipantBinding{ .replica = testReplica(1), .replica_members = testReplicaMembers() },
+            (try store.binding()).?,
+        );
+        try std.testing.expect((try participant.inspect()).pending == null);
+    }
+    {
+        const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
+        defer store.deinit();
+        try std.testing.expectEqual(
+            ParticipantBinding{ .replica = testReplica(1), .replica_members = testReplicaMembers() },
+            (try store.binding()).?,
+        );
+        try std.testing.expectError(
+            error.ReplicaStateMismatch,
+            Participant.initFile(
+                std.testing.allocator,
+                testReplica(2),
+                testReplicaMembers(),
+                store,
+                backend.backend(),
+                admission.admission(),
+            ),
+        );
+    }
 }
 
 test "FileStore persists prepare apply and idempotent completion" {

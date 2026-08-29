@@ -90,19 +90,23 @@ flowchart LR
 ```
 
 内部 Replica 的网络协议和 NVMf vendor-specific command 尚未实现。当前共享
-`write_service` 已提供一个未接入 daemon 的 node-local participant 基础：它校验 authority、
-sequence、history、range 和 payload digest，将最多 1 MiB payload 持久化为单一未决
-PREPARE，接受两个不同 Member 的 canonical attestation certificate，先持久化 COMMIT
-决定，再写入并同步本地 Replica extent，最后推进 applied frontier。标准 NVMe command
-不携带这些证据，因此不能直接把当前标准 NVMf export 当成 Replica transport
-implementation。
+`write_service` 提供 node-local participant：它校验 authority、sequence、history、range
+和 payload digest，将最多 1 MiB payload 持久化为单一未决 PREPARE，接受两个不同
+Member 的 canonical attestation certificate，先持久化 COMMIT 决定，再写入并同步本地
+Replica extent，最后推进 applied frontier。标准 NVMe command 不携带这些证据，因此
+不能直接把当前标准 NVMf export 当成 Replica transport implementation。
+
+Data-node daemon 已组合持久 participant catalog、首次 PREPARE 前的 immutable
+Replica/canonical-Member binding、完整 active Replica/backend identity 校验、4 KiB 对齐
+file apply，以及 normal admission、certified replay、Replica mutation 和 durable fence
+append 共用的 per-placement gate。启动在开放 server 前发现 catalog 并完成已持久 COMMIT
+replay；replay 携带旧 authority，可被不同或更高 durable fence 拒绝。非空本地 history
+不会继续伪装成 empty-frontier recovery evidence。
 
 当前 file snapshot 每次原子替换完整的单未决状态，只用于 crash-ordering 和协议测试，
-不是最终流式 journal。certificate attestation 尚无网络认证、remote target handler 或
-primary coordinator；只有两个独立 FileStore 的 focused test 证明本地 evidence
-持久化，不等于三节点 quorum success。生产 File Member backend 尚未接线；daemon
-composition 必须把 active Replica 校验、authority admission 与 fence drain 放入同一
-共享 gate，并在安装更高 epoch 前完成已持久 COMMIT 的 replay。
+不是最终流式 journal。controller 尚未配置 canonical Member set，participant mutation
+也未暴露到 management listener；certificate attestation 尚无网络认证、remote target
+handler 或 primary coordinator。因此这些本地组合测试不等于三节点 quorum success。
 
 目标 vendor-specific command 至少携带：
 

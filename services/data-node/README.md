@@ -44,8 +44,10 @@ incarnation, and reports sequenced capacity heartbeats at the interval returned
 by the controller. The target Pool must already exist.
 
 Replica operations are persisted in `replicas.state`, fence evidence in
-`fences.state`, and accepted authority epochs/recovery evidence in
-`authority.state`. An exclusive `daemon.lock` prevents two processes from sharing
+`fences.state`, accepted authority epochs/recovery evidence in `authority.state`,
+the physical file-object generation in `member-generation.state`, and configured
+participants in `write-catalog.state` plus per-generation `write-*.state`
+snapshots. An exclusive `daemon.lock` prevents two processes from sharing
 that state directory. The daemon binds the ledger to an opened backing-file
 inode, validates allocations against its fixed geometry, rejects overlap,
 retains deleted extents in quarantine, and reports
@@ -56,12 +58,22 @@ restart/reopen rather than allowing a later operation to overwrite it. Omitting
 all seven options keeps Replica, fence, recovery, and Member
 heartbeat operations disabled while holder/lease diagnostics remain available.
 
-This file-member backend establishes a durable control-plane boundary. The
-shared backend-neutral write participant now proves node-local payload staging,
-two-witness PREPARE/COMMIT ordering, backend apply ordering, and post-decision
-replay in focused tests, but it is not yet composed into the daemon, bound to
-the active Replica ledger, or exposed as a network transport/File Member data
-path. A three-node Volume intent can reach `ACTIVE`, but user writes are not yet
-replicated or published to hosts. Cross-node Replica transport, recovery/repair,
-and authority-gated Publication remain subsequent composition steps. See
-`tests/e2e/README.md` for the Docker Compose profile.
+This file-member backend now includes a node-local, daemon-owned write
+participant manager. It persists an immutable Replica/canonical-Member binding
+and catalog, retains retired generations for recovery evidence, validates the
+complete active Replica and physical-object generation before each 4 KiB-aligned
+positional write, synchronizes the member file, and eagerly drains
+a durable COMMIT on startup. Normal admission checks the exact live ready
+authority and durable fence; certified replay bypasses lease expiry but is
+rejected after a different/higher fence. Replica mutation and fencing take the
+same participant/control barrier through the durable fence append; undecided or
+poisoned state blocks deletion/fencing, and deletion durably retires the catalog
+entry before allowing generation rollover.
+
+The manager is intentionally not exposed on the current management listener and
+the controller does not yet provision canonical write sets. Therefore a
+three-node Volume intent can reach `ACTIVE`, but user writes are still not
+replicated or published to hosts. Authenticated cross-node Replica transport,
+primary coordination, 2/3 success, recovery/repair, and authority-gated
+Publication remain subsequent steps. See `tests/e2e/README.md` for the Docker
+Compose profile.
