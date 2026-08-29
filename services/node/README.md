@@ -5,6 +5,11 @@ protocol adapters. It consumes the public `zettide_storage` module from
 `libs/storage-engine/`; it must not use cross-directory relative imports into
 the engine.
 
+Current node/platform capabilities include the endpoint registry and daemon,
+Catalog exports over NVMf TCP/RDMA, iSCSI, and vhost-user-blk, plus the Linux
+FUSE/NFS/dufs adapters. These are component and compatibility lifecycles; they
+do not yet form the final `zettide-node` managed Publication service.
+
 Current compatibility surfaces remain unchanged:
 
 - `zettide` CLI and its existing commands;
@@ -17,6 +22,11 @@ Current compatibility surfaces remain unchanged:
 SPDK consumers, and the NFS backend use explicit `zettide_node`/
 `zettide_storage` imports. The legacy `zettide` facade is restricted to the
 existing CLI sources.
+
+The iSCSI path includes a shared SPDK service, per-Catalog target/LUN export,
+endpoint locator wiring, and the remote `tests/automation/iscsi-catalog-fio.yml`
+profile. It still lacks consumer-bound access generation and managed attachment
+reconciliation.
 
 Run `zig build test-node` for endpoint/SPDK adapter units,
 `zig build test-compatibility` for CLI/frontend compatibility units, and

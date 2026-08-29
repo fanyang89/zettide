@@ -370,7 +370,7 @@ CLI foreground commands 和 node 都可能打开 Member/Pool。约束：
 命令 output 被多个 shell/automation tests 解析；迁移 tests 时不得只保留“process exit 0”，应继续断言关键
 labels、IDs、mount cleanup 和 confirmation behavior。
 
-## 后续实施前置项
+## 剩余边界工作
 
 - [x] 建立 `zettide_storage` 和 `zettide_node` named module roots；
 - [ ] CLI commands 从 mega-module 改用 engine facade 和显式 platform adapters；
@@ -384,5 +384,5 @@ labels、IDs、mount cleanup 和 confirmation behavior。
 - [ ] legacy CLI/core unit root 改用显式 roots 后删除 compatibility facade；
 - [x] module boundaries 稳定后再移动 engine 与 node 目录。
 
-本步骤只冻结 CLI/node product composition、module roots 和 process lifecycle，不修改 CLI、DataService wire、
-磁盘格式或运行时行为。
+本文只定义 CLI/node product composition、module roots 和 process lifecycle；CLI、DataService wire、
+磁盘格式和当前运行能力由对应规范与状态页维护。

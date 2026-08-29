@@ -54,7 +54,7 @@ Tier 3 primary 到 Replica 的目标 vendor-specific transport，携带 Volume/R
 
 ## iSCSI
 
-Catalog Volume 的 fallback/compatibility block protocol。Portal、IQN、LUN 和 session 是 locator/runtime state；stable serial/WWID 用于设备验证。Zettide target 尚未实现，qtr 当前只有手动外部 initiator。
+Catalog Volume 的 fallback/compatibility block protocol。Portal、IQN、LUN 和 session 是 locator/runtime state；stable serial/WWID 用于设备验证。Zettide 当前已有 SPDK target/export、endpoint lifecycle 和 focused fio profile，但没有 consumer-bound Publication generation 或 managed host attachment。
 
 ## NFS
 
@@ -109,7 +109,7 @@ Authority 是从持久控制记录和对应 quorum evidence 中选择出的可�
 
 ## qtr / PVE / CSI
 
-qtr 是 Tier 1 阻塞性一等 consumer。PVE/其他虚拟化平台是一等后续集成目标，优先于 CSI，但不阻塞 Tier 1。CSI 是次级、非阻塞 adapter，复用 NVMf/iSCSI 与 NFS/FUSE。
+qtr 是 Tier 1 阻塞性一等外部 consumer；PVE/其他虚拟化平台是一等后续外部集成目标。本仓库不维护其实现状态。CSI 是次级、非阻塞 adapter，复用 NVMf/iSCSI 与 NFS/FUSE；当前仓库内只有静态 regular Blob file 的 FUSE CSI Node service 和独立 FUSE/NFS kind profiles。
 
 ## Republish
 

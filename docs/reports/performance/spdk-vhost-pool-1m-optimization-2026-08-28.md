@@ -1,5 +1,7 @@
 # SPDK vhost scheduled Pool 1M IOPS 优化报告
 
+状态：历史性能报告；只适用于下述 revision、硬件和工作负载，不定义当前产品能力。
+
 日期：2026-08-28
 
 ## 摘要
@@ -32,7 +34,7 @@ Linux `nvme` 驱动。
 
 ## 代码改动
 
-zettide 子模块，基线 `9e10eae` 之上：
+当时的 Zettide 源码基线 `9e10eae` 之上：
 
 | commit | 内容 |
 |---|---|
@@ -78,7 +80,7 @@ threaded 16、inline_batches 0、coalescing threshold 10000、runtime 20 s / ram
 
 ## 最终配置五轮验证
 
-配置（`/tmp/opencode/vm-fc-vhost-1m-vars.json` 相对基线 vars 的增量）：
+配置（原执行主机 `/tmp/opencode/vm-fc-vhost-1m-vars.json` 相对基线 vars 的增量；该临时文件不由仓库保存）：
 
 ```json
 {

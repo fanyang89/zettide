@@ -36,15 +36,19 @@ repositories retain their histories here as merged directory trees:
 | `vendor/spdk/` | Managed SPDK fork submodule |
 
 The target storage-node naming and process boundaries are frozen in
-[decision 0001](docs/decisions/0001-storage-node-naming-and-process-model.md).
+[decision 0001](docs/decisions/0001-storage-node-naming-and-process-model.md),
+and the data models, Tier boundaries, frontend roles, and repository ownership
+are frozen in [decision 0003](docs/decisions/0003-storage-product-architecture.md).
 The reusable engine lives under `libs/storage-engine/`; data-node product
 composition lives under `services/node/`. The existing `zettide` command remains
-compatible while `zettide-node` daemon wiring is completed.
+compatible while `zettide-node` daemon wiring is completed. See the
+[documentation index](docs/README.md) for the normative hierarchy and status
+source of truth.
 
 `qtr` and `etz` are intentionally outside this storage repository and are not
 part of its bootstrap, build, test, or update lifecycle. See
-[`docs/repository-migration.md`](docs/repository-migration.md) for the imported
-history map and publication order.
+[`docs/history/repository-migration.md`](docs/history/repository-migration.md)
+for the imported history map.
 
 ## Capability Stages
 
@@ -55,14 +59,17 @@ requiring storage-node replication:
 | Frontend | Data model | Tier 1 role | Current status |
 | --- | --- | --- | --- |
 | NVMf over TCP or RDMA | Catalog Volume | Preferred block publication | Partial: endpoint daemon and exports exist, but there is no qtr-managed end-to-end path |
-| iSCSI | Catalog Volume | Block fallback | Target |
+| iSCSI | Catalog Volume | Block fallback | Partial: SPDK target/export, endpoint wiring, and a Catalog fio automation profile exist; managed consumer lifecycle and the Tier 1 multi-disk gate do not |
 | NFS | BlobFilesystem | Network filesystem publication | Partial: NFSv3 FSAL opens a standalone target or one Pool member; it cannot assemble a multi-member Pool |
 | FUSE | BlobFilesystem | Local and same-host filesystem mount | Current multi-disk path |
 
 Virtualization is a first-class Tier 1 consumer. A native qtr backend is required
 for Tier 1; Proxmox VE is a first-class follow-up target but does not block the
-Tier 1 milestone. CSI is a secondary, non-blocking target: block volumes use
-NVMf or iSCSI, and filesystem volumes use NFS or FUSE.
+Tier 1 milestone. qtr is an external project and is not built or tested here.
+CSI is a secondary, non-blocking integration. The current repository contains a
+static FUSE CSI Node service for regular Blob files and kind-based FUSE/NFS
+profiles; dynamic provisioning, block CSI, and a Zettide CSI Controller service
+remain targets.
 
 The later tiers remain cumulative:
 
@@ -92,13 +99,16 @@ the managed SPDK runtime, catalog Volume backend, custom bdev provider, and
 standard NVMf TCP/RDMA and vhost-user-blk export lifecycles. These are endpoint
 and export primitives, not a complete consumer-bound Publication API: consumer
 identity, access-generation fencing, a protocol-neutral expected-identity
-result, qtr-side identity validation, managed attachment, and restart
-reconciliation are not implemented. The existing endpoint does derive stable
-NQN and NVMe serial values. The iSCSI target lifecycle is also not implemented.
+result, consumer-side identity validation, managed attachment, and restart
+reconciliation are not implemented. The existing endpoint derives stable NQN,
+NVMe serial, iSCSI target, and LUN locator values. The iSCSI target/export
+lifecycle and a Catalog fio automation profile exist, but they do not provide a
+consumer-bound Publication API or a Tier 1 end-to-end gate.
 
 ## Requirements
 
 - Zig 0.16.0 (managed by the root `mise.toml`)
+- Go 1.26.5 for `services/csi/` (managed by `services/csi/mise.toml`)
 - Linux: libfuse3 development files for mounting support
 - Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
 - Optional Linux SMB3 feasibility tests: Samba server and client tools
@@ -130,6 +140,15 @@ zig build test-compatibility
 zig build test-controller
 zig build test-txfs
 zig build ci
+```
+
+The CSI Node service has an independent Go gate:
+
+```sh
+cd services/csi
+mise trust
+mise install
+mise run check
 ```
 
 Build the Linux endpoint daemon against an SPDK pkg-config installation with:
@@ -229,9 +248,10 @@ frontend contract is complete. The FUSE tests cover the current frontend, while
 separate raw Pool profiles exercise Pool-backed paths with physical, loop, or
 synthetic members. The local NFS-Ganesha gate uses a standalone regular-file
 target, while the remote physical-Pool profile uses one Pool member; neither
-assembles a multi-member Pool. The SPDK and NVMf gates cover endpoint and export
-pieces without a qtr-managed end-to-end workflow. There is no iSCSI product gate
-yet.
+assembles a multi-member Pool. The SPDK, NVMf, and iSCSI gates cover endpoint or
+export pieces without an external managed-consumer end-to-end workflow. The
+remote `iscsi-catalog-fio` automation profile verifies Catalog data through an
+SPDK iSCSI target, but it is not the complete Tier 1 iSCSI product gate.
 
 The optional Linux SPDK link check consumes a separately built SPDK tree through
 its generated pkg-config metadata. For a sibling SPDK checkout built with shared
@@ -275,6 +295,14 @@ stable file IDs, hard links, symlinks, rename, truncate, persistence across a
 server restart, and read-only reopening. It requires mount tools, rpcbind,
 passwordless sudo, and `-Dganesha-build-dir` pointing to the build described in
 `services/nfs-fsal/README.md`.
+
+The CSI FUSE service under `services/csi/` implements Identity and a limited
+Node service for static regular Blob files. Its kind profile verifies publish,
+read-only access, FUSE process recovery, CSI pod restart, unpublish, and final
+filesystem checking. The separate NFS CSI kind profile uses the upstream pinned
+NFS CSI driver against the Zettide NFS frontend; it does not exercise the
+Zettide FUSE CSI binary. Neither profile provides dynamic provisioning, block
+CSI, or a multi-member NFS Pool export.
 
 `test-fio` runs deterministic CRC32C verification over buffered synchronous I/O
 to small files and multi-chunk sequential and random files. It verifies every

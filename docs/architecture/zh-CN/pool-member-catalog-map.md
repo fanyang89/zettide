@@ -248,7 +248,7 @@ integration-style test，不能成为 production import。
 - CatalogDataLease 的 generation/history/root binding 在每次 write/flush 前后验证；
 - SPDK Worker 只能借用 node-owned Pool，且 provider deletion 完成后才能释放 lease/set。
 
-## 首轮 public facade
+## Public facade
 
 storage-engine root 首轮只需提供内聚 facade，不把每个 format 文件平铺为顶层能力：
 
@@ -275,7 +275,7 @@ CLI、node 和 SPDK adapter 不应继续依赖 `v3/root.zig` 的全量平铺导�
 `pool_catalog_store.zig` 当前未在 `v3/root.zig` 平铺导出，但被其他模块传递编译。拆 root 后必须
 给它显式 Catalog test root，避免仅靠传递 import 获得测试覆盖。
 
-## 后续实施前置项
+## 剩余边界工作
 
 - [x] D1 provider test 移出 `pool_replicated_journal.zig`；
 - [ ] Member 的 Storage API 与 file/path API 分离；
@@ -287,4 +287,4 @@ CLI、node 和 SPDK adapter 不应继续依赖 `v3/root.zig` 的全量平铺导�
 - [ ] legacy fixed-three 与 dynamic Pool 分别有独立 test namespace；
 - [ ] Catalog store、volume 和 SPDK provider 各自进入正确 test root。
 
-本步骤只冻结归属和拆分方向，不修改格式、CLI 或运行时行为。
+本文只定义 Pool/Member/Catalog 的归属和内部拆分方向；格式、CLI 与运行时能力由对应规范和状态页维护。

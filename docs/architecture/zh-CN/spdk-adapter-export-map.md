@@ -21,7 +21,7 @@
    使用同一 composition，但不能与 node 同时打开相同 writable Pool 或占用相同 listener/socket。
 7. SPDK internal C ABI 不是磁盘或远程 wire format；C/Zig 两侧可成对重构，但 callback ownership、
    thread affinity、geometry、flush 和 retryable teardown semantics 必须保持。
-8. 当前 Pool production module 对 SPDK 的反向 import 只服务测试，必须按 D1 移出 engine test root。
+8. 原 Pool production module 对 SPDK 的 test-only 反向 import 已移除；后续 SPDK tests 继续位于 node/integration roots。
 
 ## 目标依赖图
 
@@ -348,7 +348,7 @@ portable build 不探测或链接 SPDK。
 NVMe-oF/iSCSI/vhost fio 和 automation gates；但每个 gate 改为依赖最小 module root。需要 hugepages、root、
 NIC/transport 或 external initiator 的测试继续显式 skip/required，不混入 portable unit gate。
 
-## 后续实施前置项
+## 剩余边界工作
 
 - [x] 建立 node root 的 SPDK export surface，并从 engine root 排除 `spdk_c`；
 - [x] runtime、ingress、provider、protocol export 和 catalog bridge 已归属 `services/node/spdk`；
@@ -362,5 +362,5 @@ NIC/transport 或 external initiator 的测试继续显式 skip/required，不�
 - [ ] direct C tests、protocol integration 和 fio gates 在新 roots 保持通过；
 - [ ] 重构前后比较 endpoint locator、flush/durability 和 teardown failure behavior。
 
-本步骤只冻结 SPDK adapter/export 归属与运行时边界，不修改磁盘格式、endpoint wire API、协议 identity
-或运行时行为。
+本文只定义 SPDK adapter/export 归属与运行时边界；磁盘格式、endpoint wire API、协议 identity
+和当前运行能力由对应规范与状态页维护。

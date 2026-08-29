@@ -1,6 +1,6 @@
 # I/O 与控制流程
 
-> 状态：FUSE、NFS 单成员、endpoint daemon 与标准 NVMf export 有当前路径；managed consumer 与 Tier 3 流程为目标
+> 状态：FUSE、NFS 单成员、endpoint daemon、标准 NVMf 与 iSCSI export 有当前路径；managed consumer 与 Tier 3 流程为目标
 
 ## 通信边界
 
@@ -46,7 +46,7 @@ qtr 重启后观察 publication、controller/namespace/device 和 libvirt XML，
 4. discovery/login 后验证 serial/WWID，再 attach libvirt。
 5. 恢复时只允许一个 protocol generation 处于 exclusive active。
 
-qtr 当前仅有手动外部 iSCSI discovery/login/logout/device discovery，不具备上述自动 fallback。
+qtr 是外部项目；本仓库不维护其当前实现状态。任何外部 consumer 只有完整实现上述 intent、generation、identity validation 和 recovery 后，才能声明 managed fallback。
 
 ## Tier 3 Node Registration 与 Heartbeat
 
@@ -190,6 +190,9 @@ Volume epoch fencing 与 publication generation fencing 是两个 barrier。标�
 7. Reconciler 通过 Raft mutation 将其重新加入 current protection；Ready observation 本身不授予资格。
 
 ## CSI 映射
+
+当前 `services/csi` 只实现静态 regular Blob file 的 Identity、`NodePublishVolume` 和
+`NodeUnpublishVolume`，通过持久 mount intent 恢复 FUSE child 或 CSI service restart。以下是完整目标映射：
 
 - `CreateVolume/DeleteVolume` 映射 Zettide Volume lifecycle。
 - `ControllerPublish/UnpublishVolume` 映射 block Publication 或 filesystem Export authority。

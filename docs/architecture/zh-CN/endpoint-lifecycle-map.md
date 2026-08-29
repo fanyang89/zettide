@@ -402,7 +402,7 @@ endpoint 前需要单独 contract plan，至少定义：
 并新增真实 request、restart reconcile、failed stop retry 和 Pool-backed endpoint integration；不能只依赖
 unit fake Backend。
 
-## 后续实施前置项
+## 剩余边界工作
 
 - [ ] 将 registry、control adapter 和 process composition 分成独立 node module roots；
 - [ ] Registry 只依赖 Backend/DesiredStore ports，不 import SPDK；
@@ -415,5 +415,5 @@ unit fake Backend。
 - [ ] build/test roots 移除 engine 对 endpoint/Unix/SPDK 的隐式依赖；
 - [ ] 增加 restart/crash/reconcile 和 multi-endpoint shared-Pool coverage。
 
-本步骤只冻结 endpoint lifecycle、local state/API 和 daemon owner 边界，不修改 endpoint wire API、
-`endpoints.state` bytes、CLI 或运行时行为。
+本文只定义 endpoint lifecycle、local state/API 和 daemon owner 边界；endpoint wire API、
+`endpoints.state` bytes、CLI 和当前运行能力由对应规范与状态页维护。

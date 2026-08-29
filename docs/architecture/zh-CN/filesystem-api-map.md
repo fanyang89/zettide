@@ -301,7 +301,7 @@ planning、Blob private map/store 或 SPDK。
 identity port 只有 directory close unit test，Blob identity adapter 没有独立 test block。拆 root 前必须
 补齐 identity conformance test，不能只依赖 `nfs_backend` 或 FSAL shell gate 的传递覆盖。
 
-## 后续实施前置项
+## 剩余边界工作
 
 - [ ] metadata runtime values 与 CRC32C codec 分离；
 - [ ] 建立 shared NodeKind/NodeIdentity/NodeInfo/error vocabulary；
@@ -314,4 +314,4 @@ identity port 只有 directory close unit test，Blob identity adapter 没有独
 - [ ] 为两个 ports 建立独立 conformance test roots；
 - [ ] FUSE、dufs 和 NFS C ABI 只依赖对应 public port。
 
-本步骤只冻结 backend-neutral API 方向，不修改 CLI、NFS C ABI、磁盘格式或 frontend 行为。
+本文只定义 backend-neutral API 方向；CLI、NFS C ABI、磁盘格式和 frontend 行为由对应规范维护。

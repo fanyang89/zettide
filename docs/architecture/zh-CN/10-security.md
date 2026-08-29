@@ -71,6 +71,12 @@ qtr/PVE adapter 只能请求已授权 Pool/Volume 与 access mode。它持久化
 
 ## CSI
 
+当前静态 FUSE CSI Node service 约束 source/publish path 必须位于配置 root 下，以独占 lock 保护持久
+state directory，并在 mount 前用 `zettide://filesystem/<uuid>` 校验 regular Blob file identity。它仍信任
+本机 kubelet/容器部署边界，不构成 Controller authorization 或多租户安全模型。
+
+完整目标要求：
+
 - CSI Controller service account 只执行其 StorageClass/tenant scope 内的 Volume/publication mutation。
 - CSI Node identity 绑定稳定 Kubernetes Node 与受管 host identity，不能只信任 RPC 中的 node name。
 - Node plugin 只接收其 Node 已获授权的 NVMf/iSCSI credential 或 NFS export 信息。

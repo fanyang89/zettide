@@ -306,7 +306,7 @@ telemetry。frontend 应在步骤 7 以后依赖 filesystem port，而不是直�
 custom/in-memory Storage，file reopen/corruption 场景放入显式 adapter integration root，避免
 portable engine unit root 因测试便利重新依赖 file backend。
 
-## 后续实施前置项
+## 剩余边界工作
 
 - [ ] 提取 file block geometry 和 persisted Snapshot，消除 format -> BlobFile runtime；
 - [ ] `BlobDevice.createFile` 移到 file adapter；
@@ -317,4 +317,4 @@ portable engine unit root 因测试便利重新依赖 file backend。
 - [ ] frontend/backend adapters 不进入 Blob core root；
 - [ ] format、authority publication、orphan recovery 和 name-profile compatibility tests 保持通过。
 
-本步骤只冻结归属和拆分方向，不修改磁盘格式、CLI 或运行时行为。
+本文只定义 Blob/BlobFilesystem 的归属和内部拆分方向；磁盘格式、CLI 与运行时能力由对应规范和状态页维护。

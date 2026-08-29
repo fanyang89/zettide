@@ -1,9 +1,8 @@
 # 组件依赖与分层规则
 
-> 状态：D1-D4、package/module roots、源码目录和 consumer/build 边界迁移已实施；完整 NodeContext/DataService daemon composition 待完成
+> 状态：当前规范；package/module roots、源码目录和 consumer/build 边界已落地，完整 NodeContext/DataService daemon composition 待完成
 
-本文为 `services/node/` 重构建立依赖基线。它描述源码编译依赖和运行时组合，
-不改变磁盘格式、产品能力或进程模型。目标命名与进程边界见
+本文定义当前源码编译依赖和运行时组合。已完成的目录迁移不再作为执行计划；后续修改必须保持本文的单向依赖。目标命名与进程边界见
 [架构决策 0001](../../decisions/0001-storage-node-naming-and-process-model.md)。首轮迁移后的 package
 粒度复评与再次拆分条件见
 [架构决策 0002](../../decisions/0002-keep-storage-engine-cohesive.md)。
@@ -76,7 +75,7 @@ exports 不进入 engine。`node_main.zig` 与
 | --- | --- | --- | --- |
 | Storage abstraction | `v3/storage.zig` | `std.Io`、file/custom backend vtable | BlobDevice、Member、Pool data、SPDK storage adapter |
 | Persistent format/value types | `v3/codec.zig`、`member_format.zig`、`blob_format.zig`、`metadata.zig`、`name_profile.zig` | CRC32C、utf8proc、基础值类型 | Pool、Blob、CLI/format planning |
-| Pool/Member/Catalog | `v3/root.zig`、`pool_member_set.zig`、`pool_replicated_journal.zig`、`pool_catalog_volume.zig` | storage abstraction、v3 codecs；当前还反向引用部分 Blob/SPDK 文件 | filesystem target、SPDK Catalog backend、CLI |
+| Pool/Member/Catalog | `v3/root.zig`、`pool_member_set.zig`、`pool_replicated_journal.zig`、`pool_catalog_volume.zig` | storage abstraction、v3 codecs 和 shared data-mode geometry；production path 不依赖 Blob/SPDK | filesystem target、SPDK Catalog backend、CLI |
 | Blob/BlobFilesystem | `blob_device.zig`、`blob_store.zig`、`blob_filesystem.zig` | storage abstraction、Blob formats/maps | Blob adapters、filesystem target、CLI、NFS backend |
 | Backend-neutral filesystem API | `filesystem_backend.zig`、`nfs_filesystem.zig` | metadata/value types | FUSE、dufs、Blob adapters、NFS ABI |
 | Filesystem composition | `filesystem_target.zig` | Blob engine、Pool/Member、format planning、storage abstraction | CLI、NFS backend |
@@ -91,7 +90,7 @@ exports 不进入 engine。`node_main.zig` 与
 
 ```mermaid
 flowchart TD
-    ROOT[services/node/root.zig<br/>single zettide module]
+    ROOT[services/node/root.zig<br/>legacy CLI compatibility facade]
     CLI[main.zig + cli]
     NODE[node_main + node_data_service]
     ENDPOINT[endpoint registry/control/daemon]
@@ -130,9 +129,9 @@ flowchart TD
 
 `ROOT` 的箭头表示聚合公开和测试强制导入，不表示所有叶模块彼此都直接 import。
 
-## 已知反向依赖与混层点
+## 已完成的反向依赖修复与剩余边界
 
-这些点驱动了迁移；下表记录当前处理状态与剩余工作：
+下表保留迁移结果，防止后续重新引入已经解除的反向依赖；它不是待执行的旧目录迁移计划：
 
 | ID | 当前状态 | 原问题 | 剩余方向 |
 | --- | --- | --- | --- |
@@ -285,9 +284,9 @@ flowchart TD
 | Endpoint registry/control/daemon | `services/node` composition | `endpoint serve` 仅迁移期兼容入口 |
 | CLI 与 DataService | CLI 与 `services/node` L5 | DataService 不进入 engine |
 
-## 执行门禁
+## 当前边界门禁
 
-以下 storage-engine 移动前门禁已满足；未完成项属于后续 node/frontend 迁移：
+以下项目持续约束后续 node/frontend 工作：
 
 - [x] D1 的 SPDK 测试依赖已移出 Pool production module；
 - [x] D2-D4 已通过 contract 提取或 composition 重组消除；

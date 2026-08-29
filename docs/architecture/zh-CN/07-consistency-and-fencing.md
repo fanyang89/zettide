@@ -53,7 +53,7 @@ Publication generation 的数值变化本身不是 fence。安全切换必须同
 
 普通 iSCSI command 同样不携带 Zettide generation。Target 将 generation 绑定到 initiator ACL/credential 和 session context。切换时撤销旧 ACL/credential、quiesce/drain session、logout/terminate connection，再安装新 generation。
 
-iSCSI 的 IQN/LUN、SCSI serial/WWID、CHAP 与 session recovery 细节继续单独定义，因为它们无法由 NVMe controller 语义替代。当前 Zettide iSCSI target 未实现。
+iSCSI 的 IQN/LUN、SCSI serial/WWID、CHAP 与 session recovery 细节继续单独定义，因为它们无法由 NVMe controller 语义替代。当前 Zettide 已有 target/export primitive，但没有 consumer-bound generation、CHAP lifecycle 或 managed session recovery。
 
 ## Filesystem Access
 
@@ -133,4 +133,4 @@ Repairing/Stale Replica 不参与 quorum。进入内存、NVMf queue 或 volatil
 
 ## 当前差距
 
-Managed qtr/PVE attachment、consumer-bound NVMf generation、iSCSI target、统一 filesystem access authority、Volume lease/write epoch、Replica persistent fencing 和 commit evidence 均未实现。
+外部虚拟化 managed attachment、consumer-bound NVMf/iSCSI generation、统一 filesystem access authority、Volume lease/write epoch、Replica persistent fencing 和 commit evidence 均未实现。现有 iSCSI target/export primitive 不执行 Publication generation fencing。

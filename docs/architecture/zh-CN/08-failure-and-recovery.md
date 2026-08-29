@@ -145,4 +145,4 @@ Tier 1/2 只按当前 frontend、Pool protection 与 durability gate 声明保�
 
 ## 当前差距
 
-当前没有 qtr/PVE managed recovery、consumer publication generation、iSCSI recovery、多成员 NFS recovery、统一 migration journal、Tier 3 commit manifest、自动 failover/repair 或生产灾难恢复流程。
+当前没有外部虚拟化 managed recovery、consumer publication generation、managed iSCSI session recovery、多成员 NFS recovery、统一 migration journal、Tier 3 commit manifest、自动 failover/repair 或生产灾难恢复流程。现有 iSCSI export lifecycle 和 focused fio gate 不覆盖 consumer/session reconciliation。

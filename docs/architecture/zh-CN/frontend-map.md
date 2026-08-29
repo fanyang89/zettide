@@ -306,7 +306,7 @@ backend archive 继续使用 PIC、bundle compiler-rt，并保留 static library
 新增 frontend module roots 后，FUSE tests 不编译 NFS/SPDK，NFS backend tests 不链接 libfuse，
 portable engine tests 不探测 host mount/Ganesha/dufs。
 
-## 后续实施前置项
+## 剩余边界工作
 
 - [x] FUSE module 改依赖 public path port/shared values；
 - [x] FUSE/dufs 从 storage-engine root 和 node root 排除；
@@ -319,4 +319,4 @@ portable engine tests 不探测 host mount/Ganesha/dufs。
 - [ ] direct ABI static asserts、real FUSE、dufs 和 NFSv3 gates 保持通过；
 - [ ] 文档继续标明 NFSv3/单 Member/无锁等能力限制。
 
-本步骤只冻结 frontend 归属和兼容边界，不修改磁盘格式、CLI、NFS ABI 或运行时行为。
+本文只定义 frontend 归属和兼容边界；磁盘格式、CLI、NFS ABI 与运行时能力由对应规范和状态页维护。

@@ -1,5 +1,7 @@
 # Unified Repository Migration
 
+Status: historical record; the repository and source-layout migrations described here are complete.
+
 Zettide storage is maintained in this repository. The former storage-owned
 repositories were merged with full ancestry instead of being copied or retained
 as submodules.
@@ -32,8 +34,8 @@ External dependencies are pinned under `vendor/`:
 - `vendor/raftz`
 - `vendor/spdk`
 
-When publishing this migration, push the new `vendor/raftz` commit referenced by
-the superproject before pushing the Zettide branch. Then archive the former
-storage-owned repositories and point their descriptions and README files to this
-repository. Removing the old `zettide-mono` integration workspace is the final
-operator step after the new repository has been cloned and validated independently.
+The original publication required the referenced `vendor/raftz` commit to be
+available before the superproject and the former storage-owned repositories to
+be archived afterward. These are provenance notes, not current bootstrap or
+release steps. Current dependency setup is defined by the root `README.md` and
+`mise run bootstrap`.

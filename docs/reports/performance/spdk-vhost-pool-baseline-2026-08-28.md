@@ -1,5 +1,7 @@
 # SPDK、raw vhost 与 scheduled Pool 性能基线报告
 
+状态：历史性能报告；只适用于下述 revision、硬件和工作负载，不定义当前产品能力。
+
 日期：2026-08-28
 
 ## 摘要
@@ -197,7 +199,7 @@ native SPDK measured window 内没有可见的 NVMe 完成 MSI-X 增量；IO 完
 
 ## 复现命令
 
-公共参数保存在 `/tmp/opencode/vm-fc-vhost-baseline-vars.json`，inventory 保存在 `/tmp/opencode/vm-fc.ini`。以下测试会直接操作并临时接管两块 NVMe，属于破坏性测试。
+原始运行的公共参数保存在执行主机的 `/tmp/opencode/vm-fc-vhost-baseline-vars.json`，inventory 保存在 `/tmp/opencode/vm-fc.ini`；这些临时文件不由仓库保存，因此以下命令是历史命令模板，不是独立可复现入口。测试会直接操作并临时接管两块 NVMe，属于破坏性测试。
 
 scheduled Pool：
 

@@ -10,9 +10,9 @@ Tier 1/2 单节点控制面负责 Pool、Catalog Volume、BlobFilesystem export�
 - versioned request format；
 - 持久 endpoint desired state；
 - restart reconciliation；
-- Catalog Volume 到标准 NVMf TCP/RDMA 或 vhost-user-blk export。
+- Catalog Volume 到标准 NVMf TCP/RDMA、iSCSI 或 vhost-user-blk export。
 
-它尚未提供统一 Pool/Volume API、consumer-bound Publication、iSCSI、NFS/FUSE lifecycle 或 qtr adapter，因此只能标为部分。
+它尚未提供统一 Pool/Volume API、consumer-bound Publication/access generation、NFS/FUSE lifecycle 或外部虚拟化 adapter，因此只能标为部分。
 
 Tier 3 的 `zettide-controller` 负责跨节点权威状态，并通过 Raft/WAL/snapshot 复制。当前两级控制面尚未端到端接通。
 
@@ -46,7 +46,7 @@ flowchart TB
 | Publication | endpoint primitives 当前局部存在 | protocol、consumer、access generation、locator、Raft republish authority |
 | Attachment | storage-side 占位 schema，无 mutation | adapter intent、host session/device、libvirt 与 caller-directed republish |
 
-当前 endpoint control 是另一条单节点 API：versioned owner-only Unix request，管理持久 endpoint desired state。每个 Pool 当前最多一个 endpoint，registry 最多 1024 个 endpoint；没有 consumer/access generation，也不是 consumer-bound Publication API。Catalog backend 当前可建立标准 NVMf endpoint/export primitive；iSCSI、NFS/FUSE lifecycle 和平台 attachment 不在该 API 中。
+当前 endpoint control 是另一条单节点 API：versioned owner-only Unix request，管理持久 endpoint desired state。每个 Pool 当前最多一个 endpoint，registry 最多 1024 个 endpoint；没有 consumer/access generation，也不是 consumer-bound Publication API。Catalog backend 当前可建立标准 NVMf、iSCSI 和 vhost endpoint/export primitive；NFS/FUSE lifecycle 和平台 attachment 不在该 API 中。
 
 ## 幂等与恢复
 
@@ -118,13 +118,13 @@ qtr/PVE block adapter 的目标顺序：
 6. 重启后比较 intent、publication、controller/session/device 与 libvirt XML 并收敛。
 7. Detach 先持久化 detaching，确认 VM 不再使用，再 disconnect/logout，最后 Unpublish。
 
-qtr 当前只实现手动外部 iSCSI 操作，上述 managed contract 全部仍是目标。
+qtr/PVE 属于外部仓库；本仓库只冻结上述 managed contract，不维护或验证其当前实现状态。
 
 ## Filesystem Control
 
 - NFS：Export intent 绑定 BlobFilesystem identity、client scope、read/write mode 和 export generation；NFS server/export path 是 locator。
 - FUSE：Mount intent 绑定 BlobFilesystem identity、host identity、mount mode 和 mount point；PID/fd 是 observation。
-- CSI filesystem volume 将 Controller publication 与 Node mount 分开，但不创建新的存储语义。
+- 当前静态 FUSE CSI Node service 直接管理 regular Blob file mount；目标 CSI filesystem lifecycle 将 Controller publication 与 Node mount 分开，但不创建新的存储语义。
 - 未冻结多 writer 契约前，控制面不得让 NFS 与 FUSE 对同一 BlobFilesystem 形成未协调可写并发。
 
 ## Tier 3 Raft
@@ -181,7 +181,7 @@ RPC、proposal、ReadIndex、heartbeat、endpoint action、migration 和 repair 
 ## 当前差距
 
 - 无统一 Tier 1 Pool/Volume/Publication/Export API。
-- endpoint daemon 无 iSCSI、NFS/FUSE 管理和 platform consumer identity。
-- qtr/PVE/CSI 无 managed adapter。
+- endpoint daemon 无 consumer-bound access generation、NFS/FUSE 管理和 platform consumer identity；iSCSI/NVMf 仍是 export primitive。
+- qtr/PVE 的 managed adapter 不属于本仓库；当前 CSI 只有静态 FUSE Node service，无 Controller/block/NFS managed lifecycle。
 - `zettide-controller` 无 placement、Replica/Allocation mutation、lease、publication authority 或 reconciler。
 - 当前控制 RPC 不具备生产级双向认证与授权。

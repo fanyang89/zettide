@@ -35,10 +35,10 @@ fencing、failover、repair 和 republish。
 | FUSE + BlobFilesystem | 当前 | foreground FUSE/POSIX frontend 已覆盖 regular Blob file 与多成员 raw Blob Pool | 完整真实多盘 Tier 1 gate 仍需与其余 frontend 一起完成 |
 | NFS + BlobFilesystem | 部分 | NFSv3 backend、`FSAL_ZETTIDE` 和真实 RPC gate 已存在 | 当前 FSAL 只打开一个 Pool Member；无多成员准入 |
 | 标准 NVMf + Catalog Volume | 部分 | TCP/RDMA Catalog export、endpoint registry、持久 desired state、owner-only Unix control API 和 endpoint daemon 已存在 | 无 qtr managed NVMf E2E；无四前端真实多盘完整 gate |
-| iSCSI + Catalog Volume | 目标 | vendored SPDK 有 target；Zettide endpoint enum 预留 iSCSI | 尚无 target/export lifecycle 与产品 gate |
-| qtr managed backend | 目标 | qtr 当前只有手动外部 iSCSI discovery/login/logout/device discovery | 尚无 Zettide Volume/publication identity、managed NVMf、fallback 选择和 attachment reconciliation |
-| PVE plugin | 目标 | 尚无实现 | 一等后续集成目标，优先于 CSI；不阻塞 Tier 1 |
-| CSI driver | 目标 | 尚无实现 | 次级、非阻塞；复用 NVMf/iSCSI 与 NFS/FUSE 生命周期 |
+| iSCSI + Catalog Volume | 部分 | Zettide 已有 SPDK shared service、Catalog target/LUN export、endpoint locator/lifecycle 和 `iscsi-catalog-fio` 自动化 profile | 无 consumer-bound access generation、managed attachment 和真实多物理盘 Tier 1 总 gate |
+| 外部虚拟化 managed backend | 目标 | qtr/PVE 不在本仓库实现或验证 | 需要 Zettide Volume/publication identity、managed NVMf-first/iSCSI-fallback attachment 和 restart reconciliation |
+| PVE integration contract | 目标 | 外部项目状态不由本仓库维护 | 一等后续集成目标，优先于完整 CSI；不阻塞 Tier 1 |
+| CSI integration | 部分 | 本仓库已有静态 regular Blob file 的 FUSE CSI Node service、持久 mount intent/recovery 和 FUSE/NFS kind profiles | 无 Controller service、动态 provisioning、block CSI、NFS export lifecycle 或多成员 FUSE Pool path |
 
 ## 存储与控制基础
 
@@ -69,10 +69,10 @@ fencing、failover、repair 和 republish。
 
 ## 组件边界
 
-- `zettide` 当前拥有本地 Pool、BlobFilesystem、FUSE、NFS backend、Catalog endpoint daemon 与标准 NVMf export。
-- `qtr` 当前只拥有手动外部 iSCSI initiator；managed adapter 为目标。
+- `zettide` 当前拥有本地 Pool、BlobFilesystem、FUSE、NFS backend、Catalog endpoint daemon，以及标准 NVMf、iSCSI 和 vhost export primitives。
+- `services/csi` 当前拥有静态 FUSE CSI Node service；完整 Controller/block/NFS CSI lifecycle 为目标。
+- `qtr` 与 PVE 是外部消费者；本仓库只冻结集成契约，不维护或验证其当前实现状态。
 - `zettide-controller` 当前拥有部分 durable metadata 和 Raft runtime；不与当前 endpoint daemon 形成产品 E2E。
-- PVE plugin 与 CSI driver 均尚无实现。
 
 ## 当前实现边界
 
@@ -111,18 +111,20 @@ fencing、failover、repair 和 republish。
 - multi-Volume Catalog、extent mapping、Catalog data lease 和 writable backend。
 - endpoint registry、持久 desired state、owner-only Unix control API 和 daemon；每个 Pool 同时最多一个 endpoint，全 registry 最多 1024 endpoints。
 - endpoint 当前记录 endpoint/Pool/Volume/frontend 和 locator，但没有 platform consumer identity 或 publication access generation。
-- managed SPDK runtime、bdev dispatcher、Catalog NVMf TCP/RDMA target export、NVMe-oF initiator、异步 bdev provider 和 vhost-user-blk lifecycle 的 focused paths。
+- managed SPDK runtime、bdev dispatcher、Catalog NVMf TCP/RDMA 与 iSCSI target exports、NVMe-oF initiator、异步 bdev provider 和 vhost-user-blk lifecycle 的 focused paths。
 
 当前不具备：
 
 - 统一 DataService/Node Agent、grpc-lite control client 或节点注册。
-- consumer-bound Publication API、access-generation fencing、iSCSI target 或 qtr/PVE/CSI managed adapter。
+- consumer-bound Publication API、access-generation fencing、外部虚拟化 managed adapter 或完整 CSI Controller/block/NFS lifecycle。
 - NFS 多成员产品路径、动态扩容、每 Volume 保护迁移和对应产品命令。
 - Tier 3 多数派数据提交、primary failover、Replica protocol 和后台 repair。
 
-### qtr
+### 外部虚拟化消费者
 
-qtr 当前具备外部 iSCSI backend 注册、扫描、host login/logout 和设备发现。VM 定义仍引用本地文件或 block path；尚无 Zettide backend/Volume/consumer intent、managed NVMf、Volume publication、持久 attachment reconciliation 或 storage republish。
+qtr 与 PVE 不属于本仓库的构建或测试生命周期。本架构只要求外部 adapter 使用稳定
+Volume/Publication/consumer identity，执行 managed NVMf-first、iSCSI-fallback attachment，并在未知响应和
+重启后 reconciliation；其当前实现状态必须由各自仓库维护。
 
 ## 成熟度判断
 

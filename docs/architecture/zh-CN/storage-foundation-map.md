@@ -14,7 +14,7 @@
    随 Pool 领域迁移，Blob/BlobFilesystem format 随 Blob 领域迁移。
 4. 只有跨领域复用的 checksum、integer/region codec 和 storage contract 放在 shared foundation。
 5. `size.zig` 是 CLI 文本解析，不是持久格式或存储抽象。
-6. 本步骤不修改 magic、version、offset、checksum、digest、reserved-zero 或 feature policy。
+6. 本文不修改 magic、version、offset、checksum、digest、reserved-zero 或 feature policy。
 
 ## Storage 文件归属
 
@@ -119,20 +119,15 @@ BlobFilesystem 领域格式，而不是可以独立发布的通用 codec package
 
 ## 跨领域 geometry 处理
 
-当前 `pool_provision.zig` 使用 `blob_format.minimum_device_size`，
-`pool_data_storage.zig` 也直接引用 `blob_format.zig`。不能把这两个 import 原样搬成
-`pool -> blob` package dependency。
-
-目标规则：
+原有 `pool -> blob_format` 反向依赖已经通过 `data_mode_geometry.zig` 解除。当前规则：
 
 1. Member header 继续持久化 Pool data mode 和 feature bits；
 2. Pool foundation 只计算 Member/control/metadata/data region，不解释 BlobFilesystem；
-3. Blob composition 提供 Blob data region 的最小容量、alignment 和 format eligibility；
-4. CLI/node 在创建计划中组合 Pool geometry 与所选 data-mode requirements；
-5. 打开后 Pool 返回受界 Storage，Blob/Catalog 层分别解释自己的 data format。
+3. shared data-mode geometry 提供创建阶段所需的最小容量与 alignment contract；
+4. Blob/Catalog 层分别解释自己的 data format，Pool production path 不 import Blob format；
+5. CLI/node 组合 Pool geometry、设备安全检查与所选 data-mode requirements。
 
-具体 contract 名称在 Pool/Member/Catalog 步骤确定；本步骤冻结依赖方向，不冻结新 public
-symbol 名称。
+后续调整 symbol 或内部布局不得重新建立 `Pool -> BlobFilesystem` production dependency。
 
 ## 建议目标布局
 
@@ -202,6 +197,6 @@ namespaces，`test-module-roots` 验证 platform/product exports 不进入 engin
 
 ## 验证边界
 
-本次实施只移动源码、拆 module/build 边界并消除反向 import，没有修改 magic、version、offset、
-checksum 或格式 policy。已通过 library-local `zig build ci`、根 `test-storage-engine`、`test-unit`
-与 `test-cross`；最终提交前仍执行仓库非增量 `mise run test` 和 `mise run check`。
+当前 package/module 边界落地时没有修改 magic、version、offset、checksum 或格式 policy。
+后续边界修改必须继续通过 library-local `zig build ci`、根 `test-storage-engine`、`test-unit`、
+`test-cross`，以及仓库非增量 `mise run test` 和 `mise run check`。

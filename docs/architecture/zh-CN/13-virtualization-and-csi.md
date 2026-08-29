@@ -1,6 +1,6 @@
 # 虚拟化与 CSI
 
-> 状态：消费者契约为目标；qtr 当前仅有手动外部 iSCSI initiator
+> 状态：外部虚拟化 consumer contract 为目标；仓库内静态 FUSE CSI Node service 当前部分存在
 
 本章集中定义消费者优先级、部署拓扑、adapter contract、协议选择和生命周期映射。各平台复用 Zettide 的 Volume、BlobFilesystem、Publication 和 Export 语义，不拥有独立数据一致性模型。
 
@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | Tier 1 阻塞性一等消费者 | qtr | 原生 managed backend 是 Tier 1 完成门槛 |
 | 一等后续产品目标 | PVE 与其他虚拟化平台 | 优先于 CSI，但不阻塞 Tier 1 |
-| 次级集成目标 | CSI | 不阻塞 Tier 1/2；复用既有 frontend/lifecycle |
+| 次级集成 | CSI | 当前有静态 FUSE Node service；完整 Controller/block/NFS lifecycle 不阻塞 Tier 1/2 |
 | 独立 profile | TxFS shared qcow2 | 面向 shared-file VM disk，不替代 Catalog block publication |
 
 “一等后续”表示产品方向和架构契约是一等公民，不表示其实现必须早于 Tier 1 qtr gate。
@@ -89,16 +89,11 @@ Reconcile(intent, provider observation, host observation)
 
 ## qtr Contract
 
-### 当前事实
+### 仓库边界
 
-qtr 当前可以注册外部 iSCSI backend、扫描 target、login/logout 并发现 Linux block device。该流程由操作者显式驱动，storage backend 与 VM disk path 相互独立。qtr 当前没有：
-
-- Zettide provider/Volume identity；
-- managed NVMf controller；
-- Publish/Unpublish API client；
-- persistent attachment intent；
-- protocol fallback policy；
-- qtr/Zettide/host/libvirt restart reconciliation。
+qtr 是独立项目，不属于本仓库的构建或测试生命周期。本章只冻结 Zettide-facing provider、Volume、
+Publication、consumer identity、protocol selection 和 restart reconciliation 契约；相关实现和缺口
+必须由 qtr 仓库维护，不能通过本仓库内不存在的源码链接证明。
 
 ### Tier 1 目标
 
@@ -127,18 +122,26 @@ PVE plugin 目标复用同一 Zettide provider contract，并映射 PVE storage 
 
 Plugin 不通过 shell 拼接 unmanaged `nvme`/`iscsiadm` 命令替代 durable intent；必要的 host tool invocation 由受管 helper 执行并可观察。
 
-## CSI Target
+## CSI
 
 CSI 是 lifecycle adapter，不是第五种 frontend。
 
-### Block Volume
+### 当前静态 FUSE Node service
+
+`services/csi` 当前实现 CSI Identity 和有限 Node service，只接受配置 source root 下的 regular Blob file。
+`NodePublishVolume` 验证 `zettide://filesystem/<uuid>`，持久化 mount intent 并启动 foreground
+`zettide mount`；`NodeUnpublishVolume` 保守卸载并清理 intent。service 和 FUSE child restart 均有 kind
+验证。当前不含 Controller RPC、dynamic provisioning、block/NFS staging、多成员 Pool、snapshot、clone
+或 expansion。
+
+### Block Volume 目标
 
 - `CreateVolume/DeleteVolume` 映射 Catalog Volume。
 - `ControllerPublishVolume/ControllerUnpublishVolume` 映射 host-bound Publication authority。
 - `NodeStageVolume/NodeUnstageVolume` 映射 NVMf controller 或 iSCSI session/device。
 - `NodePublishVolume/NodeUnpublishVolume` 映射 pod-visible block device/bind mount。
 
-### Filesystem Volume
+### Filesystem Volume 目标
 
 - Controller lifecycle 映射 BlobFilesystem identity 与 NFS Export/FUSE local eligibility。
 - Network filesystem 的 NodeStage 使用 NFS mount。
@@ -166,9 +169,9 @@ CSI 是 lifecycle adapter，不是第五种 frontend。
 
 | 集成 | NVMf | iSCSI | NFS | FUSE | Managed lifecycle |
 | --- | --- | --- | --- | --- | --- |
-| qtr 当前 | 无 | 手动外部 initiator | 无 | 普通本地 file path，不是 Zettide managed contract | 无 |
-| qtr Tier 1 目标 | 首选 | fallback | 可作为未来 filesystem consumer | 同机 local filesystem | 必需，阻塞 Tier 1 |
+| qtr Tier 1 契约 | 首选 | fallback | 可作为未来 filesystem consumer | 同机 local filesystem | 必需，阻塞 Tier 1；实现由外部仓库维护 |
 | PVE 目标 | 首选 | fallback | filesystem storage target | 同机可选 | 一等后续目标 |
+| CSI 当前 | 无 | 无 | 上游 NFS CSI kind profile，不是本 service | 静态 regular Blob file Node publish | 部分：无 Controller/dynamic provisioning |
 | CSI 目标 | block 首选 | block fallback | filesystem network | filesystem local | 次级、非阻塞 |
 
 ## Republish 边界

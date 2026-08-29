@@ -197,11 +197,13 @@ volume。mount service 必须使用 host-local singleton lock 防止重复实例
 
 每个阶段必须保持以下门禁通过：
 
-```text
-mise run check:zettide-txfs
-mise run check:zettide
-mise run check:qtr
+```sh
+zig build test-txfs
+mise run test
+mise run check
 ```
+
+qtr-side integration 必须在独立 qtr 仓库运行其自身 gate，不属于本仓库验证命令。
 
 硬件准入另需 dedicated shared LUN，覆盖 path loss、delayed I/O、host power fence、
 LUN revoke、mount crash、qtr crash 和旧 host 恢复。

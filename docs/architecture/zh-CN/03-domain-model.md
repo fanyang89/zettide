@@ -201,7 +201,7 @@ Availability 由当前 protection policy 的 read/write threshold 参数化。�
 
 ## 当前差距
 
-当前 `zettide` 已有 BlobFilesystem/FUSE 多成员路径、NFSv3 单成员路径、Catalog/extent mapping、endpoint registry/daemon 和标准 NVMf TCP/RDMA export。统一 Publication、consumer-bound access generation、iSCSI target、qtr/PVE/CSI intent 与多前端真实多盘 gate 尚未完成。
+当前 `zettide` 已有 BlobFilesystem/FUSE 多成员路径、NFSv3 单成员路径、Catalog/extent mapping、endpoint registry/daemon，以及标准 NVMf TCP/RDMA 和 iSCSI exports。`services/csi` 另有静态 regular Blob file 的 FUSE mount intent。统一 Publication、consumer-bound access generation、外部虚拟化 intent、完整 CSI Controller/block/NFS lifecycle 与多前端真实多盘 gate 尚未完成。
 
 `zettide-controller` 的 Volume 仍是固定 3/2/1 `PROVISIONING` metadata intent；Replica/Allocation/Attachment schema 没有 mutation，placement、lease、epoch enforcement 和 reconciliation 尚未实现。
 

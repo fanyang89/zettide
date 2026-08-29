@@ -89,7 +89,7 @@ flowchart LR
     BF --> BP[Blob Pool Members]
 ```
 
-实线表示已有或部分已有路径；iSCSI target 与 managed platform adapter 是目标。当前 endpoint daemon 使用 owner-only Unix control socket、持久 desired state、Catalog backend 与标准 NVMf TCP/RDMA export；它不是完整平台控制面。
+实线表示已有或部分已有路径。当前 endpoint daemon 使用 owner-only Unix control socket、持久 desired state、Catalog backend，以及标准 NVMf TCP/RDMA、iSCSI 和 vhost export primitives；它不是 consumer-bound Publication API 或完整平台控制面。
 
 ## Tier 2 增量
 
@@ -169,7 +169,7 @@ Host-facing NVMf 使用标准 NVMe block commands。内部 Replica NVMf 必须�
 - 当前本地三成员路径在任一复制 write/sync 失败后 sticky freeze writer；quorum read 要求至少两个 byte-identical 结果；writable reopen 完整比较副本且不自动修复。
 - 当前还提供 managed SPDK runtime、bdev dispatcher、NVMe-oF initiator、异步 bdev provider 和 vhost-user-blk export 的库级基础。
 - 目标运行常驻 DataService、Tier 3 Volume Engine 和 SPDK reactor，管理本地 Replica/namespace，作为 initiator 访问远程 Replica，并按 protection policy 执行排序、quorum commit、fencing、resync 和 repair。
-- 目标补齐 iSCSI target、动态 Pool/product lifecycle、统一四前端 publication/export control 和平台 adapter 所需接口。
+- 目标补齐 consumer-bound iSCSI/NVMf generation、动态 Pool/product lifecycle、统一四前端 publication/export control 和平台 adapter 所需接口。
 - `zettide` 不自行决定 Tier 3 placement/lease/epoch 权威，不把标准 host NVMf 当作 Replica protocol，也不承担 VM host 调度。
 
 ### `zettide-controller`
@@ -180,9 +180,9 @@ Host-facing NVMf 使用标准 NVMe block commands。内部 Replica NVMf 必须�
 
 ### 平台 adapter
 
-- qtr 当前只有手动外部 iSCSI initiator。
-- qtr 目标 adapter 持久化 Zettide identity，优先 NVMf，按策略 fallback 到 iSCSI，并 reconcile libvirt。
-- PVE plugin 复用相同 provider contract；CSI 映射相同 Volume/publication/mount 生命周期。
+- qtr/PVE 是外部消费者；目标 adapter 持久化 Zettide identity，优先 NVMf，按策略 fallback 到 iSCSI，并 reconcile platform attachment。本仓库不维护其当前实现状态。
+- 当前 `services/csi` 提供静态 regular Blob file 的 FUSE CSI Node lifecycle；完整 CSI Controller、block 与 NFS lifecycle 仍是目标。
+- PVE plugin 与 CSI 目标复用相同 provider contract，不建立平台专属数据语义。
 
 ### `raftz` 与 `grpc-lite`
 

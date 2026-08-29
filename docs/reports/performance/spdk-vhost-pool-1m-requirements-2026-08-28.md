@@ -1,9 +1,11 @@
-# SPDK vhost scheduled Pool 1M IOPS 达成条件（re-org 防回归清单）
+# SPDK vhost scheduled Pool 1M IOPS 达成条件（性能防回归清单）
+
+状态：固定 revision 和硬件 profile 的历史回归证据；不是通用产品要求或当前默认配置。
 
 日期：2026-08-28
 
 本文列出达到 ~1.08M IOPS（4 KiB 随机读，scheduled Pool vhost-user-blk，双 Optane
-PCIe）所必需的全部条件。项目 re-org 时，"代码机制"一节中的任何一项被移除或改坏，
+PCIe）所必需的全部条件。修改对应热路径时，"代码机制"一节中的任何一项被移除或改坏，
 性能都会明显回退；每项附实测依据。验证方法见
 `spdk-vhost-pool-1m-optimization-2026-08-28.md`。
 
@@ -115,7 +117,7 @@ PCIe）所必需的全部条件。项目 re-org 时，"代码机制"一节中的
 - 基准 case：`randread-4k-qd32-j32`（或 `qd128-j16`），runtime 20s / ramp 5s。
 - 达标：≥5 轮中位数 ≥ 1.04M IOPS，fio error=0，`queue_full_rejects=0`，
   `direct_batches` 占比 ≥ 99%，每轮结束双盘恢复 `nvme` 驱动。
-- 参考实现变量文件：`/tmp/opencode/vm-fc-vhost-1m-vars.json`（相对基线
+- 原运行主机的参考变量文件：`/tmp/opencode/vm-fc-vhost-1m-vars.json`（不由仓库保存；相对基线
   vars 的增量：guest_vcpus=15、queues=14、vcpu_cpu_base=9、
   coalescing_delay_base_us=12、fio_case=randread-4k-qd32-j32）。
 - 已知噪声带：±1.5%（共享 Proxmox 宿主机调度）；单次 ±3% 以内不算回归。

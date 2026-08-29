@@ -7,10 +7,11 @@
 - FUSE + regular Blob file 与多成员 raw Blob Pool。
 - NFSv3 backend/`FSAL_ZETTIDE` 与单成员真实 RPC gate。
 - Catalog、extent mapping、writable backend、endpoint registry/daemon。
-- 标准 Catalog NVMf TCP/RDMA export 与 focused/physical-device test harness。
+- 标准 Catalog NVMf TCP/RDMA 与 iSCSI exports，以及 focused/automation test harness。
 - vhost-user-blk 与 NVMe-oF initiator library paths。
+- 静态 regular Blob file 的 FUSE CSI Node service，以及 FUSE/NFS kind profiles。
 - `zettide-controller` metadata、heartbeat、Raft/WAL/snapshot/ReadIndex。
-- qtr 手动外部 iSCSI discovery/login/logout/device discovery。
+- qtr/PVE 等外部消费者的实现状态由各自仓库维护。
 
 这些能力仍只使 Tier 1 状态为“部分”。
 
@@ -26,7 +27,7 @@
 ## Milestone 2：完成四前端
 
 - 标准 NVMf：完善 endpoint lifecycle、consumer generation、identity、restart/flush/discard/resize gate。
-- iSCSI：实现 SPDK target/LUN、stable SCSI identity、ACL/credential 与 recovery。
+- iSCSI：在现有 SPDK target/LUN 与 endpoint lifecycle 上补 consumer generation、stable SCSI identity verification、ACL/credential、session recovery 和真实多盘产品 gate。
 - NFS：让 FSAL 组装多成员 Blob Pool，补齐声明的 NFSv3 profile。
 - FUSE：保持多成员路径并完成真实多盘 durability/recovery gate。
 
@@ -70,6 +71,8 @@ PVE 与其他虚拟化平台是一等后续集成目标，优先于 CSI，但不
 完成标准：PVE 在同一稳定 Volume identity 上完成 allocate/activate/restart/deactivate/free、resize 和保持该 Volume 可达的 migration preparation；路径变化或 provider timeout 不产生重复 Volume 或双重 exclusive publication。
 
 ## Milestone 7：CSI 次级集成
+
+当前静态 FUSE Node service 和 kind gate 是本 milestone 的局部基础，但不满足完整完成标准。
 
 - 映射 CSI Controller lifecycle 到 Volume/Publication/Export。
 - 映射 CSI Node lifecycle 到 NVMf/iSCSI session/device 或 NFS/FUSE mount。

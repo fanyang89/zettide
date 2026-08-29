@@ -1,6 +1,6 @@
 # 源码映射
 
-本页把“当前/部分/目标”映射到源码入口。第三方 API、enum 或 test harness 不单独证明产品能力。
+本页只把本仓库拥有的“当前/部分/目标”映射到源码入口。第三方 API、enum 或 test harness 不单独证明产品能力。qtr、PVE 和 etz 等外部项目只作为契约边界出现，不链接其源码或维护其实现状态。
 
 ## 工作区入口
 
@@ -21,7 +21,7 @@
 | SPDK Backend 与 Export 归属 | [`spdk-adapter-export-map.md`](spdk-adapter-export-map.md) |
 | Endpoint Lifecycle 与 Daemon 归属 | [`endpoint-lifecycle-map.md`](endpoint-lifecycle-map.md) |
 | CLI 与 Node 产品 Composition 归属 | [`cli-node-composition-map.md`](cli-node-composition-map.md) |
-| qtr external storage/VM | [`../../../qtr/README.md`](../../../qtr/README.md), [`../../../qtr/docs/external-storage.md`](../../../qtr/docs/external-storage.md), [`../../../qtr/docs/vm-configuration.md`](../../../qtr/docs/vm-configuration.md) |
+| CSI Node service | [`../../../services/csi/README.md`](../../../services/csi/README.md), [`../../../services/csi/internal/driver/driver.go`](../../../services/csi/internal/driver/driver.go) |
 | 控制面范围 | [`../../../services/controller/README.md`](../../../services/controller/README.md) |
 | Raft API、安全与恢复 | [`../../../vendor/raftz/README.md`](../../../vendor/raftz/README.md), [`../../../vendor/raftz/src/root.zig`](../../../vendor/raftz/src/root.zig) |
 | grpc-lite API 与限制 | [`../../../vendor/grpc-lite/README.md`](../../../vendor/grpc-lite/README.md), [`../../../vendor/grpc-lite/src/root.zig`](../../../vendor/grpc-lite/src/root.zig) |
@@ -65,6 +65,8 @@
 | Persistent desired state/registry | [`../../../services/node/endpoint_registry.zig`](../../../services/node/endpoint_registry.zig) |
 | Catalog endpoint backend | [`../../../services/node/spdk/catalog_endpoint_backend.zig`](../../../services/node/spdk/catalog_endpoint_backend.zig) |
 | Catalog Volume to NVMf export | [`../../../services/node/spdk/catalog_nvmf_export.zig`](../../../services/node/spdk/catalog_nvmf_export.zig) |
+| Shared iSCSI service/target wrapper | [`../../../services/node/spdk/iscsi_export.zig`](../../../services/node/spdk/iscsi_export.zig), [`../../../services/node/spdk/iscsi_export.c`](../../../services/node/spdk/iscsi_export.c) |
+| Catalog Volume to iSCSI export | [`../../../services/node/spdk/catalog_iscsi_export.zig`](../../../services/node/spdk/catalog_iscsi_export.zig) |
 | Standard NVMf TCP/RDMA export wrapper | [`../../../services/node/spdk/nvmf_tcp_export.zig`](../../../services/node/spdk/nvmf_tcp_export.zig), [`../../../services/node/spdk/nvmf_tcp_export.c`](../../../services/node/spdk/nvmf_tcp_export.c), [`../../../services/node/spdk/nvmf_tcp_export.h`](../../../services/node/spdk/nvmf_tcp_export.h) |
 | Catalog async backend/provider bdev | [`../../../services/node/spdk/catalog_volume_backend.zig`](../../../services/node/spdk/catalog_volume_backend.zig), [`../../../services/node/spdk/provider_bdev.zig`](../../../services/node/spdk/provider_bdev.zig), [`../../../services/node/spdk/bdev_provider.c`](../../../services/node/spdk/bdev_provider.c) |
 | Managed SPDK runtime | [`../../../services/node/spdk/runtime.zig`](../../../services/node/spdk/runtime.zig), [`../../../services/node/spdk/runtime.c`](../../../services/node/spdk/runtime.c) |
@@ -72,11 +74,12 @@
 | SPDK endpoint/provider C ABI | [`../../../services/node/spdk/bdev_endpoint.c`](../../../services/node/spdk/bdev_endpoint.c), [`../../../services/node/spdk/bdev_endpoint.h`](../../../services/node/spdk/bdev_endpoint.h), [`../../../services/node/spdk/bdev_provider.h`](../../../services/node/spdk/bdev_provider.h) |
 | NVMe-oF initiator | [`../../../services/node/spdk/nvme_controller.zig`](../../../services/node/spdk/nvme_controller.zig), [`../../../services/node/spdk/nvme_controller.c`](../../../services/node/spdk/nvme_controller.c) |
 | NVMf export tests | [`../../../tests/spdk_nvmf_export.zig`](../../../tests/spdk_nvmf_export.zig), [`../../../tests/spdk-nvmf-fio.sh`](../../../tests/spdk-nvmf-fio.sh), [`../../../tests/automation/nvmf-catalog-fio.yml`](../../../tests/automation/nvmf-catalog-fio.yml) |
+| iSCSI Catalog fio profile | [`../../../tests/spdk-iscsi-fio.sh`](../../../tests/spdk-iscsi-fio.sh), [`../../../tests/automation/iscsi-catalog-fio.yml`](../../../tests/automation/iscsi-catalog-fio.yml) |
 | vhost-user-blk | [`../../../services/node/spdk/catalog_vhost_export.zig`](../../../services/node/spdk/catalog_vhost_export.zig), [`../../../services/node/spdk/vhost_block_export.zig`](../../../services/node/spdk/vhost_block_export.zig) |
 | Physical/scheduled Pool gates | [`../../../tests/physical-pool-fio.sh`](../../../tests/physical-pool-fio.sh), [`../../../tests/scheduled-pool-nvmf-fio.sh`](../../../tests/scheduled-pool-nvmf-fio.sh), [`../../../tests/scheduled-blob-pool-fuse-fio.sh`](../../../tests/scheduled-blob-pool-fuse-fio.sh) |
 | Hardware/RDMA NVMf gates | [`../../../tests/automation/nvmf-catalog-optane-fio.yml`](../../../tests/automation/nvmf-catalog-optane-fio.yml), [`../../../tests/automation/nvmf-catalog-rxe-fio.yml`](../../../tests/automation/nvmf-catalog-rxe-fio.yml), [`../../../tests/automation/nvmf-scheduled-pool-rxe-fio.yml`](../../../tests/automation/nvmf-scheduled-pool-rxe-fio.yml) |
 
-这些文件证明标准 host-facing Catalog NVMf target subsystem/namespace/listener 与 endpoint daemon 已有部分实现。它们不证明 qtr managed E2E、consumer access-generation fencing、真实四前端多盘 gate 或 Tier 3 internal Replica protocol。
+这些文件证明标准 host-facing Catalog NVMf 与 iSCSI target/export 及 endpoint daemon 已有部分实现。它们不证明外部 managed-consumer E2E、consumer access-generation fencing、真实四前端多盘 gate 或 Tier 3 internal Replica protocol。
 
 ## NFS Backend 与 FSAL
 
@@ -92,16 +95,18 @@
 当前 backend/FSAL 只打开 standalone regular-file target 或一个 Pool Member，
 不组装多成员 Pool，因此 NFS 状态是“部分”。
 
-## qtr
+## CSI
 
 | 主题 | 文件 |
 | --- | --- |
-| 手动 external iSCSI backend、scan、login/logout、device discovery | [`../../../qtr/src/storage.rs`](../../../qtr/src/storage.rs) |
-| Storage CLI schema | [`../../../qtr/src/config.rs`](../../../qtr/src/config.rs) |
-| VM file/block path 与 libvirt lifecycle | [`../../../qtr/src/vm.rs`](../../../qtr/src/vm.rs) |
-| VM desired/observed reconciliation | [`../../../qtr/src/vm_model.rs`](../../../qtr/src/vm_model.rs), [`../../../qtr/src/vm_reconcile.rs`](../../../qtr/src/vm_reconcile.rs) |
+| FUSE CSI Node service | [`../../../services/csi/internal/driver/driver.go`](../../../services/csi/internal/driver/driver.go) |
+| Process entry | [`../../../services/csi/cmd/zettide-csi-node/main.go`](../../../services/csi/cmd/zettide-csi-node/main.go) |
+| Unit tests | [`../../../services/csi/internal/driver/driver_test.go`](../../../services/csi/internal/driver/driver_test.go) |
+| Container | [`../../../services/csi/Dockerfile`](../../../services/csi/Dockerfile) |
+| FUSE kind gate | [`../../../tests/fuse-csi-kind.sh`](../../../tests/fuse-csi-kind.sh), [`../../../tests/automation/csi-fuse-kind.yml`](../../../tests/automation/csi-fuse-kind.yml) |
+| NFS CSI compatibility gate | [`../../../tests/nfs-csi-kind.sh`](../../../tests/nfs-csi-kind.sh), [`../../../tests/automation/csi-nfs-kind.yml`](../../../tests/automation/csi-nfs-kind.yml) |
 
-当前没有 qtr Zettide provider、managed NVMf controller、Publication API client、protocol fallback、persistent attachment intent 或 end-to-end reconciliation。
+当前 Zettide CSI binary 只实现静态 regular Blob file 的 Identity 与有限 Node service。NFS gate 使用上游 NFS CSI driver；两者都不证明 Controller、dynamic provisioning、block CSI 或多成员 NFS 已实现。
 
 ## zettide-controller / raftz / grpc-lite
 
@@ -136,7 +141,7 @@
 | SPDK bdev API | [`../../../vendor/spdk/include/spdk/bdev.h`](../../../vendor/spdk/include/spdk/bdev.h) |
 | iSCSI target reference | [`../../../vendor/spdk/app/iscsi_tgt/iscsi_tgt.c`](../../../vendor/spdk/app/iscsi_tgt/iscsi_tgt.c) |
 
-Vendored API/target 只证明依赖中存在相应原语，不证明 Zettide 已封装产品 lifecycle。当前 Zettide 已封装标准 Catalog NVMf export；iSCSI target 和 Tier 3 vendor-specific Replica target 仍未实现。
+Vendored API/target 只证明依赖中存在相应原语，不证明 Zettide 已封装产品 lifecycle。当前 Zettide 已封装标准 Catalog NVMf 与 iSCSI exports；consumer-bound Publication generation 和 Tier 3 vendor-specific Replica target 仍未实现。
 
 当前 control Volume 是 metadata intent；无 placement、Replica/Allocation mutation、lease、publication authority 或 reconciliation。
 
@@ -152,8 +157,9 @@ Vendored API/target 只证明依赖中存在相应原语，不证明 Zettide 已
 
 ## 尚无实现
 
-- Zettide iSCSI target/publication lifecycle。
-- qtr managed NVMf-first backend、PVE plugin、CSI driver。
+- Consumer-bound NVMf/iSCSI Publication generation 与 managed external attachment。
+- qtr/PVE 等外部 managed backend（不属于本仓库）。
+- CSI Controller、dynamic provisioning、block CSI 和 managed NFS lifecycle。
 - NFS multi-member Pool export 与四前端真实多物理盘总 gate。
 - Tier 2 online Pool/protection migration product lifecycle。
 - Tier 3 vendor-specific Replica NVMf、commit evidence、epoch fencing、failover/repair。

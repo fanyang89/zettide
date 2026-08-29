@@ -139,4 +139,4 @@ Tier 3 启动顺序：
 
 ## 当前差距
 
-当前没有统一 systemd/deployment manifest、防火墙模板、qtr/PVE adapter、iSCSI target、NFS 多成员配置、真实四前端多盘 gate 或生产硬件准入。现有 component tests 与 endpoint daemon 不构成完整部署方案。
+当前没有统一 systemd/deployment manifest、防火墙模板、外部虚拟化 managed adapter、consumer-bound iSCSI deployment、NFS 多成员配置、真实四前端多盘 gate 或生产硬件准入。现有 iSCSI/NVMf component tests、CSI kind profiles 与 endpoint daemon 不构成完整部署方案。

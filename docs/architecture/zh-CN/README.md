@@ -4,10 +4,12 @@
 
 > Zettide 仍处于主动开发阶段。本文使用“当前”“部分”“目标”和“非目标”区分成熟度；目标设计不表示已端到端交付，更不表示生产可用。
 
-存储引擎、node service、CLI 与运行进程的目标边界见
+本文遵循[文档规范层级](../../README.md)。存储引擎、node service、CLI 与运行进程的目标边界见
 [架构决策 0001](../../decisions/0001-storage-node-naming-and-process-model.md)；首轮提取后暂不继续拆分
 Pool/Catalog/Blob package 的评估见
-[架构决策 0002](../../decisions/0002-keep-storage-engine-cohesive.md)。package、module root 与源码目录迁移
+[架构决策 0002](../../decisions/0002-keep-storage-engine-cohesive.md)；数据模型、Tier、frontend、组件 ownership
+和外部消费者边界见
+[架构决策 0003](../../decisions/0003-storage-product-architecture.md)。package、module root 与源码目录迁移
 已经完成；完整 `zettide-node` daemon/NodeContext wiring 尚未完成。
 
 ## 架构主线
@@ -16,14 +18,14 @@ Pool/Catalog/Blob package 的评估见
 - Tier 2：在 Tier 1 上增加动态 Pool、在线容量/保护迁移、multi-Volume 服务治理，以及更完整的 publication/attachment 生命周期。
 - Tier 3：增加跨 storage node 同步复制、fencing、storage failover、repair 和 republish。
 
-Tier 1 支持同机和独立单节点两种部署。虚拟化是一等消费者：qtr 原生 managed backend 是 Tier 1 完成门槛；PVE 和其他虚拟化平台是一等后续集成目标，优先于 CSI，但不阻塞 Tier 1；CSI 是次级、非阻塞集成目标。
+Tier 1 支持同机和独立单节点两种部署。虚拟化是一等消费者：qtr 原生 managed backend 是 Tier 1 完成门槛；PVE 和其他虚拟化平台是一等后续集成目标，优先于完整 CSI，但不阻塞 Tier 1。CSI 是次级、非阻塞集成；当前静态 FUSE Node service 是局部实现。
 
 ## 基线前端
 
 | 前端 | 数据模型 | 角色 | 当前状态 |
 | --- | --- | --- | --- |
 | 标准 NVMf TCP/RDMA | Catalog Volume | 首选 host-facing block publication | 部分：endpoint daemon 与 export 已存在；无 qtr managed E2E 和真实多物理盘完整准入 |
-| iSCSI | Catalog Volume | fallback/compatibility block protocol | 目标：Zettide target 尚未实现；qtr 仅有手动外部 initiator |
+| iSCSI | Catalog Volume | fallback/compatibility block protocol | 部分：SPDK target/export、endpoint lifecycle 和 Catalog fio profile 已存在；无 managed consumer 与真实多盘总 gate |
 | NFS | BlobFilesystem | network filesystem | 部分：NFSv3 backend/FSAL 已存在，当前只打开单成员 |
 | FUSE | BlobFilesystem | local filesystem | 当前：多成员 Blob Pool 路径已存在 |
 
@@ -38,10 +40,11 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 - `zettide-node`：目标 data-node daemon；endpoint/SPDK module surface 已存在，完整 DataService/NodeContext wiring 待完成。
 - `zettide-controller`：Tier 3 权威元数据与协调基础。
 - `raftz` 与 `grpc-lite`：共识、恢复和控制 RPC。
-- qtr/PVE/CSI：消费者 adapter、publication、attachment 与 mount 生命周期边界。
+- `services/csi`：当前静态 FUSE CSI Node service，以及目标 block/NFS/Controller lifecycle。
+- qtr/PVE：仓库外消费者的 publication、attachment 与 mount 契约；其实现状态不由本仓库维护。
 - `zettide-txfs`：独立 shared qcow2 文件路径，不替代 Catalog block publication。
 
-本书覆盖存储系统及其与 qtr、PVE、CSI 的直接 publication、attachment、export 和 mount 边界。除这些存储接入外，计算调度、VM 生命周期、自动 VM 重启、覆盖网络、Web UI、计费和完整发行版生命周期不在本书范围内。Tier 3 可以把 Volume republish 到调用方指定的 host，但不负责选择该 host 或重启 workload。
+本书覆盖存储系统、仓库内 CSI adapter，以及与 qtr/PVE 等外部消费者的直接 publication、attachment、export 和 mount 边界。除这些存储接入外，计算调度、VM 生命周期、自动 VM 重启、覆盖网络、Web UI、计费和完整发行版生命周期不在本书范围内。Tier 3 可以把 Volume republish 到调用方指定的 host，但不负责选择该 host 或重启 workload。
 
 ## 目录
 
@@ -89,4 +92,6 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 - NVMf NQN/NSID/controller、iSCSI portal/IQN/LUN/session、NFS export path、FUSE mount path 和 `/dev/...` 都是可重建 locator/runtime state，不是资源身份。
 - “持久确认”要求满足底层已经验证的 flush/FUA 语义；进入内存、发送队列、NVMf queue 或设备易失缓存都不构成持久确认。
 - 当前安全模型是可信隔离网络，不是零信任网络。
-- 文档与实现冲突时，以源码、协议和测试为准；入口见 [源码映射](source-map.md)。
+- 已接受 ADR 决定冻结的架构约束；只有后续 ADR 可以取代。源码、协议和测试用于核实
+  “当前/部分/目标”状态，发现偏差时更新[范围与状态](00-scope-and-status.md)或修复实现，不能
+  静默改变架构。实现证据入口见[源码映射](source-map.md)。

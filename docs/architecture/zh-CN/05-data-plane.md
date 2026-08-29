@@ -1,6 +1,6 @@
 # 数据面
 
-> 状态：FUSE 多成员当前；NFSv3 单成员与标准 Catalog NVMf TCP/RDMA 部分；iSCSI 和 Tier 3 Replica path 为目标
+> 状态：FUSE 多成员当前；NFSv3 单成员、标准 Catalog NVMf TCP/RDMA 与 iSCSI 部分；Tier 3 Replica path 为目标
 
 ## Tier 1 数据路径
 
@@ -39,7 +39,7 @@ flowchart LR
 
 ## iSCSI Fallback
 
-iSCSI 访问相同 Catalog Volume block model，但使用独立 target/LUN、session、stable SCSI identity 和 credential lifecycle。Vendored SPDK target 不等于 Zettide 已封装 target；当前没有 iSCSI export implementation 或 gate。
+iSCSI 访问相同 Catalog Volume block model，但使用独立 target/LUN、session、stable SCSI identity 和 credential lifecycle。Zettide 当前已封装 SPDK shared iSCSI service、per-Catalog target/LUN export、endpoint locator/lifecycle，并提供 `iscsi-catalog-fio` 自动化 profile。该 profile 是 focused export/data-integrity gate，不包含 consumer-bound Publication generation、managed host attachment 或真实多物理盘 Tier 1 总 gate。
 
 iSCSI 用于兼容不适合 NVMf 的 host/platform。Fallback 不改变 Volume 数据语义，也不允许 NVMf 与 iSCSI 同时写同一 exclusive publication。IQN/LUN 可以稳定，但 Volume ID、publication ID 与 serial/WWID 才是恢复依据。
 
@@ -165,4 +165,4 @@ NVMf 只提供远程块 transport，不能单独回答 quorum 是否持久、重
 
 ## 当前差距
 
-四前端尚未形成真实多盘统一 gate；qtr managed NVMf、Zettide iSCSI、NFS 多成员、Tier 2 migration 和 Tier 3 vendor-specific Replica protocol 均未完成。当前任何局部 export、benchmark 或 synthetic/loop test 都不能被描述为 Tier 1 完成或生产可用。
+四前端尚未形成真实多盘统一 gate；外部 managed NVMf-first/iSCSI-fallback attachment、consumer access generation、NFS 多成员、Tier 2 migration 和 Tier 3 vendor-specific Replica protocol 均未完成。当前任何局部 export、benchmark 或 synthetic/loop test 都不能被描述为 Tier 1 完成或生产可用。
