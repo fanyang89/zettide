@@ -1,9 +1,10 @@
 const std = @import("std");
-const zettide = @import("zettide");
+const node = @import("zettide_node");
 
-const runtime_api = zettide.spdk_runtime;
-const catalog_endpoint_backend = zettide.spdk_catalog_endpoint_backend;
-const export_api = zettide.spdk_vhost_block_export;
+// Keep this link artifact scoped to the vhost driver. CatalogEndpointBackend
+// also pulls NVMf/iSCSI composition and is covered by its node unit tests.
+const runtime_api = node.spdk_runtime;
+const export_api = node.spdk_vhost_block_export;
 const c = export_api.c;
 
 const block_size = 4096;
@@ -51,26 +52,6 @@ const Backend = struct {
     }
 };
 
-const UnusedPoolSource = struct {
-    fn open(_: *anyopaque, _: [16]u8) !catalog_endpoint_backend.PoolSource.Opened {
-        return error.UnusedPoolSource;
-    }
-
-    fn close(_: *anyopaque, _: *zettide.v3.pool_member_set.PoolMemberSet) !void {
-        unreachable;
-    }
-
-    fn abort(_: *anyopaque, _: *zettide.v3.pool_member_set.PoolMemberSet) void {
-        unreachable;
-    }
-
-    const vtable: catalog_endpoint_backend.PoolSource.VTable = .{
-        .open = open,
-        .close = close,
-        .abort = abort,
-    };
-};
-
 pub export fn zettide_spdk_vhost_export_test_main(socket_directory: [*:0]const u8) c_int {
     run(socket_directory) catch |err| {
         std.debug.print("SPDK vhost export test failed: {s}\n", .{@errorName(err)});
@@ -91,17 +72,6 @@ fn run(socket_directory: [*:0]const u8) !void {
         .vhost_socket_path = std.mem.span(socket_directory),
     });
     defer runtime.deinit();
-    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{ .environ = .empty });
-    defer threaded.deinit();
-    var unused_source_context: u8 = 0;
-    var endpoint_backend = catalog_endpoint_backend.CatalogEndpointBackend.init(
-        std.heap.c_allocator,
-        threaded.io(),
-        &runtime,
-        .{ .context = &unused_source_context, .vtable = &UnusedPoolSource.vtable },
-        .{},
-    );
-    _ = endpoint_backend.endpointBackend();
     var backend: Backend = .{};
     const provider_backend: export_api.Backend = .{
         .context = &backend,

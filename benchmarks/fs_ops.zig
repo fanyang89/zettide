@@ -1,10 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zbench = @import("zbench");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
+const node = @import("zettide_node");
 
 const Io = std.Io;
-const backend = zettide.filesystem_backend;
+const backend = storage_engine.filesystem_backend;
 
 const Operation = enum {
     create,
@@ -156,7 +157,7 @@ const CaseState = struct {
             },
             .stat => std.mem.doNotOptimizeAway(try self.filesystem.statPath("/subject")),
             .read_readonly, .read_partial, .read_writable_relatime => {
-                const offset = if (self.operation == .read_partial) zettide.blob_format.allocation_unit / 2 else 0;
+                const offset = if (self.operation == .read_partial) storage_engine.blob_format.allocation_unit / 2 else 0;
                 if (try self.handle.read(self.read_buffer, offset) != self.read_buffer.len) return error.ShortRead;
                 std.mem.doNotOptimizeAway(self.read_buffer);
             },
@@ -222,11 +223,11 @@ fn runOperation(allocator: std.mem.Allocator, io: Io, config: Config, operation:
     defer Io.Dir.cwd().deleteTree(io, workspace.path()) catch {};
     var path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const image_path = try std.fmt.bufPrint(&path_buffer, "{s}/image.blob", .{workspace.path()});
-    try zettide.filesystem_target.formatNewBlobFile(io, allocator, image_path, config.image_size, .portable_v1, .{});
+    try node.filesystem_target.formatNewBlobFile(io, allocator, image_path, config.image_size, .portable_v1, .{});
     const read_only = operation == .read_readonly or operation == .read_partial;
-    if (read_only) try populateReadOnlyImage(allocator, io, image_path, if (operation == .read_partial) zettide.blob_format.allocation_unit else config.block_size);
-    var native = try zettide.filesystem_target.openBlobFilesystem(allocator, io, image_path, !read_only);
-    var adapter = zettide.blob_filesystem_adapter.Adapter.init(&native, io);
+    if (read_only) try populateReadOnlyImage(allocator, io, image_path, if (operation == .read_partial) storage_engine.blob_format.allocation_unit else config.block_size);
+    var native = try node.filesystem_target.openBlobFilesystem(allocator, io, image_path, !read_only);
+    var adapter = storage_engine.blob_filesystem_adapter.Adapter.init(&native, io);
     var state = try CaseState.init(allocator, adapter.filesystem(), operation, config.block_size);
     defer state.deinit();
     try state.prepare();
@@ -261,8 +262,8 @@ fn runOperation(allocator: std.mem.Allocator, io: Io, config: Config, operation:
 }
 
 fn populateReadOnlyImage(allocator: std.mem.Allocator, io: Io, path: []const u8, size: usize) !void {
-    var native = try zettide.filesystem_target.openBlobFilesystem(allocator, io, path, true);
-    var adapter = zettide.blob_filesystem_adapter.Adapter.init(&native, io);
+    var native = try node.filesystem_target.openBlobFilesystem(allocator, io, path, true);
+    var adapter = storage_engine.blob_filesystem_adapter.Adapter.init(&native, io);
     var file = try adapter.filesystem().openFile(allocator, "/data", .{ .access = .read_write, .create = true, .exclusive = true }, .{ .mode = 0o644, .uid = 0, .gid = 0 });
     const payload = try allocator.alloc(u8, size * 2);
     defer allocator.free(payload);
@@ -288,7 +289,7 @@ fn parseArgs(args: []const []const u8) !Config {
             config.workspace_root = value;
         } else return error.UnknownArgument;
     }
-    if (config.image_size < zettide.blob_format.minimum_device_size or config.image_size % zettide.blob_format.blob_size != 0) return error.InvalidImageSize;
+    if (config.image_size < storage_engine.blob_format.minimum_device_size or config.image_size % storage_engine.blob_format.blob_size != 0) return error.InvalidImageSize;
     if (config.block_size > config.image_size / 4) return error.BlockSizeTooLarge;
     return config;
 }

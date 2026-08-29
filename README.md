@@ -21,7 +21,8 @@ repositories retain their histories here as merged directory trees:
 
 | Path | Role |
 | --- | --- |
-| `services/zettide/` | Pool, Volume, BlobFilesystem, frontend, and endpoint implementation |
+| `libs/storage-engine/` | Reusable Pool, Catalog, Blob/BlobFilesystem, formats, and backend-neutral ports |
+| `services/node/` | Data-node service, compatible CLI, endpoint lifecycle, and platform/protocol adapters |
 | `services/controller/` | Raft-replicated metadata and cluster coordination |
 | `services/csi/` | CSI node service and container image |
 | `services/nfs-fsal/` | NFS-Ganesha FSAL adapter |
@@ -33,6 +34,12 @@ repositories retain their histories here as merged directory trees:
 | `vendor/grpc-lite/` | Zig RPC runtime submodule |
 | `vendor/raftz/` | Consensus runtime submodule |
 | `vendor/spdk/` | Managed SPDK fork submodule |
+
+The target storage-node naming and process boundaries are frozen in
+[decision 0001](docs/decisions/0001-storage-node-naming-and-process-model.md).
+The reusable engine lives under `libs/storage-engine/`; data-node product
+composition lives under `services/node/`. The existing `zettide` command remains
+compatible while `zettide-node` daemon wiring is completed.
 
 `qtr` and `etz` are intentionally outside this storage repository and are not
 part of its bootstrap, build, test, or update lifecycle. See
@@ -117,6 +124,9 @@ The equivalent focused Zig gates include:
 ```sh
 zig build
 zig build test
+zig build test-storage-engine
+zig build test-node
+zig build test-compatibility
 zig build test-controller
 zig build test-txfs
 zig build ci
@@ -173,7 +183,15 @@ Run each benchmark with `--help` for its complete workload and transport options
 
 ## Tests
 
+The root build separates portable engine, node adapters, and compatibility
+frontend tests. The storage engine can also be validated independently with
+`cd libs/storage-engine && zig build ci`.
+
 ```sh
+zig build test-storage-engine
+zig build test-node
+zig build test-compatibility
+zig build test-module-roots
 zig build test-unit
 zig build test-cli
 zig build test-cross

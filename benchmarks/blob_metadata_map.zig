@@ -1,12 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
+const node = @import("zettide_node");
 
 const Io = std.Io;
-const blob_format = zettide.blob_format;
-const filesystem_format = zettide.blob_filesystem_format;
-const metadata_map = zettide.blob_metadata_map;
-const metadata_store = zettide.blob_metadata_map_store;
+const blob_format = storage_engine.blob_format;
+const filesystem_format = storage_engine.blob_filesystem_format;
+const metadata_map = storage_engine.blob_metadata_map;
+const metadata_store = storage_engine.blob_metadata_map_store;
 
 const Config = struct {
     path: ?[]const u8 = null,
@@ -38,21 +39,21 @@ pub fn main(init: std.process.Init) !void {
     var file_open = true;
     defer if (file_open) file.close(init.io);
     try file.setLength(init.io, config.device_size);
-    const storage = zettide.v3.storage.Storage.initOwned(
+    const storage = storage_engine.v3.storage.Storage.initOwned(
         file,
         config.device_size,
         .regular_file,
         1,
         false,
     );
-    const device = try zettide.blob_device.Device.init(
+    const device = try storage_engine.blob_device.Device.init(
         storage,
         0,
         config.device_size,
         blob_format.allocation_unit,
     );
     file_open = false;
-    var blobs = try zettide.blob_store.Store.create(init.gpa, init.io, device);
+    var blobs = try storage_engine.blob_store.Store.create(init.gpa, init.io, device);
     defer blobs.close(init.io) catch {};
     var maps = metadata_store.MapStore.init(init.gpa, &blobs);
 
@@ -178,7 +179,7 @@ fn parseArgs(args: []const []const u8) !Config {
         } else if (std.mem.eql(u8, arg, "--device-size")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
-            result.device_size = try zettide.size.parse(args[index]);
+            result.device_size = try node.size.parse(args[index]);
         } else return error.UnknownArgument;
     }
     if (result.help) return result;

@@ -1,5 +1,6 @@
 const std = @import("std");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
+const node = @import("zettide_node");
 
 const c = @import("spdk_c");
 
@@ -110,15 +111,15 @@ fn run(
     const basename = std.fs.path.basename(member_path);
     const parent = try std.Io.Dir.openDirAbsolute(io, parent_path, .{});
     defer parent.close(io);
-    var storages = [_]zettide.v3.storage.Storage{
-        try zettide.v3.storage.Storage.createFile(
+    var storages = [_]storage_engine.v3.storage.Storage{
+        try storage_engine.v3.storage.Storage.createFile(
             io,
             parent,
             basename,
             if (mapped) mapped_size + metadata_slack else metadata_slack,
         ),
     };
-    const outcome = try zettide.v3.pool_provision.create(
+    const outcome = try storage_engine.v3.pool_provision.create(
         io,
         allocator,
         &storages,
@@ -152,15 +153,15 @@ fn serveReformatted(
     const expected_pool_id = try parsePoolId(expected_pool_id_text);
     try verifyPoolId(io, allocator, member_path, expected_pool_id);
 
-    const opened = try zettide.v3.linux_block_device.openStorageOptions(
+    const opened = try node.linux_block_device.openStorageOptions(
         io,
         allocator,
         member_path,
         true,
         true,
     );
-    var storages = [_]zettide.v3.storage.Storage{opened.storage};
-    const outcome = try zettide.v3.pool_provision.create(
+    var storages = [_]storage_engine.v3.storage.Storage{opened.storage};
+    const outcome = try storage_engine.v3.pool_provision.create(
         io,
         allocator,
         &storages,
@@ -187,14 +188,14 @@ noinline fn verifyPoolId(
     member_path: []const u8,
     expected_pool_id: [16]u8,
 ) !void {
-    const opened = try zettide.v3.linux_block_device.openStorageOptions(
+    const opened = try node.linux_block_device.openStorageOptions(
         io,
         allocator,
         member_path,
         false,
         true,
     );
-    var member = try zettide.v3.member.openStorage(io, opened.storage, .read_only);
+    var member = try storage_engine.v3.member.openStorage(io, opened.storage, .read_only);
     defer member.close() catch {};
     if (!std.mem.eql(u8, &member.header().set_id, &expected_pool_id))
         return error.UnexpectedPoolId;
@@ -211,15 +212,15 @@ fn serveExisting(
     provision: bool,
 ) !void {
     const expected_pool_id = try parsePoolId(expected_pool_id_text);
-    const opened = try zettide.v3.linux_block_device.openStorageOptions(
+    const opened = try node.linux_block_device.openStorageOptions(
         io,
         allocator,
         member_path,
         provision,
         true,
     );
-    var storages = [_]zettide.v3.storage.Storage{opened.storage};
-    var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
+    var storages = [_]storage_engine.v3.storage.Storage{opened.storage};
+    var set = try storage_engine.v3.pool_member_set.PoolMemberSet.openStorages(
         io,
         allocator,
         &storages,
@@ -282,7 +283,7 @@ fn serve(
     ready_path: []const u8,
     reactor_mask: []const u8,
     signals: *const c.sigset_t,
-    set: *zettide.v3.pool_member_set.PoolMemberSet,
+    set: *storage_engine.v3.pool_member_set.PoolMemberSet,
     volume_id: [16]u8,
 ) !void {
     const frontend = if (c.getenv("ZETTIDE_SPDK_FRONTEND")) |value| std.mem.span(value) else "nvmf";
@@ -290,7 +291,7 @@ fn serve(
         return error.InvalidSpdkFrontend;
     const use_iscsi = std.mem.eql(u8, frontend, "iscsi");
     const transport_text = if (c.getenv("ZETTIDE_NVMF_TRANSPORT")) |value| std.mem.span(value) else "tcp";
-    const transport: zettide.spdk_nvmf_tcp_export.Transport = if (std.mem.eql(u8, transport_text, "tcp"))
+    const transport: node.spdk_nvmf_tcp_export.Transport = if (std.mem.eql(u8, transport_text, "tcp"))
         .tcp
     else if (std.mem.eql(u8, transport_text, "rdma"))
         .rdma
@@ -298,7 +299,7 @@ fn serve(
         return error.InvalidNvmfTransport;
     const traddr = if (c.getenv("ZETTIDE_NVMF_TARGET_ADDR")) |value| std.mem.span(value) else "127.0.0.1";
     const trsvcid = if (c.getenv("ZETTIDE_NVMF_TARGET_PORT")) |value| std.mem.span(value) else "44220";
-    var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
+    var runtime = try node.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_catalog_nvmf_benchmark",
         .reactor_mask = reactor_mask,
         .json_data = if (use_iscsi) iscsi_runtime_config else if (transport == .rdma) rdma_runtime_config else runtime_config,
@@ -313,7 +314,7 @@ fn serve(
         const iscsi_port = if (c.getenv("ZETTIDE_ISCSI_TARGET_PORT")) |value| std.mem.span(value) else "3260";
         const initiator_name = if (c.getenv("ZETTIDE_ISCSI_INITIATOR_NAME")) |value| std.mem.span(value) else "ANY";
         const initiator_netmask = if (c.getenv("ZETTIDE_ISCSI_INITIATOR_NETMASK")) |value| std.mem.span(value) else "127.0.0.1/32";
-        var service = try zettide.spdk_iscsi_export.IscsiService.create(
+        var service = try node.spdk_iscsi_export.IscsiService.create(
             allocator,
             &runtime,
             .{
@@ -324,7 +325,7 @@ fn serve(
             },
         );
         defer service.close() catch @panic("failed to close iSCSI service");
-        var iscsi_handle = try zettide.spdk_catalog_iscsi_export.CatalogIscsiExport.create(
+        var iscsi_handle = try node.spdk_catalog_iscsi_export.CatalogIscsiExport.create(
             allocator,
             io,
             &runtime,
@@ -339,7 +340,7 @@ fn serve(
         defer iscsi_handle.close() catch @panic("failed to close Catalog iSCSI export");
         return waitForStop(io, ready_path, signals);
     }
-    var export_handle = try zettide.spdk_catalog_nvmf_export.CatalogNvmfExport.create(
+    var export_handle = try node.spdk_catalog_nvmf_export.CatalogNvmfExport.create(
         allocator,
         io,
         &runtime,
@@ -370,18 +371,18 @@ fn waitForStop(io: std.Io, ready_path: []const u8, signals: *const c.sigset_t) !
 
 fn publishCatalog(
     io: std.Io,
-    set: *zettide.v3.pool_member_set.PoolMemberSet,
+    set: *storage_engine.v3.pool_member_set.PoolMemberSet,
     mapped: bool,
 ) ![16]u8 {
-    const catalog = zettide.v3.pool_catalog;
-    const graph = zettide.v3.pool_catalog_graph;
-    const page = zettide.v3.pool_catalog_page;
+    const catalog = storage_engine.v3.pool_catalog;
+    const graph = storage_engine.v3.pool_catalog_graph;
+    const page = storage_engine.v3.pool_catalog_page;
     const authority = set.authority() orelse return error.MissingAuthority;
     const member = (try set.memberAt(0)) orelse return error.MemberUnavailable;
     const extent_size = authority.layout.chunk_size;
     const extent_count = member.header().data.length / extent_size;
 
-    var header = try zettide.v3.catalog_volume_header.Header.init(io, catalog_size, "benchmark");
+    var header = try storage_engine.v3.catalog_volume_header.Header.init(io, catalog_size, "benchmark");
     header.extent_size = extent_size;
     header.state = .ready;
     const header_bytes = header.encode();
@@ -453,8 +454,8 @@ fn publishCatalog(
         .{ .offset = header_reference.offset, .bytes = &header_bytes },
         .{ .offset = extent_reference.offset, .bytes = &extent_bytes },
     };
-    var proposal: zettide.v3.control_record.Record = .{
-        .kind = zettide.v3.control_record.generation_prepare_kind,
+    var proposal: storage_engine.v3.control_record.Record = .{
+        .kind = storage_engine.v3.control_record.generation_prepare_kind,
         .local_sequence = 99,
         .membership_epoch = authority.membership_epoch,
         .writer_term = @max(authority.writer_term, 1),
@@ -466,13 +467,13 @@ fn publishCatalog(
         .previous_record_digest = @splat(0x11),
         .previous_history_digest = @splat(0x22),
         .data_root_digest = try catalog.rootDigest(root),
-        .topology_digest = try zettide.v3.pool_topology.digest(authority.topology),
-        .layout_digest = try zettide.v3.pool_layout.digest(authority.layout),
-        .payload = try zettide.v3.control_record.Payload.init("benchmark catalog"),
+        .topology_digest = try storage_engine.v3.pool_topology.digest(authority.topology),
+        .layout_digest = try storage_engine.v3.pool_layout.digest(authority.layout),
+        .payload = try storage_engine.v3.control_record.Payload.init("benchmark catalog"),
     };
-    proposal.history_digest = try zettide.v3.control_record.historyDigest(proposal);
+    proposal.history_digest = try storage_engine.v3.control_record.historyDigest(proposal);
 
-    var coordinator = try zettide.v3.pool_replicated_journal.open(io, set);
+    var coordinator = try storage_engine.v3.pool_replicated_journal.open(io, set);
     defer coordinator.deinit();
     const initialization: graph.DataInitialization = .{
         .volume_id = descriptor.volume_id,

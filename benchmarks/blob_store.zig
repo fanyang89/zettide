@@ -1,12 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
+const node = @import("zettide_node");
 
 const Io = std.Io;
-const Device = zettide.blob_device.Device;
-const Store = zettide.blob_store.Store;
-const format = zettide.blob_format;
-const FileIoMode = zettide.v3.file_storage.Mode;
+const Device = storage_engine.blob_device.Device;
+const Store = storage_engine.blob_store.Store;
+const format = storage_engine.blob_format;
+const FileIoMode = node.file_storage.Mode;
 
 const Operation = enum {
     read,
@@ -24,7 +25,7 @@ const Config = struct {
     path: ?[]const u8 = null,
     size: u64 = 8 * 1024 * 1024 * 1024,
     block_size: usize = format.blob_size,
-    batch_depth: usize = zettide.blob_device.max_batch,
+    batch_depth: usize = storage_engine.blob_device.max_batch,
     file_io: FileIoMode = .posix,
     help: bool = false,
 };
@@ -56,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (file_open) file.close(init.io);
     if (config.operation == .write) try file.setLength(init.io, device_size);
     if (try file.length(init.io) != device_size) return error.InvalidBenchmarkFileSize;
-    const storage = try zettide.v3.file_storage.initOwned(
+    const storage = try node.file_storage.initOwned(
         init.gpa,
         file,
         device_size,
@@ -157,7 +158,7 @@ fn runWrites(
 }
 
 fn runReads(io: Io, store: *Store, buffers: []const []u8, config: Config) !u64 {
-    var checksums: [zettide.blob_device.max_batch][format.checksum_count]u32 = undefined;
+    var checksums: [storage_engine.blob_device.max_batch][format.checksum_count]u32 = undefined;
     for (buffers, checksums[0..buffers.len]) |buffer, *checksum|
         checksum.* = format.payloadChecksums(buffer);
     var blob_index: u64 = 0;
@@ -189,12 +190,12 @@ fn rate(bytes: u64, elapsed_ns: u64) u64 {
 
 fn validateTransport(
     config: Config,
-    kind: zettide.v3.storage.TransportKind,
-    stats: zettide.v3.storage.TransportStats,
+    kind: storage_engine.v3.storage.TransportKind,
+    stats: storage_engine.v3.storage.TransportStats,
     operation_count: u64,
 ) !void {
     if (config.file_io == .io_uring and kind != .io_uring) return error.IoUringBackendNotSelected;
-    const batch_depth = @min(config.batch_depth, zettide.blob_device.max_batch);
+    const batch_depth = @min(config.batch_depth, storage_engine.blob_device.max_batch);
     const minimum_sqes = if (config.operation == .write)
         try std.math.divCeil(u64, operation_count, batch_depth)
     else
@@ -224,11 +225,11 @@ fn parseArgs(args: []const []const u8) !Config {
         } else if (std.mem.eql(u8, arg, "--size")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
-            result.size = try zettide.size.parse(args[index]);
+            result.size = try node.size.parse(args[index]);
         } else if (std.mem.eql(u8, arg, "--block-size")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
-            result.block_size = std.math.cast(usize, try zettide.size.parse(args[index])) orelse
+            result.block_size = std.math.cast(usize, try node.size.parse(args[index])) orelse
                 return error.InvalidBlockSize;
         } else if (std.mem.eql(u8, arg, "--batch-depth")) {
             index += 1;
@@ -245,7 +246,7 @@ fn parseArgs(args: []const []const u8) !Config {
     if (result.size == 0 or result.size % format.blob_size != 0 or
         result.block_size != format.blob_size)
         return error.InvalidBenchmarkGeometry;
-    if (result.batch_depth == 0 or result.batch_depth > zettide.blob_device.max_batch)
+    if (result.batch_depth == 0 or result.batch_depth > storage_engine.blob_device.max_batch)
         return error.InvalidBatchDepth;
     return result;
 }

@@ -3,7 +3,7 @@
 > **执行者说明**：本计划在 create/read 已端到端可用后增加 Delete 和 GC。逻辑删除成功
 > 不能被描述为空间已经立即释放。
 >
-> **漂移检查（首先运行）**：执行计划 003 的两个子仓库 drift 命令，并确认 SnapshotRoot、
+> **漂移检查（首先运行）**：执行计划 003 的两个 monorepo path drift 命令，并确认 SnapshotRoot、
 > COW pinning、certificate reopen tests 已存在且通过。
 
 ## 状态
@@ -14,7 +14,7 @@
 - **依赖**: `docs/plans/003-connect-crash-consistent-snapshot-data-plane.md`
 - **类别**: direction, tests
 - **Status**: BLOCKED（等待计划 003 完成并按实际文件刷新）
-- **计划生成于**: `zettide` commit `6515277`, `zettide-control` commit `c25ed1d`, 2026-07-29
+- **计划生成于**: 当时的 `zettide` commit `6515277`、原 `zettide-control` 仓库 commit `c25ed1d`, 2026-07-29
 
 ## 为什么重要
 
@@ -27,7 +27,7 @@
 
 - `docs/architecture/zh-CN/06-io-and-control-flows.md:89-91`：Replica 删除必须先撤销
   namespace/session，再 tombstone、quarantine，最后才能重分配 extent。
-- `zettide/docs/v3-multivolume-format.md:163-173`：任一 recoverable root 引用的 extent 不得
+- `docs/v3-multivolume-format.md:163-173`：任一 recoverable root 引用的 extent 不得
   复用，unknown outcome 必须 freeze。
 - `services/controller/src/state_machine.zig:499-612`：当前 request restore 校验假定 CreatePool
   对应 live Pool；删除资源后必须改为 live-or-tombstone 证明。
@@ -38,13 +38,13 @@
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
 | Controller tests | `zig build test --summary all` in `services/controller/` | all pass |
-| Unit tests | `zig build test-unit --summary all` in `zettide/` | all pass |
-| Image tests | `zig build test-image --summary all` in `zettide/` | all pass |
-| Fault tests | `zig build test-fault --summary all` in `zettide/` | all pass |
-| Linux block | `zig build test-linux-block -Dblock-tests=required --summary all` in `zettide/` | all pass on configured host |
-| CI gate | `zig build ci --summary all` in `zettide/` | all pass |
-| Controller diff | `git -C zettide-control diff --check -- proto src README.md` | exit 0 |
-| Data diff | `git -C zettide diff --check -- src docs build.zig test` | exit 0 |
+| Unit tests | `zig build test-unit --summary all` in repository root | all pass |
+| Image tests | `zig build test-image --summary all` in repository root | all pass after the plan is recalibrated to an existing target |
+| Fault tests | `zig build test-fault --summary all` in repository root | all pass after the plan is recalibrated to an existing target |
+| Linux block | `zig build test-linux-block -Dblock-tests=required --summary all` in repository root | all pass on configured host |
+| CI gate | `zig build ci --summary all` in repository root | all pass |
+| Controller diff | `git diff --check -- services/controller` | exit 0 |
+| Data diff | `git diff --check -- services/node docs build.zig tests` | exit 0 |
 
 若执行环境没有配置 privileged Linux block test，必须报告 BLOCKED，不得把该项静默改为
 optional 后宣称完成。
@@ -60,14 +60,14 @@ optional 后宣称完成。
 
 - 计划 002/003 新增的 VolumeSnapshot proto、state machine、service、reconciler 和 DataService 文件
 - `services/controller/src/integration_test.zig`
-- `services/zettide/v3/pool_catalog.zig`
-- `services/zettide/v3/snapshot_root.zig`
-- `services/zettide/v3/volume_snapshot.zig`
-- `services/zettide/v3/pool_replicated_journal.zig`
-- `zettide/tests/fault.zig`
-- `zettide/tests/image.zig`
-- `zettide/tests/linux-block.sh`
-- `zettide/build.zig`
+- `libs/storage-engine/src/v3/pool_catalog.zig`
+- `libs/storage-engine/src/v3/snapshot_root.zig`
+- `libs/storage-engine/src/v3/volume_snapshot.zig`
+- `libs/storage-engine/src/v3/pool_replicated_journal.zig`
+- `tests/fault.zig`
+- `tests/image.zig`
+- `tests/linux-block.sh`
+- `build.zig`
 - 与 snapshot 对应的新测试文件
 - `docs/architecture/zh-CN/12-volume-snapshots.md`
 

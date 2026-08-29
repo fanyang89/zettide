@@ -1,10 +1,15 @@
 # 实施计划
 
 由 improve skill 于 2026-07-29 生成。计划基于根仓库 commit `9d83bbe`、
-`zettide-control` commit `c25ed1d` 和 `zettide` commit `6515277`。计划 002-004 依赖尚不存在的 Volume、Replica protocol、
+原 `zettide-control` 仓库 commit `c25ed1d` 和当时的 `zettide` commit `6515277`。计划 002-004 依赖尚不存在的 Volume、Replica protocol、
 reconciler 和 fencing baseline，因此当前状态为 `BLOCKED`；前置能力落地后必须按当时的
 实际文件重新校准范围和验证命令，不能直接照搬未来路径。执行前必须做各计划中的 commit、
 工作树 checksum 和摘录三重漂移检查；不要覆盖或回退其他并行修改。
+
+仓库合并后的规范路径是 `services/controller/`、`services/node/` 和 `docs/`。
+计划中的旧 commit 名仅用于记录来源；漂移和验证命令不得再假定存在
+`zettide-control/` 或 `zettide/` 子仓库。计划仍为 BLOCKED 时，其中的文件清单和测试目标
+只是历史快照，执行前仍必须按当前工作树重新校准。
 
 ## 设计结论
 

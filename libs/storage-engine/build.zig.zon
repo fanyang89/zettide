@@ -1,0 +1,18 @@
+.{
+    .name = .zettide_storage_engine,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xaea31695ad29ce15,
+    .dependencies = .{
+        .crc32c = .{
+            .url = "https://codeload.github.com/google/crc32c/tar.gz/2bbb3be42e20a0e6c0f7b39dc07dc863d9ffbc07",
+            .hash = "N-V-__8AAPSAAQAtvOlJae6eMS2dtyeTGalfGt9JsXB9mYZj",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "README.md",
+    },
+}

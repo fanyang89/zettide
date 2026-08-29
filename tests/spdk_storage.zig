@@ -1,5 +1,6 @@
 const std = @import("std");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
+const node = @import("zettide_node");
 
 const c = @import("spdk_c");
 
@@ -66,7 +67,7 @@ fn runMain() !void {
         reactor_count -= 1;
     }
     const reactor_mask = std.mem.sliceTo(&reactor_mask_buffer, 0);
-    const runtime_options: zettide.spdk_runtime.Runtime.Options = .{
+    const runtime_options: node.spdk_runtime.Runtime.Options = .{
         .name = "zettide_spdk_storage_test",
         .reactor_mask = reactor_mask,
         .json_data = malloc_bdev_config,
@@ -75,7 +76,7 @@ fn runMain() !void {
         .no_huge = true,
         .disable_cpumask_locks = true,
     };
-    var runtime = try zettide.spdk_runtime.Runtime.start(context.allocator, runtime_options);
+    var runtime = try node.spdk_runtime.Runtime.start(context.allocator, runtime_options);
     defer runtime.deinit();
     if (reactor_count > 1)
         try runtimeStatus(c.zettide_spdk_test_dispatcher_owner_round_robin(
@@ -83,7 +84,7 @@ fn runMain() !void {
             reactor_count,
         ));
     second_runtime: {
-        var unexpected = zettide.spdk_runtime.Runtime.start(context.allocator, runtime_options) catch |err| {
+        var unexpected = node.spdk_runtime.Runtime.start(context.allocator, runtime_options) catch |err| {
             if (err != error.RuntimeBusy) return err;
             break :second_runtime;
         };
@@ -96,8 +97,8 @@ fn runMain() !void {
     runtime.deinit();
 }
 
-fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime) !void {
-    const base_options: zettide.spdk_nvme_controller.Controller.Options = .{
+fn runControllerTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime) !void {
+    const base_options: node.spdk_nvme_controller.Controller.Options = .{
         .name = "ZettideRemote",
         .transport_address = "127.0.0.1",
         .transport_service_id = "44219",
@@ -105,7 +106,7 @@ fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runti
         .connect_timeout_us = std.time.us_per_s,
     };
     invalid_options: {
-        var unexpected = zettide.spdk_nvme_controller.Controller.attach(
+        var unexpected = node.spdk_nvme_controller.Controller.attach(
             context.allocator,
             runtime,
             .{
@@ -122,7 +123,7 @@ fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runti
         return error.InvalidControllerOptionsAccepted;
     }
     missing_subsystem: {
-        var unexpected = zettide.spdk_nvme_controller.Controller.attach(
+        var unexpected = node.spdk_nvme_controller.Controller.attach(
             context.allocator,
             runtime,
             .{
@@ -137,7 +138,7 @@ fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runti
         return error.MissingSubsystemAttached;
     }
 
-    var controller = try zettide.spdk_nvme_controller.Controller.attach(
+    var controller = try node.spdk_nvme_controller.Controller.attach(
         context.allocator,
         runtime,
         base_options,
@@ -167,7 +168,7 @@ fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runti
     try storage.close(context.io);
     try controller.detach();
 
-    var truncated = try zettide.spdk_nvme_controller.Controller.attach(
+    var truncated = try node.spdk_nvme_controller.Controller.attach(
         context.allocator,
         runtime,
         .{
@@ -185,12 +186,12 @@ fn runControllerTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runti
     try truncated.detach();
 }
 
-fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime) !void {
+fn runStorageTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime) !void {
     const names = [_][]const u8{ "ZettideStorage0", "ZettideStorage1", "ZettideStorage2" };
     try testAsyncReadClose(context, runtime, names[0]);
-    var duplicate_storages: [3]zettide.v3.storage.Storage = undefined;
+    var duplicate_storages: [3]storage_engine.v3.storage.Storage = undefined;
     var duplicate_count: usize = 0;
-    errdefer zettide.v3.storage.closeAll(duplicate_storages[0..duplicate_count], context.io) catch {};
+    errdefer storage_engine.v3.storage.closeAll(duplicate_storages[0..duplicate_count], context.io) catch {};
     for (&duplicate_storages) |*storage| {
         storage.* = try runtime.openStorage(context.allocator, names[0], true);
         duplicate_count += 1;
@@ -207,7 +208,7 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
     // Provisioning owns both descriptors after this point, including on error.
     duplicate_count = 0;
     duplicate_check: {
-        const outcome = zettide.v3.pool_provision.create(
+        const outcome = storage_engine.v3.pool_provision.create(
             context.io,
             context.allocator,
             &duplicate_storages,
@@ -226,7 +227,7 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
         return error.DuplicateStorageAccepted;
     }
 
-    var storages: [names.len]zettide.v3.storage.Storage = undefined;
+    var storages: [names.len]storage_engine.v3.storage.Storage = undefined;
     var opened_count: usize = 0;
     errdefer for (storages[0..opened_count]) |*storage| storage.close(context.io) catch {};
     for (names, 0..) |name, index| {
@@ -237,7 +238,7 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
 
     // Provisioning consumes every supplied storage on both success and failure.
     opened_count = 0;
-    const outcome = try zettide.v3.pool_provision.create(context.io, context.allocator, &storages, .{
+    const outcome = try storage_engine.v3.pool_provision.create(context.io, context.allocator, &storages, .{
         .data_mode = .blob,
     });
     var provisioned = switch (outcome) {
@@ -245,7 +246,7 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
         .partial => |partial| return partial.cause,
     };
     defer provisioned.deinit();
-    var filesystem = try zettide.filesystem_target.formatProvisionedBlobPool(
+    var filesystem = try node.filesystem_target.formatProvisionedBlobPool(
         context.allocator,
         context.io,
         &provisioned,
@@ -262,13 +263,13 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
     }
     // PoolMemberSet likewise owns every storage once scanning starts.
     opened_count = 0;
-    var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
+    var set = try storage_engine.v3.pool_member_set.PoolMemberSet.openStorages(
         context.io,
         context.allocator,
         &storages,
         .writable,
     );
-    filesystem = try zettide.filesystem_target.openBlobPoolFilesystem(
+    filesystem = try node.filesystem_target.openBlobPoolFilesystem(
         context.allocator,
         context.io,
         &set,
@@ -282,7 +283,7 @@ fn runStorageTest(context: *TestContext, runtime: *zettide.spdk_runtime.Runtime)
     if (!std.mem.eql(u8, &payload, "SPDK")) return error.DataMismatch;
 }
 
-fn testAsyncReadMany(context: *TestContext, storage: *zettide.v3.storage.Storage) !void {
+fn testAsyncReadMany(context: *TestContext, storage: *storage_engine.v3.storage.Storage) !void {
     var expected: [2][4096]u8 = undefined;
     for (&expected, 0..) |*block, block_index| {
         for (block, 0..) |*byte, byte_index| byte.* = @truncate(block_index * 67 + byte_index * 29);
@@ -291,11 +292,11 @@ fn testAsyncReadMany(context: *TestContext, storage: *zettide.v3.storage.Storage
     try storage.writeAllAt(context.io, &expected[1], 4096);
 
     var actual: [2][4096]u8 = @splat(@splat(0));
-    const reads = [_]zettide.v3.storage.Read{
+    const reads = [_]storage_engine.v3.storage.Read{
         .{ .buffer = &actual[0], .offset = 0 },
         .{ .buffer = &actual[1], .offset = 4096 },
     };
-    var results: [reads.len]zettide.v3.storage.ReadResult = undefined;
+    var results: [reads.len]storage_engine.v3.storage.ReadResult = undefined;
     var state: AsyncReadState = .{ .io = context.io };
     if (try storage.submitReadManyAt(
         context.io,
@@ -319,7 +320,7 @@ fn testAsyncReadMany(context: *TestContext, storage: *zettide.v3.storage.Storage
 
 fn testAsyncReadClose(
     context: *TestContext,
-    runtime: *zettide.spdk_runtime.Runtime,
+    runtime: *node.spdk_runtime.Runtime,
     name: []const u8,
 ) !void {
     var storage = try runtime.openStorage(context.allocator, name, true);
@@ -327,8 +328,8 @@ fn testAsyncReadClose(
     defer if (owned) storage.close(context.io) catch {};
 
     var buffer: [4096]u8 = undefined;
-    const reads = [_]zettide.v3.storage.Read{.{ .buffer = &buffer, .offset = 0 }};
-    var results: [1]zettide.v3.storage.ReadResult = undefined;
+    const reads = [_]storage_engine.v3.storage.Read{.{ .buffer = &buffer, .offset = 0 }};
+    var results: [1]storage_engine.v3.storage.ReadResult = undefined;
     var state: AsyncReadState = .{ .io = context.io };
     if (try storage.submitReadManyAt(
         context.io,

@@ -1,0 +1,43 @@
+pub const blob_device = @import("blob_device.zig");
+pub const blob_file = @import("blob_file.zig");
+pub const blob_filesystem_format = @import("blob_filesystem_format.zig");
+pub const blob_filesystem = @import("blob_filesystem.zig");
+pub const blob_filesystem_adapter = @import("blob_filesystem_adapter.zig");
+pub const blob_format = @import("blob_format.zig");
+pub const blob_map = @import("blob_map.zig");
+pub const blob_map_store = @import("blob_map_store.zig");
+pub const blob_metadata_map = @import("blob_metadata_map.zig");
+pub const blob_metadata_map_store = @import("blob_metadata_map_store.zig");
+pub const blob_object_format = @import("blob_object_format.zig");
+pub const blob_object = @import("blob_object.zig");
+pub const blob_store = @import("blob_store.zig");
+pub const data_mode_geometry = @import("data_mode_geometry.zig");
+pub const filesystem_backend = @import("filesystem_backend.zig");
+pub const metadata = @import("metadata.zig");
+pub const name_profile = @import("name_profile.zig");
+pub const nfs_filesystem = @import("nfs_filesystem.zig");
+pub const nfs_blob_adapter = @import("nfs_blob_adapter.zig");
+pub const v3 = @import("v3/root.zig");
+
+test {
+    _ = blob_device;
+    _ = blob_file;
+    _ = blob_filesystem_format;
+    _ = blob_filesystem;
+    _ = blob_filesystem_adapter;
+    _ = blob_format;
+    _ = blob_map;
+    _ = blob_map_store;
+    _ = blob_metadata_map;
+    _ = blob_metadata_map_store;
+    _ = blob_object_format;
+    _ = blob_object;
+    _ = blob_store;
+    _ = data_mode_geometry;
+    _ = filesystem_backend;
+    _ = metadata;
+    _ = name_profile;
+    _ = nfs_filesystem;
+    _ = nfs_blob_adapter;
+    _ = v3;
+}

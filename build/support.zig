@@ -4,7 +4,7 @@ pub fn createNameProfileCrossTest(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    core: *std.Build.Module,
+    storage_engine: *std.Build.Module,
 ) *std.Build.Step.Compile {
     return b.addTest(.{
         .root_module = b.createModule(.{
@@ -12,9 +12,49 @@ pub fn createNameProfileCrossTest(
             .target = target,
             .optimize = optimize,
             .link_libc = true,
-            .imports = &.{.{ .name = "zettide", .module = core }},
+            .imports = &.{.{ .name = "zettide_storage", .module = storage_engine }},
         }),
     });
+}
+
+pub fn createNodePrivateModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    storage_engine: *std.Build.Module,
+    crc32c: *std.Build.Module,
+) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path("services/node/node_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.addImport("zettide_storage", storage_engine);
+    module.addImport("crc32c", crc32c);
+    module.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
+    module.addIncludePath(b.path("services/node"));
+    return module;
+}
+
+pub fn createNodeModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    storage_engine: *std.Build.Module,
+    crc32c: *std.Build.Module,
+) *std.Build.Module {
+    const module = b.addModule("zettide_node", .{
+        .root_source_file = b.path("services/node/node_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module.addImport("zettide_storage", storage_engine);
+    module.addImport("crc32c", crc32c);
+    module.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
+    module.addIncludePath(b.path("services/node"));
+    return module;
 }
 
 pub fn createCoreModule(
@@ -22,10 +62,11 @@ pub fn createCoreModule(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     with_fuse: bool,
-    crc32c_dependency: *std.Build.Dependency,
+    storage_engine: *std.Build.Module,
+    crc32c: *std.Build.Module,
 ) *std.Build.Module {
     const core = b.createModule(.{
-        .root_source_file = b.path("services/zettide/root.zig"),
+        .root_source_file = b.path("services/node/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -38,43 +79,9 @@ pub fn createCoreModule(
     });
     core.addImport("linux_c", unavailable_c);
     core.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
-    core.addIncludePath(b.path("vendor/utf8proc"));
-    core.addIncludePath(b.path("services/zettide"));
-    core.addCMacro("UTF8PROC_STATIC", "1");
-    core.addCSourceFiles(.{
-        .files = &.{"vendor/utf8proc/utf8proc.c"},
-        .flags = &.{ "-std=c99", "-DUTF8PROC_STATIC" },
-    });
-    const utf8proc_header = b.addWriteFiles().add("utf8proc_c.h",
-        \\#include <stdlib.h>
-        \\#include <utf8proc.h>
-    );
-    const utf8proc_translate = b.addTranslateC(.{
-        .root_source_file = utf8proc_header,
-        .target = target,
-        .optimize = optimize,
-    });
-    utf8proc_translate.addIncludePath(b.path("vendor/utf8proc"));
-    utf8proc_translate.defineCMacro("UTF8PROC_STATIC", "1");
-    core.addImport("utf8proc_c", utf8proc_translate.createModule());
-    const crc32c = b.createModule(.{
-        .root_source_file = b.path("services/zettide/crc32c.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    const crc32c_config = addCrc32c(crc32c, crc32c_dependency, target);
-    const crc32c_translate = b.addTranslateC(.{
-        .root_source_file = crc32c_dependency.path("include/crc32c/crc32c.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    crc32c_translate.addConfigHeader(crc32c_config);
-    crc32c_translate.addIncludePath(crc32c_dependency.path("include"));
-    crc32c_translate.addIncludePath(crc32c_dependency.path("src"));
-    crc32c.addImport("crc32c_c", crc32c_translate.createModule());
-    crc32c.link_libcpp = true;
+    core.addImport("zettide_storage", storage_engine);
     core.addImport("crc32c", crc32c);
+    core.addIncludePath(b.path("services/node"));
     if (target.result.os.tag == .linux) {
         const linux_header = b.addWriteFiles().add("linux_c.h",
             \\#include <errno.h>
@@ -89,7 +96,7 @@ pub fn createCoreModule(
             .target = target,
             .optimize = optimize,
         });
-        linux_translate.addIncludePath(b.path("services/zettide"));
+        linux_translate.addIncludePath(b.path("services/node"));
         linux_translate.defineCMacro("_FORTIFY_SOURCE", "0");
         linux_translate.defineCMacro("FUSE_USE_VERSION", "35");
         linux_translate.linkSystemLibrary("fuse3", .{});
@@ -99,81 +106,11 @@ pub fn createCoreModule(
         core.addCMacro("FUSE_USE_VERSION", "35");
         core.linkSystemLibrary("fuse3", .{});
         core.addCSourceFiles(.{
-            .files = &.{"services/zettide/fuse_shim.c"},
+            .files = &.{"services/node/fuse_shim.c"},
             .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-DFUSE_USE_VERSION=35" },
         });
     }
     return core;
-}
-
-pub fn addCrc32c(
-    module: *std.Build.Module,
-    dependency: *std.Build.Dependency,
-    target: std.Build.ResolvedTarget,
-) *std.Build.Step.ConfigHeader {
-    const b = module.owner;
-    const arch = target.result.cpu.arch;
-    const is_x86 = arch == .x86 or arch == .x86_64;
-    const is_aarch64 = arch == .aarch64 or arch == .aarch64_be;
-    const config_header = b.addConfigHeader(.{
-        .style = .{ .cmake = dependency.path("src/crc32c_config.h.in") },
-        .include_path = "crc32c/crc32c_config.h",
-    }, .{
-        .BYTE_ORDER_BIG_ENDIAN = arch.endian() == .big,
-        .HAVE_BUILTIN_PREFETCH = true,
-        .HAVE_MM_PREFETCH = is_x86,
-        .HAVE_SSE42 = is_x86,
-        .HAVE_ARM64_CRC32C = is_aarch64,
-        .HAVE_STRONG_GETAUXVAL = is_aarch64 and target.result.os.tag == .linux,
-        .HAVE_WEAK_GETAUXVAL = false,
-        .CRC32C_TESTS_BUILT_WITH_GLOG = false,
-    });
-    module.addConfigHeader(config_header);
-    module.addIncludePath(dependency.path("include"));
-    module.addIncludePath(dependency.path("src"));
-    module.addCSourceFiles(.{
-        .root = dependency.path(""),
-        .files = &.{
-            "src/crc32c.cc",
-            "src/crc32c_portable.cc",
-        },
-        .flags = &.{ "-fno-exceptions", "-fno-rtti" },
-    });
-    if (is_x86) {
-        module.addCSourceFile(.{
-            .file = dependency.path("src/crc32c_sse42.cc"),
-            .flags = &.{
-                "-fno-exceptions",
-                "-fno-rtti",
-                "-Xclang",
-                "-target-feature",
-                "-Xclang",
-                "+sse4.2",
-                "-Xclang",
-                "-target-feature",
-                "-Xclang",
-                "+crc32",
-            },
-        });
-    }
-    if (is_aarch64) {
-        module.addCSourceFile(.{
-            .file = dependency.path("src/crc32c_arm64.cc"),
-            .flags = &.{
-                "-fno-exceptions",
-                "-fno-rtti",
-                "-Xclang",
-                "-target-feature",
-                "-Xclang",
-                "+crc",
-                "-Xclang",
-                "-target-feature",
-                "-Xclang",
-                "+aes",
-            },
-        });
-    }
-    return config_header;
 }
 
 const BenchmarkCpuProfiler = struct {
@@ -219,7 +156,7 @@ pub fn createExecutable(
     const options = b.addOptions();
     options.addOption(bool, "spdk", enable_spdk);
     const module = b.createModule(.{
-        .root_source_file = b.path("services/zettide/main.zig"),
+        .root_source_file = b.path("services/node/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -240,11 +177,11 @@ pub fn configureSpdk(
 ) *std.Build.Module {
     module.addCSourceFiles(.{
         .files = &.{
-            "services/zettide/spdk/runtime.c",
-            "services/zettide/spdk/bdev_provider.c",
-            "services/zettide/spdk/iscsi_export.c",
-            "services/zettide/spdk/nvmf_tcp_export.c",
-            "services/zettide/spdk/vhost_blk_controller.c",
+            "services/node/spdk/runtime.c",
+            "services/node/spdk/bdev_provider.c",
+            "services/node/spdk/iscsi_export.c",
+            "services/node/spdk/nvmf_tcp_export.c",
+            "services/node/spdk/vhost_blk_controller.c",
         },
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
@@ -300,7 +237,7 @@ pub fn createSpdkCModule(
         .target = target,
         .optimize = optimize,
     });
-    spdk_translate.addIncludePath(b.path("services/zettide"));
+    spdk_translate.addIncludePath(b.path("services/node"));
     spdk_translate.addIncludePath(b.path("tests"));
     return spdk_translate.createModule();
 }
@@ -309,7 +246,8 @@ pub fn createLinuxBlockProbe(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    core: *std.Build.Module,
+    storage_engine: *std.Build.Module,
+    node_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     return b.addExecutable(.{
         .name = "zettide-linux-block-probe",
@@ -317,7 +255,10 @@ pub fn createLinuxBlockProbe(
             .root_source_file = b.path("tests/linux_block.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zettide", .module = core }},
+            .imports = &.{
+                .{ .name = "zettide_storage", .module = storage_engine },
+                .{ .name = "zettide_node", .module = node_module },
+            },
         }),
     });
 }
@@ -326,7 +267,8 @@ pub fn createSpdkStorageTest(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    core: *std.Build.Module,
+    storage_engine: *std.Build.Module,
+    node_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
         .root_source_file = b.path("tests/spdk_storage.zig"),
@@ -334,11 +276,12 @@ pub fn createSpdkStorageTest(
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "zettide", .module = core },
+            .{ .name = "zettide_storage", .module = storage_engine },
+            .{ .name = "zettide_node", .module = node_module },
             .{ .name = "spdk_c", .module = createSpdkCModule(b, target, optimize, true) },
         },
     });
-    module.addIncludePath(b.path("services/zettide"));
+    module.addIncludePath(b.path("services/node"));
     module.addIncludePath(b.path("tests"));
     return b.addLibrary(.{
         .name = "zettide-spdk-storage-test",
@@ -350,16 +293,20 @@ pub fn createSpdkNvmfExportTest(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    core: *std.Build.Module,
+    storage_engine: *std.Build.Module,
+    node_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
         .root_source_file = b.path("tests/spdk_nvmf_export.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "zettide", .module = core }},
+        .imports = &.{
+            .{ .name = "zettide_storage", .module = storage_engine },
+            .{ .name = "zettide_node", .module = node_module },
+        },
     });
-    module.addIncludePath(b.path("services/zettide"));
+    module.addIncludePath(b.path("services/node"));
     return b.addLibrary(.{
         .name = "zettide-spdk-nvmf-export-test",
         .root_module = module,
@@ -370,16 +317,20 @@ pub fn createSpdkVhostExportTest(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    core: *std.Build.Module,
+    storage_engine: *std.Build.Module,
+    node_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
         .root_source_file = b.path("tests/spdk_vhost_export.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "zettide", .module = core }},
+        .imports = &.{
+            .{ .name = "zettide_storage", .module = storage_engine },
+            .{ .name = "zettide_node", .module = node_module },
+        },
     });
-    module.addIncludePath(b.path("services/zettide"));
+    module.addIncludePath(b.path("services/node"));
     return b.addLibrary(.{
         .name = "zettide-spdk-vhost-export-test",
         .root_module = module,

@@ -1,10 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
+const node = @import("zettide_node");
 
 const Io = std.Io;
-const Device = zettide.blob_device.Device;
-const FileIoMode = zettide.v3.file_storage.Mode;
+const Device = storage_engine.blob_device.Device;
+const FileIoMode = node.file_storage.Mode;
 
 const Operation = enum {
     read,
@@ -22,7 +23,7 @@ const Config = struct {
     path: ?[]const u8 = null,
     size: u64 = 8 * 1024 * 1024 * 1024,
     block_size: usize = 1024 * 1024,
-    batch_depth: usize = zettide.blob_device.max_batch,
+    batch_depth: usize = storage_engine.blob_device.max_batch,
     file_io: FileIoMode = .posix,
     help: bool = false,
 };
@@ -57,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     if (config.operation == .write) try file.setLength(init.io, config.size);
     if (try file.length(init.io) < config.size) return error.BenchmarkFileTooSmall;
 
-    const storage = try zettide.v3.file_storage.initOwned(
+    const storage = try node.file_storage.initOwned(
         init.gpa,
         file,
         try file.length(init.io),
@@ -160,7 +161,7 @@ fn runWrites(
     latencies: []u64,
     latency_count: *usize,
 ) !void {
-    const writes = try allocator.alloc(zettide.blob_device.Write, buffers.len);
+    const writes = try allocator.alloc(storage_engine.blob_device.Write, buffers.len);
     defer allocator.free(writes);
     var offset: u64 = 0;
     while (offset < config.size) {
@@ -187,9 +188,9 @@ fn runReads(
     latencies: []u64,
     latency_count: *usize,
 ) !u64 {
-    const reads = try allocator.alloc(zettide.blob_device.Read, buffers.len);
+    const reads = try allocator.alloc(storage_engine.blob_device.Read, buffers.len);
     defer allocator.free(reads);
-    const results = try allocator.alloc(zettide.blob_device.ReadResult, buffers.len);
+    const results = try allocator.alloc(storage_engine.blob_device.ReadResult, buffers.len);
     defer allocator.free(results);
     var validation_elapsed: u64 = 0;
     var offset: u64 = 0;
@@ -238,8 +239,8 @@ fn latencySummary(samples: []u64) LatencySummary {
 
 fn validateTransport(
     config: Config,
-    kind: zettide.v3.storage.TransportKind,
-    stats: zettide.v3.storage.TransportStats,
+    kind: storage_engine.v3.storage.TransportKind,
+    stats: storage_engine.v3.storage.TransportStats,
     operation_count: u64,
 ) !void {
     if (config.file_io == .io_uring and kind != .io_uring) return error.IoUringBackendNotSelected;
@@ -247,7 +248,7 @@ fn validateTransport(
     const expected_inflight = @min(
         operation_count,
         @as(u64, config.batch_depth),
-        @as(u64, zettide.blob_device.max_batch),
+        @as(u64, storage_engine.blob_device.max_batch),
     );
     const minimum_sqes = if (config.operation == .write)
         try std.math.divCeil(u64, operation_count, expected_inflight)
@@ -285,11 +286,11 @@ fn parseArgs(args: []const []const u8) !Config {
         } else if (std.mem.eql(u8, arg, "--size")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
-            result.size = try zettide.size.parse(args[index]);
+            result.size = try node.size.parse(args[index]);
         } else if (std.mem.eql(u8, arg, "--block-size")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
-            result.block_size = std.math.cast(usize, try zettide.size.parse(args[index])) orelse
+            result.block_size = std.math.cast(usize, try node.size.parse(args[index])) orelse
                 return error.InvalidBlockSize;
         } else if (std.mem.eql(u8, arg, "--batch-depth")) {
             index += 1;
@@ -306,7 +307,7 @@ fn parseArgs(args: []const []const u8) !Config {
     if (result.size == 0 or result.block_size == 0 or
         result.block_size % 4096 != 0 or result.size % result.block_size != 0)
         return error.InvalidBenchmarkGeometry;
-    if (result.batch_depth == 0 or result.batch_depth > zettide.blob_device.max_batch)
+    if (result.batch_depth == 0 or result.batch_depth > storage_engine.blob_device.max_batch)
         return error.InvalidBatchDepth;
     if (result.file_io != .posix and result.block_size > std.math.maxInt(u32))
         return error.BlockSizeTooLargeForIoUring;

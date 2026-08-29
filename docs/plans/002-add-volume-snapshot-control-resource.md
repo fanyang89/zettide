@@ -3,10 +3,9 @@
 > **执行者说明**：本计划实现控制面 schema、确定性状态机与管理 API，但不执行介质操作。
 > 开始前必须确认 `Volume` baseline 已经落地；否则按 STOP 条件报告 BLOCKED。
 >
-> **漂移检查（首先运行）**：
-> `git -C zettide-control diff --stat c25ed1d..HEAD -- proto src README.md build.zig`
-> 执行前运行
-> `sha256sum services/controller/proto/zettide/controller/v1/controller.proto services/controller/src/state_machine.zig services/controller/src/service.zig services/controller/src/root.zig`
+> **漂移检查（首先运行）**：在仓库根目录运行
+> `git diff --stat c25ed1d..HEAD -- services/controller`；然后在 `services/controller/` 运行
+> `sha256sum proto/zettide/controller/v1/controller.proto src/state_machine.zig src/service.zig src/root.zig`
 > 并确认结果分别为
 > `2f390f2338626d2c28250957ba98ba6f19fefca4d4f03b2794ec81b1c8e899b2`、
 > `4fa351a90b955ccc0d6b64e7fa300ca75774b56b91f11df5ec08ba78543ebee8`、
@@ -22,7 +21,7 @@
 - **依赖**: `docs/plans/001-freeze-volume-snapshot-contract.md`、Volume baseline
 - **类别**: direction, tech-debt
 - **Status**: BLOCKED（等待 Volume baseline，并在其落地后刷新文件路径与符号）
-- **计划生成于**: `zettide-control` commit `c25ed1d`, 2026-07-29
+- **计划生成于**: 原 `zettide-control` 仓库 commit `c25ed1d`, 2026-07-29
 
 ## 为什么重要
 
@@ -93,7 +92,7 @@ failure_code
 | Generate | `zig build gen-proto` | exit 0 |
 | Tests | `zig build test --summary all` | all tests pass |
 | Diff | `git diff --check -- proto src README.md build.zig` | exit 0 |
-| Routes | `grep -n "VolumeSnapshotService/CreateVolumeSnapshot" services/controller/src/service.zig` | no match before plan 003 |
+| Routes | `grep -n "VolumeSnapshotService/CreateVolumeSnapshot" src/service.zig` | no match before plan 003 |
 
 命令工作目录均为 `services/controller/`。
 
@@ -116,7 +115,7 @@ failure_code
 
 **范围外**：
 
-- `zettide/` 数据面文件。
+- `services/node/` 数据面文件。
 - public Delete、clone、restore。
 - application consistency。
 - 在 apply 中进行 RPC、I/O、flush 或等待。

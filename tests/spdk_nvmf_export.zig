@@ -1,15 +1,16 @@
 const std = @import("std");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
+const node = @import("zettide_node");
 
-const nvmf = zettide.spdk_nvmf_tcp_export;
+const nvmf = node.spdk_nvmf_tcp_export;
 
 pub export fn zettide_spdk_catalog_nvmf_export_compile_test(
     io: *std.Io,
-    runtime: *zettide.spdk_runtime.Runtime,
-    set: *zettide.v3.pool_member_set.PoolMemberSet,
+    runtime: *node.spdk_runtime.Runtime,
+    set: *storage_engine.v3.pool_member_set.PoolMemberSet,
     volume_id: *const [16]u8,
 ) c_int {
-    var export_handle = zettide.spdk_catalog_nvmf_export.CatalogNvmfExport.create(
+    var export_handle = node.spdk_catalog_nvmf_export.CatalogNvmfExport.create(
         std.heap.c_allocator,
         io.*,
         runtime,

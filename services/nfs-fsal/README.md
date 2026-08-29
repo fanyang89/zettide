@@ -24,7 +24,7 @@ Add this directory to Ganesha's `src/FSAL/CMakeLists.txt` with an absolute
 source path:
 
 ```cmake
-add_subdirectory("/path/to/zettide/fsal/zettide" FSAL_ZETTIDE)
+add_subdirectory("/path/to/zettide/services/nfs-fsal" FSAL_ZETTIDE)
 ```
 
 Then configure and build Ganesha normally. Pass `ZETTIDE_SOURCE_DIR` when the

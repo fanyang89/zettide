@@ -1,0 +1,66 @@
+const storage = @import("zettide_storage");
+
+pub const blob_device = storage.blob_device;
+pub const blob_file = storage.blob_file;
+pub const blob_filesystem_format = storage.blob_filesystem_format;
+pub const blob_filesystem = storage.blob_filesystem;
+pub const blob_filesystem_adapter = storage.blob_filesystem_adapter;
+pub const blob_format = storage.blob_format;
+pub const blob_map = storage.blob_map;
+pub const blob_map_store = storage.blob_map_store;
+pub const blob_metadata_map = storage.blob_metadata_map;
+pub const blob_metadata_map_store = storage.blob_metadata_map_store;
+pub const blob_object_format = storage.blob_object_format;
+pub const blob_object = storage.blob_object;
+pub const blob_store = storage.blob_store;
+pub const filesystem_backend = storage.filesystem_backend;
+pub const metadata = storage.metadata;
+pub const name_profile = storage.name_profile;
+pub const nfs_filesystem = storage.nfs_filesystem;
+pub const nfs_blob_adapter = storage.nfs_blob_adapter;
+
+pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("endpoint_control.zig") else struct {};
+pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("endpoint_daemon.zig") else struct {};
+pub const endpoint_registry = @import("endpoint_registry.zig");
+pub const filesystem_target = @import("filesystem_target.zig");
+pub const dufs_server = if (@import("builtin").os.tag == .linux) @import("dufs_server.zig") else struct {};
+pub const nfs_handle = @import("nfs_handle.zig");
+pub const size = @import("size.zig");
+pub const spdk_catalog_endpoint_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_endpoint_backend.zig") else struct {};
+pub const spdk_catalog_iscsi_export = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_iscsi_export.zig") else struct {};
+pub const spdk_catalog_nvmf_export = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_nvmf_export.zig") else struct {};
+pub const spdk_catalog_volume_backend = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_volume_backend.zig") else struct {};
+pub const spdk_catalog_vhost_export = if (@import("builtin").os.tag == .linux) @import("spdk/catalog_vhost_export.zig") else struct {};
+pub const spdk_nvme_controller = if (@import("builtin").os.tag == .linux) @import("spdk/nvme_controller.zig") else struct {};
+pub const spdk_iscsi_export = if (@import("builtin").os.tag == .linux) @import("spdk/iscsi_export.zig") else struct {};
+pub const spdk_nvmf_tcp_export = if (@import("builtin").os.tag == .linux) @import("spdk/nvmf_tcp_export.zig") else struct {};
+pub const spdk_provider_bdev = if (@import("builtin").os.tag == .linux) @import("spdk/provider_bdev.zig") else struct {};
+pub const spdk_runtime = if (@import("builtin").os.tag == .linux) @import("spdk/runtime.zig") else struct {};
+pub const spdk_storage = if (@import("builtin").os.tag == .linux) @import("spdk/storage.zig") else struct {};
+pub const spdk_vhost_block_export = if (@import("builtin").os.tag == .linux) @import("spdk/vhost_block_export.zig") else struct {};
+pub const v3 = @import("v3/root.zig");
+pub const linux_fuse = if (@import("builtin").os.tag == .linux) @import("linux_fuse.zig") else struct {};
+
+test {
+    _ = storage;
+    _ = endpoint_control;
+    _ = endpoint_daemon;
+    _ = endpoint_registry;
+    _ = filesystem_target;
+    _ = dufs_server;
+    _ = nfs_handle;
+    _ = size;
+    _ = spdk_catalog_endpoint_backend;
+    _ = spdk_catalog_iscsi_export;
+    _ = spdk_catalog_nvmf_export;
+    _ = spdk_catalog_volume_backend;
+    _ = spdk_catalog_vhost_export;
+    _ = spdk_nvme_controller;
+    _ = spdk_iscsi_export;
+    _ = spdk_nvmf_tcp_export;
+    _ = spdk_provider_bdev;
+    _ = spdk_runtime;
+    _ = spdk_storage;
+    _ = spdk_vhost_block_export;
+    _ = v3;
+}

@@ -4,8 +4,8 @@
 
 This document freezes the first catalog root, catalog leaf page, volume descriptor, and extent run
 codecs for multi-volume raw Pools. The codecs, graph validator, and durable catalog-generation
-staging path are implemented in `services/zettide/v3/pool_catalog.zig`, `services/zettide/v3/pool_catalog_page.zig`,
-`services/zettide/v3/pool_catalog_graph.zig`, and `services/zettide/v3/pool_catalog_store.zig`. They are not yet selected by
+staging path are implemented in `libs/storage-engine/src/v3/pool_catalog.zig`, `libs/storage-engine/src/v3/pool_catalog_page.zig`,
+`libs/storage-engine/src/v3/pool_catalog_graph.zig`, and `libs/storage-engine/src/v3/pool_catalog_store.zig`. They are not yet selected by
 Pool provisioning. Existing raw Pools still use the single-volume metadata format.
 This first catalog format does not migrate development-era dynamic generations that used an arbitrary
 non-catalog `data_root_digest`.
@@ -301,7 +301,7 @@ enforce all of the following before this format becomes writable:
 
 ## Graph Validation
 
-`services/zettide/v3/pool_catalog_graph.zig` validates a collected graph without performing I/O. Its authority
+`libs/storage-engine/src/v3/pool_catalog_graph.zig` validates a collected graph without performing I/O. Its authority
 binding must come from the selected control authority, not from the candidate root itself. Validation
 requires all of the following:
 

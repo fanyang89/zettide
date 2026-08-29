@@ -1,4 +1,5 @@
 const std = @import("std");
+const storage_engine_build = @import("../libs/storage-engine/build.zig");
 const support = @import("support.zig");
 
 const FuseTestMode = enum { off, auto, required };
@@ -17,9 +18,9 @@ pub fn add(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    portable_core: *std.Build.Module,
+    storage_engine: *std.Build.Module,
+    node_module: *std.Build.Module,
     exe: *std.Build.Step.Compile,
-    crc32c_dependency: *std.Build.Dependency,
 ) Result {
     const fuse_test_mode = b.option(FuseTestMode, "fuse-tests", "FUSE tests: off, auto, or required") orelse .auto;
     const smb3_test_mode = b.option(Smb3TestMode, "smb3-tests", "Linux SMB3 tests: off, auto, or required") orelse .auto;
@@ -35,7 +36,7 @@ pub fn add(
     cli_step.dependOn(&cli_test_cmd.step);
 
     const linux_block_probe = if (target.result.os.tag == .linux)
-        support.createLinuxBlockProbe(b, target, optimize, portable_core)
+        support.createLinuxBlockProbe(b, target, optimize, storage_engine, node_module)
     else
         null;
     const linux_block_test_cmd = b.addSystemCommand(&.{ "bash", "tests/linux-block.sh" });
@@ -63,7 +64,7 @@ pub fn add(
     const spdk_provider_step = b.step("test-spdk-provider", "Run the asynchronous SPDK bdev provider test");
     spdk_provider_step.dependOn(&spdk_provider_cmd.step);
 
-    const spdk_vhost_export_test = support.createSpdkVhostExportTest(b, target, optimize, portable_core);
+    const spdk_vhost_export_test = support.createSpdkVhostExportTest(b, target, optimize, storage_engine, node_module);
     const spdk_vhost_cmd = b.addSystemCommand(&.{ "bash", "tests/spdk-vhost-blk-controller.sh" });
     spdk_vhost_cmd.addArtifactArg(spdk_vhost_export_test);
     const spdk_vhost_step = b.step("test-spdk-vhost-blk-controller", "Run the SPDK vhost-blk controller test");
@@ -74,8 +75,8 @@ pub fn add(
     const spdk_daemon_step = b.step("test-spdk-daemon", "Run the SPDK endpoint daemon lifecycle test");
     spdk_daemon_step.dependOn(&spdk_daemon_cmd.step);
 
-    const spdk_storage_test = support.createSpdkStorageTest(b, target, optimize, portable_core);
-    const spdk_nvmf_export_test = support.createSpdkNvmfExportTest(b, target, optimize, portable_core);
+    const spdk_storage_test = support.createSpdkStorageTest(b, target, optimize, storage_engine, node_module);
+    const spdk_nvmf_export_test = support.createSpdkNvmfExportTest(b, target, optimize, storage_engine, node_module);
     const spdk_storage_cmd = b.addSystemCommand(&.{ "bash", "tests/spdk-storage.sh" });
     spdk_storage_cmd.addArtifactArg(spdk_storage_test);
     spdk_storage_cmd.addArtifactArg(spdk_nvmf_export_test);
@@ -214,12 +215,34 @@ pub fn add(
         .os_tag = .windows,
         .abi = .gnu,
     });
-    const windows_core = support.createCoreModule(b, windows_target, optimize, false, crc32c_dependency);
+    const windows_storage_modules = storage_engine_build.createPrivateModules(
+        b,
+        windows_target,
+        optimize,
+        "libs/storage-engine",
+        "vendor/utf8proc",
+    );
+    const windows_storage = windows_storage_modules.storage;
+    const windows_core = support.createCoreModule(
+        b,
+        windows_target,
+        optimize,
+        false,
+        windows_storage,
+        windows_storage_modules.crc32c,
+    );
     const windows_exe = support.createExecutable(b, "zettide-windows-check", windows_target, optimize, windows_core, false);
-    const windows_name_tests = support.createNameProfileCrossTest(b, windows_target, optimize, windows_core);
+    const windows_name_tests = support.createNameProfileCrossTest(b, windows_target, optimize, windows_storage);
     const macos_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .macos });
-    const macos_core = support.createCoreModule(b, macos_target, optimize, false, crc32c_dependency);
-    const macos_name_tests = support.createNameProfileCrossTest(b, macos_target, optimize, macos_core);
+    const macos_storage_modules = storage_engine_build.createPrivateModules(
+        b,
+        macos_target,
+        optimize,
+        "libs/storage-engine",
+        "vendor/utf8proc",
+    );
+    const macos_storage = macos_storage_modules.storage;
+    const macos_name_tests = support.createNameProfileCrossTest(b, macos_target, optimize, macos_storage);
     cross_step.dependOn(&windows_exe.step);
     cross_step.dependOn(&windows_name_tests.step);
     cross_step.dependOn(&macos_name_tests.step);

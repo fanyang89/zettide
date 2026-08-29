@@ -1,10 +1,10 @@
 const std = @import("std");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
 
-const ReplicaEndpoint = zettide.v3.replica_endpoint.ReplicaEndpoint;
-const pool_blob_schedule = zettide.v3.pool_blob_schedule;
-const scheduled_device = zettide.v3.pool_scheduled_data_device;
-const storage_api = zettide.v3.storage;
+const ReplicaEndpoint = storage_engine.v3.replica_endpoint.ReplicaEndpoint;
+const pool_blob_schedule = storage_engine.v3.pool_blob_schedule;
+const scheduled_device = storage_engine.v3.pool_scheduled_data_device;
+const storage_api = storage_engine.v3.storage;
 
 const stripe_size = 1024 * 1024;
 const member_count = 6;

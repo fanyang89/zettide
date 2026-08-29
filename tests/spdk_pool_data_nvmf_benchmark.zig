@@ -1,5 +1,6 @@
 const std = @import("std");
-const zettide = @import("zettide");
+const storage_engine = @import("zettide_storage");
+const node = @import("zettide_node");
 const args = @import("spdk_pool_data_nvmf_args.zig");
 const synthetic_storage = @import("spdk_pool_data_synthetic_storage.zig");
 
@@ -86,7 +87,7 @@ const Worker = struct {
     };
 
     io: std.Io,
-    storage: *zettide.v3.storage.Storage,
+    storage: *storage_engine.v3.storage.Storage,
     concurrent_group_count: usize,
     inline_batches: bool,
     slots: [queue_capacity]Slot,
@@ -109,7 +110,7 @@ const Worker = struct {
 
     fn create(
         io: std.Io,
-        storage: *zettide.v3.storage.Storage,
+        storage: *storage_engine.v3.storage.Storage,
         concurrent_group_count: usize,
         inline_batches: bool,
     ) !*Worker {
@@ -344,8 +345,8 @@ const Worker = struct {
     }
 
     fn executeReadBatch(self: *Worker, batch: *const ReadGroup) void {
-        var reads = uninitialized([max_batch_requests]zettide.v3.storage.Read);
-        var results = uninitialized([max_batch_requests]zettide.v3.storage.ReadResult);
+        var reads = uninitialized([max_batch_requests]storage_engine.v3.storage.Read);
+        var results = uninitialized([max_batch_requests]storage_engine.v3.storage.ReadResult);
         var statuses = uninitialized([max_batch_requests]c_int);
         for (batch.queued[0..batch.count], reads[0..batch.count]) |queued, *read| {
             const request = queued.request;
@@ -425,9 +426,9 @@ fn run(
 ) !void {
     const allocator = std.heap.c_allocator;
     const device_count = std.math.cast(usize, device_count_raw) orelse return error.InvalidDeviceCount;
-    if (device_count > zettide.v3.pool_member_set.max_member_count)
+    if (device_count > storage_engine.v3.pool_member_set.max_member_count)
         return error.InvalidDeviceCount;
-    const read_policy: zettide.v3.pool_scheduled_data_device.ReadPolicy = switch (try args.parseReadPolicy(read_policy_raw)) {
+    const read_policy: storage_engine.v3.pool_scheduled_data_device.ReadPolicy = switch (try args.parseReadPolicy(read_policy_raw)) {
         .first_available => .first_available,
         .quorum => .quorum,
     };
@@ -455,7 +456,7 @@ fn run(
     else
         null;
     const transport_text = if (c.getenv("ZETTIDE_NVMF_TRANSPORT")) |value| std.mem.span(value) else "tcp";
-    const transport: ?zettide.spdk_nvmf_tcp_export.Transport = if (frontend == .nvmf)
+    const transport: ?node.spdk_nvmf_tcp_export.Transport = if (frontend == .nvmf)
         if (std.mem.eql(u8, transport_text, "tcp"))
             .tcp
         else if (std.mem.eql(u8, transport_text, "rdma"))
@@ -490,7 +491,7 @@ fn run(
     const preparation_mode = try args.parsePreparationMode(
         if (c.getenv("ZETTIDE_POOL_DATA_PREPARATION_MODE")) |value| std.mem.span(value) else null,
     );
-    const raw_storage_mode = try zettide.v3.linux_block_device.TransportMode.parse(
+    const raw_storage_mode = try node.linux_block_device.TransportMode.parse(
         if (c.getenv("ZETTIDE_POOL_DATA_RAW_TRANSPORT")) |value| std.mem.span(value) else "auto",
     );
     const sqpoll_cpu_base = try args.parseOptionalCpuBase(
@@ -514,7 +515,7 @@ fn run(
     )) orelse false;
     if (pcie_probe and storage_transport != .spdk_nvme_pcie)
         return error.InvalidPcieProbeConfiguration;
-    var window_specs_buffer: [zettide.v3.pool_member_set.max_member_count]args.WindowSpec = undefined;
+    var window_specs_buffer: [storage_engine.v3.pool_member_set.max_member_count]args.WindowSpec = undefined;
     const window_specs = try args.parseWindowSpecs(
         if (c.getenv("ZETTIDE_POOL_DATA_MEMBER_WINDOWS")) |value| std.mem.span(value) else null,
         &window_specs_buffer,
@@ -598,7 +599,7 @@ fn run(
         sqpoll_cpu_base,
         threaded_concurrency,
     });
-    var runtime = try zettide.spdk_runtime.Runtime.start(allocator, .{
+    var runtime = try node.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_pool_data_nvmf_benchmark",
         .reactor_mask = reactor_mask,
         .json_data = selected_runtime_config,
@@ -669,14 +670,14 @@ fn run(
         try publishReadyAndWait(io, ready_path, &signals);
         return;
     }
-    var physical_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
+    var physical_storages: [storage_engine.v3.pool_member_set.max_member_count]storage_engine.v3.storage.Storage = undefined;
     var physical_count: usize = 0;
-    defer zettide.v3.storage.closeAll(physical_storages[0..physical_count], io) catch @panic("failed to close physical Pool storage");
-    var member_storages: [zettide.v3.pool_member_set.max_member_count]zettide.v3.storage.Storage = undefined;
+    defer storage_engine.v3.storage.closeAll(physical_storages[0..physical_count], io) catch @panic("failed to close physical Pool storage");
+    var member_storages: [storage_engine.v3.pool_member_set.max_member_count]storage_engine.v3.storage.Storage = undefined;
     var member_count: usize = 0;
-    errdefer zettide.v3.storage.closeAll(member_storages[0..member_count], io) catch {};
-    var read_path_metrics: zettide.v3.pool_scheduled_data_device.ReadPathMetrics = .{};
-    var pool_storage: zettide.v3.storage.Storage = undefined;
+    errdefer storage_engine.v3.storage.closeAll(member_storages[0..member_count], io) catch {};
+    var read_path_metrics: storage_engine.v3.pool_scheduled_data_device.ReadPathMetrics = .{};
+    var pool_storage: storage_engine.v3.storage.Storage = undefined;
     if (storage_transport == .synthetic) {
         pool_storage = try synthetic_storage.create(
             allocator,
@@ -698,7 +699,7 @@ fn run(
         }
         if (window_specs.len == 0) {
             for (device_paths[0..device_count], member_storages[0..device_count], 0..) |device_path_z, *storage, index| {
-                const opened = try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
+                const opened = try node.linux_block_device.openStorageOptionsModeAffinity(
                     io,
                     allocator,
                     std.mem.span(device_path_z),
@@ -713,7 +714,7 @@ fn run(
         } else {
             for (device_paths[0..device_count], physical_storages[0..device_count], 0..) |device_path_z, *storage, index| {
                 storage.* = switch (storage_transport) {
-                    .linux => (try zettide.v3.linux_block_device.openStorageOptionsModeAffinity(
+                    .linux => (try node.linux_block_device.openStorageOptionsModeAffinity(
                         io,
                         allocator,
                         std.mem.span(device_path_z),
@@ -732,7 +733,7 @@ fn run(
                 physical_count += 1;
             }
             for (window_specs, member_storages[0..window_specs.len]) |spec, *storage| {
-                storage.* = try zettide.v3.storage_window.create(
+                storage.* = try storage_engine.v3.storage_window.create(
                     allocator,
                     &physical_storages[spec.device_index],
                     spec.offset,
@@ -754,7 +755,7 @@ fn run(
             try publishPreparedPoolId(io, ready_path, pool_id);
             return;
         }
-        var set = try zettide.v3.pool_member_set.PoolMemberSet.openStorages(
+        var set = try storage_engine.v3.pool_member_set.PoolMemberSet.openStorages(
             io,
             allocator,
             member_storages[0..transferring_count],
@@ -767,7 +768,7 @@ fn run(
         if (try set.dataMode() != .blob or authority.layout.scheduled_blob == null)
             return error.ScheduledBlobPoolRequired;
 
-        pool_storage = try zettide.v3.pool_data_storage.createOptions(
+        pool_storage = try storage_engine.v3.pool_data_storage.createOptions(
             allocator,
             io,
             &set,
@@ -838,7 +839,7 @@ fn run(
             std.debug.print("target-stage worker start\n", .{});
             const worker = try Worker.create(io, &pool_storage, concurrent_group_count, false);
             defer worker.close();
-            const backend: zettide.spdk_vhost_block_export.Backend = .{
+            const backend: node.spdk_vhost_block_export.Backend = .{
                 .context = worker,
                 .submit = submit_callback,
                 .block_count = pool_storage.capacity() / block_size,
@@ -846,7 +847,7 @@ fn run(
             };
             std.debug.print("target-stage worker ready\n", .{});
             std.debug.print("target-stage provider start\n", .{});
-            var provider = try zettide.spdk_provider_bdev.ProviderBdev.create(
+            var provider = try node.spdk_provider_bdev.ProviderBdev.create(
                 allocator,
                 runtime_handle,
                 backend,
@@ -855,7 +856,7 @@ fn run(
             defer provider.close() catch @panic("failed to unregister Pool data provider bdev");
             std.debug.print("target-stage provider ready\n", .{});
             std.debug.print("target-stage export start frontend=nvmf transport={s} traddr={s} trsvcid={s}\n", .{ transport_text, traddr, trsvcid });
-            var export_handle = try zettide.spdk_nvmf_tcp_export.NvmfTcpExport.create(
+            var export_handle = try node.spdk_nvmf_tcp_export.NvmfTcpExport.create(
                 allocator,
                 runtime_handle,
                 .{
@@ -882,7 +883,7 @@ fn run(
             };
             while (worker_count < vhost_worker_count) : (worker_count += 1)
                 workers[worker_count] = try Worker.create(io, &pool_storage, concurrent_group_count, vhost_inline_batches);
-            var exports: [args.max_vhost_controller_count]zettide.spdk_vhost_block_export.VhostBlockExport = undefined;
+            var exports: [args.max_vhost_controller_count]node.spdk_vhost_block_export.VhostBlockExport = undefined;
             var export_count: usize = 0;
             defer while (export_count > 0) {
                 export_count -= 1;
@@ -890,7 +891,7 @@ fn run(
             };
             std.debug.print("target-stage export start frontend=vhost socket_directory={s} controllers={d}\n", .{ vhost_socket_directory.?, vhost_controller_count });
             for (0..vhost_controller_count) |index| {
-                const backend: zettide.spdk_vhost_block_export.Backend = .{
+                const backend: node.spdk_vhost_block_export.Backend = .{
                     .context = workers[index % worker_count],
                     .submit = submit_callback,
                     .block_count = pool_storage.capacity() / block_size,
@@ -903,7 +904,7 @@ fn run(
                 const controller_name = try std.fmt.bufPrint(&controller_name_buffer, "zettide-scheduled-pool-data-{d}", .{index});
                 var controller_mask_buffer: [32]u8 = undefined;
                 const controller_mask = try args.reactorMaskAt(reactor_mask, index, &controller_mask_buffer);
-                exports[index] = try zettide.spdk_vhost_block_export.VhostBlockExport.create(
+                exports[index] = try node.spdk_vhost_block_export.VhostBlockExport.create(
                     allocator,
                     runtime_handle,
                     backend,
@@ -931,16 +932,16 @@ fn run(
 fn preparePool(
     io: std.Io,
     allocator: std.mem.Allocator,
-    storages: []zettide.v3.storage.Storage,
+    storages: []storage_engine.v3.storage.Storage,
     mode: args.PreparationMode,
     expected_pool_id: [16]u8,
 ) ![16]u8 {
-    const set = try allocator.create(zettide.v3.pool_member_set.PoolMemberSet);
+    const set = try allocator.create(storage_engine.v3.pool_member_set.PoolMemberSet);
     defer allocator.destroy(set);
     switch (mode) {
         .none => unreachable,
         .create => {
-            const outcome = try zettide.v3.pool_provision.create(io, allocator, storages, .{
+            const outcome = try storage_engine.v3.pool_provision.create(io, allocator, storages, .{
                 .protection = .replicated,
                 .data_mode = .blob,
                 .scheduled_blob = true,
@@ -959,7 +960,7 @@ fn preparePool(
             defer provisioned.deinit();
             set.* = try provisioned.intoMemberSet();
         },
-        .validate => try zettide.v3.pool_member_set.PoolMemberSet.openStoragesInto(
+        .validate => try storage_engine.v3.pool_member_set.PoolMemberSet.openStoragesInto(
             set,
             io,
             allocator,
@@ -1026,7 +1027,7 @@ fn validatePreparationWindowSpecs(specs: []const args.WindowSpec) !void {
     }
 }
 
-fn closeVhostExport(io: std.Io, export_handle: *zettide.spdk_vhost_block_export.VhostBlockExport) void {
+fn closeVhostExport(io: std.Io, export_handle: *node.spdk_vhost_block_export.VhostBlockExport) void {
     for (0..1000) |_| {
         export_handle.close() catch |err| switch (err) {
             error.ExportBusy => {

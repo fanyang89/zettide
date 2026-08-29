@@ -4,8 +4,8 @@
 > 数据证据门禁通过后，才能注册 public Create RPC 并将资源置为 READY。
 >
 > **漂移检查（首先运行）**：
-> `git -C zettide diff --stat 6515277..HEAD -- src docs build.zig test` 和
-> `git -C zettide-control diff --stat c25ed1d..HEAD -- proto src README.md`
+> `git diff --stat 6515277..HEAD -- services/node docs build.zig tests` 和
+> `git diff --stat c25ed1d..HEAD -- services/controller`
 > 执行前对照计划中记录的 checksum；任一不匹配都先刷新本计划，不要覆盖或回退其他修改。
 
 ## 状态
@@ -16,7 +16,7 @@
 - **依赖**: `docs/plans/002-add-volume-snapshot-control-resource.md`、Replica protocol、2/3 commit、lease/epoch/fencing baseline
 - **类别**: direction
 - **Status**: BLOCKED（等待计划 001 的精确磁盘格式及阶段 5-8 baseline）
-- **计划生成于**: `zettide` commit `6515277`, `zettide-control` commit `c25ed1d`, 2026-07-29
+- **计划生成于**: 当时的 `zettide` commit `6515277`、原 `zettide-control` 仓库 commit `c25ed1d`, 2026-07-29
 
 ## 为什么重要
 
@@ -27,15 +27,15 @@ operation ID 收敛到同一结果。
 
 ## 当前状态
 
-- `services/zettide/volume.zig:776-783`：`Volume.sync()` 只 flush 当前 backing，不返回或 pin root。
-- `services/zettide/v3/replica_endpoint.zig:11-17`：当前 endpoint 只有 read/write/sync，没有
+- `services/node/volume.zig:776-783`：`Volume.sync()` 只 flush 当前 backing，不返回或 pin root。
+- `libs/storage-engine/src/v3/replica_endpoint.zig:11-17`：当前 endpoint 只有 read/write/sync，没有
   volume ID、epoch、sequence、snapshot 或 certificate。
-- `services/zettide/v3/control_record.zig:62-89`：control record 能表达 generation、root digest 和
+- `libs/storage-engine/src/v3/control_record.zig:62-89`：control record 能表达 generation、root digest 和
  两份 attestation，但当前未绑定 Volume snapshot。
-- `services/zettide/v3/pool_replicated_journal.zig:72-150`：generation commit 已有 prepare/commit
+- `libs/storage-engine/src/v3/pool_replicated_journal.zig:72-150`：generation commit 已有 prepare/commit
   基础和 unknown-outcome freeze，但生产 Volume 未接线。
-- `zettide/docs/v3-multivolume-format.md:70-121`：Volume descriptor 已有 extent-map root。
-- `zettide/docs/v3-multivolume-format.md:163-191`：COW publication、root binding、pinning 和
+- `docs/v3-multivolume-format.md:70-121`：Volume descriptor 已有 extent-map root。
+- `docs/v3-multivolume-format.md:163-191`：COW publication、root binding、pinning 和
   unknown-outcome freeze 是既定不变量。
 - `docs/architecture/zh-CN/07-consistency-and-fencing.md:100-122`：Volume write 的权威边界来自
   `(epoch, sequence)` 与 2/3 certificate，而非单副本内容。
@@ -78,11 +78,11 @@ generation；不能复用 source Volume lease 或 writable namespace。
 
 ```text
 146c7539c6f5189f950aef963e02e4fe6de22bdac23d95347d82d950d7799a6e  docs/v3-multivolume-format.md
-65a5b364e707c37d394b78b35f1548c75a21290efaee34a67b24a2f09373a383  services/zettide/v3/control_record.zig
-a725cca18741e9c2fffbdd8712ff02c2ef9809d290f7029ca4165f01e048d32b  services/zettide/v3/replica_endpoint.zig
-74b39865d28ccfa88d516c727c74d6503de457ae49b977d7c60d4d7793d8268e  services/zettide/v3/pool_replicated_journal.zig
-c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  services/zettide/v3/pool_catalog.zig
-557c6f09fac841580e9b9003d960196e55d84f62a15c58dbb5c2d0527ee23528  services/zettide/volume.zig
+65a5b364e707c37d394b78b35f1548c75a21290efaee34a67b24a2f09373a383  libs/storage-engine/src/v3/control_record.zig
+a725cca18741e9c2fffbdd8712ff02c2ef9809d290f7029ca4165f01e048d32b  libs/storage-engine/src/v3/replica_endpoint.zig
+74b39865d28ccfa88d516c727c74d6503de457ae49b977d7c60d4d7793d8268e  libs/storage-engine/src/v3/pool_replicated_journal.zig
+c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  libs/storage-engine/src/v3/pool_catalog.zig
+557c6f09fac841580e9b9003d960196e55d84f62a15c58dbb5c2d0527ee23528  services/node/volume.zig
 ```
 
 ## 需要使用的命令
@@ -90,12 +90,12 @@ c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  services/zetti
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
 | Controller tests | `zig build test --summary all` in `services/controller/` | all pass |
-| Unit tests | `zig build test-unit --summary all` in `zettide/` | all pass |
-| Image tests | `zig build test-image --summary all` in `zettide/` | all pass |
-| Fault tests | `zig build test-fault --summary all` in `zettide/` | all pass |
-| CI gate | `zig build ci --summary all` in `zettide/` | all pass |
-| Controller diff | `git -C zettide-control diff --check -- proto src README.md` | exit 0 |
-| Data diff | `git -C zettide diff --check -- src docs build.zig test` | exit 0 |
+| Unit tests | `zig build test-unit --summary all` in repository root | all pass |
+| Image tests | `zig build test-image --summary all` in repository root | all pass after the plan is recalibrated to an existing target |
+| Fault tests | `zig build test-fault --summary all` in repository root | all pass after the plan is recalibrated to an existing target |
+| CI gate | `zig build ci --summary all` in repository root | all pass |
+| Controller diff | `git diff --check -- services/controller` | exit 0 |
+| Data diff | `git diff --check -- services/node docs build.zig tests` | exit 0 |
 
 ## 临时目录约定
 
@@ -111,14 +111,14 @@ c2bc317b69eb3959c0a704d5bc5958625ceae761884dcd2236cabef2c8c38d96  services/zetti
 - `services/controller/src/root.zig`
 - `services/controller/src/integration_test.zig`
 - DataService baseline 落地后刷新出的精确 reconciler、observed-state、proto 和 client 文件
-- `services/zettide/v3/replica_endpoint.zig`
-- `services/zettide/v3/control_record.zig`
-- `services/zettide/v3/pool_replicated_journal.zig`
-- `services/zettide/v3/pool_catalog.zig`
-- `services/zettide/v3/snapshot_root.zig`（新建，名称可按现有模块约定调整一次）
-- `services/zettide/v3/volume_snapshot.zig`（新建，名称可按现有模块约定调整一次）
-- `services/zettide/root.zig`
-- 与上述模块直接对应的 unit/image/fault tests
+- `libs/storage-engine/src/v3/replica_endpoint.zig`
+- `libs/storage-engine/src/v3/control_record.zig`
+- `libs/storage-engine/src/v3/pool_replicated_journal.zig`
+- `libs/storage-engine/src/v3/pool_catalog.zig`
+- `libs/storage-engine/src/v3/snapshot_root.zig`（新建，名称可按现有模块约定调整一次）
+- `libs/storage-engine/src/v3/volume_snapshot.zig`（新建，名称可按现有模块约定调整一次）
+- `services/node/root.zig`
+- 与上述模块直接对应的 `tests/` 下 unit/image/fault tests
 
 **范围外**：
 

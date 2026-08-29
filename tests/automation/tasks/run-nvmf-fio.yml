@@ -70,8 +70,8 @@
   ansible.builtin.shell:
     cmd: >-
       cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
-      -Iservices/zettide -Itest services/zettide/spdk/runtime.c services/zettide/spdk/bdev_provider.c
-      services/zettide/spdk/nvmf_tcp_export.c tests/spdk_runtime.c tests/spdk_nvmf_benchmark.c
+      -Iservices/node -Itest services/node/spdk/runtime.c services/node/spdk/bdev_provider.c
+      services/node/spdk/nvmf_tcp_export.c tests/spdk_runtime.c tests/spdk_nvmf_benchmark.c
       -o tests/spdk-nvmf-benchmark -pthread -Wl,--no-as-needed
       $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
       spdk_event spdk_event_bdev spdk_vhost spdk_event_nvmf spdk_bdev_modules spdk_env_dpdk
@@ -100,8 +100,8 @@
   ansible.builtin.shell:
     cmd: >-
       cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
-      -Iservices/zettide -Itest services/zettide/spdk/runtime.c services/zettide/spdk/bdev_provider.c
-      services/zettide/spdk/iscsi_export.c services/zettide/spdk/nvmf_tcp_export.c tests/spdk_runtime.c tests/spdk_catalog_nvmf_benchmark_main.c
+      -Iservices/node -Itest services/node/spdk/runtime.c services/node/spdk/bdev_provider.c
+      services/node/spdk/iscsi_export.c services/node/spdk/nvmf_tcp_export.c tests/spdk_runtime.c tests/spdk_catalog_nvmf_benchmark_main.c
       zig-out/lib/libzettide-spdk-catalog-nvmf-benchmark.a
       -o tests/spdk-catalog-nvmf-benchmark -pthread -lstdc++ -Wl,--no-as-needed
       $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs

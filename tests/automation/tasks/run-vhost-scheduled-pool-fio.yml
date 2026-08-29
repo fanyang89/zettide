@@ -322,9 +322,9 @@
     cmd: >-
       cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
       {{ '-fno-omit-frame-pointer' if zettide_scheduled_pool_cpu_profile else '' }}
-      -Iservices/zettide -Itest services/zettide/spdk/runtime.c services/zettide/spdk/bdev_endpoint.c
-      services/zettide/spdk/bdev_dispatcher.c services/zettide/spdk/bdev_provider.c
-      services/zettide/spdk/nvmf_tcp_export.c services/zettide/spdk/vhost_blk_controller.c
+      -Iservices/node -Itest services/node/spdk/runtime.c services/node/spdk/bdev_endpoint.c
+      services/node/spdk/bdev_dispatcher.c services/node/spdk/bdev_provider.c
+      services/node/spdk/nvmf_tcp_export.c services/node/spdk/vhost_blk_controller.c
       tests/spdk_runtime.c tests/spdk_pool_data_nvmf_benchmark_main.c
       zig-out/lib/libzettide-spdk-pool-data-nvmf-benchmark.a
       {{ zettide_scheduled_pool_profiler_link_args if zettide_scheduled_pool_cpu_profile else '' }}

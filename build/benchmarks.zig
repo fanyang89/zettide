@@ -4,7 +4,8 @@ pub fn add(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    portable_core: *std.Build.Module,
+    storage_engine: *std.Build.Module,
+    node_module: *std.Build.Module,
     unit_step: *std.Build.Step,
 ) *std.Build.Step.Compile {
     const zbench_dependency = b.dependency("zbench", .{
@@ -22,7 +23,8 @@ pub fn add(
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{
-            .{ .name = "zettide", .module = portable_core },
+            .{ .name = "zettide_storage", .module = storage_engine },
+            .{ .name = "zettide_node", .module = node_module },
             .{ .name = "zbench", .module = zbench_module },
         },
     });
@@ -45,7 +47,8 @@ pub fn add(
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "zettide", .module = portable_core },
+                .{ .name = "zettide_storage", .module = storage_engine },
+                .{ .name = "zettide_node", .module = node_module },
                 .{ .name = "zbench", .module = zbench_module },
             },
         }),
@@ -58,7 +61,7 @@ pub fn add(
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "zettide", .module = portable_core }},
+        .imports = &.{ .{ .name = "zettide_storage", .module = storage_engine }, .{ .name = "zettide_node", .module = node_module } },
     });
     const blob_device_benchmark = b.addExecutable(.{
         .name = "zettide-blob-device-benchmark",
@@ -81,7 +84,7 @@ pub fn add(
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "zettide", .module = portable_core }},
+        .imports = &.{ .{ .name = "zettide_storage", .module = storage_engine }, .{ .name = "zettide_node", .module = node_module } },
     });
     const blob_store_benchmark = b.addExecutable(.{
         .name = "zettide-blob-store-benchmark",
@@ -104,7 +107,7 @@ pub fn add(
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "zettide", .module = portable_core }},
+        .imports = &.{ .{ .name = "zettide_storage", .module = storage_engine }, .{ .name = "zettide_node", .module = node_module } },
     });
     const blob_metadata_map_benchmark = b.addExecutable(.{
         .name = "zettide-blob-metadata-map-benchmark",
@@ -133,7 +136,7 @@ pub fn add(
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{.{ .name = "zettide", .module = portable_core }},
+        .imports = &.{ .{ .name = "zettide_storage", .module = storage_engine }, .{ .name = "zettide_node", .module = node_module } },
     });
     const blob_object_benchmark = b.addExecutable(.{
         .name = "zettide-blob-object-benchmark",

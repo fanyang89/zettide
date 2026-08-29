@@ -4,6 +4,12 @@
 
 > Zettide 仍处于主动开发阶段。本文使用“当前”“部分”“目标”和“非目标”区分成熟度；目标设计不表示已端到端交付，更不表示生产可用。
 
+存储引擎、node service、CLI 与运行进程的目标边界见
+[架构决策 0001](../../decisions/0001-storage-node-naming-and-process-model.md)；首轮提取后暂不继续拆分
+Pool/Catalog/Blob package 的评估见
+[架构决策 0002](../../decisions/0002-keep-storage-engine-cohesive.md)。package、module root 与源码目录迁移
+已经完成；完整 `zettide-node` daemon/NodeContext wiring 尚未完成。
+
 ## 架构主线
 
 - Tier 1：一个 Zettide 节点接管由多个独立物理磁盘组成的 Pool，并向虚拟化与文件系统消费者提供基线前端。
@@ -27,7 +33,9 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 
 ## 范围
 
-- `zettide`：Pool、本地数据模型、FUSE/NFS frontend、Catalog endpoint daemon 与标准 NVMf publication。
+- `zettide_storage`：进程内 Pool/Catalog/Blob/BlobFilesystem storage engine 与持久格式。
+- `zettide`：兼容 CLI、foreground FUSE/dufs 与 endpoint compatibility command。
+- `zettide-node`：目标 data-node daemon；endpoint/SPDK module surface 已存在，完整 DataService/NodeContext wiring 待完成。
 - `zettide-controller`：Tier 3 权威元数据与协调基础。
 - `raftz` 与 `grpc-lite`：共识、恢复和控制 RPC。
 - qtr/PVE/CSI：消费者 adapter、publication、attachment 与 mount 生命周期边界。
@@ -53,6 +61,15 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 14. [虚拟化与 CSI](13-virtualization-and-csi.md)
 15. [术语表](glossary.md)
 16. [源码映射](source-map.md)
+17. [组件依赖与分层规则](component-dependencies.md)
+18. [存储抽象与持久格式归属](storage-foundation-map.md)
+19. [Pool、Member 与 Catalog 归属](pool-member-catalog-map.md)
+20. [Blob 与 BlobFilesystem 归属](blob-filesystem-map.md)
+21. [Backend-neutral Filesystem API 归属](filesystem-api-map.md)
+22. [FUSE、NFS 与 dufs Frontend 归属](frontend-map.md)
+23. [SPDK Backend 与 Export 归属](spdk-adapter-export-map.md)
+24. [Endpoint Lifecycle 与 Daemon 归属](endpoint-lifecycle-map.md)
+25. [CLI 与 Node 产品 Composition 归属](cli-node-composition-map.md)
 
 ## 状态标记
 

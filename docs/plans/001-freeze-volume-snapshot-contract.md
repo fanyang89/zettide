@@ -5,7 +5,7 @@
 >
 > **漂移检查（首先运行）**：
 > `git diff --stat 9d83bbe..HEAD -- docs/architecture/zh-CN` 和
-> `git -C zettide diff --stat 6515277..HEAD -- docs/v3-multivolume-format.md`
+> `git diff --stat 6515277..HEAD -- docs/v3-multivolume-format.md`
 > 如果相关文档已新增 Volume snapshot、clone、restore 或 consistency-group 设计，先逐项
 > 对照本计划；语义冲突时停止。
 
@@ -37,7 +37,7 @@
   结果再通过 Raft 改变权威状态。
 - `docs/architecture/zh-CN/07-consistency-and-fencing.md:100-122`：数据写成功依赖 prepare
   quorum 和在两个 Replica 上持久化的 commit certificate。
-- `zettide/docs/v3-multivolume-format.md:163-191`：未来 catalog 必须 COW 写入、由 control
+- `docs/v3-multivolume-format.md:163-191`：未来 catalog 必须 COW 写入、由 control
   authority 绑定 root digest，并禁止复用任一 recoverable root 引用的 extent。
 - `services/controller/proto/zettide/controller/v1/controller.proto:89-93`：现有 `StateSnapshot` 仅含
   Pool 和 request records。
@@ -55,11 +55,11 @@ snapshot root digest, and a durable data-quorum certificate.
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
 | Root drift | `git diff --stat 9d83bbe..HEAD -- docs/architecture/zh-CN` | 输出可人工对照；无未解释冲突 |
-| Data doc drift | `git -C zettide diff --stat 6515277..HEAD -- docs/v3-multivolume-format.md` | 输出可人工对照；无未解释冲突 |
+| Data doc drift | `git diff --stat 6515277..HEAD -- docs/v3-multivolume-format.md` | 输出可人工对照；无未解释冲突 |
 | Links | `grep -l "12-volume-snapshots.md" docs/architecture/zh-CN/README.md docs/architecture/zh-CN/source-map.md` | 恰好输出两个文件 |
 | Terms | `for term in VolumeSnapshot committed_sequence snapshot_root_digest certificate_digest protection_set; do grep -q "$term" docs/architecture/zh-CN/12-volume-snapshots.md || exit 1; done` | exit 0 |
 | Root diff | `git diff --check -- docs/architecture/zh-CN` | exit 0, no whitespace errors |
-| Submodule diff | `git -C zettide diff --check -- docs/v3-multivolume-format.md` | exit 0, no whitespace errors |
+| Data diff | `git diff --check -- docs/v3-multivolume-format.md` | exit 0, no whitespace errors |
 
 ## 临时目录约定
 
@@ -80,7 +80,7 @@ snapshot root digest, and a durable data-quorum certificate.
 - `docs/architecture/zh-CN/08-failure-and-recovery.md`
 - `docs/architecture/zh-CN/11-evolution-roadmap.md`
 - `docs/architecture/zh-CN/source-map.md`
-- `zettide/docs/v3-multivolume-format.md`
+- `docs/v3-multivolume-format.md`
 
 **范围外**：
 
@@ -165,7 +165,7 @@ write-back 并校验到至少两个 protection Replica；持久化 snapshot root
 
 ### 步骤 4：定义 COW、删除和恢复约束
 
-扩展 `zettide/docs/v3-multivolume-format.md`，冻结可直接实现的 versioned layout，而不是只写
+扩展 `docs/v3-multivolume-format.md`，冻结可直接实现的 versioned layout，而不是只写
 字段方向。必须给出 magic、encoded size、字段 offset/size、reserved-zero 区域、CRC32C 范围、
 BLAKE3 canonical digest domain、SnapshotRoot page reference、snapshot index root、extent-owner
 entry、retired extent entry、certificate/attestation encoding，以及 catalog root v1 的读取和
@@ -191,7 +191,7 @@ protection set 每个合格 Replica 的 A/B roots，使旧 root 不再可恢复�
 文档不得选用当前并不存在的 littlefs snapshot API，也不得把 v3 journal checkpoint 描述为
 Volume snapshot。
 
-**验证**：`grep -n "copy-on-write\|recoverable root\|tombstone" zettide/docs/v3-multivolume-format.md` 均有规范性命中。
+**验证**：`grep -n "copy-on-write\|recoverable root\|tombstone" docs/v3-multivolume-format.md` 均有规范性命中。
 
 ### 步骤 5：更新路线图和源码映射
 
@@ -214,7 +214,7 @@ Volume snapshot。
 - [ ] `StateSnapshot` 与 `VolumeSnapshot` 没有术语混用。
 - [ ] `README.md` 和 `source-map.md` 可导航到新文档。
 - [ ] 路线图显式包含 snapshot，并列出阶段 4–8 前置依赖。
-- [ ] Root diff 和 Submodule diff 均 exits 0。
+- [ ] Root diff 和 Data diff 均 exits 0。
 - [ ] 没有修改范围外文件。
 
 ## STOP 条件
