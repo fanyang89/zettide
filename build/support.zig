@@ -17,7 +17,7 @@ pub fn createNameProfileCrossTest(
     });
 }
 
-pub fn createNodePrivateModule(
+pub fn createDataNodePrivateModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
@@ -25,7 +25,7 @@ pub fn createNodePrivateModule(
     crc32c: *std.Build.Module,
 ) *std.Build.Module {
     const module = b.createModule(.{
-        .root_source_file = b.path("services/node/node_root.zig"),
+        .root_source_file = b.path("services/data-node/data_node_root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -33,19 +33,19 @@ pub fn createNodePrivateModule(
     module.addImport("zettide_storage", storage_engine);
     module.addImport("crc32c", crc32c);
     module.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
-    module.addIncludePath(b.path("services/node"));
+    module.addIncludePath(b.path("services/data-node"));
     return module;
 }
 
-pub fn createNodeModule(
+pub fn createDataNodeModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     storage_engine: *std.Build.Module,
     crc32c: *std.Build.Module,
 ) *std.Build.Module {
-    const module = b.addModule("zettide_node", .{
-        .root_source_file = b.path("services/node/node_root.zig"),
+    const module = b.addModule("zettide_data_node", .{
+        .root_source_file = b.path("services/data-node/data_node_root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -53,7 +53,7 @@ pub fn createNodeModule(
     module.addImport("zettide_storage", storage_engine);
     module.addImport("crc32c", crc32c);
     module.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
-    module.addIncludePath(b.path("services/node"));
+    module.addIncludePath(b.path("services/data-node"));
     return module;
 }
 
@@ -66,7 +66,7 @@ pub fn createCoreModule(
     crc32c: *std.Build.Module,
 ) *std.Build.Module {
     const core = b.createModule(.{
-        .root_source_file = b.path("services/node/root.zig"),
+        .root_source_file = b.path("services/data-node/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -81,7 +81,7 @@ pub fn createCoreModule(
     core.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
     core.addImport("zettide_storage", storage_engine);
     core.addImport("crc32c", crc32c);
-    core.addIncludePath(b.path("services/node"));
+    core.addIncludePath(b.path("services/data-node"));
     if (target.result.os.tag == .linux) {
         const linux_header = b.addWriteFiles().add("linux_c.h",
             \\#include <errno.h>
@@ -96,7 +96,7 @@ pub fn createCoreModule(
             .target = target,
             .optimize = optimize,
         });
-        linux_translate.addIncludePath(b.path("services/node"));
+        linux_translate.addIncludePath(b.path("services/data-node"));
         linux_translate.defineCMacro("_FORTIFY_SOURCE", "0");
         linux_translate.defineCMacro("FUSE_USE_VERSION", "35");
         linux_translate.linkSystemLibrary("fuse3", .{});
@@ -106,7 +106,7 @@ pub fn createCoreModule(
         core.addCMacro("FUSE_USE_VERSION", "35");
         core.linkSystemLibrary("fuse3", .{});
         core.addCSourceFiles(.{
-            .files = &.{"services/node/fuse_shim.c"},
+            .files = &.{"services/data-node/fuse_shim.c"},
             .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-DFUSE_USE_VERSION=35" },
         });
     }
@@ -156,7 +156,7 @@ pub fn createExecutable(
     const options = b.addOptions();
     options.addOption(bool, "spdk", enable_spdk);
     const module = b.createModule(.{
-        .root_source_file = b.path("services/node/main.zig"),
+        .root_source_file = b.path("services/data-node/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -177,11 +177,11 @@ pub fn configureSpdk(
 ) *std.Build.Module {
     module.addCSourceFiles(.{
         .files = &.{
-            "services/node/spdk/runtime.c",
-            "services/node/spdk/bdev_provider.c",
-            "services/node/spdk/iscsi_export.c",
-            "services/node/spdk/nvmf_tcp_export.c",
-            "services/node/spdk/vhost_blk_controller.c",
+            "services/data-node/spdk/runtime.c",
+            "services/data-node/spdk/bdev_provider.c",
+            "services/data-node/spdk/iscsi_export.c",
+            "services/data-node/spdk/nvmf_tcp_export.c",
+            "services/data-node/spdk/vhost_blk_controller.c",
         },
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
@@ -237,7 +237,7 @@ pub fn createSpdkCModule(
         .target = target,
         .optimize = optimize,
     });
-    spdk_translate.addIncludePath(b.path("services/node"));
+    spdk_translate.addIncludePath(b.path("services/data-node"));
     spdk_translate.addIncludePath(b.path("tests"));
     return spdk_translate.createModule();
 }
@@ -247,7 +247,7 @@ pub fn createLinuxBlockProbe(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     storage_engine: *std.Build.Module,
-    node_module: *std.Build.Module,
+    data_node_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     return b.addExecutable(.{
         .name = "zettide-linux-block-probe",
@@ -257,7 +257,7 @@ pub fn createLinuxBlockProbe(
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zettide_storage", .module = storage_engine },
-                .{ .name = "zettide_node", .module = node_module },
+                .{ .name = "zettide_data_node", .module = data_node_module },
             },
         }),
     });
@@ -268,7 +268,7 @@ pub fn createSpdkStorageTest(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     storage_engine: *std.Build.Module,
-    node_module: *std.Build.Module,
+    data_node_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
         .root_source_file = b.path("tests/spdk_storage.zig"),
@@ -277,11 +277,11 @@ pub fn createSpdkStorageTest(
         .link_libc = true,
         .imports = &.{
             .{ .name = "zettide_storage", .module = storage_engine },
-            .{ .name = "zettide_node", .module = node_module },
+            .{ .name = "zettide_data_node", .module = data_node_module },
             .{ .name = "spdk_c", .module = createSpdkCModule(b, target, optimize, true) },
         },
     });
-    module.addIncludePath(b.path("services/node"));
+    module.addIncludePath(b.path("services/data-node"));
     module.addIncludePath(b.path("tests"));
     return b.addLibrary(.{
         .name = "zettide-spdk-storage-test",
@@ -294,7 +294,7 @@ pub fn createSpdkNvmfExportTest(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     storage_engine: *std.Build.Module,
-    node_module: *std.Build.Module,
+    data_node_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
         .root_source_file = b.path("tests/spdk_nvmf_export.zig"),
@@ -303,10 +303,10 @@ pub fn createSpdkNvmfExportTest(
         .link_libc = true,
         .imports = &.{
             .{ .name = "zettide_storage", .module = storage_engine },
-            .{ .name = "zettide_node", .module = node_module },
+            .{ .name = "zettide_data_node", .module = data_node_module },
         },
     });
-    module.addIncludePath(b.path("services/node"));
+    module.addIncludePath(b.path("services/data-node"));
     return b.addLibrary(.{
         .name = "zettide-spdk-nvmf-export-test",
         .root_module = module,
@@ -318,7 +318,7 @@ pub fn createSpdkVhostExportTest(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     storage_engine: *std.Build.Module,
-    node_module: *std.Build.Module,
+    data_node_module: *std.Build.Module,
 ) *std.Build.Step.Compile {
     const module = b.createModule(.{
         .root_source_file = b.path("tests/spdk_vhost_export.zig"),
@@ -327,10 +327,10 @@ pub fn createSpdkVhostExportTest(
         .link_libc = true,
         .imports = &.{
             .{ .name = "zettide_storage", .module = storage_engine },
-            .{ .name = "zettide_node", .module = node_module },
+            .{ .name = "zettide_data_node", .module = data_node_module },
         },
     });
-    module.addIncludePath(b.path("services/node"));
+    module.addIncludePath(b.path("services/data-node"));
     return b.addLibrary(.{
         .name = "zettide-spdk-vhost-export-test",
         .root_module = module,

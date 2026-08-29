@@ -7,13 +7,13 @@
 Zettide 的第一条交付边界是**单节点、多物理磁盘存储接管**，不是某一个 frontend：
 
 - 同机：Zettide 与 qtr、PVE 等虚拟化宿主机同机，独占接管本机多块物理盘。
-- 独立节点：一个 Zettide storage node 独占接管多块物理盘，经存储网络服务一个或多个虚拟化宿主机。
+- 独立节点：一个 Zettide data node 独占接管多块物理盘，经存储网络服务一个或多个虚拟化宿主机。
 
 Tier 1 同时覆盖 Catalog Volume block model 与 BlobFilesystem model。两者都建立在由多个独立物理磁盘组成的 Pool 上，但 Pool data mode 不同，不允许 block 与 filesystem frontend 并发暴露同一对象。
 
 Tier 2 在该单节点基线上增加动态成员、在线容量/保护迁移、multi-Volume
 publication/attachment 治理和更完整的平台生命周期；基本 qtr managed
-attachment 已属于 Tier 1 门槛。Tier 3 才增加跨 storage node Replica、
+attachment 已属于 Tier 1 门槛。Tier 3 才增加跨 data node Replica、
 fencing、failover、repair 和 republish。
 
 独立 TxFS shared-file profile 见 [TxFS 共享 qcow2 接入](12-txfs-shared-qcow2.md)；它不替代 Catalog block publication。

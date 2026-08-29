@@ -4,19 +4,19 @@
 
 > Zettide 仍处于主动开发阶段。本文使用“当前”“部分”“目标”和“非目标”区分成熟度；目标设计不表示已端到端交付，更不表示生产可用。
 
-本文遵循[文档规范层级](../../README.md)。存储引擎、node service、CLI 与运行进程的目标边界见
-[架构决策 0001](../../decisions/0001-storage-node-naming-and-process-model.md)；首轮提取后暂不继续拆分
+本文遵循[文档规范层级](../../README.md)。存储引擎、data-node service、CLI 与运行进程的目标边界见
+[架构决策 0001](../../decisions/0001-data-node-naming-and-process-model.md)；首轮提取后暂不继续拆分
 Pool/Catalog/Blob package 的评估见
 [架构决策 0002](../../decisions/0002-keep-storage-engine-cohesive.md)；数据模型、Tier、frontend、组件 ownership
 和外部消费者边界见
 [架构决策 0003](../../decisions/0003-storage-product-architecture.md)。package、module root 与源码目录迁移
-已经完成；完整 `zettide-node` daemon/NodeContext wiring 尚未完成。
+已经完成；完整 `zettide-data-node` daemon/DataNodeContext wiring 尚未完成。
 
 ## 架构主线
 
 - Tier 1：一个 Zettide 节点接管由多个独立物理磁盘组成的 Pool，并向虚拟化与文件系统消费者提供基线前端。
 - Tier 2：在 Tier 1 上增加动态 Pool、在线容量/保护迁移、multi-Volume 服务治理，以及更完整的 publication/attachment 生命周期。
-- Tier 3：增加跨 storage node 同步复制、fencing、storage failover、repair 和 republish。
+- Tier 3：增加跨 data node 同步复制、fencing、storage failover、repair 和 republish。
 
 Tier 1 支持同机和独立单节点两种部署。虚拟化是一等消费者：qtr 原生 managed backend 是 Tier 1 完成门槛；PVE 和其他虚拟化平台是一等后续集成目标，优先于完整 CSI，但不阻塞 Tier 1。CSI 是次级、非阻塞集成；当前静态 FUSE Node service 是局部实现。
 
@@ -37,7 +37,7 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 
 - `zettide_storage`：进程内 Pool/Catalog/Blob/BlobFilesystem storage engine 与持久格式。
 - `zettide`：兼容 CLI、foreground FUSE/dufs 与 endpoint compatibility command。
-- `zettide-node`：目标 data-node daemon；endpoint/SPDK module surface 已存在，完整 DataService/NodeContext wiring 待完成。
+- `zettide-data-node`：目标 data-node daemon；endpoint/SPDK module surface 已存在，完整 DataService/DataNodeContext wiring 待完成。
 - `zettide-controller`：Tier 3 权威元数据与协调基础。
 - `raftz` 与 `grpc-lite`：共识、恢复和控制 RPC。
 - `services/csi`：当前静态 FUSE CSI Node service，以及目标 block/NFS/Controller lifecycle。
@@ -72,7 +72,7 @@ Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访
 22. [FUSE、NFS 与 dufs Frontend 归属](frontend-map.md)
 23. [SPDK Backend 与 Export 归属](spdk-adapter-export-map.md)
 24. [Endpoint Lifecycle 与 Daemon 归属](endpoint-lifecycle-map.md)
-25. [CLI 与 Node 产品 Composition 归属](cli-node-composition-map.md)
+25. [CLI 与 Data Node 产品 Composition 归属](cli-data-node-composition-map.md)
 
 ## 状态标记
 

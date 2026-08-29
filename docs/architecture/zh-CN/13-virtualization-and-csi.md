@@ -37,11 +37,11 @@ flowchart LR
     H1[qtr/PVE host A] --> N[Storage network]
     H2[qtr/PVE host B] --> N
     K[Kubernetes Nodes] --> N
-    N -->|NVMf / iSCSI / NFS| Z[Single Zettide storage node]
+    N -->|NVMf / iSCSI / NFS| Z[Single Zettide data node]
     Z --> D[(Multiple physical disks)]
 ```
 
-该拓扑允许多个 host 使用不同资源，但不提供 storage node HA。Tier 3 才能在 storage node 故障后 republish。
+该拓扑允许多个 host 使用不同资源，但不提供 data node HA。Tier 3 才能在 data node 故障后 republish。
 
 ## 数据模型与协议选择
 

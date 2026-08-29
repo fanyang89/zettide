@@ -59,13 +59,13 @@ pub fn addComponent(
     });
     generated_controller_dir.addStepDependencies(&generate_proto.step);
 
-    const generated_node_dir = createGeneratedDirectory(b, ".zettide-node-proto");
-    const generate_node_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
-        .destination_directory = generated_node_dir,
+    const generated_data_node_dir = createGeneratedDirectory(b, ".zettide-data-node-proto");
+    const generate_data_node_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
+        .destination_directory = generated_data_node_dir,
         .source_files = &.{data_service_contracts_dependency.path("proto/zettide/controller/v1/data_service.proto")},
         .include_directories = &.{data_service_contracts_dependency.path("proto")},
     });
-    generated_node_dir.addStepDependencies(&generate_node_proto.step);
+    generated_data_node_dir.addStepDependencies(&generate_data_node_proto.step);
 
     const controller_proto_output = ProtoOutput.create(
         b,
@@ -73,16 +73,16 @@ pub fn addComponent(
         generated_controller_dir,
         "zettide/controller/v1.pb.zig",
     );
-    const node_proto_output = ProtoOutput.create(
+    const data_node_proto_output = ProtoOutput.create(
         b,
-        &generate_node_proto.step,
-        generated_node_dir,
+        &generate_data_node_proto.step,
+        generated_data_node_dir,
         "zettide/controller/v1.pb.zig",
     );
 
-    const generate_proto_step = b.step(step_names.generate, "Generate controller Zig protobuf sources");
+    const generate_proto_step = b.step(step_names.generate, "Generate controller and data-node Zig protobuf sources");
     generate_proto_step.dependOn(&controller_proto_output.step);
-    generate_proto_step.dependOn(&node_proto_output.step);
+    generate_proto_step.dependOn(&data_node_proto_output.step);
 
     const controller_proto = b.createModule(.{
         .root_source_file = controller_proto_output.getOutput(),
@@ -90,8 +90,8 @@ pub fn addComponent(
         .optimize = optimize,
         .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
     });
-    const node_proto = b.createModule(.{
-        .root_source_file = node_proto_output.getOutput(),
+    const data_node_proto = b.createModule(.{
+        .root_source_file = data_node_proto_output.getOutput(),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "protobuf", .module = protobuf_module }},
@@ -105,7 +105,7 @@ pub fn addComponent(
             .{ .name = "clap", .module = clap_dependency.module("clap") },
             .{ .name = "controller_proto", .module = controller_proto },
             .{ .name = "grpc_lite", .module = grpc_module },
-            .{ .name = "node_proto", .module = node_proto },
+            .{ .name = "data_node_proto", .module = data_node_proto },
             .{ .name = "raftz", .module = raft_dependency.module("raftz") },
             .{ .name = "uuid", .module = uuid_dependency.module("uuid") },
             .{ .name = "zettide_data_service_contracts", .module = data_service_contracts_dependency.module("zettide_data_service_contracts") },

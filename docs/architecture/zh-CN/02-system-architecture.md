@@ -20,7 +20,7 @@ flowchart LR
         FF[FUSE<br/>local filesystem]
     end
 
-    subgraph Node[单 Zettide storage node]
+    subgraph Node[单 Zettide data node]
         CV[Catalog Volumes]
         BF[BlobFilesystem]
         CP[多物理盘 Catalog Pool]
@@ -68,7 +68,7 @@ flowchart TB
     end
 ```
 
-两种拓扑都属于 Tier 1。独立节点不等于 Tier 3；它仍是单 storage node 故障边界。
+两种拓扑都属于 Tier 1。独立节点不等于 Tier 3；它仍是单 data node 故障边界。
 
 ## 单节点组件
 

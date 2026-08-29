@@ -5,7 +5,7 @@ backend-neutral storage contract, persistent formats, Pool/Member/Catalog,
 Blob/BlobFilesystem, and backend-neutral filesystem ports.
 
 It does not depend on endpoint lifecycle, SPDK, FUSE, CLI, RPC, DataService, or
-the controller. Platform and process adapters live under `services/node/`.
+the controller. Platform and process adapters live under `services/data-node/`.
 
 Run the library-local gates with:
 

@@ -1,10 +1,10 @@
 const std = @import("std");
-const node = @import("zettide_node");
+const data_node = @import("zettide_data_node");
 
 // Keep this link artifact scoped to the vhost driver. CatalogEndpointBackend
 // also pulls NVMf/iSCSI composition and is covered by its node unit tests.
-const runtime_api = node.spdk_runtime;
-const export_api = node.spdk_vhost_block_export;
+const runtime_api = data_node.spdk_runtime;
+const export_api = data_node.spdk_vhost_block_export;
 const c = export_api.c;
 
 const block_size = 4096;

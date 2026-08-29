@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const storage_engine = @import("zettide_storage");
-const node = @import("zettide_node");
+const data_node = @import("zettide_data_node");
 
 const Io = std.Io;
 const blob_format = storage_engine.blob_format;
@@ -179,7 +179,7 @@ fn parseArgs(args: []const []const u8) !Config {
         } else if (std.mem.eql(u8, arg, "--device-size")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
-            result.device_size = try node.size.parse(args[index]);
+            result.device_size = try data_node.size.parse(args[index]);
         } else return error.UnknownArgument;
     }
     if (result.help) return result;

@@ -776,7 +776,7 @@ pub const PoolStateMachine = struct {
             );
         }
 
-        const node_proto: pb.Node = .{
+        const data_node_proto: pb.Node = .{
             .id = command.node_id,
             .cluster_id = command.cluster_id,
             .control_endpoint = command.control_endpoint,
@@ -787,13 +787,13 @@ pub const PoolStateMachine = struct {
             .registered_at_unix_ms = command.proposed_registered_at_unix_ms,
             .registered_revision = revision,
         };
-        const encoded_response = try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_REGISTERED, node_proto);
+        const encoded_response = try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_REGISTERED, data_node_proto);
         errdefer self.allocator.free(encoded_response);
         const returned_response = try self.allocator.dupe(u8, encoded_response);
         errdefer self.allocator.free(returned_response);
         const encoded_command = try encodeRegisterNodeCommand(self.allocator, command);
         errdefer self.allocator.free(encoded_command);
-        var node = try Node.init(self.allocator, node_proto);
+        var node = try Node.init(self.allocator, data_node_proto);
         errdefer node.deinit(self.allocator);
         const request_id = try self.allocator.dupe(u8, command.request_id);
         errdefer self.allocator.free(request_id);

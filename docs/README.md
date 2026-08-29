@@ -44,7 +44,7 @@
 - [SMB3 profile](smb3-profile.md)
 
 组件自身的运行与构建说明位于对应目录的 `README.md`，包括
-`libs/storage-engine/`、`services/node/`、`services/controller/`、`services/csi/`、
+`libs/storage-engine/`、`services/data-node/`、`services/controller/`、`services/csi/`、
 `services/nfs-fsal/` 和 `libs/txfs/`。
 
 ### 报告与历史

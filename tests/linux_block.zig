@@ -1,6 +1,6 @@
 const std = @import("std");
 const storage_engine = @import("zettide_storage");
-const node = @import("zettide_node");
+const data_node = @import("zettide_data_node");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -8,7 +8,7 @@ pub fn main(init: std.process.Init) !void {
 
     const operation = args[1];
     const device = args[2];
-    const api = node.linux_block_device;
+    const api = data_node.linux_block_device;
     const info = try api.inspect(init.io, init.arena.allocator(), device);
     if (std.mem.eql(u8, operation, "expect-read-only")) {
         if (!info.eligibility.read_only or info.preflightEligible()) return error.ExpectedReadOnlyDevice;

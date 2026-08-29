@@ -1,27 +1,27 @@
-# CLI 与 Node 产品 Composition 归属
+# CLI 与 Data Node 产品 Composition 归属
 
-> 状态：目录、named roots、consumer 与 component test boundaries 已落地；CLI compatibility facade 与完整 `zettide-node` daemon wiring 待完成
+> 状态：目录、named roots、consumer 与 component test boundaries 已落地；CLI compatibility facade 与完整 `zettide-data-node` daemon wiring 待完成
 
 本文细化 L5 产品入口。engine 区域见前述 storage/Pool/Blob/filesystem 文档，managed endpoint 见
 [Endpoint Lifecycle 与 Daemon 归属](endpoint-lifecycle-map.md)，进程决策见
-[ADR-0001](../../decisions/0001-storage-node-naming-and-process-model.md)。
+[ADR-0001](../../decisions/0001-data-node-naming-and-process-model.md)。
 
 ## 结论
 
 1. `zettide` 保持现有 executable name 和 operator CLI compatibility；它不是 storage engine module root。
 2. CLI 继续拥有显式、由调用者控制生命周期的 offline inspect/plan/format/check、foreground FUSE mount
    和 dufs convenience adapter。
-3. managed Pool/Catalog/SPDK/DataService lifecycle 最终只由 `zettide-node` 拥有。CLI 不新增长期
+3. managed Pool/Catalog/SPDK/DataService lifecycle 最终只由 `zettide-data-node` 拥有。CLI 不新增长期
    authoritative daemon 能力。
-4. `zettide endpoint serve` 是迁移期 compatibility entry，node parity 前保留；最终移除或转发需独立
+4. `zettide endpoint serve` 是迁移期 compatibility entry，data-node parity 前保留；最终移除或转发需独立
    release decision。
-5. `node_main.zig` 与 `node_data_service.zig` 当前是未接入 build 的 prototype，不代表已经存在
-   `zettide-node` 产品边界。
+5. `data_node_main.zig` 与 `data_node_service.zig` 当前是未接入 build 的 prototype，不代表已经存在
+   `zettide-data-node` 产品边界。
 6. DataService adapter 不自己拥有另一套 Pool/endpoint state。所有 RPC、local control 和 shutdown 进入
-   同一个 node lifecycle actor/context。
-7. CLI 和 node 都可以依赖 public `zettide_storage` facade；二者不得通过旧 `zettide` mega-module 获得
+   同一个 data-node lifecycle actor/context。
+7. CLI 和 data-node 都可以依赖 public `zettide_storage` facade；二者不得通过旧 `zettide` mega-module 获得
    隐式 FUSE、SPDK、endpoint 或 RPC 能力。
-8. 首轮只提取一个 storage-engine package。CLI/node 内部可以有多个 module roots，但不借本步骤拆成多个
+8. 首轮只提取一个 storage-engine package。CLI/data-node 内部可以有多个 module roots，但不借本步骤拆成多个
    published Pool/Catalog/Blob packages。
 
 ## 目标进程与 module 关系
@@ -31,10 +31,10 @@ flowchart TD
     ENGINE[zettide_storage]
     CLI[zettide executable]
     CLIP[CLI platform composition]
-    NODEMOD[zettide_node module]
-    NODE[zettide-node executable]
+    NODEMOD[zettide_data_node module]
+    NODE[zettide-data-node executable]
     DATASVC[DataService adapter]
-    ACTOR[Node lifecycle actor/context]
+    ACTOR[Data Node lifecycle actor/context]
     ENDPOINT[Endpoint registry + SPDK]
     FUSE[FUSE/dufs adapters]
     NFS[NFS-Ganesha process]
@@ -55,26 +55,26 @@ flowchart TD
 
 禁止：
 
-- `zettide_storage` import CLI parser/printer、signal、grpc-lite、SPDK、FUSE 或 node config；
-- CLI import `services/node` runtime 来执行 offline/foreground operations；
-- node import FUSE/dufs 或 NFS-Ganesha FSAL；
+- `zettide_storage` import CLI parser/printer、signal、grpc-lite、SPDK、FUSE 或 data-node config；
+- CLI import `services/data-node` runtime 来执行 offline/foreground operations；
+- data-node import FUSE/dufs 或 NFS-Ganesha FSAL；
 - DataService handler 直接创建独立 Pool/Registry/SPDK runtime；
-- CLI foreground path 与 node 同时 writable-open 同一物理 resource；
-- 继续把所有源码通过 `services/node/root.zig` 平铺为单个 public module；
+- CLI foreground path 与 data-node 同时 writable-open 同一物理 resource；
+- 继续把所有源码通过 `services/data-node/root.zig` 平铺为单个 public module；
 - 为了移动目录重命名 CLI commands、flags、output fields、executable 或 endpoint API。
 
 ## 文件归属
 
 | 当前文件 | 首轮目标归属 | 说明 |
 | --- | --- | --- |
-| `services/node/main.zig` | `zettide` CLI entry | command dispatch、help、stdout/error behavior |
-| `services/node/cli/common.zig` | CLI presentation helpers | metrics、UUID、target classification presentation |
-| `services/node/cli/pool.zig` | CLI Linux Pool composition | device parsing、plan/create/inspect、foreground mount |
-| `services/node/filesystem_target.zig` | product target composition | 按 consumer 拆为 CLI/NFS/node adapters，不进入 backend-neutral API |
-| `services/node/root.zig` | temporary compatibility facade | 拆 root 后删除或缩到迁移 shim，不再作为 engine root |
-| `services/node/node_main.zig` | `services/node` executable entry | config、signal、startup/readiness/shutdown |
-| `services/node/node_data_service.zig` | `services/node` DataService adapter | grpc-lite decode/encode、status mapping、handler registration |
-| `libs/data-service-contracts/` | shared protocol package | controller/node 共用 values、proto 和 authority lease contract |
+| `services/data-node/main.zig` | `zettide` CLI entry | command dispatch、help、stdout/error behavior |
+| `services/data-node/cli/common.zig` | CLI presentation helpers | metrics、UUID、target classification presentation |
+| `services/data-node/cli/pool.zig` | CLI Linux Pool composition | device parsing、plan/create/inspect、foreground mount |
+| `services/data-node/filesystem_target.zig` | product target composition | 按 consumer 拆为 CLI/NFS/data-node adapters，不进入 backend-neutral API |
+| `services/data-node/root.zig` | temporary compatibility facade | 拆 root 后删除或缩到迁移 shim，不再作为 engine root |
+| `services/data-node/data_node_main.zig` | `services/data-node` executable entry | config、signal、startup/readiness/shutdown |
+| `services/data-node/data_node_service.zig` | `services/data-node` DataService adapter | grpc-lite decode/encode、status mapping、handler registration |
+| `libs/data-service-contracts/` | shared protocol package | controller/data-node 共用 values、proto 和 authority lease contract |
 
 CLI platform code 可以继续位于产品目录，但 build 必须显式注入所需 adapter。源码物理移动顺序不能先于
 module dependency 切断。
@@ -123,7 +123,7 @@ PoolMemberSet 在 success/failure 两条路径都消费 supplied Storage。目�
 | `unmount` | CLI foreground | `fusermount3` compatibility adapter |
 | `serve dufs` | CLI supervisor | Blob file target + private FUSE session + external dufs |
 
-这些命令的 lifetime 由 invoking user/process 拥有；它们不注册到 node desired state。FUSE/dufs 细节见
+这些命令的 lifetime 由 invoking user/process 拥有；它们不注册到 data-node desired state。FUSE/dufs 细节见
 [FUSE、NFS 与 dufs Frontend 归属](frontend-map.md)。
 
 ### Transitional endpoint command
@@ -133,10 +133,10 @@ PoolMemberSet 在 success/failure 两条路径都消费 supplied Storage。目�
 
 最终允许的处理只有两种，需单独决策：
 
-1. wrapper/alias 到 `zettide-node` compatibility mode；
+1. wrapper/alias 到 `zettide-data-node` compatibility mode；
 2. 在已公告 release 中移除。
 
-不能长期保留一个与 `zettide-node` 并行争用 Pool/SPDK runtime 的第二 daemon。
+不能长期保留一个与 `zettide-data-node` 并行争用 Pool/SPDK runtime 的第二 daemon。
 
 ## CLI compatibility surface
 
@@ -153,7 +153,7 @@ PoolMemberSet 在 success/failure 两条路径都消费 supplied Storage。目�
 - foreground signal/teardown 和 exit status。
 
 CLI 是 operator API，但不是远程 control-plane API。后续 online managed operation 应调用 DataService 或同一
-node-local compatibility adapter，不能自行打开 node-owned disk。
+data-node-local compatibility adapter，不能自行打开 data-node-owned disk。
 
 ## CLI presentation 与 domain API
 
@@ -169,18 +169,18 @@ Linux UID/GID。拆分原则：
 
 engine 不负责 stdout text、human size formatting、confirmation prompts 或 process UID discovery。
 
-## `zettide-node` 产品边界
+## `zettide-data-node` 产品边界
 
-最终每个 managed storage node 运行一个 `zettide-node`。一个 process owner 组合：
+最终每个 managed data node 运行一个 `zettide-data-node`。一个 process owner 组合：
 
-- stable Node identity；
+- stable Data Node identity；
 - per-process boot identity；
 - DataService RPC server；
 - Member/Replica/Pool/Catalog local lifecycle；
 - authority/fencing state；
 - endpoint desired/observed reconciliation；
 - one SPDK runtime 和 shared protocol services；
-- node config、readiness、health、telemetry、signal 和 drain。
+- data-node config、readiness、health、telemetry、signal 和 drain。
 
 它不拥有：
 
@@ -189,12 +189,12 @@ engine 不负责 stdout text、human size formatting、confirmation prompts 或 
 - controller Raft state；
 - CLI offline format workflow。
 
-### Node context
+### Data Node context
 
-建立一个明确的 node-owned context/actor，至少持有：
+建立一个明确的 data-node-owned context/actor，至少持有：
 
 - allocator/std.Io 和 validated config；
-- stable Node ID、boot ID；
+- stable Data Node ID、boot ID；
 - storage/Pool manager；
 - authority/lease manager；
 - Endpoint Registry；
@@ -204,17 +204,17 @@ engine 不负责 stdout text、human size formatting、confirmation prompts 或 
 DataService handlers、local control adapter 和 background reconciliation 借用该 context。context 必须比全部
 servers、endpoint locators、Pool leases 和 SPDK handles 活得更久。
 
-## 当前 node prototype 状态
+## 当前 data-node prototype 状态
 
-`node_main.zig` 当前：
+`data_node_main.zig` 当前：
 
 - 只接受 `--listen host:port`；
 - block SIGINT/SIGTERM；
-- 创建 DataServer、start、记录 local address；
+- 创建 DataNodeServer、start、记录 local address；
 - `sigwait` 后执行 5-second graceful shutdown；
-- 不加载 storage config、Pool、endpoint、SPDK 或 stable Node ID。
+- 不加载 storage config、Pool、endpoint、SPDK 或 stable Data Node ID。
 
-`node_data_service.zig` 当前只注册：
+`data_node_service.zig` 当前只注册：
 
 - `IdentifyHolder`；
 - `StagePrimary`；
@@ -228,19 +228,19 @@ prototype State 当前：
 - 启动时生成 UUIDv7-compatible boot ID；
 - 用 mutex 保护 process-memory authority map；
 - 按 Volume ID 保存 staged binding 和 primary lease Runtime；
-- 不持久化 stable Node identity/authority state；
+- 不持久化 stable Data Node identity/authority state；
 - 不访问 Pool/Catalog 数据；
 - InspectPrimary 总是报告 current_active=false/current_admitting=false，只判断 candidate freshness。
 
-迁移时不能把 boot ID 当 stable Node ID，也不能让 DataServer 继续创建自己的孤立 State。boot identity 由
-NodeContext 创建一次并注入 adapter；authority methods 调用同一 lifecycle manager。
+迁移时不能把 boot ID 当 stable Data Node ID，也不能让 DataNodeServer 继续创建自己的孤立 State。boot identity 由
+DataNodeContext 创建一次并注入 adapter；authority methods 调用同一 lifecycle manager。
 
 ## DataService adapter boundary
 
 DataService adapter 只负责：
 
 - protobuf decode/validation；
-- protocol values 到 node commands/query 的转换；
+- protocol values 到 data-node commands/query 的转换；
 - grpc status mapping；
 - response encode；
 - graceful server lifecycle。
@@ -253,17 +253,17 @@ DataService adapter 只负责：
 - 绕过 authority/fencing manager 修改 engine；
 - 持久化另一份 desired state。
 
-`libs/data-service-contracts` 是 controller/node 共同协议包，不依赖 storage engine 实现。node adapter 可以同时
+`libs/data-service-contracts` 是 controller/data-node 共同协议包，不依赖 storage engine 实现。data-node adapter 可以同时
 依赖 contracts 和 engine public values，但 engine 不能依赖 generated protobuf/grpc-lite。
 
-## Node startup 与 readiness
+## Data Node startup 与 readiness
 
 目标 startup 顺序：
 
 1. parse/validate config，确保 runtime/state directories 安全；
 2. block termination signals，再创建任何 worker/server thread；
-3. load/create stable Node identity，生成本次 boot ID；
-4. 初始化 node lifecycle actor 和 durable local stores；
+3. load/create stable Data Node identity，生成本次 boot ID；
+4. 初始化 data-node lifecycle actor 和 durable local stores；
 5. discover/open configured Member/Pool resources；
 6. 启动 optional SPDK runtime/shared services；
 7. 初始化 Endpoint Registry 并 reconcile desired state；
@@ -271,10 +271,10 @@ DataService adapter 只负责：
 9. 注册并启动 DataService；
 10. publish ready/health。
 
-Endpoint 单项 reconcile failure 可以作为 observed failed state 存在，但 Node 只有在 core actor、stores 和
+Endpoint 单项 reconcile failure 可以作为 observed failed state 存在，但 Data Node 只有在 core actor、stores 和
 DataService 可服务时才 ready。startup 任何阶段失败必须反向 unwind。
 
-## Node shutdown
+## Data Node shutdown
 
 目标 shutdown 顺序：
 
@@ -286,20 +286,20 @@ DataService 可服务时才 ready。startup 任何阶段失败必须反向 unwin
 6. 释放 Catalog leases、Pool/Member runtime；
 7. 关闭 shared protocol services、controllers 和 SPDK runtime；
 8. flush/close durable local stores；
-9. join servers/workers，释放 NodeContext；
+9. join servers/workers，释放 DataNodeContext；
 10. restore process signal state 并退出。
 
 若 endpoint/Pool/SPDK close 失败，不能继续释放其 owner。必须 retry、保持 drain 或 fail-stop；不得仅记录
 warning 后形成 use-after-free。
 
-## CLI 与 node resource mutual exclusion
+## CLI 与 data-node resource mutual exclusion
 
-CLI foreground commands 和 node 都可能打开 Member/Pool。约束：
+CLI foreground commands 和 data-node 都可能打开 Member/Pool。约束：
 
-- managed node 运行时，offline format/create 禁止作用于其资源；
+- managed data-node 运行时，offline format/create 禁止作用于其资源；
 - writable Pool mount 要求 exclusive device ownership；
 - inspect/check 默认 read-only，但不能绕过 backend 要求的 exclusive/open policy；
-- endpoint compatibility daemon 与 node 必须互斥；
+- endpoint compatibility daemon 与 data-node 必须互斥；
 - future CLI managed commands 通过 DataService 或同一 local actor，不直接访问 disk；
 - owner conflict 应返回明确 error，不以“最后启动者获胜”处理。
 
@@ -311,10 +311,10 @@ CLI foreground commands 和 node 都可能打开 Member/Pool。约束：
 | --- | --- | --- | --- |
 | `zettide_storage` | L0-L3 engine facade | std、CRC32C、utf8proc；无 product/runtime | 已落地并有独立 package/test |
 | CLI compatibility root | parser/printer/dispatch + frontend facade | `zettide_storage` + selected file/Linux/frontend adapters | 保留旧 `zettide` import，仅限现有 CLI |
-| CLI Linux adapter surface | device plan/raw/FUSE/dufs | Linux/libfuse/process APIs | 文件已归 `services/node`，尚未单独命名 root |
-| `zettide_node` | endpoint/SPDK lifecycle 与未来 NodeContext | `zettide_storage` + selected platform modules | named root 已落地；完整 NodeContext 待实现 |
-| node DataService root | grpc adapter | `zettide_node` commands/queries + generated proto + grpc-lite | 待接入根构建 |
-| node SPDK surface | runtime/exports | SPDK/DPDK + `zettide_storage` public facade | 已由 `zettide_node` 导出，SPDK 链接仍为显式 option |
+| CLI Linux adapter surface | device plan/raw/FUSE/dufs | Linux/libfuse/process APIs | 文件已归 `services/data-node`，尚未单独命名 root |
+| `zettide_data_node` | endpoint/SPDK lifecycle 与未来 DataNodeContext | `zettide_storage` + selected platform modules | named root 已落地；完整 DataNodeContext 待实现 |
+| data-node DataService root | grpc adapter | `zettide_data_node` commands/queries + generated proto + grpc-lite | 待接入根构建 |
+| data-node SPDK surface | runtime/exports | SPDK/DPDK + `zettide_storage` public facade | 已由 `zettide_data_node` 导出，SPDK 链接仍为显式 option |
 
 旧 `zettide` module 可以短暂作为 tests/CLI migration shim，但：
 
@@ -329,23 +329,23 @@ CLI foreground commands 和 node 都可能打开 Member/Pool。约束：
 
 - 通过 `libs/storage-engine/build.zig:addComponent` 接入独立 `zettide_storage` package；
 - 安装 `zettide-storage-engine` library，并提供 `test-storage-engine`；
-- 注册 `zettide_node` root，并提供 `test-node` 与 `test-module-roots`；
+- 注册 `zettide_data_node` root，并提供 `test-data-node` 与 `test-module-roots`；
 - engine root 只注入 CRC32C/utf8proc，不导出 Linux/FUSE/SPDK/RPC；
-- `createCoreModule` 仅以 `services/node/root.zig` 构建 legacy product compatibility facade，
+- `createCoreModule` 仅以 `services/data-node/root.zig` 构建 legacy product compatibility facade，
   其测试由 `test-compatibility` 隔离；
 - legacy facade 仍注入 `linux_c`、`spdk_c`，可选链接 FUSE/SPDK；
-- 仍只安装 `zettide` executable；node root 已暴露 prototype source，但尚未生成 proto、链接
-  grpc-lite 或构建 `zettide-node`；
+- 仍只安装 `zettide` executable；data-node root 已暴露 prototype source，但尚未生成 proto、链接
+  grpc-lite 或构建 `zettide-data-node`；
 - Windows gate 同时编译 portable storage root 与 legacy CLI，macOS gate直接编译 portable storage root。
 
 目标 build：
 
-- 单独构建/安装 `zettide` 和 `zettide-node`；
-- `zettide-node` executable name 固定，不使用 `zettide-data`/`zettide-storage`；
+- 单独构建/安装 `zettide` 和 `zettide-data-node`；
+- `zettide-data-node` executable name 固定，不使用 `zettide-data`/`zettide-storage`；
 - engine unit root 不注入 Linux/FUSE/SPDK/RPC；
 - CLI 只链接实际命令需要的 adapters；
-- node 只链接 configured capabilities，绝不链接 FUSE/dufs/NFS；
-- generated DataService proto 和 contracts 显式传入 node adapter；
+- data-node 只链接 configured capabilities，绝不链接 FUSE/dufs/NFS；
+- generated DataService proto 和 contracts 显式传入 data-node adapter；
 - cross-compile gate 至少覆盖 portable engine 和 non-SPDK CLI surface；
 - SPDK capability 保持 Linux-only explicit option。
 
@@ -358,13 +358,13 @@ CLI foreground commands 和 node 都可能打开 Member/Pool。约束：
 | FUSE/dufs tests | foreground mount/unmount、metrics、signal/child cleanup |
 | scheduled Pool tests | CLI profiles、device count、transport metrics、reopen |
 | endpoint daemon smoke | compatibility entry、SPDK capability、ready/SIGTERM cleanup |
-| node DataService unit | decode/status、boot ID、stage/inspect authority、concurrent calls |
-| node executable smoke | build/install/name、listen/readiness、SIGTERM graceful drain |
-| node composition integration | Pool + endpoint + DataService single owner、startup/restart/shutdown |
-| `test-storage-engine` | portable formats、Pool/Catalog、Blob/Filesystem；不链接 node/platform |
-| `test-node` | endpoint 与 SPDK adapter/node composition unit tests |
+| data-node DataService unit | decode/status、boot ID、stage/inspect authority、concurrent calls |
+| data-node executable smoke | build/install/name、listen/readiness、SIGTERM graceful drain |
+| data-node composition integration | Pool + endpoint + DataService single owner、startup/restart/shutdown |
+| `test-storage-engine` | portable formats、Pool/Catalog、Blob/Filesystem；不链接 data-node/platform |
+| `test-data-node` | endpoint 与 SPDK adapter/data-node composition unit tests |
 | `test-compatibility` | legacy CLI/FUSE/dufs/NFS/platform facade unit tests |
-| `test-module-roots` | engine 无 Linux/SPDK/RPC exports；node 单向依赖 engine |
+| `test-module-roots` | engine 无 Linux/SPDK/RPC exports；data-node 单向依赖 engine |
 | Windows/cross check | portable engine 和支持的 CLI commands 可编译 |
 
 命令 output 被多个 shell/automation tests 解析；迁移 tests 时不得只保留“process exit 0”，应继续断言关键
@@ -372,17 +372,17 @@ labels、IDs、mount cleanup 和 confirmation behavior。
 
 ## 剩余边界工作
 
-- [x] 建立 `zettide_storage` 和 `zettide_node` named module roots；
+- [x] 建立 `zettide_storage` 和 `zettide_data_node` named module roots；
 - [ ] CLI commands 从 mega-module 改用 engine facade 和显式 platform adapters；
 - [ ] 为 CLI info/check 补 public inspection API，删除 private field access；
 - [ ] `cli/pool.zig` 删除 `zettide.v3.*` imports；
-- [ ] 建立 NodeContext/actor，再让 DataService 和 endpoint control 共享；
-- [ ] 将 boot ID、authority state ownership 从 DataServer 移到 NodeContext；
-- [ ] 根 build 生成 node proto、链接 grpc-lite 并安装 `zettide-node`；
+- [ ] 建立 DataNodeContext/actor，再让 DataService 和 endpoint control 共享；
+- [ ] 将 boot ID、authority state ownership 从 DataNodeServer 移到 DataNodeContext；
+- [ ] 根 build 生成 data-node proto、链接 grpc-lite 并安装 `zettide-data-node`；
 - [x] 合并 endpoint daemon lifecycle 前保持 compatibility entry；
 - [x] tests、benchmarks、NFS backend 与 SPDK tests 不再复用完整 `zettide` facade；
 - [ ] legacy CLI/core unit root 改用显式 roots 后删除 compatibility facade；
-- [x] module boundaries 稳定后再移动 engine 与 node 目录。
+- [x] module boundaries 稳定后再移动 engine 与 data-node 目录。
 
-本文只定义 CLI/node product composition、module roots 和 process lifecycle；CLI、DataService wire、
+本文只定义 CLI/data-node product composition、module roots 和 process lifecycle；CLI、DataService wire、
 磁盘格式和当前运行能力由对应规范与状态页维护。

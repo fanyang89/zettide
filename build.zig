@@ -26,7 +26,7 @@ pub fn build(b: *std.Build) void {
     );
     const storage_engine = storage_component.modules.storage;
     const module_roots_crc32c = storage_component.modules.crc32c;
-    const node_module = support.createNodeModule(b, target, optimize, storage_engine, module_roots_crc32c);
+    const data_node_module = support.createDataNodeModule(b, target, optimize, storage_engine, module_roots_crc32c);
     const module_roots_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/module_roots.zig"),
@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zettide_storage", .module = storage_engine },
-                .{ .name = "zettide_node", .module = node_module },
+                .{ .name = "zettide_data_node", .module = data_node_module },
             },
         }),
     });
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
     );
     const pool_data_benchmark_storage = pool_data_benchmark_modules.storage;
     const pool_data_benchmark_crc32c = pool_data_benchmark_modules.crc32c;
-    const pool_data_benchmark_node = support.createNodePrivateModule(
+    const pool_data_benchmark_data_node = support.createDataNodePrivateModule(
         b,
         target,
         .ReleaseSafe,
@@ -104,7 +104,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "zettide_storage", .module = storage_engine },
-                .{ .name = "zettide_node", .module = node_module },
+                .{ .name = "zettide_data_node", .module = data_node_module },
                 .{ .name = "spdk_c", .module = support.createSpdkCModule(b, target, optimize, true) },
             },
         });
@@ -129,16 +129,16 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
             .imports = &.{
                 .{ .name = "zettide_storage", .module = pool_data_benchmark_storage },
-                .{ .name = "zettide_node", .module = pool_data_benchmark_node },
+                .{ .name = "zettide_data_node", .module = pool_data_benchmark_data_node },
                 .{ .name = "spdk_c", .module = support.createSpdkCModule(b, target, .ReleaseSafe, true) },
             },
         });
-        pool_data_nvmf_benchmark_module.addIncludePath(b.path("services/node"));
+        pool_data_nvmf_benchmark_module.addIncludePath(b.path("services/data-node"));
         pool_data_nvmf_benchmark_module.addIncludePath(b.path("tests"));
         const benchmark_cpu_profiler = if (enable_benchmark_cpu_profiler) blk: {
             const gperftools_dependency = b.lazyDependency("gperftools", .{}) orelse return;
             pool_data_benchmark_storage.omit_frame_pointer = false;
-            pool_data_benchmark_node.omit_frame_pointer = false;
+            pool_data_benchmark_data_node.omit_frame_pointer = false;
             pool_data_nvmf_benchmark_module.omit_frame_pointer = false;
             break :blk support.addBenchmarkCpuProfiler(b, gperftools_dependency.path(""), target);
         } else null;
@@ -189,24 +189,24 @@ pub fn build(b: *std.Build) void {
     const compatibility_step = b.step("test-compatibility", "Run legacy CLI/frontend compatibility unit tests");
     compatibility_step.dependOn(&run_compatibility_tests.step);
 
-    const node_tests = b.addTest(.{ .root_module = node_module });
-    const run_node_tests = b.addRunArtifact(node_tests);
-    const node_step = b.step("test-node", "Run node composition and adapter unit tests");
-    node_step.dependOn(&run_node_tests.step);
+    const data_node_tests = b.addTest(.{ .root_module = data_node_module });
+    const run_data_node_tests = b.addRunArtifact(data_node_tests);
+    const data_node_step = b.step("test-data-node", "Run data-node composition and adapter unit tests");
+    data_node_step.dependOn(&run_data_node_tests.step);
 
     const unit_step = b.step("test-unit", "Run deterministic unit tests by component boundary");
     unit_step.dependOn(storage_component.tests);
     unit_step.dependOn(compatibility_step);
-    unit_step.dependOn(node_step);
+    unit_step.dependOn(data_node_step);
     unit_step.dependOn(&run_module_roots_tests.step);
-    const module_roots_step = b.step("test-module-roots", "Check storage and node module boundaries");
+    const module_roots_step = b.step("test-module-roots", "Check storage and data-node module boundaries");
     module_roots_step.dependOn(&run_module_roots_tests.step);
     unit_step.dependOn(&run_pool_data_nvmf_args_tests.step);
     unit_step.dependOn(&run_pool_data_synthetic_storage_tests.step);
 
     if (target.result.os.tag == .linux) {
         const nfs_backend_module = b.createModule(.{
-            .root_source_file = b.path("services/node/nfs_backend.zig"),
+            .root_source_file = b.path("services/data-node/nfs_backend.zig"),
             .target = target,
             .optimize = optimize,
             .pic = true,
@@ -225,7 +225,7 @@ pub fn build(b: *std.Build) void {
         nfs_backend_library.bundle_compiler_rt = true;
         b.installArtifact(nfs_backend_library);
         b.getInstallStep().dependOn(&b.addInstallHeaderFile(
-            b.path("services/node/nfs_backend.h"),
+            b.path("services/data-node/nfs_backend.h"),
             "zettide/nfs_backend.h",
         ).step);
         const nfs_backend_tests = b.addTest(.{ .root_module = nfs_backend_module });
@@ -238,7 +238,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
-        nfs_backend_c_test.root_module.addIncludePath(b.path("services/node"));
+        nfs_backend_c_test.root_module.addIncludePath(b.path("services/data-node"));
         nfs_backend_c_test.root_module.addCSourceFile(.{
             .file = b.path("tests/nfs_backend_abi.c"),
             .flags = &.{"-std=c11"},
@@ -252,9 +252,9 @@ pub fn build(b: *std.Build) void {
         unit_step.dependOn(&run_nfs_backend_c_test.step);
     }
 
-    const fs_ops_benchmark = benchmarks.add(b, target, optimize, storage_engine, node_module, unit_step);
+    const fs_ops_benchmark = benchmarks.add(b, target, optimize, storage_engine, data_node_module, unit_step);
 
-    const test_suites = tests.add(b, target, optimize, storage_engine, node_module, exe);
+    const test_suites = tests.add(b, target, optimize, storage_engine, data_node_module, exe);
 
     const controller_test_step = controller_build.addComponent(b, target, optimize, "services/controller", .{
         .generate = "gen-controller-proto",
@@ -281,7 +281,7 @@ pub fn build(b: *std.Build) void {
             "build.zig",
             "build.zig.zon",
             "build",
-            "services/node",
+            "services/data-node",
             "tests",
             "benchmarks",
             "services/controller/build.zig",

@@ -1,6 +1,6 @@
 # FUSE、NFS 与 dufs Frontend 归属
 
-> 状态：frontend 源码已归 `services/node/`，NFS backend 已移除 mega-module 依赖；CLI/FUSE/dufs compatibility 与 C ABI 保持不变
+> 状态：frontend 源码已归 `services/data-node/`，NFS backend 已移除 mega-module 依赖；CLI/FUSE/dufs compatibility 与 C ABI 保持不变
 
 本文细化 storage engine L3 ports 之上的 Linux/protocol frontends。backend-neutral contracts 见
 [Backend-neutral Filesystem API 归属](filesystem-api-map.md)。
@@ -8,7 +8,7 @@
 ## 结论
 
 1. `linux_fuse.zig` 是 Linux/libfuse3 adapter，只属于 `zettide` CLI foreground frontend；不进入
-   storage-engine portable root，也不由 `zettide-node` 隐式启动。
+   storage-engine portable root，也不由 `zettide-data-node` 隐式启动。
 2. `dufs_server.zig` 是 Linux-only process supervisor：它建立 private FUSE mount、启动外部 `dufs`
    子进程并协调 signal/teardown；不属于 filesystem engine。
 3. `nfs_filesystem.zig` 与 `nfs_blob_adapter.zig` 已归 storage-engine L3 identity port/adapter；
@@ -16,7 +16,7 @@
 4. NFS-Ganesha 保持独立产品进程。FSAL 是进程内 Ganesha module，通过稳定 C ABI 调用静态链接的
    Zig backend；不通过 FUSE、Linux VFS 或 IPC。
 5. NFS backend 当前在 Ganesha 进程内直接打开 standalone BlobFilesystem 或单个 Blob Pool Member。
-   这意味着该 Ganesha export 是 storage runtime owner；node/CLI 不得同时 writable-open 同一目标。
+   这意味着该 Ganesha export 是 storage runtime owner；data-node/CLI 不得同时 writable-open 同一目标。
 6. 重构必须保持 FUSE CLI 行为、dufs 参数/信号语义、NFS C ABI、44-byte stable handle 和
    FSAL config keys；不能借目录移动顺便升级协议。
 7. 所有 frontend build target 显式声明其平台依赖。import `zettide_storage` 不能自动链接 libfuse、
@@ -28,7 +28,7 @@
 flowchart TD
     ENGINE[zettide_storage]
     PATH[path/handle port]
-    ID[identity/node port]
+    ID[identity/data-node port]
     TARGET[target owner composition]
     CLI[zettide CLI process]
     FUSE[FUSE adapter]
@@ -60,16 +60,16 @@ flowchart TD
 - engine import FUSE/NFS/dufs；
 - FUSE adapter import Blob private map/store；
 - FSAL 直接 import Zig engine internals；
-- NFS backend import legacy `zettide` facade（`services/node/root.zig`）或 engine `v3` 私有相对路径；
-- node 与独立 Ganesha/CLI frontend 同时成为同一 Pool 的 writable owner；
+- NFS backend import legacy `zettide` facade（`services/data-node/root.zig`）或 engine `v3` 私有相对路径；
+- data-node 与独立 Ganesha/CLI frontend 同时成为同一 Pool 的 writable owner；
 - 用 mount path、export path 或 endpoint locator 代替 persisted filesystem identity。
 
 ## FUSE frontend
 
 | 当前文件 | 首轮目标归属 | 说明 |
 | --- | --- | --- |
-| `services/node/linux_fuse.zig` | `zettide` CLI Linux frontend module | libfuse low-level adapter、inode/dentry cache、file/directory handles、session lifecycle |
-| `services/node/fuse_shim.c`/`.h` | FUSE build adapter | 隔离 libfuse C API 和 connection/session helpers |
+| `services/data-node/linux_fuse.zig` | `zettide` CLI Linux frontend module | libfuse low-level adapter、inode/dentry cache、file/directory handles、session lifecycle |
+| `services/data-node/fuse_shim.c`/`.h` | FUSE build adapter | 隔离 libfuse C API 和 connection/session helpers |
 
 `linux_fuse.zig` 只能依赖：
 
@@ -132,7 +132,7 @@ callback 只用于通知 owner loop 已退出，不能在 callback 内抢先释�
 
 | 当前文件 | 首轮目标归属 | 说明 |
 | --- | --- | --- |
-| `services/node/dufs_server.zig` | `zettide` CLI Linux frontend/supervisor | private mount、child process、signal/pidfd/pipe supervision |
+| `services/data-node/dufs_server.zig` | `zettide` CLI Linux frontend/supervisor | private mount、child process、signal/pidfd/pipe supervision |
 
 `dufs_server.serve` 当前流程：
 
@@ -150,7 +150,7 @@ callback 只用于通知 owner loop 已退出，不能在 callback 内抢先释�
 实际数据访问由已经打开的 filesystem port 提供。
 
 当前 spawn 期间使用 process-global signal handler/atomic flag，因此应继续作为一个 CLI command 的
-single supervisor 使用；未经重设计不能在 node daemon 内并行启动多个 dufs supervisor。
+single supervisor 使用；未经重设计不能在 data-node daemon 内并行启动多个 dufs supervisor。
 
 稳定行为：
 
@@ -166,7 +166,7 @@ single supervisor 使用；未经重设计不能在 node daemon 内并行启动�
 
 | 文件 | 归属 |
 | --- | --- |
-| `nfs_filesystem.zig` | identity/node port，目标 `filesystem/identity_port.zig` |
+| `nfs_filesystem.zig` | identity/data-node port，目标 `filesystem/identity_port.zig` |
 | `nfs_blob_adapter.zig` | BlobFilesystem identity adapter，目标 `filesystem/blob_identity_adapter.zig` |
 
 以下文件属于 NFS frontend：
@@ -189,7 +189,7 @@ single supervisor 使用；未经重设计不能在 node daemon 内并行启动�
 - encoded size：44 bytes；
 - magic：`ZNFH`；
 - version：1；
-- node kind；
+- data-node kind；
 - 16-byte volume/filesystem UUID；
 - 16-byte backend identity；
 - CRC32C over preceding bytes；
@@ -205,7 +205,7 @@ single supervisor 使用；未经重设计不能在 node daemon 内并行启动�
 - `ZETTIDE_NFS_HANDLE_SIZE == 44`；
 - `ZETTIDE_NFS_NAME_CAPACITY == 256`；
 - status enum numeric values 0-16；
-- node kind numeric values 1-4；
+- data-node kind numeric values 1-4；
 - attributes、directory entry、set attributes、filesystem info 的 C layout；
 - set-attribute mask bits；
 - 全部 `zettide_nfs_*` function symbol、参数和 ownership。
@@ -231,7 +231,7 @@ status conversion 先由 identity adapter 形成 protocol-neutral semantic error
 
 首轮保留现有 artifact；C ABI operation 不直接 import Pool/Blob private 模块。当前 build 已显式注入
 `zettide_storage` 与 CRC32C，file target、Linux block adapter 和 target owner composition 由同一
-node package 内的 adapter import 提供。
+data-node package 内的 adapter import 提供。
 
 `@import("zettide")` mega-module 和 `zettide.v3.*` private access 已删除。NFS backend target 不因此
 链接 FUSE、dufs、SPDK、endpoint daemon、DataService 或 controller。源码内进一步拆出独立
@@ -246,8 +246,8 @@ export 仍是未实现能力。本步骤不扩大支持范围。
 
 - Ganesha process 是该 export 的 runtime owner；
 - FSAL 与 Zig backend 同进程、同步函数调用；
-- 与 `zettide-node` 是独立 process boundary；
-- node 未来如管理 NFS，只能管理 desired config/process lifecycle，不能同时打开同一 writable Pool；
+- 与 `zettide-data-node` 是独立 process boundary；
+- data-node 未来如管理 NFS，只能管理 desired config/process lifecycle，不能同时打开同一 writable Pool；
 - crash/restart 后通过 stable handle 中的 filesystem UUID + identity 重新验证对象；
 - FSAL 不通过 FUSE、VFS、Unix socket 或 endpoint daemon 访问 storage。
 
@@ -286,7 +286,7 @@ stable writes 可以按 arrival order 批量等待并由一次 `zettide_nfs_sync
 | portable storage-engine tests | filesystem ports/adapters | libfuse、Ganesha、dufs binary |
 
 `nfs_backend_module` 现只注入 `zettide_storage` 与共享 CRC32C module；target composition 通过
-同一 `services/node` package 内的相对 adapter import 完成，不再注入 legacy `portable_core`。
+同一 `services/data-node` package 内的相对 adapter import 完成，不再注入 legacy `portable_core`。
 backend archive 继续使用 PIC、bundle compiler-rt，并保留 static library/header install。
 
 ## 测试迁移矩阵
@@ -309,7 +309,7 @@ portable engine tests 不探测 host mount/Ganesha/dufs。
 ## 剩余边界工作
 
 - [x] FUSE module 改依赖 public path port/shared values；
-- [x] FUSE/dufs 从 storage-engine root 和 node root 排除；
+- [x] FUSE/dufs 从 storage-engine root 和 data-node root 排除；
 - [x] dufs supervisor 保持 CLI-only Linux capability；
 - [x] NFS identity port/Blob adapter 移入 engine L3 后，frontend 只依赖公开 facade；
 - [x] `nfs_handle.zig` 改依赖 shared identity value，保持 44-byte wire bytes；

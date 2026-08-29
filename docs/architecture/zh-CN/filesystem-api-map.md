@@ -9,8 +9,8 @@ BlobFilesystem native domain 见 [Blob 与 BlobFilesystem 归属](blob-filesyste
 
 1. 保留两个 backend-neutral contract，而不是强行合并成一个最大公约数：
    - path/handle port 服务 FUSE、dufs 和 CLI-like frontend；
-   - identity/node port 服务 NFS stable handle 和 parent/cookie 语义。
-2. 两个 port 共享 metadata、node kind、stable identity、space info 和语义错误 vocabulary，
+   - identity/data-node port 服务 NFS stable handle 和 parent/cookie 语义。
+2. 两个 port 共享 metadata、data-node kind、stable identity、space info 和语义错误 vocabulary，
    但可以拥有不同 operation shape。
 3. `filesystem_backend.zig` 不应继续使用 C sentinel path，也不应因 import persisted metadata codec
    而要求每个 frontend 链接 CRC32C。
@@ -28,7 +28,7 @@ BlobFilesystem native domain 见 [Blob 与 BlobFilesystem 归属](blob-filesyste
 flowchart TD
     TYPES[filesystem shared values / errors]
     PATH[path + open handle port]
-    ID[identity + node port]
+    ID[identity + data-node port]
     BLOB[BlobFilesystem native API]
     PADAPTER[Blob path adapter]
     IADAPTER[Blob identity adapter]
@@ -83,8 +83,8 @@ flowchart TD
 | --- | --- | --- |
 | `[*:0]const u8` path | C/FUSE representation 泄漏到 engine port | 使用 `[]const u8`；C adapter 在边界执行 `span`/NUL validation |
 | `[256:0]u8` directory name | sentinel 与固定 storage 混合 | 保留 bounded caller-owned buffer 也可，但公开 slice，不要求 C sentinel |
-| `DirectoryEntry.Kind {file,directory}` | symlink/FIFO 被压成 file | 使用完整 shared node kind，frontend 再映射能力 |
-| `NodeInfo.identity` + optional `file_id` | 两个 identity 含义不清 | 明确命名为 all-node identity 与 optional path-independent reopen identity，或证明可安全合并 |
+| `DirectoryEntry.Kind {file,directory}` | symlink/FIFO 被压成 file | 使用完整 shared data-node kind，frontend 再映射能力 |
+| `NodeInfo.identity` + optional `file_id` | 两个 identity 含义不清 | 明确命名为 all-data-node identity 与 optional path-independent reopen identity，或证明可安全合并 |
 | `read_special` | 同时暗示 symlink/FIFO，语义模糊 | 首轮明确为 readlink/special payload capability；不能把 FIFO 当普通可读文件 |
 
 路径必须保持相对/绝对、`/`、`.`、`..`、trailing slash、embedded NUL 和 UTF-8/name-profile
@@ -141,20 +141,20 @@ POSIX open”。
 无论选择哪种方式，必须保持：exclusive create 不覆盖已有对象、truncate 仅允许 writable、
 open handle retain 与 unlink-orphan 生命周期一致、namespace race 不泄漏 retain/context。
 
-## Identity/node port
+## Identity/data-node port
 
 | 当前文件 | 首轮目标 | 说明/动作 |
 | --- | --- | --- |
-| `nfs_filesystem.zig` | `filesystem/identity_port.zig` | borrowed stable-node API；去除仅命名上的 NFS 绑定，保留 NFS 所需语义 |
-| `nfs_blob_adapter.zig` | `filesystem/blob_identity_adapter.zig` | Blob inode/generation 到 identity/node API 的映射 |
+| `nfs_filesystem.zig` | `filesystem/identity_port.zig` | borrowed stable-data-node API；去除仅命名上的 NFS 绑定，保留 NFS 所需语义 |
+| `nfs_blob_adapter.zig` | `filesystem/blob_identity_adapter.zig` | Blob inode/generation 到 identity/data-node API 的映射 |
 
 identity port 与 path port 不同：
 
 - `Filesystem` 带 stable `filesystem_id`；
-- `Node` 包含 kind 与 16-byte identity；
+- `Data Node` 包含 kind 与 16-byte identity；
 - root/stat/lookup/parent 都返回完整 NodeInfo；
-- read/write/truncate/setattr 以 Node 为目标并验证 stale generation；
-- create/link/remove/rename 以 parent Node + name 操作；
+- read/write/truncate/setattr 以 Data Node 为目标并验证 stale generation；
+- create/link/remove/rename 以 parent Data Node + name 操作；
 - directory cursor 从 caller cookie 开始，并在每个 entry 返回 `next_cookie` 和 NodeInfo；
 - 不依赖 path 缓存，也不通过 path 恢复 stable handle。
 
@@ -196,10 +196,10 @@ BlobFilesystem format 使用 metadata codec；ports 和 frontends 只使用 valu
 
 两个 ports 应共享的最小类型：
 
-- full node kind：file、directory、symlink、FIFO；
+- full data-node kind：file、directory、symlink、FIFO；
 - metadata：mode、uid/gid、四种 timestamp、Windows attributes；
 - metadata patch；
-- opaque node identity；
+- opaque data-node identity；
 - size、allocated bytes、nlink；
 - filesystem space geometry；
 - protocol-neutral semantic errors。
@@ -264,9 +264,9 @@ frontend 的进程、构建和稳定接口详见
 | --- | --- | --- |
 | `linux_fuse.zig` | path/handle | Linux FUSE frontend adapter |
 | `dufs_server.zig` | path/handle | dufs process/supervisor adapter |
-| `nfs_backend.zig` | identity/node | NFS C ABI adapter |
+| `nfs_backend.zig` | identity/data-node | NFS C ABI adapter |
 | `services/nfs-fsal/` | C ABI，不直接 import Zig port | NFS-Ganesha 独立进程 |
-| `filesystem_target.zig` | 不应作为 port consumer facade | CLI/node target composition |
+| `filesystem_target.zig` | 不应作为 port consumer facade | CLI/data-node target composition |
 
 `filesystem_target.zig` 负责 inspect/format/open Pool 或 regular file、构造 BlobDevice/Store/
 Filesystem，并管理 owner lifetime。它可以最终产出 path 或 identity adapter，但不能进入
@@ -278,7 +278,7 @@ storage-engine L3 首轮建议公开：
 
 - `filesystem.types`；
 - `filesystem.path` borrowed Filesystem/FileHandle/DirectoryHandle；
-- `filesystem.identity` borrowed Filesystem/Node/Directory；
+- `filesystem.identity` borrowed Filesystem/Data Node/Directory；
 - Blob path adapter；
 - Blob identity adapter。
 
@@ -289,10 +289,10 @@ planning、Blob private map/store 或 SPDK。
 
 | Test root | 应覆盖 | 禁止依赖 |
 | --- | --- | --- |
-| shared values | metadata/node/identity/error value semantics | CRC32C codec、Blob runtime、frontend |
+| shared values | metadata/data-node/identity/error value semantics | CRC32C codec、Blob runtime、frontend |
 | path port ownership | file/directory close-on-error consumes and destroys context | Blob/FUSE/NFS |
 | Blob path conformance | paths、open flags、identity、pin/retain、metadata、directory snapshot、readonly/error mapping | FUSE C API |
-| identity port ownership | directory close-on-error、filesystem_id/node/cookie shapes | NFS C ABI |
+| identity port ownership | directory close-on-error、filesystem_id/data-node/cookie shapes | NFS C ABI |
 | Blob identity conformance | stale generation、kind mismatch、parent/lookup/link/rename、cookie resume、readonly/error mapping | FSAL/C ABI |
 | FUSE integration | lookup/open/unlink-open/rename/readdir/errno | Blob private fields |
 | NFS integration | stable handle、readdir cookie、rename/link/setattr/status mapping | path reconstruction |
@@ -306,7 +306,7 @@ identity port 只有 directory close unit test，Blob identity adapter 没有独
 - [ ] metadata runtime values 与 CRC32C codec 分离；
 - [ ] 建立 shared NodeKind/NodeIdentity/NodeInfo/error vocabulary；
 - [ ] path API 的 sentinel path 改为 slice，并在 frontend 边界转换；
-- [ ] 明确 all-node identity 与 optional reopen identity 的命名/关系；
+- [ ] 明确 all-data-node identity 与 optional reopen identity 的命名/关系；
 - [ ] 修复 path directory entry kind 丢失；
 - [ ] 冻结 open/create/truncate 的并发原子性 contract；
 - [ ] 将 `nfs_filesystem.zig`/`nfs_blob_adapter.zig` 作为独立 identity port/adapter 纳入 engine L3；

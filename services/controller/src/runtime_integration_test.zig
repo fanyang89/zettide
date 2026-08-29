@@ -17,7 +17,7 @@ const node_control_endpoint = "127.0.0.1:9000";
 const node_nvmf_endpoint = "127.0.0.1:4420";
 const node_failure_domain = "rack-a";
 const node_capability_bits: u64 = 5;
-const node_protocol_version: u32 = 1;
+const data_node_protocol_version: u32 = 1;
 const snapshot_member_id = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f };
 const suffix_member_id = [_]u8{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f };
 const failover_member_id = [_]u8{ 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f };
@@ -1055,7 +1055,7 @@ fn registerNode(
         .nvmf_endpoint = node_nvmf_endpoint,
         .failure_domain = node_failure_domain,
         .capability_bits = node_capability_bits,
-        .protocol_version = node_protocol_version,
+        .protocol_version = data_node_protocol_version,
     });
     defer runtime_allocator.free(request);
     var result = try call(runtime, "/zettide.controller.v1.NodeService/RegisterNode", request);
@@ -1124,7 +1124,7 @@ fn registerReconcileNode(
         .nvmf_endpoint = node_nvmf_endpoint,
         .failure_domain = failure_domain,
         .capability_bits = node_capability_bits,
-        .protocol_version = node_protocol_version,
+        .protocol_version = data_node_protocol_version,
     });
     defer runtime_allocator.free(request);
     var result = try call(runtime, "/zettide.controller.v1.NodeService/RegisterNode", request);
@@ -1336,7 +1336,7 @@ fn expectNode(
     try std.testing.expectEqualStrings(node_nvmf_endpoint, node.nvmf_endpoint);
     try std.testing.expectEqualStrings(node_failure_domain, node.failure_domain);
     try std.testing.expectEqual(node_capability_bits, node.capability_bits);
-    try std.testing.expectEqual(node_protocol_version, node.protocol_version);
+    try std.testing.expectEqual(data_node_protocol_version, node.protocol_version);
     try std.testing.expect(node.registered_at_unix_ms > 0);
     try std.testing.expectEqual(expected.revision, node.registered_revision);
 }

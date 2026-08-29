@@ -58,8 +58,8 @@ if [[ -z $spdk_source ]]; then
 fi
 
 # shellcheck disable=SC2046
-"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/node -Itest \
-	services/node/spdk/runtime.c services/node/spdk/bdev_provider.c services/node/spdk/nvmf_tcp_export.c tests/spdk_runtime.c \
+"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/data-node -Itest \
+	services/data-node/spdk/runtime.c services/data-node/spdk/bdev_provider.c services/data-node/spdk/nvmf_tcp_export.c tests/spdk_runtime.c \
 	tests/spdk_nvmf_tcp_export.c "$2" -o "$build_dir/zettide-spdk-nvmf-export-test" -pthread -lubsan -lstdc++ \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \
@@ -69,18 +69,18 @@ LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 	timeout 30 "$build_dir/zettide-spdk-nvmf-export-test"
 
 # shellcheck disable=SC2046
-"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/node -Itest \
-	services/node/spdk/runtime.c tests/spdk_runtime.c tests/spdk_nvmf_target.c \
+"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/data-node -Itest \
+	services/data-node/spdk/runtime.c tests/spdk_runtime.c tests/spdk_nvmf_target.c \
 	-o "$build_dir/zettide-spdk-nvmf-target" -pthread \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \
 	-Wl,--as-needed
 
 # shellcheck disable=SC2046
-"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/node -Itest \
+"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/data-node -Itest \
 	-I"$spdk_source/module/bdev/nvme" \
-	services/node/spdk/runtime.c services/node/spdk/nvme_controller.c services/node/spdk/bdev_endpoint.c \
-	services/node/spdk/bdev_dispatcher.c tests/spdk_runtime.c \
+	services/data-node/spdk/runtime.c services/data-node/spdk/nvme_controller.c services/data-node/spdk/bdev_endpoint.c \
+	services/data-node/spdk/bdev_dispatcher.c tests/spdk_runtime.c \
 	tests/spdk_storage_main.c "$1" -o "$build_dir/zettide-spdk-storage-test" -pthread -lubsan -lstdc++ \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \

@@ -2,7 +2,7 @@
 
 Zettide is an experimental storage engine for single-node, multi-physical-disk
 storage ownership. Tier 1 covers both a same-host virtualization deployment and
-a dedicated single storage node. BlobFilesystem provides filesystem data, while
+a dedicated single data node. BlobFilesystem provides filesystem data, while
 Catalog Volumes provide block data; both are designed to use Pools assembled
 from independent physical disks.
 
@@ -22,9 +22,9 @@ repositories retain their histories here as merged directory trees:
 | Path | Role |
 | --- | --- |
 | `libs/storage-engine/` | Reusable Pool, Catalog, Blob/BlobFilesystem, formats, and backend-neutral ports |
-| `services/node/` | Data-node service, compatible CLI, endpoint lifecycle, and platform/protocol adapters |
+| `services/data-node/` | Data-node service, compatible CLI, endpoint lifecycle, and platform/protocol adapters |
 | `services/controller/` | Raft-replicated metadata and cluster coordination |
-| `services/csi/` | CSI node service and container image |
+| `services/csi/` | CSI Node service and container image |
 | `services/nfs-fsal/` | NFS-Ganesha FSAL adapter |
 | `libs/txfs/` | Conditional-write transaction engine for shared writable filesystems |
 | `libs/data-service-contracts/` | Shared data-service API and authority/fencing contracts |
@@ -35,13 +35,13 @@ repositories retain their histories here as merged directory trees:
 | `vendor/raftz/` | Consensus runtime submodule |
 | `vendor/spdk/` | Managed SPDK fork submodule |
 
-The target storage-node naming and process boundaries are frozen in
-[decision 0001](docs/decisions/0001-storage-node-naming-and-process-model.md),
+The data-node naming and process boundaries are frozen in
+[decision 0001](docs/decisions/0001-data-node-naming-and-process-model.md),
 and the data models, Tier boundaries, frontend roles, and repository ownership
 are frozen in [decision 0003](docs/decisions/0003-storage-product-architecture.md).
 The reusable engine lives under `libs/storage-engine/`; data-node product
-composition lives under `services/node/`. The existing `zettide` command remains
-compatible while `zettide-node` daemon wiring is completed. See the
+composition lives under `services/data-node/`. The existing `zettide` command remains
+compatible while `zettide-data-node` daemon wiring is completed. See the
 [documentation index](docs/README.md) for the normative hierarchy and status
 source of truth.
 
@@ -54,7 +54,7 @@ for the imported history map.
 
 Tier 1 is the single-node storage takeover milestone. It requires all four
 baseline frontends against the appropriate Pool-backed data model, without
-requiring storage-node replication:
+requiring data-node replication:
 
 | Frontend | Data model | Tier 1 role | Current status |
 | --- | --- | --- | --- |
@@ -135,7 +135,7 @@ The equivalent focused Zig gates include:
 zig build
 zig build test
 zig build test-storage-engine
-zig build test-node
+zig build test-data-node
 zig build test-compatibility
 zig build test-controller
 zig build test-txfs
@@ -202,13 +202,13 @@ Run each benchmark with `--help` for its complete workload and transport options
 
 ## Tests
 
-The root build separates portable engine, node adapters, and compatibility
+The root build separates portable engine, data-node adapters, and compatibility
 frontend tests. The storage engine can also be validated independently with
 `cd libs/storage-engine && zig build ci`.
 
 ```sh
 zig build test-storage-engine
-zig build test-node
+zig build test-data-node
 zig build test-compatibility
 zig build test-module-roots
 zig build test-unit

@@ -4,7 +4,7 @@
 
 - Tier 1：单 Zettide node 接管多块独立物理盘，以 NVMf/iSCSI 服务 Catalog Volume，以 NFS/FUSE 服务 BlobFilesystem；qtr managed backend 是完成门槛。
 - Tier 2：在 Tier 1 上增加动态 Pool、在线容量/保护迁移、multi-Volume 与 publication/attachment 治理。
-- Tier 3：跨 storage node Replica、fencing、failover、repair 和 republish。
+- Tier 3：跨 data node Replica、fencing、failover、repair 和 republish。
 
 ## Pool 与 Member
 
@@ -66,10 +66,10 @@ BlobFilesystem 的 local filesystem frontend。当前 foreground Linux path 可�
 
 ## Node、Raft Node、Replica 与 Primary
 
-Node 是运行 DataService/Volume Engine 的受管 storage node，使用稳定 `node_id`。`raftz` node 是 Raft voter/participant，属于独立身份域；两者不能按地址、hostname 或数值 ID 隐式等同。
+Node 是运行 DataService/Volume Engine 的受管 data node，使用稳定 `node_id`。`raftz` node 是 Raft voter/participant，属于独立身份域；两者不能按地址、hostname 或数值 ID 隐式等同。
 
 大写 Replica 是 Tier 3 Catalog Volume 的正式持久资源，绑定 Volume、稳定 Node、
-本地介质和跨节点故障域。Tier 2 在同一 storage node 上使用 local protection
+本地介质和跨节点故障域。Tier 2 在同一 data node 上使用 local protection
 copy，不因此创建控制面 Replica resource。Primary 是单个 Tier 3 Volume 的唯一
 写协调者，不是 Raft leader，也不等于 host-facing publication target。
 

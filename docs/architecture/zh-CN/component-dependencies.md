@@ -1,9 +1,9 @@
 # 组件依赖与分层规则
 
-> 状态：当前规范；package/module roots、源码目录和 consumer/build 边界已落地，完整 NodeContext/DataService daemon composition 待完成
+> 状态：当前规范；package/module roots、源码目录和 consumer/build 边界已落地，完整 DataNodeContext/DataService daemon composition 待完成
 
 本文定义当前源码编译依赖和运行时组合。已完成的目录迁移不再作为执行计划；后续修改必须保持本文的单向依赖。目标命名与进程边界见
-[架构决策 0001](../../decisions/0001-storage-node-naming-and-process-model.md)。首轮迁移后的 package
+[架构决策 0001](../../decisions/0001-data-node-naming-and-process-model.md)。首轮迁移后的 package
 粒度复评与再次拆分条件见
 [架构决策 0002](../../decisions/0002-keep-storage-engine-cohesive.md)。
 
@@ -31,8 +31,8 @@ storage primitives, codecs, formats and shared value types
 
 ```text
 services/controller ----> libs/data-service-contracts
-services/node ----------> libs/data-service-contracts
-services/node ----------> libs/storage-engine
+services/data-node ----------> libs/data-service-contracts
+services/data-node ----------> libs/storage-engine
 ```
 
 `libs/data-service-contracts` 本身不得依赖 `libs/storage-engine`。
@@ -40,17 +40,17 @@ services/node ----------> libs/storage-engine
 ## 当前构建边界
 
 根构建先通过 `libs/storage-engine/build.zig:addComponent` 注册并测试 `zettide_storage`，再注册
-`zettide_node`。`build/support.zig:createCoreModule` 只为现有 CLI 构建
-`services/node/root.zig` compatibility facade；该 facade 复用 engine/CRC32C module，并仅注入：
+`zettide_data_node`。`build/support.zig:createCoreModule` 只为现有 CLI 构建
+`services/data-node/root.zig` compatibility facade；该 facade 复用 engine/CRC32C module，并仅注入：
 
 - Linux/FUSE C translation module；
 - SPDK C translation module；
 - 按 target 条件启用的产品平台源码和系统库。
 
-测试分别由 `test-storage-engine`、`test-node`、`test-compatibility` 与
+测试分别由 `test-storage-engine`、`test-data-node`、`test-compatibility` 与
 `test-module-roots` 表达，不再用一个 test root 代表全部能力。
 
-`services/node/root.zig` 仍公开 Blob、filesystem、endpoint、SPDK 和整个 `v3`
+`services/data-node/root.zig` 仍公开 Blob、filesystem、endpoint、SPDK 和整个 `v3`
 namespace，并作为 legacy product compatibility facade；它不再拥有 engine declarations，
 而是转发新 `zettide_storage` root。新 consumer 不得继续把该 facade 当作存储引擎边界。
 
@@ -62,9 +62,9 @@ namespace，并作为 legacy product compatibility facade；它不再拥有 engi
 - `libs/data-service-contracts/`。
 
 根构建从 `libs/storage-engine/src/root.zig` 注册 `zettide_storage`，并从
-`services/node/node_root.zig` 注册 `zettide_node`；`test-module-roots` 检查 product/platform
-exports 不进入 engine。`node_main.zig` 与
-`node_data_service.zig` 仍未形成可安装的 `zettide-node` executable，RPC/proto build wiring
+`services/data-node/data_node_root.zig` 注册 `zettide_data_node`；`test-module-roots` 检查 product/platform
+exports 不进入 engine。`data_node_main.zig` 与
+`data_node_service.zig` 仍未形成可安装的 `zettide-data-node` executable，RPC/proto build wiring
 留待后续步骤。
 
 ## 当前区域与主要依赖
@@ -81,18 +81,18 @@ exports 不进入 engine。`node_main.zig` 与
 | Filesystem composition | `filesystem_target.zig` | Blob engine、Pool/Member、format planning、storage abstraction | CLI、NFS backend |
 | FUSE/NFS/dufs adapters | `linux_fuse.zig`、`nfs_handle.zig`、`nfs_backend.zig`、`dufs_server.zig`、`services/nfs-fsal/` | filesystem ports、Blob identity adapter、Linux/process/Ganesha APIs | `zettide` CLI、NFS-Ganesha process |
 | SPDK adapter/export | `spdk/` | SPDK C API、Pool/Catalog、storage abstraction、endpoint registry | endpoint daemon、SPDK tests/benchmarks |
-| Endpoint lifecycle | `endpoint_registry.zig`、`endpoint_control.zig`、`endpoint_daemon.zig` | registry state machine、Unix socket、SPDK exports/runtime | `zettide endpoint serve`；目标 `zettide-node` |
+| Endpoint lifecycle | `endpoint_registry.zig`、`endpoint_control.zig`、`endpoint_daemon.zig` | registry state machine、Unix socket、SPDK exports/runtime | `zettide endpoint serve`；目标 `zettide-data-node` |
 | CLI | `main.zig`、`cli/` | 聚合 `zettide` facade、filesystem target、FUSE/dufs/endpoint | `zettide` executable |
-| DataService prototype | `node_data_service.zig`、`node_main.zig` | grpc-lite、generated proto、data-service contracts | 目标 `zettide-node` |
+| DataService prototype | `data_node_service.zig`、`data_node_main.zig` | grpc-lite、generated proto、data-service contracts | 目标 `zettide-data-node` |
 | Controller | `services/controller/` | raftz、grpc-lite、data-service contracts | `zettide-controller` executable |
 
 ## 当前依赖图
 
 ```mermaid
 flowchart TD
-    ROOT[services/node/root.zig<br/>legacy CLI compatibility facade]
+    ROOT[services/data-node/root.zig<br/>legacy CLI compatibility facade]
     CLI[main.zig + cli]
-    NODE[node_main + node_data_service]
+    NODE[data_node_main + data_node_service]
     ENDPOINT[endpoint registry/control/daemon]
     SPDK[spdk adapters and exports]
     FRONTEND[FUSE / NFS / dufs]
@@ -135,14 +135,14 @@ flowchart TD
 
 | ID | 当前状态 | 原问题 | 剩余方向 |
 | --- | --- | --- | --- |
-| D1 | 已解除：`pool_replicated_journal.zig` 不再 import SPDK | 原 provider assertions 混在 Pool test | provider status mapping 已迁到 node/SPDK adapter test；完整 bridge integration 继续由专用 gate 补齐 |
+| D1 | 已解除：`pool_replicated_journal.zig` 不再 import SPDK | 原 provider assertions 混在 Pool test | provider status mapping 已迁到 data-node/SPDK adapter test；完整 bridge integration 继续由专用 gate 补齐 |
 | D2 | 已解除：Pool provisioning 改依赖 `data_mode_geometry.zig` | Pool 只读取 `.blob` data-mode geometry | Blob format 从同一低层 contract 重导出原常量，数值不变 |
 | D3 | 已解除：Pool data adapter 的 production path 不再 import Blob format | Pool 只验证 logical region 非空且落在 Member data region 内 | Blob size/minimum/header 解释留在上层；跨层 reopen 场景仅存在于 integration-style test |
-| D4 | 已解除：`linux_pool_plan.zig` 排除于 engine root | Linux composition 曾混入 engine | 保持 node adapter -> public `zettide_storage.name_profile` 方向 |
-| D5 | 已解除目录混层：`filesystem_target.zig` 位于 `services/node` | 产品 composition 曾与 engine 同目录 | 继续作为 tool/node adapter，不进入 storage-engine |
+| D4 | 已解除：`linux_pool_plan.zig` 排除于 engine root | Linux composition 曾混入 engine | 保持 data-node adapter -> public `zettide_storage.name_profile` 方向 |
+| D5 | 已解除目录混层：`filesystem_target.zig` 位于 `services/data-node` | 产品 composition 曾与 engine 同目录 | 继续作为 tool/data-node adapter，不进入 storage-engine |
 | D6 | 大部分解除：named roots 与 consumer 迁移完成 | mega facade 使 consumer 间接取得全部能力 | legacy facade 只剩现有 CLI，待 CLI 显式 composition 后删除 |
 | D7 | 大部分解除：engine 自有 CRC32C/utf8proc build，component tests 分离 | 单 module 注入全部 C/system dependencies | compatibility CLI 仍按 feature 注入 FUSE/SPDK，后续缩到命令级 composition |
-| D8 | 部分解除：`zettide_node` root 已建立，DataService executable wiring 未完成 | 目标 service 与可执行边界不一致 | 生成 proto、链接 grpc-lite、建立 NodeContext；禁止 RPC 进入 engine |
+| D8 | 部分解除：`zettide_data_node` root 已建立，DataService executable wiring 未完成 | 目标 service 与可执行边界不一致 | 生成 proto、链接 grpc-lite、建立 DataNodeContext；禁止 RPC 进入 engine |
 
 D1 的 production reverse import 已移除；D2-D3 通过共享 data-mode geometry contract 解除；
 D4 通过 module-root ownership 与 public engine import 解除。后续改动不得重新引入这些依赖。
@@ -211,7 +211,7 @@ NFS 的 identity-oriented API 与通用 POSIX backend 可以保持两个 contrac
 包含：
 
 - `zettide` CLI；
-- `zettide-node` daemon、DataService、endpoint reconciliation；
+- `zettide-data-node` daemon、DataService、endpoint reconciliation；
 - `zettide-controller` daemon。
 
 L5 负责 allocator/thread/process lifecycle、信号、socket、配置、RPC 和 adapter 组合。
@@ -223,7 +223,7 @@ L5 负责 allocator/thread/process lifecycle、信号、socket、配置、RPC �
 flowchart TD
     CONTRACTS[libs/data-service-contracts]
     ENGINE[libs/storage-engine<br/>L0-L3]
-    NODE[services/node<br/>zettide-node]
+    NODE[services/data-node<br/>zettide-data-node]
     CLI[zettide CLI]
     CONTROLLER[services/controller]
     PLATFORM[Linux / FUSE / NFS / SPDK adapters]
@@ -248,14 +248,14 @@ flowchart TD
    import；路径只允许出现在 build wiring 中。
 2. **生产模块不为测试引入上层依赖。** 需要 SPDK/FUSE/daemon 的测试放在独立 integration
    test root，不在 engine 源文件顶层 import 上层 adapter。
-3. **portable root 不条件导出整个 OS 层。** OS-specific module 由 node/tool build 显式创建；
+3. **portable root 不条件导出整个 OS 层。** OS-specific module 由 data-node/tool build 显式创建；
    `builtin.os.tag` 不能替代清晰 module boundary。
 4. **接口由被依赖层拥有。** Storage vtable 由 engine foundation 拥有；SPDK 实现该接口。
-   Endpoint backend port 由 node composition 拥有；具体 Catalog/SPDK backend 实现它。
+   Endpoint backend port 由 data-node composition 拥有；具体 Catalog/SPDK backend 实现它。
 5. **格式依赖与 runtime 依赖分开。** on-media format 可依赖 checksum/Unicode 算法，不能依赖
    process、RPC 或 export runtime。
 6. **一个资源只有一个 runtime owner。** Pool/Catalog/SPDK endpoint 的进程 ownership 位于
-   `zettide-node`；CLI foreground compatibility path 必须显式互斥，不能形成第二 owner。
+   `zettide-data-node`；CLI foreground compatibility path 必须显式互斥，不能形成第二 owner。
 7. **facade 不隐藏能力依赖。** 消费者若使用 FUSE、NFS 或 SPDK，build target 必须显式声明；
    不因 import `zettide_storage` 自动链接全部平台库。
 8. **迁移不改变稳定接口。** on-media format、CLI、endpoint wire API 和 NFS C ABI 的兼容约束
@@ -271,7 +271,7 @@ flowchart TD
 [FUSE、NFS 与 dufs Frontend 归属](frontend-map.md)，SPDK ingress/export 见
 [SPDK Backend 与 Export 归属](spdk-adapter-export-map.md)，endpoint state/process 见
 [Endpoint Lifecycle 与 Daemon 归属](endpoint-lifecycle-map.md)，产品入口与 process composition 见
-[CLI 与 Node 产品 Composition 归属](cli-node-composition-map.md)。后续逐区域确认以此表为起点：
+[CLI 与 Data Node 产品 Composition 归属](cli-data-node-composition-map.md)。后续逐区域确认以此表为起点：
 
 | 区域 | 首轮目标归属 | 备注 |
 | --- | --- | --- |
@@ -279,20 +279,20 @@ flowchart TD
 | Pool/Member/Catalog | `libs/storage-engine` L2 | 先处理 D1-D4 |
 | BlobFilesystem | `libs/storage-engine` L2 | 包含 BlobDevice/store/map/filesystem |
 | Backend-neutral filesystem API | `libs/storage-engine` L3 | NFS identity view 可保持独立 port |
-| FUSE/NFS/dufs frontend | CLI/node platform adapter | NFS-Ganesha 仍是独立进程 |
-| SPDK backend/export | `services/node` platform adapter | 不进入 engine portable root |
-| Endpoint registry/control/daemon | `services/node` composition | `endpoint serve` 仅迁移期兼容入口 |
-| CLI 与 DataService | CLI 与 `services/node` L5 | DataService 不进入 engine |
+| FUSE/NFS/dufs frontend | CLI/data-node platform adapter | NFS-Ganesha 仍是独立进程 |
+| SPDK backend/export | `services/data-node` platform adapter | 不进入 engine portable root |
+| Endpoint registry/control/daemon | `services/data-node` composition | `endpoint serve` 仅迁移期兼容入口 |
+| CLI 与 DataService | CLI 与 `services/data-node` L5 | DataService 不进入 engine |
 
 ## 当前边界门禁
 
-以下项目持续约束后续 node/frontend 工作：
+以下项目持续约束后续 data-node/frontend 工作：
 
 - [x] D1 的 SPDK 测试依赖已移出 Pool production module；
 - [x] D2-D4 已通过 contract 提取或 composition 重组消除；
 - [x] storage engine 有独立 module root，且不导出 endpoint/SPDK/FUSE/RPC；
-- [ ] frontend integration tests 全部迁出 legacy root（node boundary test 已独立）；
-- [x] `createCoreModule` 仅保留为 compatibility product facade，不再代表 storage/node 全部能力；
+- [ ] frontend integration tests 全部迁出 legacy root（data-node boundary test 已独立）；
+- [x] `createCoreModule` 仅保留为 compatibility product facade，不再代表 storage/data-node 全部能力；
 - [x] portable storage tests 不链接 FUSE/SPDK；
 - [x] 当前 CLI、NFS ABI、non-SPDK 默认构建和 cross-compile gates 仍可构建。
 

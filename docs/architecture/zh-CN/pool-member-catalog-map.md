@@ -186,15 +186,15 @@ Catalog 可以依赖 Pool 的：
 - control commit contract；
 - ReplicaEndpoint 或 bounded data-region port。
 
-Catalog 不得依赖 SPDK provider、endpoint name/NQN、FUSE/NFS、CLI 或 node lifecycle。
+Catalog 不得依赖 SPDK provider、endpoint name/NQN、FUSE/NFS、CLI 或 data-node lifecycle。
 
 ## 不属于本区域或需要改属的文件
 
 | 当前文件 | 目标归属 | 原因 |
 | --- | --- | --- |
-| `spdk/catalog_volume_backend.zig` | `services/node` SPDK adapter | 将 CatalogVolumeBackend 适配为 SPDK provider C callback |
-| `spdk/catalog_endpoint_backend.zig` | `services/node` endpoint/SPDK adapter | endpoint lifecycle 与 SPDK export composition |
-| `v3/linux_pool_plan.zig` | Linux CLI/node device-plan adapter | sysfs/device acquisition 和 user confirmation token 不是 engine domain |
+| `spdk/catalog_volume_backend.zig` | `services/data-node` SPDK adapter | 将 CatalogVolumeBackend 适配为 SPDK provider C callback |
+| `spdk/catalog_endpoint_backend.zig` | `services/data-node` endpoint/SPDK adapter | endpoint lifecycle 与 SPDK export composition |
+| `v3/linux_pool_plan.zig` | Linux CLI/data-node device-plan adapter | sysfs/device acquisition 和 user confirmation token 不是 engine domain |
 | `v3/file_storage.zig`、`v3/linux_*storage.zig` | platform storage adapter | 只负责产生 Storage |
 | Blob format/store/filesystem | [BlobFilesystem 区域](blob-filesystem-map.md) | 只能依赖 Pool public data-region contract，不能被 Pool core import |
 
@@ -207,12 +207,12 @@ SPDK bridge 的完整 ownership 和测试目标见
 
 重构前 `pool_replicated_journal.zig` 顶层 import
 `../spdk/catalog_volume_backend.zig`，仅供同文件 provider 场景测试使用。该 production reverse import
-及 `ProviderCompletion` helper 现已移除；provider error/status assertions 位于 node/SPDK adapter test。
+及 `ProviderCompletion` helper 现已移除；provider error/status assertions 位于 data-node/SPDK adapter test。
 
 处理：
 
 - 删除 production module 的 SPDK import 和 `ProviderCompletion` test helper；
-- provider 场景迁移到独立 node/SPDK integration test root；
+- provider 场景迁移到独立 data-node/SPDK integration test root；
 - integration test 通过 `zettide_storage` public module 使用 Pool/Catalog，不用相对路径钻入 engine；
 - portable Pool unit test 不注入 `spdk_c`。
 
@@ -233,7 +233,7 @@ integration-style test，不能成为 production import。
 ### D4：Linux Pool plan import name profile
 
 `linux_pool_plan.Options` 为兼容既有确认 token，暂时继续携带 `name_profile.Profile`；该文件现已
-排除于 engine root，并作为 Linux/node composition adapter 通过 public `zettide_storage` import
+排除于 engine root，并作为 Linux/data-node composition adapter 通过 public `zettide_storage` import
 该 value type。由此消除了 engine 内的反向依赖且不改变 token；后续目录迁移可再拆通用 device plan
 与 Blob format options，但不得在本步骤改变 CLI 确认行为。
 
@@ -246,7 +246,7 @@ integration-style test，不能成为 production import。
 - Journal claim、CatalogClaim、DataClaim 和 coordinator claim 都是 exclusive，release 可重复策略不得改变；
 - writable Pool authority 或 commit outcome 不确定时保持 frozen，不能通过 wrapper 吞掉；
 - CatalogDataLease 的 generation/history/root binding 在每次 write/flush 前后验证；
-- SPDK Worker 只能借用 node-owned Pool，且 provider deletion 完成后才能释放 lease/set。
+- SPDK Worker 只能借用 data-node-owned Pool，且 provider deletion 完成后才能释放 lease/set。
 
 ## Public facade
 
@@ -259,7 +259,7 @@ storage-engine root 首轮只需提供内聚 facade，不把每个 format 文件
 - compatibility：显式 legacy namespace，供旧磁盘 reopen 和测试使用。
 
 format codec、fault injection、raw claims 和 graph scratch 可以先作为 advanced/internal namespace。
-CLI、node 和 SPDK adapter 不应继续依赖 `v3/root.zig` 的全量平铺导出。
+CLI、data-node 和 SPDK adapter 不应继续依赖 `v3/root.zig` 的全量平铺导出。
 
 ## 测试迁移矩阵
 
@@ -270,7 +270,7 @@ CLI、node 和 SPDK adapter 不应继续依赖 `v3/root.zig` 的全量平铺导�
 | portable Pool runtime | authority selection、quorum、membership/bootstrap/recovery、data access | SPDK provider |
 | portable Catalog | page/graph/mutation/store/lease、extent mapping、fencing | SPDK/FUSE/NFS |
 | file adapter integration | createAt/openAt、parent sync、legacy reopen | SPDK |
-| node SPDK integration | CatalogVolumeBackend provider read/write/flush/reset 和 teardown | engine 私有相对 import |
+| data-node SPDK integration | CatalogVolumeBackend provider read/write/flush/reset 和 teardown | engine 私有相对 import |
 
 `pool_catalog_store.zig` 当前未在 `v3/root.zig` 平铺导出，但被其他模块传递编译。拆 root 后必须
 给它显式 Catalog test root，避免仅靠传递 import 获得测试覆盖。

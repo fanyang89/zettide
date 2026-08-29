@@ -9,10 +9,10 @@
 | 整体组件与 storage direction | [`../../../README.md`](../../../README.md) |
 | Zettide 当前能力与 gate | [`../../../README.md`](../../../README.md) |
 | 组件依赖与目标分层 | [`component-dependencies.md`](component-dependencies.md) |
-| Package split decisions | [`../../decisions/0001-storage-node-naming-and-process-model.md`](../../decisions/0001-storage-node-naming-and-process-model.md), [`../../decisions/0002-keep-storage-engine-cohesive.md`](../../decisions/0002-keep-storage-engine-cohesive.md) |
+| Package split decisions | [`../../decisions/0001-data-node-naming-and-process-model.md`](../../decisions/0001-data-node-naming-and-process-model.md), [`../../decisions/0002-keep-storage-engine-cohesive.md`](../../decisions/0002-keep-storage-engine-cohesive.md) |
 | Root component/test wiring | [`../../../build.zig`](../../../build.zig), [`../../../build/tests.zig`](../../../build/tests.zig), [`../../../build/benchmarks.zig`](../../../build/benchmarks.zig) |
 | Independent storage-engine package | [`../../../libs/storage-engine/README.md`](../../../libs/storage-engine/README.md), [`../../../libs/storage-engine/build.zig`](../../../libs/storage-engine/build.zig), [`../../../libs/storage-engine/src/root.zig`](../../../libs/storage-engine/src/root.zig) |
-| Node product package | [`../../../services/node/README.md`](../../../services/node/README.md), [`../../../services/node/node_root.zig`](../../../services/node/node_root.zig), [`../../../services/node/root.zig`](../../../services/node/root.zig) |
+| Data-node product package | [`../../../services/data-node/README.md`](../../../services/data-node/README.md), [`../../../services/data-node/data_node_root.zig`](../../../services/data-node/data_node_root.zig), [`../../../services/data-node/root.zig`](../../../services/data-node/root.zig) |
 | 存储抽象与持久格式归属 | [`storage-foundation-map.md`](storage-foundation-map.md) |
 | Pool、Member 与 Catalog 归属 | [`pool-member-catalog-map.md`](pool-member-catalog-map.md) |
 | Blob 与 BlobFilesystem 归属 | [`blob-filesystem-map.md`](blob-filesystem-map.md) |
@@ -20,7 +20,7 @@
 | FUSE、NFS 与 dufs Frontend 归属 | [`frontend-map.md`](frontend-map.md) |
 | SPDK Backend 与 Export 归属 | [`spdk-adapter-export-map.md`](spdk-adapter-export-map.md) |
 | Endpoint Lifecycle 与 Daemon 归属 | [`endpoint-lifecycle-map.md`](endpoint-lifecycle-map.md) |
-| CLI 与 Node 产品 Composition 归属 | [`cli-node-composition-map.md`](cli-node-composition-map.md) |
+| CLI 与 Data Node 产品 Composition 归属 | [`cli-data-node-composition-map.md`](cli-data-node-composition-map.md) |
 | CSI Node service | [`../../../services/csi/README.md`](../../../services/csi/README.md), [`../../../services/csi/internal/driver/driver.go`](../../../services/csi/internal/driver/driver.go) |
 | 控制面范围 | [`../../../services/controller/README.md`](../../../services/controller/README.md) |
 | Raft API、安全与恢复 | [`../../../vendor/raftz/README.md`](../../../vendor/raftz/README.md), [`../../../vendor/raftz/src/root.zig`](../../../vendor/raftz/src/root.zig) |
@@ -37,11 +37,11 @@
 | Member bootstrap/storage | [`../../../libs/storage-engine/src/v3/member_bootstrap.zig`](../../../libs/storage-engine/src/v3/member_bootstrap.zig), [`../../../libs/storage-engine/src/v3/member.zig`](../../../libs/storage-engine/src/v3/member.zig), [`../../../libs/storage-engine/src/v3/storage.zig`](../../../libs/storage-engine/src/v3/storage.zig) |
 | Provision/authority/member set | [`../../../libs/storage-engine/src/v3/pool_provision.zig`](../../../libs/storage-engine/src/v3/pool_provision.zig), [`../../../libs/storage-engine/src/v3/pool_authority.zig`](../../../libs/storage-engine/src/v3/pool_authority.zig), [`../../../libs/storage-engine/src/v3/pool_member_set.zig`](../../../libs/storage-engine/src/v3/pool_member_set.zig) |
 | Membership/control history | [`../../../libs/storage-engine/src/v3/membership.zig`](../../../libs/storage-engine/src/v3/membership.zig), [`../../../libs/storage-engine/src/v3/pool_replicated_journal.zig`](../../../libs/storage-engine/src/v3/pool_replicated_journal.zig), [`../../../libs/storage-engine/src/v3/control_record.zig`](../../../libs/storage-engine/src/v3/control_record.zig) |
-| Linux device safety/planning | [`../../../services/node/v3/linux_block_device.zig`](../../../services/node/v3/linux_block_device.zig), [`../../../services/node/v3/linux_pool_plan.zig`](../../../services/node/v3/linux_pool_plan.zig) |
+| Linux device safety/planning | [`../../../services/data-node/v3/linux_block_device.zig`](../../../services/data-node/v3/linux_block_device.zig), [`../../../services/data-node/v3/linux_pool_plan.zig`](../../../services/data-node/v3/linux_pool_plan.zig) |
 | Pool data device/storage | [`../../../libs/storage-engine/src/v3/pool_data_device.zig`](../../../libs/storage-engine/src/v3/pool_data_device.zig), [`../../../libs/storage-engine/src/v3/pool_data_storage.zig`](../../../libs/storage-engine/src/v3/pool_data_storage.zig) |
 | Scheduled data/blob layout | [`../../../libs/storage-engine/src/v3/pool_scheduled_data_device.zig`](../../../libs/storage-engine/src/v3/pool_scheduled_data_device.zig), [`../../../libs/storage-engine/src/v3/pool_blob_schedule.zig`](../../../libs/storage-engine/src/v3/pool_blob_schedule.zig) |
-| BlobFilesystem | [`../../../libs/storage-engine/src/blob_filesystem.zig`](../../../libs/storage-engine/src/blob_filesystem.zig), [`../../../services/node/filesystem_target.zig`](../../../services/node/filesystem_target.zig) |
-| FUSE frontend 与 Blob adapter | [`../../../services/node/linux_fuse.zig`](../../../services/node/linux_fuse.zig), [`../../../libs/storage-engine/src/blob_filesystem_adapter.zig`](../../../libs/storage-engine/src/blob_filesystem_adapter.zig) |
+| BlobFilesystem | [`../../../libs/storage-engine/src/blob_filesystem.zig`](../../../libs/storage-engine/src/blob_filesystem.zig), [`../../../services/data-node/filesystem_target.zig`](../../../services/data-node/filesystem_target.zig) |
+| FUSE frontend 与 Blob adapter | [`../../../services/data-node/linux_fuse.zig`](../../../services/data-node/linux_fuse.zig), [`../../../libs/storage-engine/src/blob_filesystem_adapter.zig`](../../../libs/storage-engine/src/blob_filesystem_adapter.zig) |
 | Multi-Volume format | [`../../../docs/v3-multivolume-format.md`](../../../docs/v3-multivolume-format.md) |
 | Catalog Volume/mutation | [`../../../libs/storage-engine/src/v3/pool_catalog_volume.zig`](../../../libs/storage-engine/src/v3/pool_catalog_volume.zig), [`../../../libs/storage-engine/src/v3/pool_catalog_mutation.zig`](../../../libs/storage-engine/src/v3/pool_catalog_mutation.zig) |
 | Catalog graph/store/page | [`../../../libs/storage-engine/src/v3/pool_catalog_graph.zig`](../../../libs/storage-engine/src/v3/pool_catalog_graph.zig), [`../../../libs/storage-engine/src/v3/pool_catalog_store.zig`](../../../libs/storage-engine/src/v3/pool_catalog_store.zig), [`../../../libs/storage-engine/src/v3/pool_catalog_page.zig`](../../../libs/storage-engine/src/v3/pool_catalog_page.zig) |
@@ -51,7 +51,7 @@
 | Shared data-mode geometry | [`../../../libs/storage-engine/src/data_mode_geometry.zig`](../../../libs/storage-engine/src/data_mode_geometry.zig) |
 | Engine v3 root | [`../../../libs/storage-engine/src/v3/root.zig`](../../../libs/storage-engine/src/v3/root.zig) |
 | Legacy v3 compatibility entry | [`../../../libs/storage-engine/src/v3/root.zig`](../../../libs/storage-engine/src/v3/root.zig) |
-| Node module root | [`../../../services/node/node_root.zig`](../../../services/node/node_root.zig) |
+| Data-node module root | [`../../../services/data-node/data_node_root.zig`](../../../services/data-node/data_node_root.zig) |
 | Module boundary gate | [`../../../tests/module_roots.zig`](../../../tests/module_roots.zig) |
 
 `ReplicaEndpoint` 是本地 vtable；v3 control journal 是 Pool control history，二者都不是 Tier 3 Replica protocol。
@@ -60,22 +60,22 @@
 
 | 主题 | 文件 |
 | --- | --- |
-| Product endpoint daemon | [`../../../services/node/endpoint_daemon.zig`](../../../services/node/endpoint_daemon.zig) |
-| Versioned owner-only Unix API | [`../../../services/node/endpoint_control.zig`](../../../services/node/endpoint_control.zig) |
-| Persistent desired state/registry | [`../../../services/node/endpoint_registry.zig`](../../../services/node/endpoint_registry.zig) |
-| Catalog endpoint backend | [`../../../services/node/spdk/catalog_endpoint_backend.zig`](../../../services/node/spdk/catalog_endpoint_backend.zig) |
-| Catalog Volume to NVMf export | [`../../../services/node/spdk/catalog_nvmf_export.zig`](../../../services/node/spdk/catalog_nvmf_export.zig) |
-| Shared iSCSI service/target wrapper | [`../../../services/node/spdk/iscsi_export.zig`](../../../services/node/spdk/iscsi_export.zig), [`../../../services/node/spdk/iscsi_export.c`](../../../services/node/spdk/iscsi_export.c) |
-| Catalog Volume to iSCSI export | [`../../../services/node/spdk/catalog_iscsi_export.zig`](../../../services/node/spdk/catalog_iscsi_export.zig) |
-| Standard NVMf TCP/RDMA export wrapper | [`../../../services/node/spdk/nvmf_tcp_export.zig`](../../../services/node/spdk/nvmf_tcp_export.zig), [`../../../services/node/spdk/nvmf_tcp_export.c`](../../../services/node/spdk/nvmf_tcp_export.c), [`../../../services/node/spdk/nvmf_tcp_export.h`](../../../services/node/spdk/nvmf_tcp_export.h) |
-| Catalog async backend/provider bdev | [`../../../services/node/spdk/catalog_volume_backend.zig`](../../../services/node/spdk/catalog_volume_backend.zig), [`../../../services/node/spdk/provider_bdev.zig`](../../../services/node/spdk/provider_bdev.zig), [`../../../services/node/spdk/bdev_provider.c`](../../../services/node/spdk/bdev_provider.c) |
-| Managed SPDK runtime | [`../../../services/node/spdk/runtime.zig`](../../../services/node/spdk/runtime.zig), [`../../../services/node/spdk/runtime.c`](../../../services/node/spdk/runtime.c) |
-| SPDK bdev storage/dispatcher | [`../../../services/node/spdk/storage.zig`](../../../services/node/spdk/storage.zig), [`../../../services/node/spdk/bdev_dispatcher.c`](../../../services/node/spdk/bdev_dispatcher.c) |
-| SPDK endpoint/provider C ABI | [`../../../services/node/spdk/bdev_endpoint.c`](../../../services/node/spdk/bdev_endpoint.c), [`../../../services/node/spdk/bdev_endpoint.h`](../../../services/node/spdk/bdev_endpoint.h), [`../../../services/node/spdk/bdev_provider.h`](../../../services/node/spdk/bdev_provider.h) |
-| NVMe-oF initiator | [`../../../services/node/spdk/nvme_controller.zig`](../../../services/node/spdk/nvme_controller.zig), [`../../../services/node/spdk/nvme_controller.c`](../../../services/node/spdk/nvme_controller.c) |
+| Product endpoint daemon | [`../../../services/data-node/endpoint_daemon.zig`](../../../services/data-node/endpoint_daemon.zig) |
+| Versioned owner-only Unix API | [`../../../services/data-node/endpoint_control.zig`](../../../services/data-node/endpoint_control.zig) |
+| Persistent desired state/registry | [`../../../services/data-node/endpoint_registry.zig`](../../../services/data-node/endpoint_registry.zig) |
+| Catalog endpoint backend | [`../../../services/data-node/spdk/catalog_endpoint_backend.zig`](../../../services/data-node/spdk/catalog_endpoint_backend.zig) |
+| Catalog Volume to NVMf export | [`../../../services/data-node/spdk/catalog_nvmf_export.zig`](../../../services/data-node/spdk/catalog_nvmf_export.zig) |
+| Shared iSCSI service/target wrapper | [`../../../services/data-node/spdk/iscsi_export.zig`](../../../services/data-node/spdk/iscsi_export.zig), [`../../../services/data-node/spdk/iscsi_export.c`](../../../services/data-node/spdk/iscsi_export.c) |
+| Catalog Volume to iSCSI export | [`../../../services/data-node/spdk/catalog_iscsi_export.zig`](../../../services/data-node/spdk/catalog_iscsi_export.zig) |
+| Standard NVMf TCP/RDMA export wrapper | [`../../../services/data-node/spdk/nvmf_tcp_export.zig`](../../../services/data-node/spdk/nvmf_tcp_export.zig), [`../../../services/data-node/spdk/nvmf_tcp_export.c`](../../../services/data-node/spdk/nvmf_tcp_export.c), [`../../../services/data-node/spdk/nvmf_tcp_export.h`](../../../services/data-node/spdk/nvmf_tcp_export.h) |
+| Catalog async backend/provider bdev | [`../../../services/data-node/spdk/catalog_volume_backend.zig`](../../../services/data-node/spdk/catalog_volume_backend.zig), [`../../../services/data-node/spdk/provider_bdev.zig`](../../../services/data-node/spdk/provider_bdev.zig), [`../../../services/data-node/spdk/bdev_provider.c`](../../../services/data-node/spdk/bdev_provider.c) |
+| Managed SPDK runtime | [`../../../services/data-node/spdk/runtime.zig`](../../../services/data-node/spdk/runtime.zig), [`../../../services/data-node/spdk/runtime.c`](../../../services/data-node/spdk/runtime.c) |
+| SPDK bdev storage/dispatcher | [`../../../services/data-node/spdk/storage.zig`](../../../services/data-node/spdk/storage.zig), [`../../../services/data-node/spdk/bdev_dispatcher.c`](../../../services/data-node/spdk/bdev_dispatcher.c) |
+| SPDK endpoint/provider C ABI | [`../../../services/data-node/spdk/bdev_endpoint.c`](../../../services/data-node/spdk/bdev_endpoint.c), [`../../../services/data-node/spdk/bdev_endpoint.h`](../../../services/data-node/spdk/bdev_endpoint.h), [`../../../services/data-node/spdk/bdev_provider.h`](../../../services/data-node/spdk/bdev_provider.h) |
+| NVMe-oF initiator | [`../../../services/data-node/spdk/nvme_controller.zig`](../../../services/data-node/spdk/nvme_controller.zig), [`../../../services/data-node/spdk/nvme_controller.c`](../../../services/data-node/spdk/nvme_controller.c) |
 | NVMf export tests | [`../../../tests/spdk_nvmf_export.zig`](../../../tests/spdk_nvmf_export.zig), [`../../../tests/spdk-nvmf-fio.sh`](../../../tests/spdk-nvmf-fio.sh), [`../../../tests/automation/nvmf-catalog-fio.yml`](../../../tests/automation/nvmf-catalog-fio.yml) |
 | iSCSI Catalog fio profile | [`../../../tests/spdk-iscsi-fio.sh`](../../../tests/spdk-iscsi-fio.sh), [`../../../tests/automation/iscsi-catalog-fio.yml`](../../../tests/automation/iscsi-catalog-fio.yml) |
-| vhost-user-blk | [`../../../services/node/spdk/catalog_vhost_export.zig`](../../../services/node/spdk/catalog_vhost_export.zig), [`../../../services/node/spdk/vhost_block_export.zig`](../../../services/node/spdk/vhost_block_export.zig) |
+| vhost-user-blk | [`../../../services/data-node/spdk/catalog_vhost_export.zig`](../../../services/data-node/spdk/catalog_vhost_export.zig), [`../../../services/data-node/spdk/vhost_block_export.zig`](../../../services/data-node/spdk/vhost_block_export.zig) |
 | Physical/scheduled Pool gates | [`../../../tests/physical-pool-fio.sh`](../../../tests/physical-pool-fio.sh), [`../../../tests/scheduled-pool-nvmf-fio.sh`](../../../tests/scheduled-pool-nvmf-fio.sh), [`../../../tests/scheduled-blob-pool-fuse-fio.sh`](../../../tests/scheduled-blob-pool-fuse-fio.sh) |
 | Hardware/RDMA NVMf gates | [`../../../tests/automation/nvmf-catalog-optane-fio.yml`](../../../tests/automation/nvmf-catalog-optane-fio.yml), [`../../../tests/automation/nvmf-catalog-rxe-fio.yml`](../../../tests/automation/nvmf-catalog-rxe-fio.yml), [`../../../tests/automation/nvmf-scheduled-pool-rxe-fio.yml`](../../../tests/automation/nvmf-scheduled-pool-rxe-fio.yml) |
 
@@ -87,8 +87,8 @@
 | --- | --- |
 | NFS filesystem abstraction | [`../../../libs/storage-engine/src/nfs_filesystem.zig`](../../../libs/storage-engine/src/nfs_filesystem.zig) |
 | Blob adapter | [`../../../libs/storage-engine/src/nfs_blob_adapter.zig`](../../../libs/storage-engine/src/nfs_blob_adapter.zig) |
-| Stable NFS handle | [`../../../services/node/nfs_handle.zig`](../../../services/node/nfs_handle.zig) |
-| Zig C ABI backend | [`../../../services/node/nfs_backend.zig`](../../../services/node/nfs_backend.zig), [`../../../services/node/nfs_backend.h`](../../../services/node/nfs_backend.h) |
+| Stable NFS handle | [`../../../services/data-node/nfs_handle.zig`](../../../services/data-node/nfs_handle.zig) |
+| Zig C ABI backend | [`../../../services/data-node/nfs_backend.zig`](../../../services/data-node/nfs_backend.zig), [`../../../services/data-node/nfs_backend.h`](../../../services/data-node/nfs_backend.h) |
 | NFS-Ganesha module | [`../../../services/nfs-fsal/README.md`](../../../services/nfs-fsal/README.md), [`../../../services/nfs-fsal/main.c`](../../../services/nfs-fsal/main.c), [`../../../services/nfs-fsal/export.c`](../../../services/nfs-fsal/export.c), [`../../../services/nfs-fsal/handle.c`](../../../services/nfs-fsal/handle.c) |
 | NFSv3 RPC gate | [`../../../tests/nfs-ganesha.sh`](../../../tests/nfs-ganesha.sh), [`../../../tests/automation/blob-pool-nfs-fio.yml`](../../../tests/automation/blob-pool-nfs-fio.yml) |
 

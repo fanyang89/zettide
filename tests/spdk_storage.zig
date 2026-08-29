@@ -1,6 +1,6 @@
 const std = @import("std");
 const storage_engine = @import("zettide_storage");
-const node = @import("zettide_node");
+const data_node = @import("zettide_data_node");
 
 const c = @import("spdk_c");
 
@@ -67,7 +67,7 @@ fn runMain() !void {
         reactor_count -= 1;
     }
     const reactor_mask = std.mem.sliceTo(&reactor_mask_buffer, 0);
-    const runtime_options: node.spdk_runtime.Runtime.Options = .{
+    const runtime_options: data_node.spdk_runtime.Runtime.Options = .{
         .name = "zettide_spdk_storage_test",
         .reactor_mask = reactor_mask,
         .json_data = malloc_bdev_config,
@@ -76,7 +76,7 @@ fn runMain() !void {
         .no_huge = true,
         .disable_cpumask_locks = true,
     };
-    var runtime = try node.spdk_runtime.Runtime.start(context.allocator, runtime_options);
+    var runtime = try data_node.spdk_runtime.Runtime.start(context.allocator, runtime_options);
     defer runtime.deinit();
     if (reactor_count > 1)
         try runtimeStatus(c.zettide_spdk_test_dispatcher_owner_round_robin(
@@ -84,7 +84,7 @@ fn runMain() !void {
             reactor_count,
         ));
     second_runtime: {
-        var unexpected = node.spdk_runtime.Runtime.start(context.allocator, runtime_options) catch |err| {
+        var unexpected = data_node.spdk_runtime.Runtime.start(context.allocator, runtime_options) catch |err| {
             if (err != error.RuntimeBusy) return err;
             break :second_runtime;
         };
@@ -97,8 +97,8 @@ fn runMain() !void {
     runtime.deinit();
 }
 
-fn runControllerTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime) !void {
-    const base_options: node.spdk_nvme_controller.Controller.Options = .{
+fn runControllerTest(context: *TestContext, runtime: *data_node.spdk_runtime.Runtime) !void {
+    const base_options: data_node.spdk_nvme_controller.Controller.Options = .{
         .name = "ZettideRemote",
         .transport_address = "127.0.0.1",
         .transport_service_id = "44219",
@@ -106,7 +106,7 @@ fn runControllerTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime)
         .connect_timeout_us = std.time.us_per_s,
     };
     invalid_options: {
-        var unexpected = node.spdk_nvme_controller.Controller.attach(
+        var unexpected = data_node.spdk_nvme_controller.Controller.attach(
             context.allocator,
             runtime,
             .{
@@ -123,7 +123,7 @@ fn runControllerTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime)
         return error.InvalidControllerOptionsAccepted;
     }
     missing_subsystem: {
-        var unexpected = node.spdk_nvme_controller.Controller.attach(
+        var unexpected = data_node.spdk_nvme_controller.Controller.attach(
             context.allocator,
             runtime,
             .{
@@ -138,7 +138,7 @@ fn runControllerTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime)
         return error.MissingSubsystemAttached;
     }
 
-    var controller = try node.spdk_nvme_controller.Controller.attach(
+    var controller = try data_node.spdk_nvme_controller.Controller.attach(
         context.allocator,
         runtime,
         base_options,
@@ -168,7 +168,7 @@ fn runControllerTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime)
     try storage.close(context.io);
     try controller.detach();
 
-    var truncated = try node.spdk_nvme_controller.Controller.attach(
+    var truncated = try data_node.spdk_nvme_controller.Controller.attach(
         context.allocator,
         runtime,
         .{
@@ -186,7 +186,7 @@ fn runControllerTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime)
     try truncated.detach();
 }
 
-fn runStorageTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime) !void {
+fn runStorageTest(context: *TestContext, runtime: *data_node.spdk_runtime.Runtime) !void {
     const names = [_][]const u8{ "ZettideStorage0", "ZettideStorage1", "ZettideStorage2" };
     try testAsyncReadClose(context, runtime, names[0]);
     var duplicate_storages: [3]storage_engine.v3.storage.Storage = undefined;
@@ -246,7 +246,7 @@ fn runStorageTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime) !v
         .partial => |partial| return partial.cause,
     };
     defer provisioned.deinit();
-    var filesystem = try node.filesystem_target.formatProvisionedBlobPool(
+    var filesystem = try data_node.filesystem_target.formatProvisionedBlobPool(
         context.allocator,
         context.io,
         &provisioned,
@@ -269,7 +269,7 @@ fn runStorageTest(context: *TestContext, runtime: *node.spdk_runtime.Runtime) !v
         &storages,
         .writable,
     );
-    filesystem = try node.filesystem_target.openBlobPoolFilesystem(
+    filesystem = try data_node.filesystem_target.openBlobPoolFilesystem(
         context.allocator,
         context.io,
         &set,
@@ -320,7 +320,7 @@ fn testAsyncReadMany(context: *TestContext, storage: *storage_engine.v3.storage.
 
 fn testAsyncReadClose(
     context: *TestContext,
-    runtime: *node.spdk_runtime.Runtime,
+    runtime: *data_node.spdk_runtime.Runtime,
     name: []const u8,
 ) !void {
     var storage = try runtime.openStorage(context.allocator, name, true);

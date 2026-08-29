@@ -1,13 +1,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const storage_engine = @import("zettide_storage");
-const node = @import("zettide_node");
+const data_node = @import("zettide_data_node");
 
 const Io = std.Io;
 const Device = storage_engine.blob_device.Device;
 const Store = storage_engine.blob_store.Store;
 const format = storage_engine.blob_format;
-const FileIoMode = node.file_storage.Mode;
+const FileIoMode = data_node.file_storage.Mode;
 
 const Operation = enum {
     read,
@@ -57,7 +57,7 @@ pub fn main(init: std.process.Init) !void {
     defer if (file_open) file.close(init.io);
     if (config.operation == .write) try file.setLength(init.io, device_size);
     if (try file.length(init.io) != device_size) return error.InvalidBenchmarkFileSize;
-    const storage = try node.file_storage.initOwned(
+    const storage = try data_node.file_storage.initOwned(
         init.gpa,
         file,
         device_size,
@@ -225,11 +225,11 @@ fn parseArgs(args: []const []const u8) !Config {
         } else if (std.mem.eql(u8, arg, "--size")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
-            result.size = try node.size.parse(args[index]);
+            result.size = try data_node.size.parse(args[index]);
         } else if (std.mem.eql(u8, arg, "--block-size")) {
             index += 1;
             if (index == args.len) return error.MissingArgumentValue;
-            result.block_size = std.math.cast(usize, try node.size.parse(args[index])) orelse
+            result.block_size = std.math.cast(usize, try data_node.size.parse(args[index])) orelse
                 return error.InvalidBlockSize;
         } else if (std.mem.eql(u8, arg, "--batch-depth")) {
             index += 1;

@@ -1,5 +1,5 @@
 const std = @import("std");
-const node = @import("node_data_service");
+const data_node = @import("data_node_service");
 
 const Signals = struct {
     set: std.c.sigset_t,
@@ -37,11 +37,11 @@ pub fn main(init: std.process.Init) !void {
 
     var signals = try Signals.block();
     defer signals.restore();
-    var server = try node.DataServer.init(allocator, init.io, host, port);
+    var server = try data_node.DataNodeServer.init(allocator, init.io, host, port);
     defer server.deinit();
     try server.start();
     const address = try server.localAddress();
-    std.log.info("zettide node service ready address={s}:{d}", .{ address.host, address.port });
+    std.log.info("zettide data-node service ready address={s}:{d}", .{ address.host, address.port });
     try signals.wait();
     server.shutdownGracefully(5 * std.time.ns_per_s);
     server.wait();

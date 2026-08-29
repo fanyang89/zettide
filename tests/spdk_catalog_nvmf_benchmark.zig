@@ -1,6 +1,6 @@
 const std = @import("std");
 const storage_engine = @import("zettide_storage");
-const node = @import("zettide_node");
+const data_node = @import("zettide_data_node");
 
 const c = @import("spdk_c");
 
@@ -153,7 +153,7 @@ fn serveReformatted(
     const expected_pool_id = try parsePoolId(expected_pool_id_text);
     try verifyPoolId(io, allocator, member_path, expected_pool_id);
 
-    const opened = try node.linux_block_device.openStorageOptions(
+    const opened = try data_node.linux_block_device.openStorageOptions(
         io,
         allocator,
         member_path,
@@ -188,7 +188,7 @@ noinline fn verifyPoolId(
     member_path: []const u8,
     expected_pool_id: [16]u8,
 ) !void {
-    const opened = try node.linux_block_device.openStorageOptions(
+    const opened = try data_node.linux_block_device.openStorageOptions(
         io,
         allocator,
         member_path,
@@ -212,7 +212,7 @@ fn serveExisting(
     provision: bool,
 ) !void {
     const expected_pool_id = try parsePoolId(expected_pool_id_text);
-    const opened = try node.linux_block_device.openStorageOptions(
+    const opened = try data_node.linux_block_device.openStorageOptions(
         io,
         allocator,
         member_path,
@@ -291,7 +291,7 @@ fn serve(
         return error.InvalidSpdkFrontend;
     const use_iscsi = std.mem.eql(u8, frontend, "iscsi");
     const transport_text = if (c.getenv("ZETTIDE_NVMF_TRANSPORT")) |value| std.mem.span(value) else "tcp";
-    const transport: node.spdk_nvmf_tcp_export.Transport = if (std.mem.eql(u8, transport_text, "tcp"))
+    const transport: data_node.spdk_nvmf_tcp_export.Transport = if (std.mem.eql(u8, transport_text, "tcp"))
         .tcp
     else if (std.mem.eql(u8, transport_text, "rdma"))
         .rdma
@@ -299,7 +299,7 @@ fn serve(
         return error.InvalidNvmfTransport;
     const traddr = if (c.getenv("ZETTIDE_NVMF_TARGET_ADDR")) |value| std.mem.span(value) else "127.0.0.1";
     const trsvcid = if (c.getenv("ZETTIDE_NVMF_TARGET_PORT")) |value| std.mem.span(value) else "44220";
-    var runtime = try node.spdk_runtime.Runtime.start(allocator, .{
+    var runtime = try data_node.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_catalog_nvmf_benchmark",
         .reactor_mask = reactor_mask,
         .json_data = if (use_iscsi) iscsi_runtime_config else if (transport == .rdma) rdma_runtime_config else runtime_config,
@@ -314,7 +314,7 @@ fn serve(
         const iscsi_port = if (c.getenv("ZETTIDE_ISCSI_TARGET_PORT")) |value| std.mem.span(value) else "3260";
         const initiator_name = if (c.getenv("ZETTIDE_ISCSI_INITIATOR_NAME")) |value| std.mem.span(value) else "ANY";
         const initiator_netmask = if (c.getenv("ZETTIDE_ISCSI_INITIATOR_NETMASK")) |value| std.mem.span(value) else "127.0.0.1/32";
-        var service = try node.spdk_iscsi_export.IscsiService.create(
+        var service = try data_node.spdk_iscsi_export.IscsiService.create(
             allocator,
             &runtime,
             .{
@@ -325,7 +325,7 @@ fn serve(
             },
         );
         defer service.close() catch @panic("failed to close iSCSI service");
-        var iscsi_handle = try node.spdk_catalog_iscsi_export.CatalogIscsiExport.create(
+        var iscsi_handle = try data_node.spdk_catalog_iscsi_export.CatalogIscsiExport.create(
             allocator,
             io,
             &runtime,
@@ -340,7 +340,7 @@ fn serve(
         defer iscsi_handle.close() catch @panic("failed to close Catalog iSCSI export");
         return waitForStop(io, ready_path, signals);
     }
-    var export_handle = try node.spdk_catalog_nvmf_export.CatalogNvmfExport.create(
+    var export_handle = try data_node.spdk_catalog_nvmf_export.CatalogNvmfExport.create(
         allocator,
         io,
         &runtime,

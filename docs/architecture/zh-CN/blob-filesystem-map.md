@@ -271,7 +271,7 @@ Blob-on-Pool test root。
 | `nfs_blob_adapter.zig` | [storage-engine L3 identity adapter](filesystem-api-map.md) | stable handle/identity 语义不同于 path facade |
 | `nfs_filesystem.zig`、`nfs_handle.zig` | NFS contract/value | 不进入 Blob core |
 | `linux_fuse.zig` | FUSE platform adapter | Linux frontend |
-| `filesystem_target.zig` | CLI/node composition | 组合 Pool、Blob、format options、file/device lifecycle |
+| `filesystem_target.zig` | CLI/data-node composition | 组合 Pool、Blob、format options、file/device lifecycle |
 | `dufs_server.zig` | frontend supervisor | process/socket lifecycle |
 
 `metadata.zig` 可被 backend-neutral/NFS contract 复用，但其唯一实现归属仍是 engine filesystem

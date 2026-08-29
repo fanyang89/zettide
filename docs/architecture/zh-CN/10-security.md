@@ -5,7 +5,7 @@
 ## 初始模型
 
 - Management、NVMf、iSCSI、NFS、Raft 与内部 Replica ports 不暴露到公网或不可信租户网络。
-- 只允许受管 virtualization host、NFS client、control voter 和 storage node 访问对应平面。
+- 只允许受管 virtualization host、NFS client、control voter 和 data node 访问对应平面。
 - 主机 root、内核、SPDK/NFS-Ganesha/FUSE 进程与本地介质属于可信计算基。
 - 网络可达、Host NQN、IQN、UID/GID、Node ID 或 service account name 不自动授予权限。
 - 节点加入经过受控 bootstrap；网络可达本身不能注册 Node 或加入 Raft。

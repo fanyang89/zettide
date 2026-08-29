@@ -18,7 +18,7 @@ flowchart LR
     BF --> BP[(Blob Pool members)]
 ```
 
-四个 frontend 都是 Tier 1 基线，但成熟度不同。单 storage node 失效会使其服务不可用。
+四个 frontend 都是 Tier 1 基线，但成熟度不同。单 data node 失效会使其服务不可用。
 
 ## 标准 Host-facing NVMf
 
@@ -61,7 +61,7 @@ Catalog 与 Blob Pool 都应由多个独立物理磁盘组成。当前本地 rep
 
 - Member 数量不直接证明某个 Volume 的 current protection；
 - 在线迁移必须 copy、verify、publish 后才能提升保护；
-- 同一 storage node 内多副本只能覆盖经验证的设备故障；
+- 同一 data node 内多副本只能覆盖经验证的设备故障；
 - 单节点进程、PCIe domain、电源或主机故障仍在共同故障边界内。
 
 当前本地数据路径的具体语义必须与未来 Tier 2/3 保证分开：

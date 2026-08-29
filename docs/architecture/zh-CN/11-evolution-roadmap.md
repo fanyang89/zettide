@@ -39,7 +39,7 @@
 - 实现 NVMf controller connect、namespace identity verification、libvirt attach 与 restart reconciliation。
 - 实现显式 policy/capability 驱动的 iSCSI fallback。
 - 验证 unknown response、duplicate request、controller/session loss、device renumbering 与 interrupted detach。
-- 覆盖同机和独立 storage node E2E。
+- 覆盖同机和独立 data node E2E。
 
 完成标准：NVMf-first create/publish/attach/restart/detach 自动收敛；iSCSI fallback 受管可用；无需手工 `nvme connect`、`iscsiadm` 或填写 `/dev/...`。这是 Tier 1 gate，不放到 Tier 2。
 
@@ -49,7 +49,7 @@
 - 覆盖进程/host restart、路径丢失、Member fault、身份错配和权限失败。
 - 分别验证同机与独立单节点拓扑。
 
-完成标准：Tier 1 matrix 的所有必需项均通过，且同机与独立单节点拓扑的结果可复现。完成后仍只声明单 storage node 能力，不声明 storage HA 或生产可用。
+完成标准：Tier 1 matrix 的所有必需项均通过，且同机与独立单节点拓扑的结果可复现。完成后仍只声明单 data node 能力，不声明 storage HA 或生产可用。
 
 ## Milestone 5：Tier 2 动态 Pool 与治理
 
@@ -111,7 +111,7 @@ CSI 不阻塞 Tier 1/2，也不新增数据 plane。
 - 可达旧 target 先 quiesce/drain session 并撤销 ACL/credential；失联 target 依靠 primary lease 到期和 Replica epoch fencing 阻止旧路径提交。
 - 在新 target 激活 publication generation；adapter 在调用方指定 host 上以同一 Volume/consumer identity reconcile session 与 attachment。
 
-完成标准：pause old primary、promote、resume old primary、storage node loss 和跨 host republish E2E 同时证明不会出现两个可写 primary 或两个有效 exclusive publication generation。VM host 选择和自动 workload restart 不属于该标准。
+完成标准：pause old primary、promote、resume old primary、data node loss 和跨 host republish E2E 同时证明不会出现两个可写 primary 或两个有效 exclusive publication generation。VM host 选择和自动 workload restart 不属于该标准。
 
 ## Milestone 11：Repair 与 Production Admission
 

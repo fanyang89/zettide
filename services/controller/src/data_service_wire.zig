@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const data_service = @import("data_service.zig");
-const pb = @import("node_proto");
+const pb = @import("data_node_proto");
 const reconciler = @import("reconciler.zig");
 const replica_fence = @import("replica_fence.zig");
 

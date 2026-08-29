@@ -1,11 +1,11 @@
 const std = @import("std");
 
 const grpc = @import("grpc_lite");
-const pb = @import("node_proto");
+const pb = @import("data_node_proto");
 const protocol = @import("zettide_data_service_contracts");
 const lease = protocol.primary_lease;
 
-pub const DataServer = struct {
+pub const DataNodeServer = struct {
     state: *State,
     server: grpc.Server,
 
@@ -14,7 +14,7 @@ pub const DataServer = struct {
         io: std.Io,
         host: []const u8,
         port: u16,
-    ) !DataServer {
+    ) !DataNodeServer {
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
         state.* = try State.init(allocator, io);
@@ -27,23 +27,23 @@ pub const DataServer = struct {
         return .{ .state = state, .server = server };
     }
 
-    pub fn start(self: *DataServer) !void {
+    pub fn start(self: *DataNodeServer) !void {
         try self.server.start();
     }
 
-    pub fn localAddress(self: *const DataServer) !grpc.ServerLocalAddress {
+    pub fn localAddress(self: *const DataNodeServer) !grpc.ServerLocalAddress {
         return self.server.localAddress();
     }
 
-    pub fn shutdownGracefully(self: *DataServer, timeout_ns: u64) void {
+    pub fn shutdownGracefully(self: *DataNodeServer, timeout_ns: u64) void {
         self.server.shutdownGracefully(timeout_ns);
     }
 
-    pub fn wait(self: *DataServer) void {
+    pub fn wait(self: *DataNodeServer) void {
         self.server.wait();
     }
 
-    pub fn deinit(self: *DataServer) void {
+    pub fn deinit(self: *DataNodeServer) void {
         const allocator = self.state.allocator;
         self.server.deinit();
         self.state.deinit();
@@ -268,8 +268,8 @@ fn methodPath(comptime method: []const u8) []const u8 {
     return "/zettide.controller.v1.DataService/" ++ method;
 }
 
-test "node service stages and inspects a fresh candidate without claiming readiness" {
-    var service = try DataServer.init(std.testing.allocator, std.testing.io, "127.0.0.1", 0);
+test "data-node service stages and inspects a fresh candidate without claiming readiness" {
+    var service = try DataNodeServer.init(std.testing.allocator, std.testing.io, "127.0.0.1", 0);
     defer service.deinit();
     try service.start();
 

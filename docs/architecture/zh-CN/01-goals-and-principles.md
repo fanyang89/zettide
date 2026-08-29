@@ -7,13 +7,13 @@
 ### Tier 1：单节点多盘接管
 
 - 一个 Zettide 节点独占管理多个独立物理磁盘。
-- 同时支持同机虚拟化宿主机与独立 storage node 两种拓扑。
+- 同时支持同机虚拟化宿主机与独立 data node 两种拓扑。
 - Catalog Volume 通过标准 NVMf TCP/RDMA 首选发布，iSCSI 提供兼容 fallback。
 - BlobFilesystem 通过 NFS 提供网络文件系统，通过 FUSE 提供本地文件系统。
 - qtr 原生 managed backend 完成 NVMf-first、iSCSI fallback 的幂等 attachment lifecycle。
 - 四前端均以真实多物理盘 Pool 通过准入；单文件或单盘仅作为辅助路径。
 
-Tier 1 不承诺 storage node 故障后的服务连续性。它的故障边界是单个 storage node 及其介质，局部多盘保护只能覆盖经 profile 验证的设备故障。
+Tier 1 不承诺 data node 故障后的服务连续性。它的故障边界是单个 data node 及其介质，局部多盘保护只能覆盖经 profile 验证的设备故障。
 
 ### Tier 2：在线演进与服务治理
 
@@ -25,7 +25,7 @@ Tier 1 不承诺 storage node 故障后的服务连续性。它的故障边界�
 
 ### Tier 3：跨节点高可用
 
-- 默认三个 Replica 跨 storage node 故障域放置，2/3 持久提交。
+- 默认三个 Replica 跨 data node 故障域放置，2/3 持久提交。
 - 每个可写 Volume 只有一个 primary，并由 lease 与 write epoch fencing。
 - `zettide-controller` 通过 Raft 保存权威元数据。
 - 内部 vendor-specific Replica NVMf transport 承载带 epoch/sequence/commit evidence 的复制 I/O。
@@ -95,7 +95,7 @@ TLS server authentication、Host NQN、CHAP name、UID/GID、Node ID 和 CSI ser
 - 多主写同一 Volume。
 - 让 CSI 定义独立数据面或一致性语义。
 - 由存储系统自动选择 VM host、迁移或重启 VM。
-- 在 Tier 1/2 抵抗整个 storage node 故障。
+- 在 Tier 1/2 抵抗整个 data node 故障。
 - 跨地域同步复制。
 - 纠删码数据路径。
 - 让每次数据 I/O 经过 Raft。

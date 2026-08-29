@@ -2,7 +2,7 @@
 
 - 状态：Accepted
 - 范围：Zettide storage repository 的数据模型、frontend、Tier、组件 ownership 与外部消费者边界
-- 前置决策：[0001：存储节点命名与进程模型](0001-storage-node-naming-and-process-model.md)、
+- 前置决策：[0001：Data Node 命名与进程模型](0001-data-node-naming-and-process-model.md)、
   [0002：首轮提取后保持单一 Storage Engine Package](0002-keep-storage-engine-cohesive.md)
 
 ## 背景
@@ -33,12 +33,12 @@ NFS 与 FUSE 同样不能通过路径名称替代 BlobFilesystem identity 和 wr
 
 ### 2. Tier 是累积产品能力
 
-- **Tier 1**：一个 Zettide storage node 独占接管多块独立物理盘，在同机或独立节点部署中提供
+- **Tier 1**：一个 Zettide data node 独占接管多块独立物理盘，在同机或独立节点部署中提供
   Catalog 与 Blob 两种数据路径。四个基线 frontend 是 NVMf、iSCSI、NFS 和 FUSE。虚拟化的
   managed NVMf-first、iSCSI-fallback attachment 是 Tier 1 完成门槛。
 - **Tier 2**：在 Tier 1 上增加动态 Pool membership、可恢复在线容量/保护迁移、multi-Volume
   服务治理和更完整的 publication/attachment lifecycle。
-- **Tier 3**：增加跨 storage node Replica、持久多数派提交、lease/epoch fencing、storage
+- **Tier 3**：增加跨 data node Replica、持久多数派提交、lease/epoch fencing、storage
   failover、repair 和 caller-directed republish。
 
 独立单节点部署仍属于 Tier 1，不因使用网络 frontend 自动成为 Tier 3。单文件、单盘、loop、
@@ -57,13 +57,13 @@ transport 是独立协议，需要 Zettide write epoch、sequence、generation �
 | 路径/产物 | 固定职责 |
 | --- | --- |
 | `libs/storage-engine/` / `zettide_storage` | 进程内 backend-neutral storage engine、持久格式、Pool/Member/Catalog、Blob/BlobFilesystem 和 filesystem ports |
-| `services/node/` / `zettide-node` | data-node product composition、DataService、Pool/endpoint reconciliation、Linux/SPDK/protocol adapters |
+| `services/data-node/` / `zettide-data-node` | data-node product composition、DataService、Pool/endpoint reconciliation、Linux/SPDK/protocol adapters |
 | `zettide` | operator-owned offline/foreground CLI；保留 format/check/inspect、foreground FUSE/dufs 和迁移期 endpoint compatibility |
 | `services/controller/` / `zettide-controller` | Raft 权威元数据、placement/reconciliation/fencing 控制面 |
 | `services/csi/` | Kubernetes CSI lifecycle adapter；不得定义新的数据格式或一致性模型 |
 | `services/nfs-fsal/` | 独立 NFS-Ganesha 进程加载的 FSAL adapter |
 | `libs/txfs/` | conditional-write shared-file engine；不替代 Catalog Volume block publication |
-| `libs/data-service-contracts/` | controller/node 共享 RPC 与 authority/fencing contract；不依赖 storage engine |
+| `libs/data-service-contracts/` | controller/data-node 共享 RPC 与 authority/fencing contract；不依赖 storage engine |
 
 一个 writable Pool、Catalog、endpoint 或 SPDK runtime 在同一时刻只能有一个进程 owner。
 `zettide_storage` 不启动 socket、不解析产品 CLI、不处理进程信号，也不依赖 controller、CSI、SPDK、
@@ -79,7 +79,7 @@ Export、generation、locator 和错误契约，但不在本仓库维护 qtr/etz
 - block 请求映射 Catalog Volume 和 NVMf/iSCSI；
 - filesystem 请求映射 BlobFilesystem 和 NFS/FUSE；
 - 只有已经实现并验证的 capability 可以对 Kubernetes 广告；
-- CSI handle、Node 名称、service account、mount path 或 `/dev/...` 都不能替代 Zettide resource identity。
+- CSI handle、Data Node 名称、service account、mount path 或 `/dev/...` 都不能替代 Zettide resource identity。
 
 计算调度、VM 自动重启、Pod 重调度、Web UI、计费和覆盖网络不属于 storage repository。
 Tier 3 republish 只把 storage publication 激活到调用方指定的 host，不选择 host 或重启 workload。

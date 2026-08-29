@@ -45,7 +45,7 @@ Volume lifecycle、availability 和 operation phase 分开报告。默认 3/2 pr
 | 在线迁移中断 | 未验证目标不计入保护；按 phase 重试或回滚 | migration ID、generation、copy/verify boundary |
 | 整个 Zettide node 失效 | 所有本节点 frontend 不可用 | 恢复原节点；Tier 1/2 不承诺 storage failover |
 
-同机部署中，虚拟化 host 故障与 Zettide node 故障是同一主机故障域；独立节点部署中，host 与 storage node 分离，但 storage node 仍是单点。
+同机部署中，虚拟化 host 故障与 Zettide node 故障是同一主机故障域；独立节点部署中，host 与 data node 分离，但 data node 仍是单点。
 
 ## Protocol Recovery
 
@@ -78,7 +78,7 @@ flowchart TD
     K --> L[Reconnect selected host]
 ```
 
-Primary failover 与 host publication recovery 是独立步骤。仅 host path 故障不必切换 primary；storage node loss 通常同时触发 Volume epoch 与 publication generation barrier。
+Primary failover 与 host publication recovery 是独立步骤。仅 host path 故障不必切换 primary；data node loss 通常同时触发 Volume epoch 与 publication generation barrier。
 
 ## Tier 3 故障矩阵
 
@@ -137,7 +137,7 @@ Candidate 必须属于当前 placement、registration 有效且未管理隔离�
 
 ## RPO/RTO
 
-Tier 1/2 只按当前 frontend、Pool protection 与 durability gate 声明保证，不承诺 storage node failover。Tier 3 目标中，Raft quorum 已提交 metadata 与默认 3/2 quorum 已确认 data 在单 Replica 故障下目标 RPO 为零。
+Tier 1/2 只按当前 frontend、Pool protection 与 durability gate 声明保证，不承诺 data node failover。Tier 3 目标中，Raft quorum 已提交 metadata 与默认 3/2 quorum 已确认 data 在单 Replica 故障下目标 RPO 为零。
 
 响应丢失的 write 可能已提交：certificate 已在两个 payload holder 持久化时必须保留，客户端应以原 identity 查询/重试；没有 quorum evidence 的单副本或 prepare-only 尾部不受保护。Recovery quorum 观察到一份 candidate 时结果为 unknown，并在 write-back 后保留。Tier 3 同时永久丢失两个 Replica 超出默认单故障保证。
 

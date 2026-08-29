@@ -19,7 +19,7 @@ pub fn add(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     storage_engine: *std.Build.Module,
-    node_module: *std.Build.Module,
+    data_node_module: *std.Build.Module,
     exe: *std.Build.Step.Compile,
 ) Result {
     const fuse_test_mode = b.option(FuseTestMode, "fuse-tests", "FUSE tests: off, auto, or required") orelse .auto;
@@ -36,7 +36,7 @@ pub fn add(
     cli_step.dependOn(&cli_test_cmd.step);
 
     const linux_block_probe = if (target.result.os.tag == .linux)
-        support.createLinuxBlockProbe(b, target, optimize, storage_engine, node_module)
+        support.createLinuxBlockProbe(b, target, optimize, storage_engine, data_node_module)
     else
         null;
     const linux_block_test_cmd = b.addSystemCommand(&.{ "bash", "tests/linux-block.sh" });
@@ -64,7 +64,7 @@ pub fn add(
     const spdk_provider_step = b.step("test-spdk-provider", "Run the asynchronous SPDK bdev provider test");
     spdk_provider_step.dependOn(&spdk_provider_cmd.step);
 
-    const spdk_vhost_export_test = support.createSpdkVhostExportTest(b, target, optimize, storage_engine, node_module);
+    const spdk_vhost_export_test = support.createSpdkVhostExportTest(b, target, optimize, storage_engine, data_node_module);
     const spdk_vhost_cmd = b.addSystemCommand(&.{ "bash", "tests/spdk-vhost-blk-controller.sh" });
     spdk_vhost_cmd.addArtifactArg(spdk_vhost_export_test);
     const spdk_vhost_step = b.step("test-spdk-vhost-blk-controller", "Run the SPDK vhost-blk controller test");
@@ -75,8 +75,8 @@ pub fn add(
     const spdk_daemon_step = b.step("test-spdk-daemon", "Run the SPDK endpoint daemon lifecycle test");
     spdk_daemon_step.dependOn(&spdk_daemon_cmd.step);
 
-    const spdk_storage_test = support.createSpdkStorageTest(b, target, optimize, storage_engine, node_module);
-    const spdk_nvmf_export_test = support.createSpdkNvmfExportTest(b, target, optimize, storage_engine, node_module);
+    const spdk_storage_test = support.createSpdkStorageTest(b, target, optimize, storage_engine, data_node_module);
+    const spdk_nvmf_export_test = support.createSpdkNvmfExportTest(b, target, optimize, storage_engine, data_node_module);
     const spdk_storage_cmd = b.addSystemCommand(&.{ "bash", "tests/spdk-storage.sh" });
     spdk_storage_cmd.addArtifactArg(spdk_storage_test);
     spdk_storage_cmd.addArtifactArg(spdk_nvmf_export_test);

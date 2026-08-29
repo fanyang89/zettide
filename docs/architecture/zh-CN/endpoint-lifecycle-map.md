@@ -1,27 +1,27 @@
 # Endpoint Lifecycle 与 Daemon 归属
 
-> 状态：endpoint 源码已归 `services/node/` 并由 `zettide_node` 导出；Registry 与 DataService 的单 NodeContext actor ownership 待完成
+> 状态：endpoint 源码已归 `services/data-node/` 并由 `zettide_data_node` 导出；Registry 与 DataService 的单 DataNodeContext actor ownership 待完成
 
 本文细化 managed block endpoint 的 desired/observed lifecycle。SPDK export implementation 见
 [SPDK Backend 与 Export 归属](spdk-adapter-export-map.md)，进程命名与最终 owner 见
-[ADR-0001](../../decisions/0001-storage-node-naming-and-process-model.md)。
+[ADR-0001](../../decisions/0001-data-node-naming-and-process-model.md)。
 
 ## 结论
 
-1. `endpoint_registry.zig` 是 node-local endpoint lifecycle state machine，属于 `services/node/`，不属于
+1. `endpoint_registry.zig` 是 data-node-local endpoint lifecycle state machine，属于 `services/data-node/`，不属于
    storage engine，也不属于 SPDK wrapper 本身。
 2. `endpoint_control.zig` 是 Linux owner-only Unix socket compatibility API。它与 DataService 不同，
    不得成为第二套长期产品控制面。
 3. `endpoint_daemon.zig` 是当前过渡 composition；其 SPDK runtime、registry、control server、signal 和
-   teardown 逻辑最终合并进单个 `zettide-node`。
-4. `zettide endpoint serve` 在 node parity 之前保留 CLI、参数和 socket behavior；移除或转发需单独
+   teardown 逻辑最终合并进单个 `zettide-data-node`。
+4. `zettide endpoint serve` 在 data-node parity 之前保留 CLI、参数和 socket behavior；移除或转发需单独
    compatibility decision 和 release note。
 5. desired state 必须在 runtime start 前 durable；release 必须在 runtime stop 前 durable。observed
    runtime handle 和 locator 不写入 state file，process restart 后统一 reconcile。
-6. 一个 Registry 只允许单 owner 串行调用。DataService、local socket 和 shutdown 必须汇入同一个 node
+6. 一个 Registry 只允许单 owner 串行调用。DataService、local socket 和 shutdown 必须汇入同一个 data-node
    actor/serialization boundary，不能各自持有 Registry。
 7. 当前“一 Pool 一个 endpoint”是为避免每个 endpoint 重复 writable-open Pool 的安全限制，不是长期
-   domain invariant。引入 node-owned shared Pool manager 前不得放宽。
+   domain invariant。引入 data-node-owned shared Pool manager 前不得放宽。
 8. current DataService proto 没有 endpoint RPC。迁移不能假装 local Unix API 已成为 controller API；
    managed endpoint contract 必须单独演进。
 
@@ -31,12 +31,12 @@
 flowchart TD
     CONTROLLER[zettide-controller]
     DATASVC[DataService boundary]
-    NODE[zettide-node process]
-    ACTOR[Node lifecycle actor]
+    NODE[zettide-data-node process]
+    ACTOR[Data Node lifecycle actor]
     REG[Endpoint Registry]
     STORE[DesiredStore]
     LOCAL[owner-only local API]
-    POOLS[Node Pool manager]
+    POOLS[Data Node Pool manager]
     SPDK[SPDK endpoint backend]
     OBS[Runtime instance + locator]
     CLI[zettide compatibility client/entry]
@@ -58,7 +58,7 @@ flowchart TD
 - storage engine import endpoint Spec、Locator、DesiredStore、Unix socket 或 daemon code；
 - endpoint registry import SPDK concrete implementation；它只能依赖 Backend port；
 - DataService thread 和 control socket thread 并发直接调用 Registry；
-- node 与 compatibility endpoint daemon 同时打开同一 writable Pool；
+- data-node 与 compatibility endpoint daemon 同时打开同一 writable Pool；
 - local `endpoints.state` 与 controller desired state 各自驱动独立 Registry；
 - 将 runtime locator、SPDK handle 或 process-local pointer 持久化；
 - release 先 stop runtime、后删除 desired state；
@@ -69,16 +69,16 @@ flowchart TD
 
 | 当前文件 | 首轮目标归属 | 职责 |
 | --- | --- | --- |
-| `services/node/endpoint_registry.zig` | `services/node` endpoint domain | Spec/value、DesiredStore port、Backend port、Registry state machine、FileStore |
-| `services/node/endpoint_control.zig` | `services/node` Linux compatibility adapter | versioned Unix API、same-UID auth、single request server/client helpers |
-| `services/node/endpoint_daemon.zig` | `services/node` composition | CLI option migration、SPDK runtime/services、PoolSource、registry/server/signal lifecycle |
-| `services/node/spdk/catalog_endpoint_backend.zig` | node SPDK Backend implementation | authenticated Pool + Catalog export + locator |
-| `services/node/main.zig` endpoint branch | `zettide` compatibility entry | 迁移期调用 node endpoint composition |
-| `services/node/node_main.zig` | 目标 `zettide-node` entry | 当前只有 DataService；后续接管 endpoint composition |
-| `services/node/node_data_service.zig` | node DataService adapter | 当前无 endpoint RPC；不得直接拥有第二个 Registry |
+| `services/data-node/endpoint_registry.zig` | `services/data-node` endpoint domain | Spec/value、DesiredStore port、Backend port、Registry state machine、FileStore |
+| `services/data-node/endpoint_control.zig` | `services/data-node` Linux compatibility adapter | versioned Unix API、same-UID auth、single request server/client helpers |
+| `services/data-node/endpoint_daemon.zig` | `services/data-node` composition | CLI option migration、SPDK runtime/services、PoolSource、registry/server/signal lifecycle |
+| `services/data-node/spdk/catalog_endpoint_backend.zig` | data-node SPDK Backend implementation | authenticated Pool + Catalog export + locator |
+| `services/data-node/main.zig` endpoint branch | `zettide` compatibility entry | 迁移期调用 data-node endpoint composition |
+| `services/data-node/data_node_main.zig` | 目标 `zettide-data-node` entry | 当前只有 DataService；后续接管 endpoint composition |
+| `services/data-node/data_node_service.zig` | data-node DataService adapter | 当前无 endpoint RPC；不得直接拥有第二个 Registry |
 
-`Frontend`、`Spec`、`Locator` 是 node endpoint values，不导出自 `zettide_storage`。PoolId/VolumeId 虽与
-engine identity byte width 相同，也必须通过 node composition 验证 authenticated authority，不能只靠
+`Frontend`、`Spec`、`Locator` 是 data-node endpoint values，不导出自 `zettide_storage`。PoolId/VolumeId 虽与
+engine identity byte width 相同，也必须通过 data-node composition 验证 authenticated authority，不能只靠
 类型别名宣称合法。
 
 ## Endpoint value contract
@@ -180,7 +180,7 @@ shutdown：
 - 不修改 DesiredStore；
 - 只有所有 runtime handle 都清除后才能 Registry.deinit。
 
-node shutdown 不能在 registry shutdown 失败后继续销毁 SPDK runtime/Pool manager；必须 retry、报告
+data-node shutdown 不能在 registry shutdown 失败后继续销毁 SPDK runtime/Pool manager；必须 retry、报告
 fatal drain failure 或保持 process alive，不能制造 dangling handles。
 
 ## 当前“一 Pool 一个 endpoint”限制
@@ -189,9 +189,9 @@ Registry init 和 ensure 会拒绝重复 Pool ID，即便 Volume ID 不同。这
 `CatalogEndpointBackend` 每个 endpoint 都独立 open/close `PoolMemberSet` 相匹配，避免同一 Pool 被重复
 writable-open。
 
-目标 node 可以管理多个 Pool/Volume，但放宽为同 Pool 多 endpoint 前必须先引入：
+目标 data-node 可以管理多个 Pool/Volume，但放宽为同 Pool 多 endpoint 前必须先引入：
 
-- node-owned、按 authenticated Pool ID 索引的 shared Pool owner；
+- data-node-owned、按 authenticated Pool ID 索引的 shared Pool owner；
 - endpoint 获取的 borrowed Pool/Catalog lease；
 - Volume 级别 publication conflict 规则；
 - endpoint stop 不关闭仍被其他 endpoint 使用的 Pool；
@@ -201,7 +201,7 @@ writable-open。
 
 ## Desired-state FileStore format
 
-`endpoints.state` 是 node runtime state format，不是 Pool/Blob 磁盘格式，但仍是 restart compatibility API。
+`endpoints.state` 是 data-node runtime state format，不是 Pool/Blob 磁盘格式，但仍是 restart compatibility API。
 
 ### Header
 
@@ -242,7 +242,7 @@ FileNotFound 等价 empty desired state。不得原地覆写、仅 rename 不 sy
 成功后再补写 state。
 
 当 managed controller 成为 desired-state source 时，必须明确这份文件的角色：作为同一 Registry 的
-node-local durable cache/journal，或由新的 authoritative store 替代。不能让 controller view 与本地 file
+data-node-local durable cache/journal，或由新的 authoritative store 替代。不能让 controller view 与本地 file
 各自独立接受 mutation。
 
 ## Local control protocol v1
@@ -301,7 +301,7 @@ control server 是 owner-only local API：
 - stop shutdown listener 和 active client，join thread 后才关闭 fd/lock；
 - deinit 只删除 inode 仍匹配自己创建的 socket，避免删除 replacement entry。
 
-Registry、runtime directory handle 和 allocator 必须比 Server 活得更久。node 内加入 DataService 后，不能让
+Registry、runtime directory handle 和 allocator 必须比 Server 活得更久。data-node 内加入 DataService 后，不能让
 local Server 继续直接调用 Registry 而 DataService 也直接调用；两者都应投递到同一 actor。
 
 ## Current daemon composition
@@ -337,16 +337,16 @@ CLI/runtime options 当前包括：
 - NVMe-oF TCP/RDMA listen address/service、host NQN 或 allow-any-host policy；
 - iSCSI listen address/service、initiator policy 和 netmask。
 
-这些参数属于 `zettide endpoint serve` compatibility surface，不直接成为 storage-engine options。node config
-可以采用不同 representation，但兼容入口必须转换到同一 validated node config。
+这些参数属于 `zettide endpoint serve` compatibility surface，不直接成为 storage-engine options。data-node config
+可以采用不同 representation，但兼容入口必须转换到同一 validated data-node config。
 
-## 合并到 zettide-node
+## 合并到 zettide-data-node
 
-当前 `node_main.zig` 只启动 DataService，`node_data_service.zig` 只实现 holder/primary authority prototype，
+当前 `data_node_main.zig` 只启动 DataService，`data_node_service.zig` 只实现 holder/primary authority prototype，
 且两者尚未接入根 build；它们没有 endpoint RPC 或 SPDK owner。完整产品边界见
-[CLI 与 Node 产品 Composition 归属](cli-node-composition-map.md)。
+[CLI 与 Data Node 产品 Composition 归属](cli-data-node-composition-map.md)。
 
-目标不是让 node 启动一个 endpoint child daemon，而是在同一 process composition 中：
+目标不是让 data-node 启动一个 endpoint child daemon，而是在同一 process composition 中：
 
 - 一个 signal/shutdown owner；
 - 一个 SPDK runtime；
@@ -356,7 +356,7 @@ CLI/runtime options 当前包括：
 - shared protocol services；
 - deterministic startup/reconcile/drain ordering。
 
-DataService 是 controller 到 node 的长期管理边界。由于当前 proto 无 endpoint methods，接通 managed
+DataService 是 controller 到 data-node 的长期管理边界。由于当前 proto 无 endpoint methods，接通 managed
 endpoint 前需要单独 contract plan，至少定义：
 
 - idempotent ensure/release operation identity；
@@ -364,7 +364,7 @@ endpoint 前需要单独 contract plan，至少定义：
 - Endpoint/Pool/Volume authenticated IDs；
 - requested frontend/options/access policy；
 - observed state、typed locator 和 retryable failure；
-- controller restart/node restart reconciliation；
+- controller restart/data-node restart reconciliation；
 - fencing/ownership error。
 
 在该 contract 可用前，local Unix v1 API 继续服务 compatibility path；它不能被 controller 当作跨主机 API。
@@ -375,14 +375,14 @@ endpoint 前需要单独 contract plan，至少定义：
 | --- | --- | --- |
 | endpoint registry unit root | std、CRC32C、fake store/backend | SPDK、Unix socket、storage engine |
 | endpoint control Linux root | registry public API、Linux socket | SPDK concrete backend、engine |
-| node SPDK endpoint backend | registry Backend values、SPDK module、public storage facade | CLI mega-module |
-| zettide-node | DataService、registry actor、node config、SPDK composition | FUSE/dufs/NFS-Ganesha |
-| zettide compatibility command | node endpoint config/composition adapter | independent authoritative state |
+| data-node SPDK endpoint backend | registry Backend values、SPDK module、public storage facade | CLI mega-module |
+| zettide-data-node | DataService、registry actor、data-node config、SPDK composition | FUSE/dufs/NFS-Ganesha |
+| zettide compatibility command | data-node endpoint config/composition adapter | independent authoritative state |
 | portable storage engine tests | none | endpoint registry/control/daemon |
 
-当前 `endpoint_registry` 只由 `zettide_node` 与 compatibility CLI facade 导出，不进入
+当前 `endpoint_registry` 只由 `zettide_data_node` 与 compatibility CLI facade 导出，不进入
 `zettide_storage`；tests/benchmarks 也不再通过 legacy facade 获取它。CRC32C 复用 engine package
-提供的共享 module instance；Unix/Linux 与 SPDK dependencies 留在 node/control/backend targets。
+提供的共享 module instance；Unix/Linux 与 SPDK dependencies 留在 data-node/control/backend targets。
 
 ## 测试迁移矩阵
 
@@ -395,7 +395,7 @@ endpoint 前需要单独 contract plan，至少定义：
 | Control security | runtime-dir owner/mode、same UID、lock contention、stale socket/inode protection |
 | SPDK endpoint backend | Pool identity、export rollback、locator、retryable close ordering |
 | daemon integration | ready/socket/lock、SIGTERM、restart reconcile、no leaked bdev/listener/socket |
-| node integration | DataService + local adapter serialization、one runtime/Pool owner、ordered shutdown |
+| data-node integration | DataService + local adapter serialization、one runtime/Pool owner、ordered shutdown |
 | crash tests | ensure persistence window、release persistence window、state corruption、process kill/restart |
 
 现有 `test-spdk-daemon` 只覆盖无 endpoint 配置的 ready/SIGTERM/socket cleanup。迁移时保留该 smoke gate，
@@ -404,14 +404,14 @@ unit fake Backend。
 
 ## 剩余边界工作
 
-- [ ] 将 registry、control adapter 和 process composition 分成独立 node module roots；
+- [ ] 将 registry、control adapter 和 process composition 分成独立 data-node module roots；
 - [ ] Registry 只依赖 Backend/DesiredStore ports，不 import SPDK；
-- [ ] endpoint control server 改为向同一 node actor 提交请求；
+- [ ] endpoint control server 改为向同一 data-node actor 提交请求；
 - [ ] `endpoints.state` v1/v2 golden 和 corruption tests 随文件迁移；
-- [ ] SPDK endpoint backend 借用 node-owned Pool manager 后再放宽“一 Pool 一 endpoint”限制；
+- [ ] SPDK endpoint backend 借用 data-node-owned Pool manager 后再放宽“一 Pool 一 endpoint”限制；
 - [ ] 合并 endpoint daemon 与 DataService 的 signal/runtime/shutdown owner；
 - [ ] 为 managed endpoint 设计 DataService contract，而不是复用 local Unix socket；
-- [ ] `zettide endpoint serve` 保留兼容 wrapper 直到 node parity 和 release decision；
+- [ ] `zettide endpoint serve` 保留兼容 wrapper 直到 data-node parity 和 release decision；
 - [ ] build/test roots 移除 engine 对 endpoint/Unix/SPDK 的隐式依赖；
 - [ ] 增加 restart/crash/reconcile 和 multi-endpoint shared-Pool coverage。
 

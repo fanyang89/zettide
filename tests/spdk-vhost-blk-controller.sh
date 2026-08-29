@@ -40,8 +40,8 @@ done
 
 # SPDK modules register through constructors and must not be dropped as unused.
 # shellcheck disable=SC2046
-"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/node \
-	services/node/spdk/runtime.c services/node/spdk/vhost_blk_controller.c tests/spdk_vhost_blk_controller.c \
+"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/data-node \
+	services/data-node/spdk/runtime.c services/data-node/spdk/vhost_blk_controller.c tests/spdk_vhost_blk_controller.c \
 	-o "$build_dir/zettide-spdk-vhost-blk-controller-test" -pthread \
 	-Wl,--no-as-needed \
 	$(pkg-config --cflags --libs "${packages[@]}") \
@@ -50,9 +50,9 @@ LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 	timeout 30 "$build_dir/zettide-spdk-vhost-blk-controller-test" "$socket_dir"
 
 # shellcheck disable=SC2046
-"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/node \
-	services/node/spdk/runtime.c services/node/spdk/bdev_provider.c services/node/spdk/nvmf_tcp_export.c \
-	services/node/spdk/vhost_blk_controller.c \
+"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/data-node \
+	services/data-node/spdk/runtime.c services/data-node/spdk/bdev_provider.c services/data-node/spdk/nvmf_tcp_export.c \
+	services/data-node/spdk/vhost_blk_controller.c \
 	tests/spdk_vhost_export_main.c "$1" \
 	-o "$build_dir/zettide-spdk-vhost-export-test" -pthread -lubsan -lstdc++ \
 	-Wl,--no-as-needed \

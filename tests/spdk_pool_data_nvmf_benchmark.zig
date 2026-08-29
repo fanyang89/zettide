@@ -1,6 +1,6 @@
 const std = @import("std");
 const storage_engine = @import("zettide_storage");
-const node = @import("zettide_node");
+const data_node = @import("zettide_data_node");
 const args = @import("spdk_pool_data_nvmf_args.zig");
 const synthetic_storage = @import("spdk_pool_data_synthetic_storage.zig");
 
@@ -456,7 +456,7 @@ fn run(
     else
         null;
     const transport_text = if (c.getenv("ZETTIDE_NVMF_TRANSPORT")) |value| std.mem.span(value) else "tcp";
-    const transport: ?node.spdk_nvmf_tcp_export.Transport = if (frontend == .nvmf)
+    const transport: ?data_node.spdk_nvmf_tcp_export.Transport = if (frontend == .nvmf)
         if (std.mem.eql(u8, transport_text, "tcp"))
             .tcp
         else if (std.mem.eql(u8, transport_text, "rdma"))
@@ -491,7 +491,7 @@ fn run(
     const preparation_mode = try args.parsePreparationMode(
         if (c.getenv("ZETTIDE_POOL_DATA_PREPARATION_MODE")) |value| std.mem.span(value) else null,
     );
-    const raw_storage_mode = try node.linux_block_device.TransportMode.parse(
+    const raw_storage_mode = try data_node.linux_block_device.TransportMode.parse(
         if (c.getenv("ZETTIDE_POOL_DATA_RAW_TRANSPORT")) |value| std.mem.span(value) else "auto",
     );
     const sqpoll_cpu_base = try args.parseOptionalCpuBase(
@@ -599,7 +599,7 @@ fn run(
         sqpoll_cpu_base,
         threaded_concurrency,
     });
-    var runtime = try node.spdk_runtime.Runtime.start(allocator, .{
+    var runtime = try data_node.spdk_runtime.Runtime.start(allocator, .{
         .name = "zettide_spdk_pool_data_nvmf_benchmark",
         .reactor_mask = reactor_mask,
         .json_data = selected_runtime_config,
@@ -699,7 +699,7 @@ fn run(
         }
         if (window_specs.len == 0) {
             for (device_paths[0..device_count], member_storages[0..device_count], 0..) |device_path_z, *storage, index| {
-                const opened = try node.linux_block_device.openStorageOptionsModeAffinity(
+                const opened = try data_node.linux_block_device.openStorageOptionsModeAffinity(
                     io,
                     allocator,
                     std.mem.span(device_path_z),
@@ -714,7 +714,7 @@ fn run(
         } else {
             for (device_paths[0..device_count], physical_storages[0..device_count], 0..) |device_path_z, *storage, index| {
                 storage.* = switch (storage_transport) {
-                    .linux => (try node.linux_block_device.openStorageOptionsModeAffinity(
+                    .linux => (try data_node.linux_block_device.openStorageOptionsModeAffinity(
                         io,
                         allocator,
                         std.mem.span(device_path_z),
@@ -839,7 +839,7 @@ fn run(
             std.debug.print("target-stage worker start\n", .{});
             const worker = try Worker.create(io, &pool_storage, concurrent_group_count, false);
             defer worker.close();
-            const backend: node.spdk_vhost_block_export.Backend = .{
+            const backend: data_node.spdk_vhost_block_export.Backend = .{
                 .context = worker,
                 .submit = submit_callback,
                 .block_count = pool_storage.capacity() / block_size,
@@ -847,7 +847,7 @@ fn run(
             };
             std.debug.print("target-stage worker ready\n", .{});
             std.debug.print("target-stage provider start\n", .{});
-            var provider = try node.spdk_provider_bdev.ProviderBdev.create(
+            var provider = try data_node.spdk_provider_bdev.ProviderBdev.create(
                 allocator,
                 runtime_handle,
                 backend,
@@ -856,7 +856,7 @@ fn run(
             defer provider.close() catch @panic("failed to unregister Pool data provider bdev");
             std.debug.print("target-stage provider ready\n", .{});
             std.debug.print("target-stage export start frontend=nvmf transport={s} traddr={s} trsvcid={s}\n", .{ transport_text, traddr, trsvcid });
-            var export_handle = try node.spdk_nvmf_tcp_export.NvmfTcpExport.create(
+            var export_handle = try data_node.spdk_nvmf_tcp_export.NvmfTcpExport.create(
                 allocator,
                 runtime_handle,
                 .{
@@ -883,7 +883,7 @@ fn run(
             };
             while (worker_count < vhost_worker_count) : (worker_count += 1)
                 workers[worker_count] = try Worker.create(io, &pool_storage, concurrent_group_count, vhost_inline_batches);
-            var exports: [args.max_vhost_controller_count]node.spdk_vhost_block_export.VhostBlockExport = undefined;
+            var exports: [args.max_vhost_controller_count]data_node.spdk_vhost_block_export.VhostBlockExport = undefined;
             var export_count: usize = 0;
             defer while (export_count > 0) {
                 export_count -= 1;
@@ -891,7 +891,7 @@ fn run(
             };
             std.debug.print("target-stage export start frontend=vhost socket_directory={s} controllers={d}\n", .{ vhost_socket_directory.?, vhost_controller_count });
             for (0..vhost_controller_count) |index| {
-                const backend: node.spdk_vhost_block_export.Backend = .{
+                const backend: data_node.spdk_vhost_block_export.Backend = .{
                     .context = workers[index % worker_count],
                     .submit = submit_callback,
                     .block_count = pool_storage.capacity() / block_size,
@@ -904,7 +904,7 @@ fn run(
                 const controller_name = try std.fmt.bufPrint(&controller_name_buffer, "zettide-scheduled-pool-data-{d}", .{index});
                 var controller_mask_buffer: [32]u8 = undefined;
                 const controller_mask = try args.reactorMaskAt(reactor_mask, index, &controller_mask_buffer);
-                exports[index] = try node.spdk_vhost_block_export.VhostBlockExport.create(
+                exports[index] = try data_node.spdk_vhost_block_export.VhostBlockExport.create(
                     allocator,
                     runtime_handle,
                     backend,
@@ -1027,7 +1027,7 @@ fn validatePreparationWindowSpecs(specs: []const args.WindowSpec) !void {
     }
 }
 
-fn closeVhostExport(io: std.Io, export_handle: *node.spdk_vhost_block_export.VhostBlockExport) void {
+fn closeVhostExport(io: std.Io, export_handle: *data_node.spdk_vhost_block_export.VhostBlockExport) void {
     for (0..1000) |_| {
         export_handle.close() catch |err| switch (err) {
             error.ExportBusy => {

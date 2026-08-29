@@ -22,12 +22,12 @@
 | --- | --- | --- | --- |
 | `libs/storage-engine/src/v3/storage.zig` | owned random-access Storage、file/custom backend、batch/async I/O、transport diagnostics | 拆出 contract 到 `libs/storage-engine/src/foundation/storage.zig` | 将内建 file 实现和平台名称从核心 contract 分离 |
 | `libs/storage-engine/src/v3/storage_window.zig` | 对 borrowed Storage 建立有界逻辑 window | `libs/storage-engine/src/foundation/storage_window.zig` | 保留 generic decorator；单独测试越界、identity 和 close ownership |
-| `services/node/v3/file_storage.zig` | `auto/posix/io_uring` mode 解析、Linux fallback 和 adapter 选择 | CLI/node platform composition | 不进入 portable root；mode parsing 属于产品配置 |
-| `services/node/v3/linux_file_storage.zig` | regular file 的 io_uring Storage adapter | Linux platform adapter | 继续实现 foundation Storage port |
-| `services/node/v3/linux_raw_storage.zig` | raw block io_uring、iopoll、async lane 和 telemetry | Linux platform adapter | 与 core contract 解耦平台 enum；保留 durable sync/error semantics |
-| `services/node/v3/linux_block_device.zig` | ioctl/sysfs eligibility、exclusive open 和 raw Storage composition | Linux node/tool adapter | device safety policy 留在平台层，不进入 engine foundation |
-| `services/node/linux_io_uring.zig` | Linux io_uring engine | Linux platform adapter | 只由 Linux storage/frontend adapter 引用 |
-| `services/node/spdk/storage.zig` | SPDK bdev Storage adapter | `services/node` SPDK adapter | 见 [SPDK Backend 与 Export 归属](spdk-adapter-export-map.md)，不进入 storage-engine |
+| `services/data-node/v3/file_storage.zig` | `auto/posix/io_uring` mode 解析、Linux fallback 和 adapter 选择 | CLI/data-node platform composition | 不进入 portable root；mode parsing 属于产品配置 |
+| `services/data-node/v3/linux_file_storage.zig` | regular file 的 io_uring Storage adapter | Linux platform adapter | 继续实现 foundation Storage port |
+| `services/data-node/v3/linux_raw_storage.zig` | raw block io_uring、iopoll、async lane 和 telemetry | Linux platform adapter | 与 core contract 解耦平台 enum；保留 durable sync/error semantics |
+| `services/data-node/v3/linux_block_device.zig` | ioctl/sysfs eligibility、exclusive open 和 raw Storage composition | Linux data-node/tool adapter | device safety policy 留在平台层，不进入 engine foundation |
+| `services/data-node/linux_io_uring.zig` | Linux io_uring engine | Linux platform adapter | 只由 Linux storage/frontend adapter 引用 |
+| `services/data-node/spdk/storage.zig` | SPDK bdev Storage adapter | `services/data-node` SPDK adapter | 见 [SPDK Backend 与 Export 归属](spdk-adapter-export-map.md)，不进入 storage-engine |
 
 ### Storage contract 保留项
 
@@ -125,7 +125,7 @@ BlobFilesystem 领域格式，而不是可以独立发布的通用 codec package
 2. Pool foundation 只计算 Member/control/metadata/data region，不解释 BlobFilesystem；
 3. shared data-mode geometry 提供创建阶段所需的最小容量与 alignment contract；
 4. Blob/Catalog 层分别解释自己的 data format，Pool production path 不 import Blob format；
-5. CLI/node 组合 Pool geometry、设备安全检查与所选 data-mode requirements。
+5. CLI/data-node 组合 Pool geometry、设备安全检查与所选 data-mode requirements。
 
 后续调整 symbol 或内部布局不得重新建立 `Pool -> BlobFilesystem` production dependency。
 
@@ -152,13 +152,13 @@ libs/storage-engine/src/
     name_profile.zig
     ...
 
-services/node/src/platform/linux/
+services/data-node/src/platform/linux/
   file_storage.zig
   raw_storage.zig
   block_device.zig
   io_uring.zig
 
-services/node/src/platform/spdk/
+services/data-node/src/platform/spdk/
   storage.zig
 ```
 

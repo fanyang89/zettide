@@ -23,10 +23,11 @@ when referring to the former repository or its historical commits.
 
 The former in-repository `services/zettide/` source tree has also been split by
 responsibility: reusable engine code is now `libs/storage-engine/` and product,
-platform, endpoint, CLI, NFS, and SPDK adapters are under `services/node/`.
+platform, endpoint, CLI, NFS, and SPDK adapters are under `services/data-node/`.
 This was an internal `git mv` refactor, not another repository ancestry join.
-The public engine module is `zettide_storage`; the existing `zettide` executable
-and NFS C ABI remain compatibility surfaces.
+The public engine module is `zettide_storage`; data-node composition uses
+`zettide_data_node` and the target daemon name `zettide-data-node`. The existing
+`zettide` executable and NFS C ABI remain compatibility surfaces.
 
 External dependencies are pinned under `vendor/`:
 

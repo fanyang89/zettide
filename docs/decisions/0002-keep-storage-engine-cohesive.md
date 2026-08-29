@@ -2,11 +2,11 @@
 
 - 状态：Accepted
 - 范围：`libs/storage-engine/` 的第二阶段 package 边界
-- 前置决策：[0001：存储节点命名与进程模型](0001-storage-node-naming-and-process-model.md)
+- 前置决策：[0001：数据节点命名与进程模型](0001-data-node-naming-and-process-model.md)
 
 ## 背景
 
-`services/zettide/` 已按进程职责拆为 `libs/storage-engine/` 与 `services/node/`。
+`services/zettide/` 已按进程职责拆为 `libs/storage-engine/` 与 `services/data-node/`。
 反向 platform import 已移除，engine 具有独立 `zettide_storage` module、build、test 和 cross
 compile gate。首轮完成后需要重新判断是否立即把 Pool、Catalog、Blob、BlobFilesystem 或
 foundation 继续拆成独立 package。
@@ -21,7 +21,7 @@ foundation 继续拆成独立 package。
   `pool_provision.zig` 的回引，不是 production runtime 环；
 - proposed foundation 仍有 `control_record.zig -> topology.zig` 的持久格式依赖，尚未形成
   完全向下的独立 package DAG；
-- 仓库已有约 34 个显式 `zettide_storage` consumers，分布于 node adapters、tests 和
+- 仓库已有约 34 个显式 `zettide_storage` consumers，分布于 data-node adapters、tests 和
   benchmarks；public root 目前公开约 20 个顶层 declaration，`v3` root 公开约 36 个；
 - engine 的格式、reopen、corruption 和 cross-domain tests 共享同一个格式版本与发布周期。
 
@@ -40,10 +40,10 @@ foundation 继续拆成独立 package。
 这不是放弃分层。package 内继续遵守
 [组件依赖与分层规则](../architecture/zh-CN/component-dependencies.md)：
 
-1. foundation contract 不得依赖 node、SPDK、FUSE、CLI、RPC 或 controller；
+1. foundation contract 不得依赖 data node、SPDK、FUSE、CLI、RPC 或 controller；
 2. Pool production path 不得解释 Blob header/chunk geometry；
 3. 持久格式继续归所属领域，不建立独立 `libs/formats`；
-4. node/platform consumers 只通过 public `zettide_storage` module 使用 engine；
+4. data-node/platform consumers 只通过 public `zettide_storage` module 使用 engine；
 5. integration tests 可以跨领域验证 reopen，但必须与 production import 方向明确区分。
 
 可以先在 package 内建立更窄的 internal roots、test roots 和 namespace；不得仅为缩短文件列表
@@ -65,7 +65,7 @@ integration tests。先保持一个 package 可以继续验证 Pool-backed Blob 
 
 ### Consumers 仍需要组合视图
 
-node target composition、NFS backend、SPDK adapters 和 benchmarks 经常同时使用 Storage port、
+data-node target composition、NFS backend、SPDK adapters 和 benchmarks 经常同时使用 Storage port、
 Pool data adapter、Blob 或 filesystem API。立即拆包会增加 module injection 和 compatibility aliases，
 但不会减少进程权限、磁盘格式耦合或发布风险。
 
@@ -84,7 +84,7 @@ Pool、Catalog 和 Blob 格式仍共享 v3 compatibility lifecycle。独立 pack
 3. **独立验证**：候选组件能在不递归 import sibling test namespace 的情况下完成 format、reopen、
    corruption 和 cross-target gates；
 4. **独立演进**：组件具有不同 owner、release cadence 或依赖策略，拆包能实际减少变更影响面；
-5. **组合成本可控**：root build、node、NFS、SPDK、benchmarks 不需要重新建立 mega compatibility
+5. **组合成本可控**：root build、data node、NFS、SPDK、benchmarks 不需要重新建立 mega compatibility
    facade；
 6. **格式策略明确**：拆包不复制 persisted type，不改变 magic/version/offset/checksum，也不引入
    隐式格式版本组合。
