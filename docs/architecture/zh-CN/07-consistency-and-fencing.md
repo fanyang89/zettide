@@ -89,7 +89,7 @@ flowchart LR
     R --> A[Validate local lease window<br/>and commit ready authority]
 ```
 
-内部 Replica NVMf 使用 vendor-specific commands，把 Volume/Replica generation、epoch、sequence 与 checksum 交给 target state machine。Target-owned metadata 不可由普通 namespace write 修改。该协议尚未实现，与当前标准 host-facing NVMf export 无关。
+内部 Replica NVMf 使用 vendor-specific commands，把 Volume/Replica generation、epoch、sequence 与 checksum 交给 target state machine。Target-owned metadata 不可由普通 namespace write 修改。当前仅实现未接入 daemon/network 的 backend-neutral node-local participant：单未决 PREPARE payload、canonical two-witness certificate、COMMIT-before-apply crash ordering、backend apply 和 restart replay 均有 focused test；active Replica backend、transport session gate、认证 attestation、跨节点 coordinator、fencing/replay composition 与 recovery quorum 尚未实现。它与当前标准 host-facing NVMf export 无关。
 
 ## Tier 3 Commit Evidence
 
@@ -133,4 +133,4 @@ Repairing/Stale Replica 不参与 quorum。进入内存、NVMf queue 或 volatil
 
 ## 当前差距
 
-外部虚拟化 managed attachment、consumer-bound NVMf/iSCSI generation、统一 filesystem access authority、Volume lease/write epoch、Replica persistent fencing 和 commit evidence 均未实现。现有 iSCSI target/export primitive 不执行 Publication generation fencing。
+当前没有外部虚拟化 managed attachment、consumer-bound NVMf/iSCSI generation、统一 filesystem access authority 或完整 Tier 3 数据面。Volume lease/write epoch、Replica persistent fencing 与 node-local certificate snapshot 已有基础，但尚无网络 participant、认证/quorum coordinator、certified recovery 或 managed Publication fencing。现有 iSCSI target/export primitive 不执行 Publication generation fencing。

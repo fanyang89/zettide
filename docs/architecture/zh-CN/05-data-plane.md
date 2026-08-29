@@ -89,7 +89,20 @@ flowchart LR
     V -.->|vendor-specific NVMf| R2[Remote Replica C]
 ```
 
-内部 Replica protocol 尚未实现。标准 NVMe command 不携带 Zettide `write_epoch`、`sequence`、checksum 或 commit evidence，因此不能直接把当前标准 NVMf export 当成 Replica transport implementation。
+内部 Replica 的网络协议和 NVMf vendor-specific command 尚未实现。当前共享
+`write_service` 已提供一个未接入 daemon 的 node-local participant 基础：它校验 authority、
+sequence、history、range 和 payload digest，将最多 1 MiB payload 持久化为单一未决
+PREPARE，接受两个不同 Member 的 canonical attestation certificate，先持久化 COMMIT
+决定，再写入并同步本地 Replica extent，最后推进 applied frontier。标准 NVMe command
+不携带这些证据，因此不能直接把当前标准 NVMf export 当成 Replica transport
+implementation。
+
+当前 file snapshot 每次原子替换完整的单未决状态，只用于 crash-ordering 和协议测试，
+不是最终流式 journal。certificate attestation 尚无网络认证、remote target handler 或
+primary coordinator；只有两个独立 FileStore 的 focused test 证明本地 evidence
+持久化，不等于三节点 quorum success。生产 File Member backend 尚未接线；daemon
+composition 必须把 active Replica 校验、authority admission 与 fence drain 放入同一
+共享 gate，并在安装更高 epoch 前完成已持久 COMMIT 的 replay。
 
 目标 vendor-specific command 至少携带：
 

@@ -20,10 +20,12 @@ pub const FenceResult = model.FenceResult;
 
 pub const replica_service = @import("replica_service.zig");
 pub const fence_service = @import("fence_service.zig");
+pub const write_service = @import("write_service.zig");
 pub const primary_lease = @import("primary_lease.zig");
 
 test {
     _ = replica_service;
     _ = fence_service;
+    _ = write_service;
     _ = primary_lease;
 }

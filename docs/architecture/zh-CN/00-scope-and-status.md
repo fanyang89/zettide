@@ -47,8 +47,8 @@ fencing、failover、repair 和 republish。
 | 本地 Pool 与格式 | 当前/部分 | Member v3、authority scan、control journal、Blob data mode、多成员复制和 scheduled layout 已有路径；动态生命周期未产品化 |
 | Catalog | 部分 | multi-Volume catalog、extent mapping、writable backend 和 endpoint registry 已存在；在线扩容/保护迁移未接线 |
 | SPDK | 部分 | managed runtime、provider bdev、Catalog NVMf TCP/RDMA export、vhost-user-blk 与 initiator wrapper 有 focused tests |
-| `zettide-controller` | 部分 | Pool/Node/Member/Volume metadata、heartbeat、Raft/WAL/snapshot/ReadIndex 与恢复测试存在；placement、lease、reconciliation 不存在 |
-| Tier 3 Replica NVMf | 目标 | 尚无 vendor-specific commands、Replica namespace authority、commit evidence 或 epoch gate |
+| `zettide-controller` | 基础 | Pool/Node/Member/Volume metadata、heartbeat、Raft/WAL/snapshot/ReadIndex、placement、authority/lease state machine 与 leader reconciliation 已接线；公开 Lease/Publication API 仍不存在 |
+| Tier 3 Replica protocol | 基础 | 三节点 file Replica fencing/authority 生命周期与 restart failover 已验证；backend-neutral node-local participant 持久化单未决 payload/certificate 并验证 apply/replay ordering；尚无 vendor-specific NVMf commands、跨节点 coordinator、认证 attestation、quorum recovery/repair 或 publication |
 | TxFS shared qcow2 | 部分 | transaction、SCSI CAW/data transport、voting 和 allocator 基础存在；POSIX/FUSE 与 qtr 未接线 |
 
 ## 两种 Pool
@@ -63,7 +63,7 @@ fencing、failover、repair 和 republish。
 ## 两种 NVMf
 
 - **标准 host-facing NVMf publication**：Catalog Volume 到虚拟化 host 的标准 NVMe block interface，支持 TCP/RDMA；当前已有部分实现。
-- **内部 Replica NVMf transport**：Tier 3 primary 到 Replica 的 vendor-specific 协议，需要携带 Zettide epoch、sequence 和 commit evidence；尚未实现。
+- **内部 Replica NVMf transport**：Tier 3 primary 到 Replica 的 vendor-specific 协议，需要携带 Zettide epoch、sequence 和 commit evidence；当前只有未联网的 node-local participant 与 file apply 基础，NVMf transport 尚未实现。
 
 标准 NVMf export 的存在不证明 Tier 3 Replica protocol 已实现；反过来，Tier 3 设计也不能把标准 host-facing NVMf 写成仅供内部使用。
 

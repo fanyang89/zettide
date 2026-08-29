@@ -56,8 +56,12 @@ restart/reopen rather than allowing a later operation to overwrite it. Omitting
 all seven options keeps Replica, fence, recovery, and Member
 heartbeat operations disabled while holder/lease diagnostics remain available.
 
-This file-member backend establishes a durable control-plane boundary only. It
-can drive a three-node Volume intent to `ACTIVE`, but does not replicate user
-writes or publish that Volume to hosts. Cross-node Replica transport, durable
-write certificates, repair, and authority-gated Publication remain subsequent
-composition steps. See `tests/e2e/README.md` for the Docker Compose profile.
+This file-member backend establishes a durable control-plane boundary. The
+shared backend-neutral write participant now proves node-local payload staging,
+two-witness PREPARE/COMMIT ordering, backend apply ordering, and post-decision
+replay in focused tests, but it is not yet composed into the daemon, bound to
+the active Replica ledger, or exposed as a network transport/File Member data
+path. A three-node Volume intent can reach `ACTIVE`, but user writes are not yet
+replicated or published to hosts. Cross-node Replica transport, recovery/repair,
+and authority-gated Publication remain subsequent composition steps. See
+`tests/e2e/README.md` for the Docker Compose profile.
