@@ -1,5 +1,5 @@
 const std = @import("std");
-const protocol = @import("zettide_data_service_contracts");
+const protocol = @import("model.zig");
 const uuid = @import("uuid");
 
 pub const Id = protocol.Id;
@@ -18,22 +18,29 @@ pub const Backend = struct {
     /// Mutations receive the complete Binding and must be idempotent for it.
     /// The journal provides durable at-least-once invocation, not exactly-once.
     pub const VTable = struct {
+        /// Validate a binding without mutating backend or admission state.
+        validate: ?*const fn (*anyopaque, Binding) anyerror!void = null,
         /// Implement this when backend state can be verified before replaying a mutation.
         inspect: ?*const fn (*anyopaque, Binding) anyerror!BackendState = null,
         ensure: *const fn (*anyopaque, Binding) anyerror!Digest,
         delete: *const fn (*anyopaque, Binding) anyerror!void,
     };
 
-    fn inspect(self: Backend, binding: Binding) !?BackendState {
+    pub fn validate(self: Backend, binding: Binding) !void {
+        const validateFn = self.vtable.validate orelse return;
+        return validateFn(self.context, binding);
+    }
+
+    pub fn inspect(self: Backend, binding: Binding) !?BackendState {
         const inspectFn = self.vtable.inspect orelse return null;
         return try inspectFn(self.context, binding);
     }
 
-    fn ensure(self: Backend, binding: Binding) !Digest {
+    pub fn ensure(self: Backend, binding: Binding) !Digest {
         return self.vtable.ensure(self.context, binding);
     }
 
-    fn delete(self: Backend, binding: Binding) !void {
+    pub fn delete(self: Backend, binding: Binding) !void {
         return self.vtable.delete(self.context, binding);
     }
 };
@@ -67,7 +74,8 @@ pub const Store = struct {
 
     pub const VTable = struct {
         find_operation: *const fn (*anyopaque, Id) ?OperationRecord,
-        find_replica: *const fn (*anyopaque, Id) ?Replica,
+        find_replica_record: *const fn (*anyopaque, Id) ?OperationRecord,
+        find_allocation_conflict: *const fn (*anyopaque, Binding) ?ReplicaState,
         append: *const fn (*anyopaque, OperationRecord) anyerror!void,
     };
 
@@ -75,8 +83,12 @@ pub const Store = struct {
         return self.vtable.find_operation(self.context, operation_id);
     }
 
-    fn findReplica(self: Store, target_placement_id: Id) ?Replica {
-        return self.vtable.find_replica(self.context, target_placement_id);
+    fn findReplicaRecord(self: Store, target_placement_id: Id) ?OperationRecord {
+        return self.vtable.find_replica_record(self.context, target_placement_id);
+    }
+
+    fn findAllocationConflict(self: Store, binding: Binding) ?ReplicaState {
+        return self.vtable.find_allocation_conflict(self.context, binding);
     }
 
     fn append(self: Store, record: OperationRecord) !void {
@@ -87,16 +99,29 @@ pub const Store = struct {
 pub const Service = struct {
     store: Store,
     backend: Backend,
+    transaction_lock: std.atomic.Mutex = .unlocked,
 
     pub fn init(store: Store, backend: Backend) Service {
         return .{ .store = store, .backend = backend };
     }
 
+    fn lockTransaction(self: *Service) void {
+        while (!self.transaction_lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
     pub fn ensureReplica(self: *Service, request: Request) !Response {
+        self.lockTransaction();
+        defer self.transaction_lock.unlock();
+        return self.ensureReplicaLocked(request);
+    }
+
+    fn ensureReplicaLocked(self: *Service, request: Request) !Response {
         const parsed = try parseRequest(request);
         if (try self.recoverOperation(parsed, .ensure)) |response| return response;
 
-        if (self.store.findReplica(parsed.binding.placement_id)) |current| {
+        if (self.store.findReplicaRecord(parsed.binding.placement_id)) |current_record| {
+            if (current_record.status == .prepared) return error.OperationInProgress;
+            const current = current_record.result;
             try validateGeneration(parsed.binding, current.attestation.binding);
             if (parsed.binding.generation == current.attestation.binding.generation) {
                 if (!std.meta.eql(parsed.binding, current.attestation.binding)) return error.BindingConflict;
@@ -110,7 +135,13 @@ pub const Service = struct {
                 try self.store.append(record);
                 return responseOf(record);
             }
+            if (current.state == .active) return error.PlacementStillActive;
         }
+        if (self.store.findAllocationConflict(parsed.binding)) |state| return switch (state) {
+            .active => error.AllocationOverlap,
+            .tombstoned => error.AllocationQuarantined,
+        };
+        try self.backend.validate(parsed.binding);
 
         const prepared: OperationRecord = .{
             .operation_id = parsed.operation_id,
@@ -126,20 +157,43 @@ pub const Service = struct {
     }
 
     pub fn inspectReplica(self: *Service, request: Request) !Response {
+        self.lockTransaction();
+        defer self.transaction_lock.unlock();
         const parsed = try parseRequest(request);
-        const replica = self.store.findReplica(parsed.binding.placement_id) orelse return error.ReplicaNotFound;
+        const record = self.store.findReplicaRecord(parsed.binding.placement_id) orelse return error.ReplicaNotFound;
+        if (record.status == .prepared) return error.OperationInProgress;
+        const replica = record.result;
         try validateGeneration(parsed.binding, replica.attestation.binding);
         if (!std.meta.eql(parsed.binding, replica.attestation.binding)) return error.BindingConflict;
         return .{ .operation_id = parsed.operation_id, .replica = replica };
     }
 
     pub fn deleteReplica(self: *Service, request: Request) !Response {
+        self.lockTransaction();
+        defer self.transaction_lock.unlock();
+        return self.deleteReplicaLocked(request);
+    }
+
+    fn deleteReplicaLocked(self: *Service, request: Request) !Response {
         const parsed = try parseRequest(request);
         if (try self.recoverOperation(parsed, .delete)) |response| return response;
 
-        const current = self.store.findReplica(parsed.binding.placement_id) orelse return error.ReplicaNotFound;
+        const current_record = self.store.findReplicaRecord(parsed.binding.placement_id) orelse return error.ReplicaNotFound;
+        if (current_record.status == .prepared) return error.OperationInProgress;
+        const current = current_record.result;
         try validateGeneration(parsed.binding, current.attestation.binding);
         if (!std.meta.eql(parsed.binding, current.attestation.binding)) return error.BindingConflict;
+        if (current.state == .tombstoned) {
+            const completed: OperationRecord = .{
+                .operation_id = parsed.operation_id,
+                .kind = .delete,
+                .status = .completed,
+                .result = current,
+            };
+            try self.store.append(completed);
+            return responseOf(completed);
+        }
+        try self.backend.validate(parsed.binding);
         const prepared: OperationRecord = .{
             .operation_id = parsed.operation_id,
             .kind = .delete,
@@ -162,6 +216,7 @@ pub const Service = struct {
     }
 
     fn completeEnsure(self: *Service, prepared: OperationRecord) !Response {
+        try self.backend.validate(prepared.result.attestation.binding);
         const digest = if (try self.backend.inspect(prepared.result.attestation.binding)) |state| switch (state) {
             .active => |digest| digest,
             .absent, .deleted => try self.backend.ensure(prepared.result.attestation.binding),
@@ -174,6 +229,7 @@ pub const Service = struct {
     }
 
     fn completeDelete(self: *Service, prepared: OperationRecord) !Response {
+        try self.backend.validate(prepared.result.attestation.binding);
         if (try self.backend.inspect(prepared.result.attestation.binding)) |state| switch (state) {
             .active => try self.backend.delete(prepared.result.attestation.binding),
             .absent, .deleted => {},
@@ -214,6 +270,7 @@ fn parseUuidV7(value: []const u8) !Id {
     if (canonical[14] != '7' or !std.mem.eql(u8, value, &canonical)) return error.InvalidId;
     var result: Id = undefined;
     std.mem.writeInt(u128, &result, parsed, .little);
+    if (!validUuidV7Bytes(&result)) return error.InvalidId;
     return result;
 }
 
@@ -239,13 +296,27 @@ fn findOperation(records: []const OperationRecord, operation_id: Id) ?OperationR
     return null;
 }
 
-fn findReplica(records: []const OperationRecord, target_placement_id: Id) ?Replica {
+fn findReplicaRecord(records: []const OperationRecord, target_placement_id: Id) ?OperationRecord {
     var index = records.len;
     while (index != 0) {
         index -= 1;
-        if (records[index].status != .completed) continue;
+        const record = records[index];
+        if (std.mem.eql(u8, &record.result.attestation.binding.placement_id, &target_placement_id)) return record;
+    }
+    return null;
+}
+
+fn findAllocationConflict(records: []const OperationRecord, requested: Binding) ?ReplicaState {
+    var index = records.len;
+    while (index != 0) {
+        index -= 1;
         const replica = records[index].result;
-        if (std.mem.eql(u8, &replica.attestation.binding.placement_id, &target_placement_id)) return replica;
+        const binding = replica.attestation.binding;
+        if (!std.mem.eql(u8, &binding.member_id, &requested.member_id)) continue;
+        const binding_end = binding.offset_bytes + binding.length_bytes;
+        const requested_end = requested.offset_bytes + requested.length_bytes;
+        if (binding.offset_bytes < requested_end and requested.offset_bytes < binding_end)
+            return replica.state;
     }
     return null;
 }
@@ -272,9 +343,14 @@ pub const MemoryStore = struct {
         return findOperation(self.records, operation_id);
     }
 
-    fn findReplicaOpaque(context: *anyopaque, target_placement_id: Id) ?Replica {
+    fn findReplicaRecordOpaque(context: *anyopaque, target_placement_id: Id) ?OperationRecord {
         const self: *MemoryStore = @ptrCast(@alignCast(context));
-        return findReplica(self.records, target_placement_id);
+        return findReplicaRecord(self.records, target_placement_id);
+    }
+
+    fn findAllocationConflictOpaque(context: *anyopaque, binding: Binding) ?ReplicaState {
+        const self: *MemoryStore = @ptrCast(@alignCast(context));
+        return findAllocationConflict(self.records, binding);
     }
 
     fn appendOpaque(context: *anyopaque, record: OperationRecord) !void {
@@ -288,10 +364,75 @@ pub const MemoryStore = struct {
 
     const vtable: Store.VTable = .{
         .find_operation = findOperationOpaque,
-        .find_replica = findReplicaOpaque,
+        .find_replica_record = findReplicaRecordOpaque,
+        .find_allocation_conflict = findAllocationConflictOpaque,
         .append = appendOpaque,
     };
 };
+
+pub const CapacitySnapshot = struct {
+    free_extent_count: u64,
+    allocated_extent_count: u64,
+    reserved_extent_count: u64,
+    retired_extent_count: u64,
+};
+
+const CapacityGeometry = struct {
+    capacity_bytes: u64,
+    extent_size_bytes: u64,
+};
+
+fn summarizeCapacity(records: []const OperationRecord, geometry: CapacityGeometry) !CapacitySnapshot {
+    var latest_by_allocation: std.AutoHashMapUnmanaged(Id, OperationRecord) = .empty;
+    defer latest_by_allocation.deinit(std.heap.page_allocator);
+    var reverse_index = records.len;
+    while (reverse_index != 0) {
+        reverse_index -= 1;
+        const record = records[reverse_index];
+        const binding = record.result.attestation.binding;
+        const entry = try latest_by_allocation.getOrPut(std.heap.page_allocator, binding.allocation_id);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = record;
+        } else if (!std.meta.eql(entry.value_ptr.result.attestation.binding, binding)) {
+            return error.AllocationIdentityConflict;
+        }
+    }
+
+    var result: CapacitySnapshot = .{
+        .free_extent_count = 0,
+        .allocated_extent_count = 0,
+        .reserved_extent_count = 0,
+        .retired_extent_count = 0,
+    };
+    var iterator = latest_by_allocation.valueIterator();
+    while (iterator.next()) |record| {
+        const binding = record.result.attestation.binding;
+        if (binding.offset_bytes % geometry.extent_size_bytes != 0 or
+            binding.length_bytes % geometry.extent_size_bytes != 0)
+            return error.InvalidMemberGeometry;
+        const end = std.math.add(u64, binding.offset_bytes, binding.length_bytes) catch
+            return error.InvalidMemberGeometry;
+        if (end > geometry.capacity_bytes) return error.InvalidMemberGeometry;
+        const extents = binding.length_bytes / geometry.extent_size_bytes;
+        const target = if (record.status == .prepared)
+            if (record.kind == .ensure)
+                &result.reserved_extent_count
+            else
+                &result.retired_extent_count
+        else if (record.result.state == .active)
+            &result.allocated_extent_count
+        else
+            &result.retired_extent_count;
+        target.* = std.math.add(u64, target.*, extents) catch return error.InvalidMemberGeometry;
+    }
+    var used = std.math.add(u64, result.allocated_extent_count, result.reserved_extent_count) catch
+        return error.InvalidMemberGeometry;
+    used = std.math.add(u64, used, result.retired_extent_count) catch return error.InvalidMemberGeometry;
+    const total = geometry.capacity_bytes / geometry.extent_size_bytes;
+    if (used > total) return error.InvalidMemberGeometry;
+    result.free_extent_count = total - used;
+    return result;
+}
 
 pub const FileStore = struct {
     allocator: std.mem.Allocator,
@@ -299,6 +440,14 @@ pub const FileStore = struct {
     parent: std.Io.Dir,
     basename: []const u8,
     records: []OperationRecord,
+    mutex: std.Io.Mutex = .init,
+    capacity_geometry: ?CapacityGeometry = null,
+    capacity_snapshot: CapacitySnapshot = .{
+        .free_extent_count = 0,
+        .allocated_extent_count = 0,
+        .reserved_extent_count = 0,
+        .retired_extent_count = 0,
+    },
     faults: ?*Faults = null,
 
     const magic = "ZETDATA1".*;
@@ -320,7 +469,7 @@ pub const FileStore = struct {
         parent: std.Io.Dir,
         basename: []const u8,
     ) !FileStore {
-        const bytes = parent.readFileAlloc(io, basename, allocator, .limited(max_file_size)) catch |err| switch (err) {
+        const bytes = parent.readFileAlloc(io, basename, allocator, .limited(max_file_size + 1)) catch |err| switch (err) {
             error.FileNotFound => return .{
                 .allocator = allocator,
                 .io = io,
@@ -349,18 +498,58 @@ pub const FileStore = struct {
         return .{ .context = self, .vtable = &vtable };
     }
 
+    pub fn validateMember(self: *const FileStore, expected_member_id: Id) !void {
+        if (isZero(&expected_member_id)) return error.InvalidMemberId;
+        for (self.records) |record| {
+            if (!std.mem.eql(u8, &record.result.attestation.binding.member_id, &expected_member_id))
+                return error.MemberIdentityMismatch;
+        }
+    }
+
+    pub fn configureCapacity(
+        self: *FileStore,
+        expected_member_id: Id,
+        capacity_bytes: u64,
+        extent_size_bytes: u64,
+    ) !void {
+        try self.validateMember(expected_member_id);
+        if (capacity_bytes == 0 or extent_size_bytes == 0 or capacity_bytes % extent_size_bytes != 0)
+            return error.InvalidMemberGeometry;
+        const geometry: CapacityGeometry = .{
+            .capacity_bytes = capacity_bytes,
+            .extent_size_bytes = extent_size_bytes,
+        };
+        const snapshot = try summarizeCapacity(self.records, geometry);
+        self.capacity_geometry = geometry;
+        self.capacity_snapshot = snapshot;
+    }
+
+    pub fn capacitySnapshot(self: *FileStore) !CapacitySnapshot {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.capacity_geometry == null) return error.CapacityNotConfigured;
+        return self.capacity_snapshot;
+    }
+
     fn findOperationOpaque(context: *anyopaque, operation_id: Id) ?OperationRecord {
         const self: *FileStore = @ptrCast(@alignCast(context));
         return findOperation(self.records, operation_id);
     }
 
-    fn findReplicaOpaque(context: *anyopaque, target_placement_id: Id) ?Replica {
+    fn findReplicaRecordOpaque(context: *anyopaque, target_placement_id: Id) ?OperationRecord {
         const self: *FileStore = @ptrCast(@alignCast(context));
-        return findReplica(self.records, target_placement_id);
+        return findReplicaRecord(self.records, target_placement_id);
+    }
+
+    fn findAllocationConflictOpaque(context: *anyopaque, binding: Binding) ?ReplicaState {
+        const self: *FileStore = @ptrCast(@alignCast(context));
+        return findAllocationConflict(self.records, binding);
     }
 
     fn appendOpaque(context: *anyopaque, record: OperationRecord) !void {
         const self: *FileStore = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const required_slots: usize = if (record.status == .prepared) 2 else 1;
         if (required_slots > max_records - self.records.len) return error.StoreFull;
         const replacement = try self.allocator.alloc(OperationRecord, self.records.len + 1);
@@ -368,12 +557,17 @@ pub const FileStore = struct {
         errdefer if (!installed) self.allocator.free(replacement);
         @memcpy(replacement[0..self.records.len], self.records);
         replacement[self.records.len] = record;
+        const capacity = if (self.capacity_geometry) |geometry|
+            try summarizeCapacity(replacement, geometry)
+        else
+            null;
         try self.replace(replacement);
+        try self.syncParent(replacement.len);
         const previous = self.records;
         self.records = replacement;
+        if (capacity) |snapshot| self.capacity_snapshot = snapshot;
         installed = true;
         if (previous.len != 0) self.allocator.free(previous);
-        try self.syncParent();
     }
 
     fn replace(self: *FileStore, records: []const OperationRecord) !void {
@@ -392,9 +586,9 @@ pub const FileStore = struct {
         try atomic_file.replace(self.io);
     }
 
-    fn syncParent(self: *FileStore) !void {
+    fn syncParent(self: *FileStore, candidate_record_count: usize) !void {
         if (self.faults) |faults| {
-            if (faults.fail_directory_sync_once_at_record_count == self.records.len) {
+            if (faults.fail_directory_sync_once_at_record_count == candidate_record_count) {
                 faults.fail_directory_sync_once_at_record_count = null;
                 return error.InjectedDirectorySyncFailure;
             }
@@ -406,7 +600,8 @@ pub const FileStore = struct {
 
     const vtable: Store.VTable = .{
         .find_operation = findOperationOpaque,
-        .find_replica = findReplicaOpaque,
+        .find_replica_record = findReplicaRecordOpaque,
+        .find_allocation_conflict = findAllocationConflictOpaque,
         .append = appendOpaque,
     };
 
@@ -569,7 +764,7 @@ const allocation_id = "0198f54d-5c2a-7000-8000-000000000013";
 const ensure_operation_id = "0198f54d-5c2a-7000-8000-000000000014";
 const delete_operation_id = "0198f54d-5c2a-7000-8000-000000000015";
 const inspect_operation_id = "0198f54d-5c2a-7000-8000-000000000016";
-const member_id: Id = .{1} ++ @as([15]u8, @splat(0));
+const member_id: Id = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 0x20 };
 
 fn testRequest(operation_id: []const u8, generation: u64) Request {
     return .{
@@ -582,6 +777,37 @@ fn testRequest(operation_id: []const u8, generation: u64) Request {
         .offset_bytes = 4096,
         .length_bytes = 8192,
     };
+}
+
+const ConcurrentResult = struct { err: ?anyerror = null };
+
+fn runConcurrentEnsure(service: *Service, request: Request, result: *ConcurrentResult) void {
+    _ = service.ensureReplica(request) catch |err| {
+        result.err = err;
+        return;
+    };
+}
+
+test "concurrent overlapping ensure transactions are serialized" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var service = Service.init(store.store(), backend.backend());
+    const first = testRequest(ensure_operation_id, 1);
+    var second = testRequest("0198f54d-5c2a-7000-8000-000000000017", 1);
+    second.placement_id = "0198f54d-5c2a-7000-8000-000000000018";
+    second.allocation_id = "0198f54d-5c2a-7000-8000-000000000019";
+    second.offset_bytes = 8192;
+    second.length_bytes = 4096;
+    var first_result: ConcurrentResult = .{};
+    var second_result: ConcurrentResult = .{};
+    const first_thread = try std.Thread.spawn(.{}, runConcurrentEnsure, .{ &service, first, &first_result });
+    const second_thread = try std.Thread.spawn(.{}, runConcurrentEnsure, .{ &service, second, &second_result });
+    first_thread.join();
+    second_thread.join();
+    try std.testing.expect((first_result.err == null) != (second_result.err == null));
+    const rejected = first_result.err orelse second_result.err.?;
+    try std.testing.expectEqual(error.AllocationOverlap, rejected);
 }
 
 test "ensure is durable idempotent and operation conflicts are rejected" {
@@ -632,9 +858,49 @@ test "generation regression and malformed identities and geometry are rejected" 
     var invalid = testRequest(inspect_operation_id, 2);
     invalid.volume_id = "not-a-uuid";
     try std.testing.expectError(error.InvalidId, service.inspectReplica(invalid));
+    invalid = testRequest("0198f54d-5c2a-7000-0000-000000000016", 2);
+    try std.testing.expectError(error.InvalidId, service.inspectReplica(invalid));
     invalid = testRequest(inspect_operation_id, 2);
     invalid.offset_bytes = std.math.maxInt(u64);
     try std.testing.expectError(error.InvalidGeometry, service.inspectReplica(invalid));
+}
+
+test "overlapping active and tombstoned allocations are rejected" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var service = Service.init(store.store(), backend.backend());
+    _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+
+    var overlap = testRequest("0198f54d-5c2a-7000-8000-000000000017", 1);
+    overlap.placement_id = "0198f54d-5c2a-7000-8000-000000000018";
+    overlap.allocation_id = "0198f54d-5c2a-7000-8000-000000000019";
+    overlap.offset_bytes = 8192;
+    overlap.length_bytes = 4096;
+    try std.testing.expectError(error.AllocationOverlap, service.ensureReplica(overlap));
+
+    _ = try service.deleteReplica(testRequest(delete_operation_id, 1));
+    overlap.operation_id = "0198f54d-5c2a-7000-8000-00000000001a";
+    try std.testing.expectError(error.AllocationQuarantined, service.ensureReplica(overlap));
+}
+
+test "higher generations require deletion and cannot reuse quarantined extents" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var service = Service.init(store.store(), backend.backend());
+    _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+
+    var next = testRequest("0198f54d-5c2a-7000-8000-00000000001b", 2);
+    next.allocation_id = "0198f54d-5c2a-7000-8000-00000000001c";
+    try std.testing.expectError(error.PlacementStillActive, service.ensureReplica(next));
+
+    _ = try service.deleteReplica(testRequest(delete_operation_id, 1));
+    try std.testing.expectError(error.AllocationQuarantined, service.ensureReplica(next));
+
+    next.operation_id = "0198f54d-5c2a-7000-8000-00000000001d";
+    next.offset_bytes = 16 * 1024;
+    _ = try service.ensureReplica(next);
 }
 
 test "pending operations provide durable at-least-once idempotent recovery" {
@@ -658,6 +924,10 @@ test "pending operations provide durable at-least-once idempotent recovery" {
         var conflict = testRequest(ensure_operation_id, 1);
         conflict.length_bytes += 1;
         try std.testing.expectError(error.OperationConflict, service.ensureReplica(conflict));
+        try std.testing.expectError(
+            error.AllocationOverlap,
+            service.ensureReplica(testRequest("0198f54d-5c2a-7000-8000-000000000017", 1)),
+        );
     }
     {
         var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
@@ -679,6 +949,10 @@ test "pending operations provide durable at-least-once idempotent recovery" {
             service.deleteReplica(testRequest(delete_operation_id, 1)),
         );
         try std.testing.expectEqual(@as(usize, 1), backend.deletes);
+        try std.testing.expectError(
+            error.OperationInProgress,
+            service.ensureReplica(testRequest("0198f54d-5c2a-7000-8000-00000000001e", 1)),
+        );
     }
     {
         var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
@@ -691,7 +965,53 @@ test "pending operations provide durable at-least-once idempotent recovery" {
     }
 }
 
-test "FileStore retains a record published before directory sync failure" {
+test "FileStore tracks capacity and rejects configured Member identity drift" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{};
+    var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+    defer file_store.deinit();
+    try file_store.configureCapacity(member_id, 32 * 1024, 4096);
+    var capacity = try file_store.capacitySnapshot();
+    try std.testing.expectEqual(@as(u64, 8), capacity.free_extent_count);
+
+    var service = Service.init(file_store.store(), backend.backend());
+    _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+    capacity = try file_store.capacitySnapshot();
+    try std.testing.expectEqual(@as(u64, 6), capacity.free_extent_count);
+    try std.testing.expectEqual(@as(u64, 2), capacity.allocated_extent_count);
+    _ = try service.deleteReplica(testRequest(delete_operation_id, 1));
+    capacity = try file_store.capacitySnapshot();
+    try std.testing.expectEqual(@as(u64, 2), capacity.retired_extent_count);
+    try std.testing.expectEqual(@as(u64, 0), capacity.allocated_extent_count);
+
+    var changed = member_id;
+    changed[15] ^= 1;
+    try std.testing.expectError(error.MemberIdentityMismatch, file_store.validateMember(changed));
+}
+
+test "directory sync failure before prepare prevents backend mutation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{};
+    var faults: FileStore.Faults = .{ .fail_directory_sync_once_at_record_count = 1 };
+    var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+    defer file_store.deinit();
+    file_store.faults = &faults;
+    var service = Service.init(file_store.store(), backend.backend());
+
+    try std.testing.expectError(
+        error.InjectedDirectorySyncFailure,
+        service.ensureReplica(testRequest(ensure_operation_id, 1)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), file_store.records.len);
+    try std.testing.expectEqual(@as(usize, 0), backend.ensure_calls);
+
+    _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+    try std.testing.expectEqual(@as(usize, 1), backend.ensure_calls);
+}
+
+test "FileStore does not publish a record before directory sync succeeds" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var backend: FakeBackend = .{};
@@ -706,8 +1026,8 @@ test "FileStore retains a record published before directory sync failure" {
             error.InjectedDirectorySyncFailure,
             service.ensureReplica(testRequest(ensure_operation_id, 1)),
         );
-        try std.testing.expectEqual(@as(usize, 2), file_store.records.len);
-        try std.testing.expectEqual(OperationStatus.completed, file_store.records[1].status);
+        try std.testing.expectEqual(@as(usize, 1), file_store.records.len);
+        try std.testing.expectEqual(OperationStatus.prepared, file_store.records[0].status);
 
         const retry = try service.ensureReplica(testRequest(ensure_operation_id, 1));
         try std.testing.expectEqual(ReplicaState.active, retry.replica.state);

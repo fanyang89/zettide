@@ -32,9 +32,26 @@ Run `zig build test-data-node` for endpoint/SPDK adapter units,
 `zig build test-compatibility` for CLI/frontend compatibility units, and
 `zig build test-module-roots` for dependency-boundary checks.
 
-`data_node_main.zig` and `data_node_service.zig` contain the DataService prototype.
-The repository root build installs `zettide-data-node`; the daemon starts its
-control endpoint and registers its stable identity and advertised data endpoint
-with the controller. Replica/publication reconciliation remains a later
-composition step. See `tests/e2e/README.md` for the local Docker Compose and
-libiscsi smoke profile.
+`data_node_main.zig` and `data_node_service.zig` expose the DataService control
+endpoint. The repository root build installs `zettide-data-node`; the daemon starts that
+endpoint and registers its stable Node identity and advertised data endpoint
+with the controller.
+
+For development provisioning, configure all of `--state-dir`, `--member-file`,
+`--member-id`, `--pool-id`, `--member-metadata-capacity`, `--member-capacity`, and
+`--extent-size`. The daemon registers the file Member, advances a durable process
+incarnation, and reports sequenced capacity heartbeats at the interval returned
+by the controller. The target Pool must already exist.
+
+Replica operations are persisted in `replicas.state`, and an exclusive
+`daemon.lock` prevents two processes from sharing that state directory. The daemon validates
+allocations against the pre-sized member file, rejects overlap, retains deleted
+extents in quarantine, and reports free/allocated/reserved/retired extent counts.
+Omitting all seven options keeps Replica operations and Member heartbeats disabled
+while lease diagnostics remain available.
+
+This file-member backend establishes the durable control-plane boundary only; it
+does not replicate user writes or publish a managed Volume. Cross-node Replica
+transport, fencing/recovery, and authority-gated Publication remain subsequent
+composition steps. See `tests/e2e/README.md` for the current local Docker Compose
+and libiscsi smoke profile.

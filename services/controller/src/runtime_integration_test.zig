@@ -4,7 +4,7 @@ const pb = @import("controller_proto");
 const grpc = @import("grpc_lite");
 const raft = @import("raftz");
 const config_mod = @import("config.zig");
-const data_service = @import("data_service.zig");
+const data_service = @import("zettide_data_service_contracts").replica_service;
 const primary_lease = @import("primary_lease.zig");
 const reconciler = @import("reconciler.zig");
 const replica_fence = @import("replica_fence.zig");
@@ -879,6 +879,8 @@ fn makeConfig(
         .raft_advertise = raft_advertise,
         .data_dir = data_dir,
         .peers = peers,
+        .reconcile_interval_ms = 1_000,
+        .data_service_timeout_ns = 5 * std.time.ns_per_s,
     };
 }
 

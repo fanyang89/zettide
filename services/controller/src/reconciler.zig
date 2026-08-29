@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const data_service = @import("data_service.zig");
+const data_service = @import("zettide_data_service_contracts").replica_service;
 const pb = @import("controller_proto");
 const primary_lease = @import("primary_lease.zig");
 const protocol = @import("zettide_data_service_contracts");

@@ -76,7 +76,11 @@ zig build run -- \
 ```
 
 Use `--raft-advertise` when the address visible to peers differs from the local
-listen address. `SIGINT` and `SIGTERM` initiate graceful RPC and Raft shutdown.
+listen address. The production daemon creates its DataService RPC client and
+runs leader-only reconciliation by default; tune it with
+`--reconcile-interval-ms` (default `1000`) and
+`--data-service-timeout-ms` (default `5000`). `SIGINT` and `SIGTERM` initiate
+graceful RPC, reconciliation, and Raft shutdown.
 
 ## Development
 

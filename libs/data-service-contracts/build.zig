@@ -3,10 +3,15 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const uuid_dependency = b.dependency("uuid", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const contracts = b.addModule("zettide_data_service_contracts", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "uuid", .module = uuid_dependency.module("uuid") }},
     });
     const tests = b.addTest(.{ .root_module = contracts });
     const run_tests = b.addRunArtifact(tests);

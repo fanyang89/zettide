@@ -27,7 +27,7 @@ The table below is only a concise entry point.
 | Raw-disk Blob Pool | Current | One unprotected member or three local scheduled replicas, safe planning, confirmation, inspection, and FUSE mount |
 | NFSv3 | Partial | `FSAL_ZETTIDE` can open a standalone target or one Pool member; multi-member assembly is not implemented |
 | Catalog block path | Partial | Multi-Volume Catalog, extent mappings, SPDK-backed NVMf/iSCSI exports, endpoint registry, and focused lifecycle tests |
-| Controller | Foundation | Raft-replicated Pool, Node, Member, and Volume metadata with WAL, snapshots, and gRPC; heartbeat observations are leader-local and volatile |
+| Controller | Foundation | Raft-replicated metadata, leader-local heartbeats, placement/authority state machines, and a production-wired leader reconciler for the partial DataService lifecycle |
 | CSI | Partial | CSI Node service for the current FUSE path; dynamic provisioning and a CSI Controller service are not implemented |
 | Distributed data plane | Target | Placement, majority data commits, repair, primary failover, and cross-node replica lifecycle remain future work |
 

@@ -208,27 +208,30 @@ servers、endpoint locators、Pool leases 和 SPDK handles 活得更久。
 
 `data_node_main.zig` 当前：
 
-- 只接受 `--listen host:port`；
-- block SIGINT/SIGTERM；
-- 创建 DataNodeServer、start、记录 local address；
-- `sigwait` 后执行 5-second graceful shutdown；
-- 不加载 storage config、Pool、endpoint、SPDK 或 stable Data Node ID。
+- 接受 control listen/advertise、controller endpoint、cluster/node identity 和 data endpoint 配置；
+- 启动 DataNodeServer 后向 controller 注册 stable Data Node ID；
+- 可选接受完整的 `--state-dir`、`--member-file`、`--member-id`、`--pool-id`、
+  `--member-metadata-capacity`、`--member-capacity`、`--extent-size` 组合，启用单个开发用 file Member；
+- block SIGINT/SIGTERM，并在 `sigwait` 后执行 5-second graceful shutdown；
+- file Member 模式会注册 Member、持久递增 process incarnation，并按 controller 建议间隔上报
+  sequenced capacity heartbeat；
+- 尚未组合 Pool/Catalog、Endpoint Registry 或 SPDK runtime。
 
-`data_node_service.zig` 当前只注册：
+`data_node_service.zig` 当前注册：
 
-- `IdentifyHolder`；
-- `StagePrimary`；
-- `InspectPrimary`。
+- `EnsureReplica`、`InspectReplica`、`DeleteReplica`；
+- `IdentifyHolder`、`StagePrimary`、`InspectPrimary`。
 
-共享 proto 声明的 Ensure/Inspect/DeleteReplica、FenceReplica、RecoverPrimary、MarkPrimaryReady 等 methods
-尚未接通。未注册 method 不能在文档或 readiness 中宣称已实现。
+Replica mutation 使用 checksummed、file-synchronized operation journal，校验 Member identity、extent
+alignment/bounds、历史 overlap 和 tombstone quarantine。这个 backend 只建立持久控制面边界，不复制用户数据。
+共享 proto 中的 `FenceReplica`、`RecoverPrimary` 和 `MarkPrimaryReady` 尚未接通。
 
 prototype State 当前：
 
-- 启动时生成 UUIDv7-compatible boot ID；
-- 用 mutex 保护 process-memory authority map；
+- 每次进程启动生成新的 UUIDv7-compatible boot ID；
+- 用独立 mutex 保护 Replica service 与 process-memory authority map；
 - 按 Volume ID 保存 staged binding 和 primary lease Runtime；
-- 不持久化 stable Data Node identity/authority state；
+- Replica operation journal 与 heartbeat incarnation 持久化，但 authority/lease runtime 仍不持久化；
 - 不访问 Pool/Catalog 数据；
 - InspectPrimary 总是报告 current_active=false/current_admitting=false，只判断 candidate freshness。
 

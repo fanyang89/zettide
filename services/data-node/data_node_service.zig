@@ -3,7 +3,18 @@ const std = @import("std");
 const grpc = @import("grpc_lite");
 const pb = @import("data_node_proto");
 const protocol = @import("zettide_data_service_contracts");
+const file_member_backend = @import("file_member_backend.zig");
 const lease = protocol.primary_lease;
+const replica_service = protocol.replica_service;
+
+pub const ReplicaFileStore = replica_service.FileStore;
+pub const ReplicaCapacitySnapshot = replica_service.CapacitySnapshot;
+pub const FileMemberBackend = file_member_backend.FileMemberBackend;
+
+pub const Options = struct {
+    replica_store: ?replica_service.Store = null,
+    replica_backend: ?replica_service.Backend = null,
+};
 
 pub const DataNodeServer = struct {
     state: *State,
@@ -15,12 +26,27 @@ pub const DataNodeServer = struct {
         host: []const u8,
         port: u16,
     ) !DataNodeServer {
+        return initWithOptions(allocator, io, host, port, .{});
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        options: Options,
+    ) !DataNodeServer {
+        if ((options.replica_store == null) != (options.replica_backend == null))
+            return error.IncompleteReplicaConfiguration;
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
-        state.* = try State.init(allocator, io);
+        state.* = try State.init(allocator, io, options);
         errdefer state.deinit();
         var server = try grpc.Server.init(allocator, .{ .host = host, .port = port });
         errdefer server.deinit();
+        try server.registerUnary(methodPath("EnsureReplica"), grpc.UnaryHandler.bind(State, state, State.ensureReplica));
+        try server.registerUnary(methodPath("InspectReplica"), grpc.UnaryHandler.bind(State, state, State.inspectReplica));
+        try server.registerUnary(methodPath("DeleteReplica"), grpc.UnaryHandler.bind(State, state, State.deleteReplica));
         try server.registerUnary(methodPath("IdentifyHolder"), grpc.UnaryHandler.bind(State, state, State.identifyHolder));
         try server.registerUnary(methodPath("StagePrimary"), grpc.UnaryHandler.bind(State, state, State.stagePrimary));
         try server.registerUnary(methodPath("InspectPrimary"), grpc.UnaryHandler.bind(State, state, State.inspectPrimary));
@@ -57,6 +83,10 @@ const State = struct {
     io: std.Io,
     boot_id: protocol.Id,
     mutex: std.Io.Mutex = .init,
+    // Blocks concurrent RPCs before the contract-level transaction lock so
+    // filesystem I/O never causes another request to busy-spin.
+    replica_mutex: std.Io.Mutex = .init,
+    replicas: ?replica_service.Service,
     authorities: std.AutoHashMapUnmanaged(protocol.Id, Authority) = .empty,
 
     const Authority = struct {
@@ -64,13 +94,80 @@ const State = struct {
         runtime: lease.Runtime,
     };
 
-    fn init(allocator: std.mem.Allocator, io: std.Io) !State {
-        return .{ .allocator = allocator, .io = io, .boot_id = try createBootId(io) };
+    fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) !State {
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .boot_id = try createBootId(io),
+            .replicas = if (options.replica_store) |store|
+                replica_service.Service.init(store, options.replica_backend.?)
+            else
+                null,
+        };
     }
 
     fn deinit(self: *State) void {
         self.authorities.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    fn ensureReplica(
+        self: *State,
+        allocator: std.mem.Allocator,
+        _: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.EnsureReplicaRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid EnsureReplica request");
+        defer request.deinit(allocator);
+        return self.handleReplicaMutation(allocator, pb.EnsureReplicaResponse, replicaRequest(request), .ensure);
+    }
+
+    fn inspectReplica(
+        self: *State,
+        allocator: std.mem.Allocator,
+        _: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.InspectReplicaRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid InspectReplica request");
+        defer request.deinit(allocator);
+        return self.handleReplicaMutation(allocator, pb.InspectReplicaResponse, replicaRequest(request), .inspect);
+    }
+
+    fn deleteReplica(
+        self: *State,
+        allocator: std.mem.Allocator,
+        _: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.DeleteReplicaRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid DeleteReplica request");
+        defer request.deinit(allocator);
+        return self.handleReplicaMutation(allocator, pb.DeleteReplicaResponse, replicaRequest(request), .delete);
+    }
+
+    const ReplicaMethod = enum { ensure, inspect, delete };
+
+    fn handleReplicaMutation(
+        self: *State,
+        allocator: std.mem.Allocator,
+        comptime ResponseType: type,
+        request: replica_service.Request,
+        method: ReplicaMethod,
+    ) !grpc.UnaryResponse {
+        self.replica_mutex.lockUncancelable(self.io);
+        defer self.replica_mutex.unlock(self.io);
+        const service = if (self.replicas) |*replicas| replicas else return fail(allocator, .failed_precondition, "replica backend is not configured");
+        const response = switch (method) {
+            .ensure => service.ensureReplica(request),
+            .inspect => service.inspectReplica(request),
+            .delete => service.deleteReplica(request),
+        } catch |err| return replicaFailure(allocator, err);
+        return encodeReplicaResponse(allocator, ResponseType, response);
     }
 
     fn identifyHolder(
@@ -196,6 +293,91 @@ fn nowAwakeMs(io: std.Io) !u64 {
         error.InvalidTimestamp;
 }
 
+fn replicaRequest(request: anytype) replica_service.Request {
+    return .{
+        .operation_id = request.operation_id,
+        .volume_id = request.volume_id,
+        .placement_id = request.placement_id,
+        .allocation_id = request.allocation_id,
+        .generation = request.generation,
+        .member_id = request.member_id,
+        .offset_bytes = request.offset_bytes,
+        .length_bytes = request.length_bytes,
+    };
+}
+
+fn encodeReplicaResponse(
+    allocator: std.mem.Allocator,
+    comptime ResponseType: type,
+    response: replica_service.Response,
+) !grpc.UnaryResponse {
+    const operation_id = uuidText(response.operation_id);
+    const binding = response.replica.attestation.binding;
+    const volume_id = uuidText(binding.volume_id);
+    const placement_id = uuidText(binding.placement_id);
+    const allocation_id = uuidText(binding.allocation_id);
+    return encodeResponse(allocator, ResponseType{
+        .operation_id = &operation_id,
+        .replica = .{
+            .state = switch (response.replica.state) {
+                .active => .DATA_REPLICA_STATE_ACTIVE,
+                .tombstoned => .DATA_REPLICA_STATE_TOMBSTONED,
+            },
+            .attestation = .{
+                .volume_id = &volume_id,
+                .placement_id = &placement_id,
+                .allocation_id = &allocation_id,
+                .generation = binding.generation,
+                .member_id = &binding.member_id,
+                .offset_bytes = binding.offset_bytes,
+                .length_bytes = binding.length_bytes,
+                .backend_digest = &response.replica.attestation.backend_digest,
+            },
+        },
+    });
+}
+
+fn replicaFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
+    return switch (err) {
+        error.InvalidGeometry,
+        error.InvalidMemberId,
+        error.InvalidId,
+        => fail(allocator, .invalid_argument, "invalid replica request"),
+        error.ReplicaNotFound => fail(allocator, .not_found, "replica not found"),
+        error.OperationConflict,
+        error.OperationInProgress,
+        error.BindingConflict,
+        error.GenerationRegression,
+        error.PlacementStillActive,
+        error.AllocationOverlap,
+        error.AllocationQuarantined,
+        error.MemberMismatch,
+        error.UnalignedAllocation,
+        error.AllocationOutOfBounds,
+        error.MemberGeometryChanged,
+        => fail(allocator, .failed_precondition, "replica request rejected"),
+        error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "replica state exhausted"),
+        else => fail(allocator, .internal, "replica operation failed"),
+    };
+}
+
+fn uuidText(id: protocol.Id) [36]u8 {
+    const hex = "0123456789abcdef";
+    var text: [36]u8 = undefined;
+    var source_index: usize = 0;
+    var target_index: usize = 0;
+    while (source_index < id.len) : (source_index += 1) {
+        if (target_index == 8 or target_index == 13 or target_index == 18 or target_index == 23) {
+            text[target_index] = '-';
+            target_index += 1;
+        }
+        text[target_index] = hex[id[source_index] >> 4];
+        text[target_index + 1] = hex[id[source_index] & 0x0f];
+        target_index += 2;
+    }
+    return text;
+}
+
 fn parseAuthorityBinding(binding: ?pb.DataAuthorityBinding) !protocol.AuthorityBinding {
     const value = binding orelse return error.MissingBinding;
     if (value.authority_generation == 0 or value.write_epoch == 0 or value.placement_revision == 0)
@@ -268,6 +450,116 @@ fn methodPath(comptime method: []const u8) []const u8 {
     return "/zettide.controller.v1.DataService/" ++ method;
 }
 
+test "data-node service persists Replica lifecycle through gRPC" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const member_file = try tmp.dir.createFile(std.testing.io, "member.img", .{ .read = true });
+    try member_file.setLength(std.testing.io, 64 * 1024);
+    member_file.close(std.testing.io);
+
+    const member: protocol.Id = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 9 };
+    var store = try ReplicaFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
+    defer store.deinit();
+    var backend = try FileMemberBackend.init(
+        std.testing.io,
+        tmp.dir,
+        "member.img",
+        "/test/member.img",
+        member,
+        64 * 1024,
+        4096,
+    );
+    var server = try DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
+        .replica_store = store.store(),
+        .replica_backend = backend.backend(),
+    });
+    defer server.deinit();
+    try server.start();
+
+    var endpoint_buffer: [32]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "127.0.0.1:{d}", .{try server.server.port()});
+    var channel = try grpc.Channel.init(std.testing.allocator, endpoint, .{});
+    defer channel.deinit();
+
+    var ensure_request: pb.EnsureReplicaRequest = .{
+        .operation_id = "0198f54d-5c2a-7000-8000-000000000021",
+        .volume_id = "0198f54d-5c2a-7000-8000-000000000022",
+        .placement_id = "0198f54d-5c2a-7000-8000-000000000023",
+        .allocation_id = "0198f54d-5c2a-7000-8000-000000000024",
+        .generation = 1,
+        .member_id = &member,
+        .offset_bytes = 4096,
+        .length_bytes = 8192,
+    };
+    var invalid_request = ensure_request;
+    invalid_request.operation_id = "0198f54d-5c2a-7000-8000-000000000027";
+    invalid_request.offset_bytes = 64 * 1024;
+    var invalid_result = try testCallUnary(&channel, methodPath("EnsureReplica"), &invalid_request);
+    defer invalid_result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.failed_precondition, invalid_result.status.code);
+
+    var ensure_result = try testCallUnary(&channel, methodPath("EnsureReplica"), &ensure_request);
+    defer ensure_result.deinit();
+    try std.testing.expect(ensure_result.status.isOk());
+    var ensure_reader: std.Io.Reader = .fixed(ensure_result.payload);
+    var ensured = try pb.EnsureReplicaResponse.decode(&ensure_reader, std.testing.allocator);
+    defer ensured.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(ensure_request.operation_id, ensured.operation_id);
+    try std.testing.expectEqual(pb.DataReplicaState.DATA_REPLICA_STATE_ACTIVE, ensured.replica.?.state);
+    try std.testing.expectEqual(@as(usize, 32), ensured.replica.?.attestation.?.backend_digest.len);
+
+    var inspect_request: pb.InspectReplicaRequest = .{
+        .operation_id = "0198f54d-5c2a-7000-8000-000000000025",
+        .volume_id = ensure_request.volume_id,
+        .placement_id = ensure_request.placement_id,
+        .allocation_id = ensure_request.allocation_id,
+        .generation = ensure_request.generation,
+        .member_id = ensure_request.member_id,
+        .offset_bytes = ensure_request.offset_bytes,
+        .length_bytes = ensure_request.length_bytes,
+    };
+    var inspect_result = try testCallUnary(&channel, methodPath("InspectReplica"), &inspect_request);
+    defer inspect_result.deinit();
+    try std.testing.expect(inspect_result.status.isOk());
+
+    var delete_request: pb.DeleteReplicaRequest = .{
+        .operation_id = "0198f54d-5c2a-7000-8000-000000000026",
+        .volume_id = ensure_request.volume_id,
+        .placement_id = ensure_request.placement_id,
+        .allocation_id = ensure_request.allocation_id,
+        .generation = ensure_request.generation,
+        .member_id = ensure_request.member_id,
+        .offset_bytes = ensure_request.offset_bytes,
+        .length_bytes = ensure_request.length_bytes,
+    };
+    const drifted_file = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
+    try drifted_file.setLength(std.testing.io, 32 * 1024);
+    drifted_file.close(std.testing.io);
+    var rejected_delete = delete_request;
+    rejected_delete.operation_id = "0198f54d-5c2a-7000-8000-000000000028";
+    var rejected_delete_result = try testCallUnary(&channel, methodPath("DeleteReplica"), &rejected_delete);
+    defer rejected_delete_result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.failed_precondition, rejected_delete_result.status.code);
+
+    const restored_file = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
+    try restored_file.setLength(std.testing.io, 64 * 1024);
+    restored_file.close(std.testing.io);
+    var delete_result = try testCallUnary(&channel, methodPath("DeleteReplica"), &delete_request);
+    defer delete_result.deinit();
+    try std.testing.expect(delete_result.status.isOk());
+    var delete_reader: std.Io.Reader = .fixed(delete_result.payload);
+    var deleted = try pb.DeleteReplicaResponse.decode(&delete_reader, std.testing.allocator);
+    defer deleted.deinit(std.testing.allocator);
+    try std.testing.expectEqual(pb.DataReplicaState.DATA_REPLICA_STATE_TOMBSTONED, deleted.replica.?.state);
+}
+
+fn testCallUnary(channel: *grpc.Channel, path: []const u8, request: anytype) !grpc.CallResult {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try request.encode(&writer.writer, std.testing.allocator);
+    return channel.callUnary(std.testing.allocator, path, writer.written(), .{});
+}
+
 test "data-node service stages and inspects a fresh candidate without claiming readiness" {
     var service = try DataNodeServer.init(std.testing.allocator, std.testing.io, "127.0.0.1", 0);
     defer service.deinit();
@@ -333,7 +625,11 @@ test "data-node service stages and inspects a fresh candidate without claiming r
     try std.testing.expect(!inspected.current_active);
     try std.testing.expect(!inspected.current_admitting);
 
-    var unimplemented = try channel.callUnary(std.testing.allocator, methodPath("EnsureReplica"), "", .{});
-    defer unimplemented.deinit();
-    try std.testing.expectEqual(grpc.StatusCode.unimplemented, unimplemented.status.code);
+    var unconfigured = try channel.callUnary(std.testing.allocator, methodPath("EnsureReplica"), "", .{});
+    defer unconfigured.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.failed_precondition, unconfigured.status.code);
+}
+
+test {
+    _ = file_member_backend;
 }

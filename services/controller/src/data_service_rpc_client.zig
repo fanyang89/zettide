@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const data_service = @import("data_service.zig");
+const data_service = @import("zettide_data_service_contracts").replica_service;
 const grpc = @import("grpc_lite");
 const pb = @import("data_node_proto");
 const reconciler = @import("reconciler.zig");

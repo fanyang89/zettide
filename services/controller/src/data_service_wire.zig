@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const data_service = @import("data_service.zig");
+const data_service = @import("zettide_data_service_contracts").replica_service;
 const pb = @import("data_node_proto");
 const reconciler = @import("reconciler.zig");
 const replica_fence = @import("replica_fence.zig");
@@ -185,10 +185,12 @@ pub fn methodPath(comptime method: []const u8) []const u8 {
 
 fn parseUuidText(text: []const u8) ![16]u8 {
     const uuid = @import("uuid");
-    const id = uuid.urn.deserialize(text) catch return error.InvalidUuid;
+    const parsed = uuid.urn.deserialize(text) catch return error.InvalidUuid;
+    const canonical = uuid.urn.serialize(parsed);
+    if (canonical[14] != '7' or !std.mem.eql(u8, text, &canonical)) return error.InvalidUuid;
+    var id: [16]u8 = undefined;
+    std.mem.writeInt(u128, &id, parsed, .little);
     if (!validUuidV7(id)) return error.InvalidUuid;
-    var canonical = uuid.urn.serialize(id);
-    if (!std.mem.eql(u8, text, &canonical)) return error.InvalidUuid;
     return id;
 }
 
@@ -220,6 +222,12 @@ const id_d: [16]u8 = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0x00, 0x80, 0x
 const id_e: [16]u8 = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0x00, 0x80, 0x00, 0, 0, 0, 0, 0, 5 };
 const id_f: [16]u8 = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0x00, 0x80, 0x00, 0, 0, 0, 0, 0, 6 };
 const digest: [32]u8 = @splat(0x44);
+
+test "Replica UUID text parses to canonical wire bytes" {
+    try std.testing.expectEqual(id_a, try parseUuidText("0198f54d-5c2a-7000-8000-000000000001"));
+    try std.testing.expectError(error.InvalidUuid, parseUuidText("0198F54D-5C2A-7000-8000-000000000001"));
+    try std.testing.expectError(error.InvalidUuid, parseUuidText("0198f54d-5c2a-7000-0000-000000000001"));
+}
 
 fn testAuthority() reconciler.AuthorityBinding {
     return .{

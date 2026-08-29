@@ -13,6 +13,8 @@ const params = clap.parseParamsComptime(
     \\    --raft-advertise <str>         Raft address advertised to peers.
     \\    --data-dir <str>               Persistent WAL directory.
     \\    --peer <str>...                Initial voter as ID=IPv4:PORT.
+    \\    --reconcile-interval-ms <u64>  DataService reconciliation interval (default 1000).
+    \\    --data-service-timeout-ms <u64> DataService RPC timeout (default 5000).
     \\
 );
 
@@ -26,6 +28,8 @@ pub const Config = struct {
     raft_advertise: []u8,
     data_dir: []u8,
     peers: []raft.Peer,
+    reconcile_interval_ms: i64,
+    data_service_timeout_ns: u64,
 
     pub fn deinit(self: *Config) void {
         for (self.peers) |peer| self.allocator.free(peer.context.?);
@@ -85,6 +89,14 @@ pub fn parse(
     if (data_dir_text.len == 0) return error.DataDirRequired;
     const peer_args = parsed.args.peer;
     if (peer_args.len == 0) return error.PeerRequired;
+    const reconcile_interval_raw = @field(parsed.args, "reconcile-interval-ms") orelse 1_000;
+    const reconcile_interval_ms = std.math.cast(i64, reconcile_interval_raw) orelse
+        return error.InvalidReconcileInterval;
+    if (reconcile_interval_ms <= 0) return error.InvalidReconcileInterval;
+    const data_service_timeout_ms = @field(parsed.args, "data-service-timeout-ms") orelse 5_000;
+    if (data_service_timeout_ms == 0) return error.InvalidDataServiceTimeout;
+    const data_service_timeout_ns = std.math.mul(u64, data_service_timeout_ms, std.time.ns_per_ms) catch
+        return error.InvalidDataServiceTimeout;
 
     const management_host = try allocator.dupe(u8, management.host);
     errdefer allocator.free(management_host);
@@ -128,6 +140,8 @@ pub fn parse(
         .raft_advertise = raft_advertise,
         .data_dir = data_dir,
         .peers = peers,
+        .reconcile_interval_ms = reconcile_interval_ms,
+        .data_service_timeout_ns = data_service_timeout_ns,
     } };
 }
 
@@ -191,22 +205,28 @@ test "parse persistent three-voter configuration" {
     try std.testing.expectEqualStrings("127.0.0.1:9002", config.raft_advertise);
     try std.testing.expectEqual(@as(usize, 3), config.peers.len);
     try std.testing.expectEqualStrings("127.0.0.1:9003", config.peers[2].context.?);
+    try std.testing.expectEqual(@as(i64, 1_000), config.reconcile_interval_ms);
+    try std.testing.expectEqual(@as(u64, 5 * std.time.ns_per_s), config.data_service_timeout_ns);
 }
 
 test "parse explicit advertised Raft address" {
     const arguments = [_][]const u8{
-        "--node-id",           "1",
-        "--cluster-id",        "0198f54d-5c2a-7000-8000-000000000001",
-        "--management-listen", "127.0.0.1:8001",
-        "--raft-listen",       "0.0.0.0:9001",
-        "--raft-advertise",    "127.0.0.1:9001",
-        "--data-dir",          "/tmp/zettide-controller",
-        "--peer",              "1=127.0.0.1:9001",
+        "--node-id",                 "1",
+        "--cluster-id",              "0198f54d-5c2a-7000-8000-000000000001",
+        "--management-listen",       "127.0.0.1:8001",
+        "--raft-listen",             "0.0.0.0:9001",
+        "--raft-advertise",          "127.0.0.1:9001",
+        "--data-dir",                "/tmp/zettide-controller",
+        "--peer",                    "1=127.0.0.1:9001",
+        "--reconcile-interval-ms",   "250",
+        "--data-service-timeout-ms", "2000",
     };
     var result = try parseSlice(&arguments);
     defer result.deinit();
     try std.testing.expectEqualStrings("0.0.0.0:9001", result.config.raft_listen);
     try std.testing.expectEqualStrings("127.0.0.1:9001", result.config.raft_advertise);
+    try std.testing.expectEqual(@as(i64, 250), result.config.reconcile_interval_ms);
+    try std.testing.expectEqual(@as(u64, 2 * std.time.ns_per_s), result.config.data_service_timeout_ns);
 }
 
 test "parse help without required configuration" {
@@ -264,4 +284,17 @@ test "reject missing durable and network configuration" {
         "--peer",              "1=127.0.0.1:9001",
     };
     try std.testing.expectError(error.InvalidManagementListen, parseSlice(&invalid_port));
+
+    const valid = [_][]const u8{
+        "--node-id",           "1",
+        "--cluster-id",        "0198f54d-5c2a-7000-8000-000000000001",
+        "--management-listen", "127.0.0.1:8001",
+        "--raft-listen",       "127.0.0.1:9001",
+        "--data-dir",          "/tmp/zettide-controller",
+        "--peer",              "1=127.0.0.1:9001",
+    };
+    const zero_reconcile = valid ++ [_][]const u8{ "--reconcile-interval-ms", "0" };
+    try std.testing.expectError(error.InvalidReconcileInterval, parseSlice(&zero_reconcile));
+    const zero_timeout = valid ++ [_][]const u8{ "--data-service-timeout-ms", "0" };
+    try std.testing.expectError(error.InvalidDataServiceTimeout, parseSlice(&zero_timeout));
 }

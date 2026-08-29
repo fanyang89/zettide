@@ -37,6 +37,23 @@ services:
       retries: 30
     stop_grace_period: 10s
 
+  bootstrap:
+    build:
+      context: ../..
+      dockerfile: tests/e2e/Dockerfile
+      target: smoke
+    entrypoint: ["/usr/local/bin/zettide-e2e-bootstrap"]
+    environment:
+      ZETTIDE_CONTROLLER_ENDPOINT: controller:8001
+    depends_on:
+      controller:
+        condition: service_healthy
+    volumes:
+      - cluster-bootstrap:/bootstrap
+    networks:
+      - zettide
+    restart: "no"
+
   data-node:
     build:
       context: ../..
@@ -51,18 +68,24 @@ services:
       ZETTIDE_CLUSTER_ID: 0198f54d-5c2a-7000-8000-000000000001
       ZETTIDE_NODE_ID: 0198f54d-5c2a-7000-8000-000000000002
       ZETTIDE_REQUEST_ID: 0198f54d-5c2a-7000-8000-000000000003
+      ZETTIDE_POOL_ID_FILE: /bootstrap/pool-id
+      ZETTIDE_MEMBER_ID: 0198f54d-5c2a-7000-8000-000000000004
+      ZETTIDE_MEMBER_METADATA_CAPACITY: "1048576"
+      ZETTIDE_MEMBER_CAPACITY: "67108864"
+      ZETTIDE_EXTENT_SIZE: "4194304"
       ZETTIDE_ISCSI_TARGET: iqn.2026-08.io.zettide:e2e
       ZETTIDE_ISCSI_LUN: "1"
       ZETTIDE_ISCSI_SIZE: 64M
     depends_on:
-      controller:
-        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
     security_opt:
       - seccomp=unconfined
     ports:
       - "3260:3260"
       - "7001:7001"
     volumes:
+      - cluster-bootstrap:/bootstrap:ro
       - data-node-data:/var/lib/zettide-data-node
     networks:
       - zettide
@@ -75,7 +98,7 @@ services:
       interval: 1s
       timeout: 2s
       retries: 60
-    stop_grace_period: 10s
+    stop_grace_period: 15s
 
   smoke:
     profiles: ["smoke"]
@@ -88,6 +111,8 @@ services:
         condition: service_healthy
       data-node:
         condition: service_healthy
+    volumes:
+      - cluster-bootstrap:/bootstrap:ro
     networks:
       - zettide
 
@@ -98,5 +123,6 @@ networks:
         - subnet: 172.30.0.0/24
 
 volumes:
+  cluster-bootstrap:
   controller-data:
   data-node-data:

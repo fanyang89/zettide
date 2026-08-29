@@ -34,7 +34,16 @@ pub fn main(init: std.process.Init) !void {
     std.posix.sigaction(.TERM, &action, &old_terminate);
     defer std.posix.sigaction(.TERM, &old_terminate, null);
 
-    const runtime = try controller.Runtime.create(std.heap.smp_allocator, init.io, &parsed.config, .{});
+    var data_service_client = try controller.data_service_rpc_client.RpcClient.init(
+        std.heap.smp_allocator,
+        init.io,
+        .{ .timeout_ns = parsed.config.data_service_timeout_ns },
+    );
+    defer data_service_client.deinit();
+    const runtime = try controller.Runtime.create(std.heap.smp_allocator, init.io, &parsed.config, .{
+        .data_service_client = data_service_client.interface(),
+        .reconcile_interval_ms = parsed.config.reconcile_interval_ms,
+    });
     defer {
         if (runtime.running) runtime.shutdown() catch {};
         runtime.deinit();
