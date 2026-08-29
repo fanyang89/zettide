@@ -1,19 +1,27 @@
 const std = @import("std");
 
+const authority_file_store = @import("authority_file_store.zig");
 const grpc = @import("grpc_lite");
 const pb = @import("data_node_proto");
 const protocol = @import("zettide_data_service_contracts");
 const file_member_backend = @import("file_member_backend.zig");
+const fence_service = protocol.fence_service;
 const lease = protocol.primary_lease;
 const replica_service = protocol.replica_service;
 
 pub const ReplicaFileStore = replica_service.FileStore;
 pub const ReplicaCapacitySnapshot = replica_service.CapacitySnapshot;
+pub const FenceFileStore = fence_service.FileStore;
+pub const AuthorityFileStore = authority_file_store.FileStore;
 pub const FileMemberBackend = file_member_backend.FileMemberBackend;
+pub const FileFenceBackend = file_member_backend.FileFenceBackend;
 
 pub const Options = struct {
     replica_store: ?replica_service.Store = null,
     replica_backend: ?replica_service.Backend = null,
+    fence_store: ?fence_service.Store = null,
+    fence_backend: ?fence_service.Backend = null,
+    authority_store: ?*authority_file_store.FileStore = null,
 };
 
 pub const DataNodeServer = struct {
@@ -36,7 +44,8 @@ pub const DataNodeServer = struct {
         port: u16,
         options: Options,
     ) !DataNodeServer {
-        if ((options.replica_store == null) != (options.replica_backend == null))
+        if ((options.replica_store == null) != (options.replica_backend == null) or
+            (options.fence_store == null) != (options.fence_backend == null))
             return error.IncompleteReplicaConfiguration;
         const state = try allocator.create(State);
         errdefer allocator.destroy(state);
@@ -49,6 +58,9 @@ pub const DataNodeServer = struct {
         try server.registerUnary(methodPath("DeleteReplica"), grpc.UnaryHandler.bind(State, state, State.deleteReplica));
         try server.registerUnary(methodPath("IdentifyHolder"), grpc.UnaryHandler.bind(State, state, State.identifyHolder));
         try server.registerUnary(methodPath("StagePrimary"), grpc.UnaryHandler.bind(State, state, State.stagePrimary));
+        try server.registerUnary(methodPath("FenceReplica"), grpc.UnaryHandler.bind(State, state, State.fenceReplica));
+        try server.registerUnary(methodPath("RecoverPrimary"), grpc.UnaryHandler.bind(State, state, State.recoverPrimary));
+        try server.registerUnary(methodPath("MarkPrimaryReady"), grpc.UnaryHandler.bind(State, state, State.markPrimaryReady));
         try server.registerUnary(methodPath("InspectPrimary"), grpc.UnaryHandler.bind(State, state, State.inspectPrimary));
         return .{ .state = state, .server = server };
     }
@@ -87,6 +99,8 @@ const State = struct {
     // filesystem I/O never causes another request to busy-spin.
     replica_mutex: std.Io.Mutex = .init,
     replicas: ?replica_service.Service,
+    fences: ?fence_service.Service,
+    authority_store: ?*authority_file_store.FileStore,
     authorities: std.AutoHashMapUnmanaged(protocol.Id, Authority) = .empty,
 
     const Authority = struct {
@@ -103,6 +117,11 @@ const State = struct {
                 replica_service.Service.init(store, options.replica_backend.?)
             else
                 null,
+            .fences = if (options.fence_store) |store|
+                fence_service.Service.init(store, options.fence_backend.?)
+            else
+                null,
+            .authority_store = options.authority_store,
         };
     }
 
@@ -197,11 +216,13 @@ const State = struct {
             return fail(allocator, .invalid_argument, "invalid authority binding");
         if (request.lease_duration_ms != lease.duration_ms)
             return fail(allocator, .invalid_argument, "unsupported lease duration");
+        if (self.authority_store == null)
+            return fail(allocator, .failed_precondition, "durable authority state is not configured");
         if (!std.mem.eql(u8, &binding.holder_boot_id, &self.boot_id))
             return fail(allocator, .failed_precondition, "holder boot identity mismatch");
 
         self.stage(binding) catch |err| return switch (err) {
-            error.OutOfMemory => fail(allocator, .resource_exhausted, "authority state exhausted"),
+            error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "authority state exhausted"),
             error.AuthorityConflict,
             error.StaleAuthority,
             error.LeaseConflict,
@@ -213,6 +234,73 @@ const State = struct {
             .binding = authorityProto(&binding),
             .lease_duration_ms = request.lease_duration_ms,
         });
+    }
+
+    fn fenceReplica(
+        self: *State,
+        allocator: std.mem.Allocator,
+        _: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.FenceReplicaRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid FenceReplica request");
+        defer request.deinit(allocator);
+        const binding = parseFenceBinding(request.binding) catch
+            return fail(allocator, .invalid_argument, "invalid fence binding");
+        self.replica_mutex.lockUncancelable(self.io);
+        defer self.replica_mutex.unlock(self.io);
+        const service = if (self.fences) |*fences| fences else return fail(allocator, .failed_precondition, "fence backend is not configured");
+        const result = service.accept(binding) catch |err| return fenceFailure(allocator, err);
+        return encodeResponse(allocator, pb.FenceReplicaResponse{
+            .binding = fenceProto(&result.binding),
+            .fence_digest = &result.fence_digest,
+        });
+    }
+
+    fn recoverPrimary(
+        self: *State,
+        allocator: std.mem.Allocator,
+        _: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.RecoverPrimaryRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid RecoverPrimary request");
+        defer request.deinit(allocator);
+        const binding = parseAuthorityBinding(request.binding) catch
+            return fail(allocator, .invalid_argument, "invalid authority binding");
+        if (self.authority_store == null)
+            return fail(allocator, .failed_precondition, "durable authority state is not configured");
+        if (!std.mem.eql(u8, &binding.holder_boot_id, &self.boot_id))
+            return fail(allocator, .failed_precondition, "holder boot identity mismatch");
+        const recovered = self.recover(binding) catch |err| return authorityFailure(allocator, err, "primary recovery failed");
+        return encodeResponse(allocator, pb.RecoverPrimaryResponse{
+            .binding = authorityProto(&binding),
+            .certified_sequence = recovered.certified_sequence,
+            .history_digest = &recovered.history_digest,
+            .empty_frontier = recovered.empty_frontier,
+        });
+    }
+
+    fn markPrimaryReady(
+        self: *State,
+        allocator: std.mem.Allocator,
+        _: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.MarkPrimaryReadyRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid MarkPrimaryReady request");
+        defer request.deinit(allocator);
+        const binding = parseAuthorityBinding(request.binding) catch
+            return fail(allocator, .invalid_argument, "invalid authority binding");
+        if (self.authority_store == null)
+            return fail(allocator, .failed_precondition, "durable authority state is not configured");
+        if (!std.mem.eql(u8, &binding.holder_boot_id, &self.boot_id))
+            return fail(allocator, .failed_precondition, "holder boot identity mismatch");
+        self.markReady(binding) catch |err| return authorityFailure(allocator, err, "primary readiness failed");
+        return encodeResponse(allocator, pb.MarkPrimaryReadyResponse{ .binding = authorityProto(&binding) });
     }
 
     fn inspectPrimary(
@@ -227,17 +315,14 @@ const State = struct {
         defer request.deinit(allocator);
         const binding = parseAuthorityBinding(request.binding) catch
             return fail(allocator, .invalid_argument, "invalid authority binding");
-        const candidate_fresh = self.inspect(binding) catch |err| return switch (err) {
-            error.NotFound => fail(allocator, .not_found, "authority not staged"),
-            error.AuthorityConflict => fail(allocator, .failed_precondition, "authority binding mismatch"),
-            else => fail(allocator, .internal, "authority inspection failed"),
-        };
+        const status = self.inspect(binding) catch
+            return fail(allocator, .internal, "authority inspection failed");
         return encodeResponse(allocator, pb.InspectPrimaryResponse{
             .binding = authorityProto(&binding),
-            .current_active = false,
-            .current_admitting = false,
-            .candidate_fresh = candidate_fresh,
-            .should_renew = false,
+            .current_active = status.current_active,
+            .current_admitting = status.current_admitting,
+            .candidate_fresh = status.candidate_fresh,
+            .should_renew = status.should_renew,
         });
     }
 
@@ -246,28 +331,96 @@ const State = struct {
         const now_ms = try nowAwakeMs(self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const result = try self.authorities.getOrPut(self.allocator, binding.volume_id);
-        if (!result.found_existing) {
-            result.value_ptr.* = .{
-                .binding = binding,
-                .runtime = try lease.Runtime.init(self.boot_id),
-            };
-        } else if (std.mem.eql(u8, &result.value_ptr.binding.lease_id, &binding.lease_id) and
-            !std.meta.eql(result.value_ptr.binding, binding))
-        {
-            return error.AuthorityConflict;
+        const store = self.authority_store orelse return error.AuthorityStoreRequired;
+        const durable_existing = try store.validate(binding, .staged);
+        const existing = self.authorities.get(binding.volume_id);
+        var next: Authority = if (existing) |authority| authority else .{
+            .binding = binding,
+            .runtime = try lease.Runtime.init(self.boot_id),
+        };
+        if (std.mem.eql(u8, &next.binding.lease_id, &binding.lease_id) and
+            !std.meta.eql(next.binding, binding)) return error.AuthorityConflict;
+        _ = try next.runtime.stage(token, now_ms);
+        next.binding = binding;
+
+        if (existing == null) try self.authorities.ensureUnusedCapacity(self.allocator, 1);
+        if (durable_existing == null)
+            try store.append(.{ .binding = binding, .phase = .staged });
+        if (self.authorities.getPtr(binding.volume_id)) |authority| {
+            authority.* = next;
+        } else {
+            self.authorities.putAssumeCapacity(binding.volume_id, next);
         }
-        _ = try result.value_ptr.runtime.stage(token, now_ms);
-        result.value_ptr.binding = binding;
     }
 
-    fn inspect(self: *State, binding: protocol.AuthorityBinding) !bool {
+    fn recover(self: *State, binding: protocol.AuthorityBinding) !authority_file_store.Record {
         const now_ms = try nowAwakeMs(self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const authority = self.authorities.get(binding.volume_id) orelse return error.NotFound;
+        const authority = self.authorities.get(binding.volume_id) orelse return error.AuthorityNotStaged;
         if (!std.meta.eql(authority.binding, binding)) return error.AuthorityConflict;
-        return authority.runtime.canMarkReadyToken(authorityToken(binding), now_ms);
+        if (!authority.runtime.canMarkReadyToken(authorityToken(binding), now_ms)) return error.CandidateNotFresh;
+        if (self.authority_store) |store| {
+            if (try store.validate(binding, .recovered)) |existing| {
+                if (existing.phase == .recovered or (existing.phase == .ready and !isZero(&existing.history_digest)))
+                    return existing;
+                return error.RecoveryEvidenceUnavailable;
+            }
+        }
+        const record: authority_file_store.Record = .{
+            .binding = binding,
+            .phase = .recovered,
+            .certified_sequence = 0,
+            .history_digest = recoveryDigest(binding),
+            .empty_frontier = true,
+        };
+        if (self.authority_store) |store| try store.append(record);
+        return record;
+    }
+
+    fn markReady(self: *State, binding: protocol.AuthorityBinding) !void {
+        const token = authorityToken(binding);
+        const now_ms = try nowAwakeMs(self.io);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const authority = self.authorities.getPtr(binding.volume_id) orelse return error.AuthorityNotStaged;
+        if (!std.meta.eql(authority.binding, binding)) return error.AuthorityConflict;
+        if (authority.runtime.canAdmit(token, now_ms)) return;
+        if (!authority.runtime.canMarkReadyToken(token, now_ms)) return error.CandidateNotFresh;
+        if (self.authority_store) |store| {
+            if (try store.validate(binding, .ready) == null) {
+                const existing = store.latest(binding.volume_id);
+                try store.append(.{
+                    .binding = binding,
+                    .phase = .ready,
+                    .certified_sequence = if (existing) |value| value.certified_sequence else 0,
+                    .history_digest = if (existing) |value| value.history_digest else @splat(0),
+                    .empty_frontier = if (existing) |value| value.empty_frontier else false,
+                });
+            }
+        }
+        try authority.runtime.markReady(binding.lease_id, now_ms);
+    }
+
+    fn inspect(self: *State, binding: protocol.AuthorityBinding) !protocol.PrimaryLeaseStatus {
+        const now_ms = try nowAwakeMs(self.io);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const authority = self.authorities.get(binding.volume_id) orelse return .{
+            .request = .{ .binding = binding },
+            .current_active = false,
+            .current_admitting = false,
+            .candidate_fresh = false,
+            .should_renew = false,
+        };
+        const token = authorityToken(binding);
+        return .{
+            .request = .{ .binding = binding },
+            .current_active = authority.runtime.canComplete(token, now_ms),
+            .current_admitting = authority.runtime.canAdmit(token, now_ms),
+            .candidate_fresh = authority.runtime.canMarkReadyToken(token, now_ms),
+            .should_renew = authority.runtime.shouldRenew(token, now_ms),
+        };
     }
 };
 
@@ -361,6 +514,40 @@ fn replicaFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryRespon
     };
 }
 
+fn fenceFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
+    return switch (err) {
+        error.InvalidBinding => fail(allocator, .invalid_argument, "invalid fence request"),
+        error.OperationConflict,
+        error.EpochRegression,
+        error.AuthorityConflict,
+        error.ReplicaNotFound,
+        error.OperationInProgress,
+        error.ReplicaNotActive,
+        error.FenceBindingMismatch,
+        => fail(allocator, .failed_precondition, "fence request rejected"),
+        error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "fence state exhausted"),
+        else => fail(allocator, .internal, "fence operation failed"),
+    };
+}
+
+fn authorityFailure(allocator: std.mem.Allocator, err: anyerror, message: []const u8) !grpc.UnaryResponse {
+    return switch (err) {
+        error.AuthorityConflict,
+        error.StaleAuthority,
+        error.AuthorityNotStaged,
+        error.CandidateNotFresh,
+        error.RecoveryEvidenceUnavailable,
+        error.LeaseConflict,
+        error.LeaseMismatch,
+        error.NoCandidate,
+        error.InsufficientWindow,
+        error.BootMismatch,
+        => fail(allocator, .failed_precondition, message),
+        error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "authority state exhausted"),
+        else => fail(allocator, .internal, message),
+    };
+}
+
 fn uuidText(id: protocol.Id) [36]u8 {
     const hex = "0123456789abcdef";
     var text: [36]u8 = undefined;
@@ -376,6 +563,34 @@ fn uuidText(id: protocol.Id) [36]u8 {
         target_index += 2;
     }
     return text;
+}
+
+fn parseFenceBinding(binding: ?pb.DataReplicaFenceBinding) !fence_service.Binding {
+    const value = binding orelse return error.MissingBinding;
+    if (value.replica_generation == 0 or value.write_epoch == 0) return error.InvalidBinding;
+    return .{
+        .operation_id = try uuid(value.operation_id),
+        .volume_id = try uuid(value.volume_id),
+        .placement_id = try uuid(value.placement_id),
+        .replica_generation = value.replica_generation,
+        .write_epoch = value.write_epoch,
+        .primary_node_id = try uuid(value.primary_node_id),
+        .lease_id = try uuid(value.lease_id),
+        .authority_digest = try digest(value.authority_digest),
+    };
+}
+
+fn fenceProto(binding: *const fence_service.Binding) pb.DataReplicaFenceBinding {
+    return .{
+        .operation_id = &binding.operation_id,
+        .volume_id = &binding.volume_id,
+        .placement_id = &binding.placement_id,
+        .replica_generation = binding.replica_generation,
+        .write_epoch = binding.write_epoch,
+        .primary_node_id = &binding.primary_node_id,
+        .lease_id = &binding.lease_id,
+        .authority_digest = &binding.authority_digest,
+    };
 }
 
 fn parseAuthorityBinding(binding: ?pb.DataAuthorityBinding) !protocol.AuthorityBinding {
@@ -418,6 +633,33 @@ fn authorityToken(binding: protocol.AuthorityBinding) lease.Token {
         .authority_generation = binding.authority_generation,
         .write_epoch = binding.write_epoch,
     };
+}
+
+fn recoveryDigest(binding: protocol.AuthorityBinding) protocol.Digest {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("zettide-file-recovery-v1");
+    hasher.update(&binding.volume_id);
+    hasher.update(&binding.primary_placement_id);
+    hasher.update(&binding.primary_node_id);
+    hasher.update(&binding.lease_id);
+    hasher.update(&binding.holder_boot_id);
+    var integer: [8]u8 = undefined;
+    std.mem.writeInt(u64, &integer, binding.authority_generation, .little);
+    hasher.update(&integer);
+    std.mem.writeInt(u64, &integer, binding.write_epoch, .little);
+    hasher.update(&integer);
+    std.mem.writeInt(u64, &integer, binding.placement_revision, .little);
+    hasher.update(&integer);
+    hasher.update(&binding.activation_nonce);
+    hasher.update(&binding.authority_digest);
+    var result: protocol.Digest = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+fn isZero(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte != 0) return false;
+    return true;
 }
 
 fn uuid(bytes: []const u8) !protocol.Id {
@@ -469,9 +711,15 @@ test "data-node service persists Replica lifecycle through gRPC" {
         64 * 1024,
         4096,
     );
+    defer backend.deinit();
+    var fence_store = try FenceFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
+    defer fence_store.deinit();
+    var fence_backend = FileFenceBackend.init(&backend, &store);
     var server = try DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
         .replica_store = store.store(),
         .replica_backend = backend.backend(),
+        .fence_store = fence_store.store(),
+        .fence_backend = fence_backend.backend(),
     });
     defer server.deinit();
     try server.start();
@@ -522,6 +770,35 @@ test "data-node service persists Replica lifecycle through gRPC" {
     defer inspect_result.deinit();
     try std.testing.expect(inspect_result.status.isOk());
 
+    var volume_bytes = member;
+    volume_bytes[15] = 0x22;
+    var placement_bytes = member;
+    placement_bytes[15] = 0x23;
+    var operation_bytes = member;
+    operation_bytes[15] = 0x31;
+    var primary_node = member;
+    primary_node[15] = 0x32;
+    var lease_id = member;
+    lease_id[15] = 0x33;
+    const authority_digest: protocol.Digest = @splat(0x44);
+    var fence_request: pb.FenceReplicaRequest = .{ .binding = .{
+        .operation_id = &operation_bytes,
+        .volume_id = &volume_bytes,
+        .placement_id = &placement_bytes,
+        .replica_generation = 1,
+        .write_epoch = 1,
+        .primary_node_id = &primary_node,
+        .lease_id = &lease_id,
+        .authority_digest = &authority_digest,
+    } };
+    var fence_result = try testCallUnary(&channel, methodPath("FenceReplica"), &fence_request);
+    defer fence_result.deinit();
+    try std.testing.expect(fence_result.status.isOk());
+    var fence_reader: std.Io.Reader = .fixed(fence_result.payload);
+    var fenced = try pb.FenceReplicaResponse.decode(&fence_reader, std.testing.allocator);
+    defer fenced.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 32), fenced.fence_digest.len);
+
     var delete_request: pb.DeleteReplicaRequest = .{
         .operation_id = "0198f54d-5c2a-7000-8000-000000000026",
         .volume_id = ensure_request.volume_id,
@@ -560,8 +837,14 @@ fn testCallUnary(channel: *grpc.Channel, path: []const u8, request: anytype) !gr
     return channel.callUnary(std.testing.allocator, path, writer.written(), .{});
 }
 
-test "data-node service stages and inspects a fresh candidate without claiming readiness" {
-    var service = try DataNodeServer.init(std.testing.allocator, std.testing.io, "127.0.0.1", 0);
+test "data-node service recovers and marks a staged primary ready" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var authority_store = try AuthorityFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "authority.state");
+    defer authority_store.deinit();
+    var service = try DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
+        .authority_store = &authority_store,
+    });
     defer service.deinit();
     try service.start();
 
@@ -624,6 +907,35 @@ test "data-node service stages and inspects a fresh candidate without claiming r
     try std.testing.expect(inspected.candidate_fresh);
     try std.testing.expect(!inspected.current_active);
     try std.testing.expect(!inspected.current_admitting);
+
+    var recover_request: pb.RecoverPrimaryRequest = .{ .binding = authorityProto(&binding) };
+    var recover_result = try testCallUnary(&channel, methodPath("RecoverPrimary"), &recover_request);
+    defer recover_result.deinit();
+    try std.testing.expect(recover_result.status.isOk());
+    var recover_reader: std.Io.Reader = .fixed(recover_result.payload);
+    var recovered = try pb.RecoverPrimaryResponse.decode(&recover_reader, std.testing.allocator);
+    defer recovered.deinit(std.testing.allocator);
+    try std.testing.expect(recovered.empty_frontier);
+    try std.testing.expectEqual(@as(u64, 0), recovered.certified_sequence);
+    try std.testing.expectEqual(@as(usize, 32), recovered.history_digest.len);
+
+    var ready_request: pb.MarkPrimaryReadyRequest = .{ .binding = authorityProto(&binding) };
+    var ready_result = try testCallUnary(&channel, methodPath("MarkPrimaryReady"), &ready_request);
+    defer ready_result.deinit();
+    try std.testing.expect(ready_result.status.isOk());
+    var ready_replay = try testCallUnary(&channel, methodPath("MarkPrimaryReady"), &ready_request);
+    defer ready_replay.deinit();
+    try std.testing.expect(ready_replay.status.isOk());
+
+    var active_result = try testCallUnary(&channel, methodPath("InspectPrimary"), &inspect_request);
+    defer active_result.deinit();
+    try std.testing.expect(active_result.status.isOk());
+    var active_reader: std.Io.Reader = .fixed(active_result.payload);
+    var active = try pb.InspectPrimaryResponse.decode(&active_reader, std.testing.allocator);
+    defer active.deinit(std.testing.allocator);
+    try std.testing.expect(!active.candidate_fresh);
+    try std.testing.expect(active.current_active);
+    try std.testing.expect(active.current_admitting);
 
     var unconfigured = try channel.callUnary(std.testing.allocator, methodPath("EnsureReplica"), "", .{});
     defer unconfigured.deinit();

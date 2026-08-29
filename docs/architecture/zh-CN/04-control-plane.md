@@ -184,6 +184,7 @@ RPC、proposal、ReadIndex、heartbeat、endpoint action、migration 和 repair 
 - endpoint daemon 无 consumer-bound access generation、NFS/FUSE 管理和 platform consumer identity；iSCSI/NVMf 仍是 export primitive。
 - qtr/PVE 的 managed adapter 不属于本仓库；当前 CSI 只有静态 FUSE Node service，无 Controller/block/NFS managed lifecycle。
 - `zettide-controller` 已有 placement、Replica/Allocation mutation、primary authority 状态机与
-  leader-only reconciler，生产入口也已启用 DataService RPC client；但 data-node 的 fencing、recovery、
-  readiness admission 与 publication lifecycle 尚未闭环。
+  leader-only reconciler，生产入口也已启用 DataService RPC client；file data-node 已闭环 fence、
+  empty-frontier recovery 与 readiness admission，但用户数据复制、failover/repair 验证和 publication
+  lifecycle 尚未闭环。
 - 当前控制 RPC 不具备生产级双向认证与授权。

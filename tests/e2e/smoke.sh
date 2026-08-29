@@ -2,76 +2,140 @@
 set -euo pipefail
 
 : "${ZETTIDE_CONTROLLER_ENDPOINT:=controller:8001}"
-: "${ZETTIDE_NODE_ID:=0198f54d-5c2a-7000-8000-000000000002}"
+: "${ZETTIDE_NODE_IDS:=0198f54d-5c2a-7000-8000-000000000011 0198f54d-5c2a-7000-8000-000000000021 0198f54d-5c2a-7000-8000-000000000031}"
 : "${ZETTIDE_MEMBER_CAPACITY:=67108864}"
 : "${ZETTIDE_EXTENT_SIZE:=4194304}"
-: "${ZETTIDE_ISCSI_PORTAL:=data-node:3260}"
-: "${ZETTIDE_ISCSI_TARGET:=iqn.2026-08.io.zettide:e2e}"
+: "${ZETTIDE_ISCSI_PORTAL:=data-node-1:3260}"
+: "${ZETTIDE_ISCSI_TARGET:=iqn.2026-08.io.zettide:e2e-1}"
 : "${ZETTIDE_ISCSI_LUN:=1}"
+: "${ZETTIDE_VOLUME_REQUEST_ID:=0198f54d-5c2a-7000-8000-000000000040}"
 
 controller_proto=/proto/zettide/controller/v1/controller.proto
+read -r -a node_ids <<<"$ZETTIDE_NODE_IDS"
+
 registered=false
 for _ in {1..90}; do
-    if nodes=$(grpcurl -plaintext -import-path /proto -proto "$controller_proto" \
+    if nodes=$(grpcurl -max-time 2 -plaintext -import-path /proto -proto "$controller_proto" \
         -d '{"pageSize":100}' "$ZETTIDE_CONTROLLER_ENDPOINT" \
-        zettide.controller.v1.NodeService/ListNodes 2>/dev/null) \
-        && jq -e --arg id "$ZETTIDE_NODE_ID" '.nodes[]? | select(.id == $id)' \
-            >/dev/null <<<"$nodes"; then
-        registered=true
-        break
+        zettide.controller.v1.NodeService/ListNodes 2>/dev/null); then
+        registered_count=$(jq -r --argjson ids "$(printf '%s\n' "${node_ids[@]}" | jq -R . | jq -s .)" \
+            '[.nodes[]?.id | select(. as $id | $ids | index($id))] | length' <<<"$nodes")
+        [[ $registered_count == "${#node_ids[@]}" ]] && { registered=true; break; }
     fi
     sleep 1
 done
 [[ $registered == true ]] || {
-    echo "data-node was not registered with the controller" >&2
+    echo "three data-nodes were not registered with the controller" >&2
     exit 1
 }
-echo "controller node registration: ok (${ZETTIDE_NODE_ID})"
+echo "controller node registration: ok (${#node_ids[@]} nodes)"
 
 pool_id=$(</bootstrap/pool-id)
 member_registered=false
-member_id=""
 for _ in {1..90}; do
-    if members=$(grpcurl -plaintext -import-path /proto -proto "$controller_proto" \
+    if members=$(grpcurl -max-time 2 -plaintext -import-path /proto -proto "$controller_proto" \
         -d '{"pageSize":100}' "$ZETTIDE_CONTROLLER_ENDPOINT" \
         zettide.controller.v1.MemberService/ListMembers 2>/dev/null) \
-        && member_id=$(jq -er --arg pool "$pool_id" --arg node "$ZETTIDE_NODE_ID" \
-            '.members[]? | select(.poolId == $pool and .nodeId == $node) | .id' \
-            <<<"$members"); then
+        && [[ $(jq -r --arg pool "$pool_id" '[.members[]? | select(.poolId == $pool)] | length' <<<"$members") == "${#node_ids[@]}" ]]; then
         member_registered=true
         break
     fi
     sleep 1
 done
 [[ $member_registered == true ]] || {
-    echo "file Member was not registered with the controller" >&2
+    echo "three file Members were not registered with the controller" >&2
     exit 1
 }
 
 expected_free=$((ZETTIDE_MEMBER_CAPACITY / ZETTIDE_EXTENT_SIZE))
-heartbeat_observed=false
-for _ in {1..90}; do
-    if heartbeat=$(grpcurl -plaintext -import-path /proto -proto "$controller_proto" \
-        -d "$(jq -cn --arg nodeId "$ZETTIDE_NODE_ID" '{nodeId:$nodeId}')" \
+for node_id in "${node_ids[@]}"; do
+    member_id=$(jq -er --arg pool "$pool_id" --arg node "$node_id" \
+        '.members[]? | select(.poolId == $pool and .nodeId == $node) | .id' <<<"$members")
+    heartbeat_observed=false
+    for _ in {1..90}; do
+        if heartbeat=$(grpcurl -max-time 2 -plaintext -import-path /proto -proto "$controller_proto" \
+            -d "$(jq -cn --arg nodeId "$node_id" '{nodeId:$nodeId}')" \
+            "$ZETTIDE_CONTROLLER_ENDPOINT" \
+            zettide.controller.v1.HeartbeatService/GetHeartbeat 2>/dev/null) \
+            && jq -e --arg member "$member_id" --arg free "$expected_free" \
+                '.freshness == "HEARTBEAT_FRESHNESS_FRESH" and
+                 (.observation.members[]? |
+                    .memberId == $member and
+                    .state == "MEMBER_HEARTBEAT_STATE_PRESENT" and
+                    .capacity.freeExtentCount == $free)' \
+                >/dev/null <<<"$heartbeat"; then
+            heartbeat_observed=true
+            break
+        fi
+        sleep 1
+    done
+    [[ $heartbeat_observed == true ]] || {
+        echo "fresh capacity heartbeat was not observed for ${node_id}" >&2
+        exit 1
+    }
+done
+echo "controller Member registration and capacity heartbeat: ok (${pool_id})"
+
+create_payload=$(jq -cn \
+    --arg requestId "$ZETTIDE_VOLUME_REQUEST_ID" \
+    --arg poolId "$pool_id" \
+    '{requestId:$requestId,poolId:$poolId,name:"e2e-volume",description:"three-node control-plane E2E",sizeBytes:"8388608"}')
+create_response=$(grpcurl -max-time 5 -plaintext -import-path /proto -proto "$controller_proto" \
+    -d "$create_payload" "$ZETTIDE_CONTROLLER_ENDPOINT" \
+    zettide.controller.v1.VolumeService/CreateVolume)
+volume_id=$(jq -er '.volume.id' <<<"$create_response")
+
+volume_active=false
+for _ in {1..120}; do
+    if volume=$(grpcurl -max-time 2 -plaintext -import-path /proto -proto "$controller_proto" \
+        -d "$(jq -cn --arg volumeId "$volume_id" '{volumeId:$volumeId}')" \
         "$ZETTIDE_CONTROLLER_ENDPOINT" \
-        zettide.controller.v1.HeartbeatService/GetHeartbeat 2>/dev/null) \
-        && jq -e --arg member "$member_id" --arg free "$expected_free" \
-            '.freshness == "HEARTBEAT_FRESHNESS_FRESH" and
-             (.observation.members[]? |
-                .memberId == $member and
-                .state == "MEMBER_HEARTBEAT_STATE_PRESENT" and
-                .capacity.freeExtentCount == $free)' \
-            >/dev/null <<<"$heartbeat"; then
-        heartbeat_observed=true
+        zettide.controller.v1.VolumeService/GetVolume 2>/dev/null) \
+        && jq -e '.volume.lifecycleState == "VOLUME_LIFECYCLE_STATE_ACTIVE" and
+                     .volume.availabilityState == "VOLUME_AVAILABILITY_STATE_HEALTHY" and
+                     .volume.operationPhase == "VOLUME_OPERATION_PHASE_NONE" and
+                     .volume.targetReplicaCount == 3' >/dev/null <<<"$volume"; then
+        volume_active=true
         break
     fi
     sleep 1
 done
-[[ $heartbeat_observed == true ]] || {
-    echo "fresh file-Member capacity heartbeat was not observed" >&2
+[[ $volume_active == true ]] || {
+    echo "Volume did not reach ACTIVE through real DataService reconciliation" >&2
+    printf '%s\n' "${volume:-no GetVolume response}" >&2
     exit 1
 }
-echo "controller Member registration and capacity heartbeat: ok (${pool_id})"
+echo "three-node Volume reconciliation: ok (${volume_id})"
+
+expected_allocated=$((8388608 / ZETTIDE_EXTENT_SIZE))
+expected_free_after=$((expected_free - expected_allocated))
+for node_id in "${node_ids[@]}"; do
+    member_id=$(jq -er --arg pool "$pool_id" --arg node "$node_id" \
+        '.members[]? | select(.poolId == $pool and .nodeId == $node) | .id' <<<"$members")
+    allocation_observed=false
+    for _ in {1..30}; do
+        if heartbeat=$(grpcurl -max-time 2 -plaintext -import-path /proto -proto "$controller_proto" \
+            -d "$(jq -cn --arg nodeId "$node_id" '{nodeId:$nodeId}')" \
+            "$ZETTIDE_CONTROLLER_ENDPOINT" \
+            zettide.controller.v1.HeartbeatService/GetHeartbeat 2>/dev/null) \
+            && jq -e --arg member "$member_id" --arg free "$expected_free_after" --arg allocated "$expected_allocated" \
+                '.freshness == "HEARTBEAT_FRESHNESS_FRESH" and
+                 (.observation.members[]? |
+                    .memberId == $member and
+                    .capacity.freeExtentCount == $free and
+                    .capacity.allocatedExtentCount == $allocated)' \
+                >/dev/null <<<"$heartbeat"; then
+            allocation_observed=true
+            break
+        fi
+        sleep 1
+    done
+    [[ $allocation_observed == true ]] || {
+        echo "allocated Replica capacity was not observed for ${node_id}" >&2
+        exit 1
+    }
+done
+echo "three-node Replica capacity evidence: ok (${expected_allocated} extents each)"
 
 portal_url="iscsi://${ZETTIDE_ISCSI_PORTAL}"
 lun_url="${portal_url}/${ZETTIDE_ISCSI_TARGET}/${ZETTIDE_ISCSI_LUN}"

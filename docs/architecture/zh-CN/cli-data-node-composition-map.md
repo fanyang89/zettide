@@ -217,23 +217,27 @@ servers、endpoint locators、Pool leases 和 SPDK handles 活得更久。
   sequenced capacity heartbeat；
 - 尚未组合 Pool/Catalog、Endpoint Registry 或 SPDK runtime。
 
-`data_node_service.zig` 当前注册：
+`data_node_service.zig` 当前注册全部九个内部 DataService RPC：
 
 - `EnsureReplica`、`InspectReplica`、`DeleteReplica`；
-- `IdentifyHolder`、`StagePrimary`、`InspectPrimary`。
+- `IdentifyHolder`、`StagePrimary`、`InspectPrimary`；
+- `FenceReplica`、`RecoverPrimary`、`MarkPrimaryReady`。
 
 Replica mutation 使用 checksummed、file-synchronized operation journal，校验 Member identity、extent
-alignment/bounds、历史 overlap 和 tombstone quarantine。这个 backend 只建立持久控制面边界，不复制用户数据。
-共享 proto 中的 `FenceReplica`、`RecoverPrimary` 和 `MarkPrimaryReady` 尚未接通。
+alignment/bounds、历史 overlap 和 tombstone quarantine。Fence 会验证 active Replica binding、同步完整
+file Member 后生成持久 evidence；file backend 的 recovery 明确产生 empty-frontier evidence。这个 backend
+只建立持久控制面边界，不复制用户数据。
 
 prototype State 当前：
 
 - 每次进程启动生成新的 UUIDv7-compatible boot ID；
-- 用独立 mutex 保护 Replica service 与 process-memory authority map；
-- 按 Volume ID 保存 staged binding 和 primary lease Runtime；
-- Replica operation journal 与 heartbeat incarnation 持久化，但 authority/lease runtime 仍不持久化；
+- 用独立 mutex 保护 Replica/fence transaction 与 process-memory authority map；
+- 按 Volume ID 保存 staged/current binding 和 primary lease Runtime；
+- Replica、fence、accepted authority epoch/recovery evidence 与 heartbeat incarnation 持久化；
+- lease deadline/runtime 不跨进程恢复，重启后 fail closed，但 monotonic max accepted write epoch 不回退；
 - 不访问 Pool/Catalog 数据；
-- InspectPrimary 总是报告 current_active=false/current_admitting=false，只判断 candidate freshness。
+- InspectPrimary 报告 current active/admitting、candidate freshness 与 renewal 建议；旧 boot binding 在重启后
+  返回全 false，使 controller 进入 holder re-identification/failover。
 
 迁移时不能把 boot ID 当 stable Data Node ID，也不能让 DataNodeServer 继续创建自己的孤立 State。boot identity 由
 DataNodeContext 创建一次并注入 adapter；authority methods 调用同一 lifecycle manager。

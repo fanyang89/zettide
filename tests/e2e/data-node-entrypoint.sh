@@ -3,7 +3,8 @@ set -euo pipefail
 
 : "${ZETTIDE_CONTROLLER_ENDPOINT:=controller:8001}"
 : "${ZETTIDE_DATA_NODE_LISTEN:=0.0.0.0:7001}"
-: "${ZETTIDE_DATA_NODE_ADVERTISE:=data-node:7001}"
+: "${ZETTIDE_DATA_NODE_ADVERTISE:=data-node-1:7001}"
+: "${ZETTIDE_DATA_NODE_HOST:=data-node-1}"
 : "${ZETTIDE_CLUSTER_ID:=0198f54d-5c2a-7000-8000-000000000001}"
 : "${ZETTIDE_NODE_ID:=0198f54d-5c2a-7000-8000-000000000002}"
 : "${ZETTIDE_REQUEST_ID:=0198f54d-5c2a-7000-8000-000000000003}"
@@ -79,7 +80,7 @@ tgtadm --lld iscsi --op bind --mode target --tid 1 --initiator-address ALL
     --request-id "$ZETTIDE_REQUEST_ID" \
     --node-id "$ZETTIDE_NODE_ID" \
     --cluster-id "$ZETTIDE_CLUSTER_ID" \
-    --iscsi-endpoint "iscsi://data-node:${ZETTIDE_ISCSI_PORT}/${ZETTIDE_ISCSI_TARGET}/${ZETTIDE_ISCSI_LUN}" \
+    --iscsi-endpoint "iscsi://${ZETTIDE_DATA_NODE_HOST}:${ZETTIDE_ISCSI_PORT}/${ZETTIDE_ISCSI_TARGET}/${ZETTIDE_ISCSI_LUN}" \
     --failure-domain "$ZETTIDE_FAILURE_DOMAIN" \
     --state-dir "$state_dir" \
     --member-file "$member_file" \

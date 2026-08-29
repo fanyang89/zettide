@@ -43,15 +43,21 @@ For development provisioning, configure all of `--state-dir`, `--member-file`,
 incarnation, and reports sequenced capacity heartbeats at the interval returned
 by the controller. The target Pool must already exist.
 
-Replica operations are persisted in `replicas.state`, and an exclusive
-`daemon.lock` prevents two processes from sharing that state directory. The daemon validates
-allocations against the pre-sized member file, rejects overlap, retains deleted
-extents in quarantine, and reports free/allocated/reserved/retired extent counts.
-Omitting all seven options keeps Replica operations and Member heartbeats disabled
-while lease diagnostics remain available.
+Replica operations are persisted in `replicas.state`, fence evidence in
+`fences.state`, and accepted authority epochs/recovery evidence in
+`authority.state`. An exclusive `daemon.lock` prevents two processes from sharing
+that state directory. The daemon binds the ledger to an opened backing-file
+inode, validates allocations against its fixed geometry, rejects overlap,
+retains deleted extents in quarantine, and reports
+free/allocated/reserved/retired extent counts. Lease deadlines remain
+process-local and fail closed after restart; the maximum accepted write epoch is
+durable. An uncertain parent-directory sync poisons the affected ledger until
+restart/reopen rather than allowing a later operation to overwrite it. Omitting
+all seven options keeps Replica, fence, recovery, and Member
+heartbeat operations disabled while holder/lease diagnostics remain available.
 
-This file-member backend establishes the durable control-plane boundary only; it
-does not replicate user writes or publish a managed Volume. Cross-node Replica
-transport, fencing/recovery, and authority-gated Publication remain subsequent
-composition steps. See `tests/e2e/README.md` for the current local Docker Compose
-and libiscsi smoke profile.
+This file-member backend establishes a durable control-plane boundary only. It
+can drive a three-node Volume intent to `ACTIVE`, but does not replicate user
+writes or publish that Volume to hosts. Cross-node Replica transport, durable
+write certificates, repair, and authority-gated Publication remain subsequent
+composition steps. See `tests/e2e/README.md` for the Docker Compose profile.

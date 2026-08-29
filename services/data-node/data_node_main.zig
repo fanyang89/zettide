@@ -77,7 +77,13 @@ pub fn main(init: std.process.Init) !void {
     };
     var replica_store: ?data_node.ReplicaFileStore = null;
     defer if (replica_store) |*store| store.deinit();
+    var fence_store: ?data_node.FenceFileStore = null;
+    defer if (fence_store) |*store| store.deinit();
+    var authority_store: ?data_node.AuthorityFileStore = null;
+    defer if (authority_store) |*store| store.deinit();
     var replica_backend: ?data_node.FileMemberBackend = null;
+    defer if (replica_backend) |*backend| backend.deinit();
+    var fence_backend: ?data_node.FileFenceBackend = null;
     var server_options: data_node.Options = .{};
     if (config.replica) |replica| {
         state_dir = try std.Io.Dir.cwd().openDir(init.io, replica.state_dir, .{});
@@ -102,9 +108,26 @@ pub fn main(init: std.process.Init) !void {
             replica.capacity_bytes,
             replica.extent_size_bytes,
         );
+        try replica_store.?.validateBackendDigest(replica_backend.?.backend_digest);
+        fence_store = try data_node.FenceFileStore.init(
+            allocator,
+            init.io,
+            state_dir.?,
+            "fences.state",
+        );
+        authority_store = try data_node.AuthorityFileStore.init(
+            allocator,
+            init.io,
+            state_dir.?,
+            "authority.state",
+        );
+        fence_backend = data_node.FileFenceBackend.init(&replica_backend.?, &replica_store.?);
         server_options = .{
             .replica_store = replica_store.?.store(),
             .replica_backend = replica_backend.?.backend(),
+            .fence_store = fence_store.?.store(),
+            .fence_backend = fence_backend.?.backend(),
+            .authority_store = &authority_store.?,
         };
     }
     var server = try data_node.DataNodeServer.initWithOptions(

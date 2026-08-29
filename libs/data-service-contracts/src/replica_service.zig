@@ -73,11 +73,16 @@ pub const Store = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
+        check_healthy: *const fn (*anyopaque) anyerror!void,
         find_operation: *const fn (*anyopaque, Id) ?OperationRecord,
         find_replica_record: *const fn (*anyopaque, Id) ?OperationRecord,
         find_allocation_conflict: *const fn (*anyopaque, Binding) ?ReplicaState,
         append: *const fn (*anyopaque, OperationRecord) anyerror!void,
     };
+
+    fn checkHealthy(self: Store) !void {
+        try self.vtable.check_healthy(self.context);
+    }
 
     fn findOperation(self: Store, operation_id: Id) ?OperationRecord {
         return self.vtable.find_operation(self.context, operation_id);
@@ -116,6 +121,7 @@ pub const Service = struct {
     }
 
     fn ensureReplicaLocked(self: *Service, request: Request) !Response {
+        try self.store.checkHealthy();
         const parsed = try parseRequest(request);
         if (try self.recoverOperation(parsed, .ensure)) |response| return response;
 
@@ -159,6 +165,7 @@ pub const Service = struct {
     pub fn inspectReplica(self: *Service, request: Request) !Response {
         self.lockTransaction();
         defer self.transaction_lock.unlock();
+        try self.store.checkHealthy();
         const parsed = try parseRequest(request);
         const record = self.store.findReplicaRecord(parsed.binding.placement_id) orelse return error.ReplicaNotFound;
         if (record.status == .prepared) return error.OperationInProgress;
@@ -175,6 +182,7 @@ pub const Service = struct {
     }
 
     fn deleteReplicaLocked(self: *Service, request: Request) !Response {
+        try self.store.checkHealthy();
         const parsed = try parseRequest(request);
         if (try self.recoverOperation(parsed, .delete)) |response| return response;
 
@@ -338,6 +346,8 @@ pub const MemoryStore = struct {
         return .{ .context = self, .vtable = &vtable };
     }
 
+    fn checkHealthyOpaque(_: *anyopaque) !void {}
+
     fn findOperationOpaque(context: *anyopaque, operation_id: Id) ?OperationRecord {
         const self: *MemoryStore = @ptrCast(@alignCast(context));
         return findOperation(self.records, operation_id);
@@ -363,6 +373,7 @@ pub const MemoryStore = struct {
     }
 
     const vtable: Store.VTable = .{
+        .check_healthy = checkHealthyOpaque,
         .find_operation = findOperationOpaque,
         .find_replica_record = findReplicaRecordOpaque,
         .find_allocation_conflict = findAllocationConflictOpaque,
@@ -440,6 +451,7 @@ pub const FileStore = struct {
     parent: std.Io.Dir,
     basename: []const u8,
     records: []OperationRecord,
+    poisoned: bool = false,
     mutex: std.Io.Mutex = .init,
     capacity_geometry: ?CapacityGeometry = null,
     capacity_snapshot: CapacitySnapshot = .{
@@ -506,6 +518,18 @@ pub const FileStore = struct {
         }
     }
 
+    pub fn validateBackendDigest(self: *const FileStore, expected_digest: Digest) !void {
+        if (isZero(&expected_digest)) return error.InvalidBackendDigest;
+        for (self.records) |record| {
+            const actual = record.result.attestation.backend_digest;
+            if (isZero(&actual)) {
+                if (record.status == .completed) return error.StoreCorrupt;
+                continue;
+            }
+            if (!std.mem.eql(u8, &actual, &expected_digest)) return error.MemberBackendIdentityMismatch;
+        }
+    }
+
     pub fn configureCapacity(
         self: *FileStore,
         expected_member_id: Id,
@@ -527,8 +551,28 @@ pub const FileStore = struct {
     pub fn capacitySnapshot(self: *FileStore) !CapacitySnapshot {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
         if (self.capacity_geometry == null) return error.CapacityNotConfigured;
         return self.capacity_snapshot;
+    }
+
+    pub fn validateFence(self: *FileStore, binding: protocol.FenceBinding) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        const record = findReplicaRecord(self.records, binding.placement_id) orelse return error.ReplicaNotFound;
+        if (record.status != .completed) return error.OperationInProgress;
+        if (record.result.state != .active) return error.ReplicaNotActive;
+        const replica = record.result.attestation.binding;
+        if (!std.mem.eql(u8, &replica.volume_id, &binding.volume_id) or
+            !std.mem.eql(u8, &replica.placement_id, &binding.placement_id) or
+            replica.generation != binding.replica_generation)
+            return error.FenceBindingMismatch;
+    }
+
+    fn checkHealthyOpaque(context: *anyopaque) !void {
+        const self: *FileStore = @ptrCast(@alignCast(context));
+        if (self.poisoned) return error.StorePoisoned;
     }
 
     fn findOperationOpaque(context: *anyopaque, operation_id: Id) ?OperationRecord {
@@ -550,6 +594,7 @@ pub const FileStore = struct {
         const self: *FileStore = @ptrCast(@alignCast(context));
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
         const required_slots: usize = if (record.status == .prepared) 2 else 1;
         if (required_slots > max_records - self.records.len) return error.StoreFull;
         const replacement = try self.allocator.alloc(OperationRecord, self.records.len + 1);
@@ -562,7 +607,10 @@ pub const FileStore = struct {
         else
             null;
         try self.replace(replacement);
-        try self.syncParent(replacement.len);
+        self.syncParent(replacement.len) catch |err| {
+            self.poisoned = true;
+            return err;
+        };
         const previous = self.records;
         self.records = replacement;
         if (capacity) |snapshot| self.capacity_snapshot = snapshot;
@@ -599,6 +647,7 @@ pub const FileStore = struct {
     }
 
     const vtable: Store.VTable = .{
+        .check_healthy = checkHealthyOpaque,
         .find_operation = findOperationOpaque,
         .find_replica_record = findReplicaRecordOpaque,
         .find_allocation_conflict = findAllocationConflictOpaque,
@@ -735,7 +784,7 @@ const FakeBackend = struct {
     fn inspectOpaque(context: *anyopaque, binding: Binding) !BackendState {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
         const existing = self.binding orelse return .absent;
-        if (!std.meta.eql(existing, binding)) return error.BackendBindingConflict;
+        if (!std.meta.eql(existing, binding)) return if (self.active) error.BackendBindingConflict else .absent;
         return if (self.active) .{ .active = digestOf(binding) } else .deleted;
     }
 
@@ -925,7 +974,7 @@ test "pending operations provide durable at-least-once idempotent recovery" {
         conflict.length_bytes += 1;
         try std.testing.expectError(error.OperationConflict, service.ensureReplica(conflict));
         try std.testing.expectError(
-            error.AllocationOverlap,
+            error.OperationInProgress,
             service.ensureReplica(testRequest("0198f54d-5c2a-7000-8000-000000000017", 1)),
         );
     }
@@ -980,6 +1029,11 @@ test "FileStore tracks capacity and rejects configured Member identity drift" {
     capacity = try file_store.capacitySnapshot();
     try std.testing.expectEqual(@as(u64, 6), capacity.free_extent_count);
     try std.testing.expectEqual(@as(u64, 2), capacity.allocated_extent_count);
+    const backend_digest = FakeBackend.digestOf(backend.binding.?);
+    try file_store.validateBackendDigest(backend_digest);
+    var changed_digest = backend_digest;
+    changed_digest[0] ^= 1;
+    try std.testing.expectError(error.MemberBackendIdentityMismatch, file_store.validateBackendDigest(changed_digest));
     _ = try service.deleteReplica(testRequest(delete_operation_id, 1));
     capacity = try file_store.capacitySnapshot();
     try std.testing.expectEqual(@as(u64, 2), capacity.retired_extent_count);
@@ -990,25 +1044,32 @@ test "FileStore tracks capacity and rejects configured Member identity drift" {
     try std.testing.expectError(error.MemberIdentityMismatch, file_store.validateMember(changed));
 }
 
-test "directory sync failure before prepare prevents backend mutation" {
+test "directory sync failure before prepare poisons the store until reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var backend: FakeBackend = .{};
-    var faults: FileStore.Faults = .{ .fail_directory_sync_once_at_record_count = 1 };
-    var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
-    defer file_store.deinit();
-    file_store.faults = &faults;
-    var service = Service.init(file_store.store(), backend.backend());
-
-    try std.testing.expectError(
-        error.InjectedDirectorySyncFailure,
-        service.ensureReplica(testRequest(ensure_operation_id, 1)),
-    );
-    try std.testing.expectEqual(@as(usize, 0), file_store.records.len);
-    try std.testing.expectEqual(@as(usize, 0), backend.ensure_calls);
-
-    _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
-    try std.testing.expectEqual(@as(usize, 1), backend.ensure_calls);
+    {
+        var faults: FileStore.Faults = .{ .fail_directory_sync_once_at_record_count = 1 };
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        file_store.faults = &faults;
+        var service = Service.init(file_store.store(), backend.backend());
+        try std.testing.expectError(
+            error.InjectedDirectorySyncFailure,
+            service.ensureReplica(testRequest(ensure_operation_id, 1)),
+        );
+        try std.testing.expectEqual(@as(usize, 0), file_store.records.len);
+        try std.testing.expectEqual(@as(usize, 0), backend.ensure_calls);
+        try std.testing.expect(file_store.poisoned);
+        try std.testing.expectError(error.StorePoisoned, service.ensureReplica(testRequest(ensure_operation_id, 1)));
+    }
+    {
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        var service = Service.init(file_store.store(), backend.backend());
+        _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+        try std.testing.expectEqual(@as(usize, 1), backend.ensure_calls);
+    }
 }
 
 test "FileStore does not publish a record before directory sync succeeds" {
@@ -1029,8 +1090,8 @@ test "FileStore does not publish a record before directory sync succeeds" {
         try std.testing.expectEqual(@as(usize, 1), file_store.records.len);
         try std.testing.expectEqual(OperationStatus.prepared, file_store.records[0].status);
 
-        const retry = try service.ensureReplica(testRequest(ensure_operation_id, 1));
-        try std.testing.expectEqual(ReplicaState.active, retry.replica.state);
+        try std.testing.expect(file_store.poisoned);
+        try std.testing.expectError(error.StorePoisoned, service.ensureReplica(testRequest(ensure_operation_id, 1)));
         try std.testing.expectEqual(@as(usize, 1), backend.ensures);
         try std.testing.expectEqual(@as(usize, 1), backend.ensure_calls);
     }

@@ -1,5 +1,38 @@
 name: zettide-e2e
 
+x-data-node-environment: &data-node-environment
+  # grpc-lite currently needs numeric endpoints unless a resolver runtime is installed.
+  ZETTIDE_CONTROLLER_ENDPOINT: 172.30.0.10:8001
+  ZETTIDE_DATA_NODE_LISTEN: 0.0.0.0:7001
+  ZETTIDE_CLUSTER_ID: 0198f54d-5c2a-7000-8000-000000000001
+  ZETTIDE_POOL_ID_FILE: /bootstrap/pool-id
+  ZETTIDE_MEMBER_METADATA_CAPACITY: "1048576"
+  ZETTIDE_MEMBER_CAPACITY: "67108864"
+  ZETTIDE_EXTENT_SIZE: "4194304"
+  ZETTIDE_ISCSI_LUN: "1"
+  ZETTIDE_ISCSI_SIZE: 64M
+
+x-data-node-service: &data-node-service
+  build:
+    context: ../..
+    dockerfile: tests/e2e/Dockerfile
+    target: data-node
+  depends_on:
+    bootstrap:
+      condition: service_completed_successfully
+  security_opt:
+    - seccomp=unconfined
+  healthcheck:
+    test:
+      - CMD-SHELL
+      - >-
+        nc -z 127.0.0.1 7001 &&
+        tgtadm --lld iscsi --op show --mode target | grep -Fq iqn.2026-08.io.zettide
+    interval: 1s
+    timeout: 2s
+    retries: 60
+  stop_grace_period: 15s
+
 services:
   controller:
     build:
@@ -54,51 +87,68 @@ services:
       - zettide
     restart: "no"
 
-  data-node:
-    build:
-      context: ../..
-      dockerfile: tests/e2e/Dockerfile
-      target: data-node
+  data-node-1:
+    <<: *data-node-service
     environment:
-      # grpc-lite requires an explicit resolver runtime for DNS targets. The
-      # prototype daemon intentionally uses the controller's stable E2E IPv4.
-      ZETTIDE_CONTROLLER_ENDPOINT: 172.30.0.10:8001
-      ZETTIDE_DATA_NODE_LISTEN: 0.0.0.0:7001
-      ZETTIDE_DATA_NODE_ADVERTISE: data-node:7001
-      ZETTIDE_CLUSTER_ID: 0198f54d-5c2a-7000-8000-000000000001
-      ZETTIDE_NODE_ID: 0198f54d-5c2a-7000-8000-000000000002
-      ZETTIDE_REQUEST_ID: 0198f54d-5c2a-7000-8000-000000000003
-      ZETTIDE_POOL_ID_FILE: /bootstrap/pool-id
-      ZETTIDE_MEMBER_ID: 0198f54d-5c2a-7000-8000-000000000004
-      ZETTIDE_MEMBER_METADATA_CAPACITY: "1048576"
-      ZETTIDE_MEMBER_CAPACITY: "67108864"
-      ZETTIDE_EXTENT_SIZE: "4194304"
-      ZETTIDE_ISCSI_TARGET: iqn.2026-08.io.zettide:e2e
-      ZETTIDE_ISCSI_LUN: "1"
-      ZETTIDE_ISCSI_SIZE: 64M
-    depends_on:
-      bootstrap:
-        condition: service_completed_successfully
-    security_opt:
-      - seccomp=unconfined
+      <<: *data-node-environment
+      ZETTIDE_DATA_NODE_ADVERTISE: 172.30.0.11:7001
+      ZETTIDE_DATA_NODE_HOST: data-node-1
+      ZETTIDE_NODE_ID: 0198f54d-5c2a-7000-8000-000000000011
+      ZETTIDE_REQUEST_ID: 0198f54d-5c2a-7000-8000-000000000012
+      ZETTIDE_MEMBER_ID: 0198f54d-5c2a-7000-8000-000000000013
+      ZETTIDE_FAILURE_DOMAIN: rack-a
+      ZETTIDE_ISCSI_TARGET: iqn.2026-08.io.zettide:e2e-1
     ports:
-      - "3260:3260"
+      - "3261:3260"
       - "7001:7001"
     volumes:
       - cluster-bootstrap:/bootstrap:ro
-      - data-node-data:/var/lib/zettide-data-node
+      - data-node-1-data:/var/lib/zettide-data-node
     networks:
-      - zettide
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          nc -z 127.0.0.1 7001 &&
-          tgtadm --lld iscsi --op show --mode target | grep -Fq iqn.2026-08.io.zettide:e2e
-      interval: 1s
-      timeout: 2s
-      retries: 60
-    stop_grace_period: 15s
+      zettide:
+        ipv4_address: 172.30.0.11
+
+  data-node-2:
+    <<: *data-node-service
+    environment:
+      <<: *data-node-environment
+      ZETTIDE_DATA_NODE_ADVERTISE: 172.30.0.12:7001
+      ZETTIDE_DATA_NODE_HOST: data-node-2
+      ZETTIDE_NODE_ID: 0198f54d-5c2a-7000-8000-000000000021
+      ZETTIDE_REQUEST_ID: 0198f54d-5c2a-7000-8000-000000000022
+      ZETTIDE_MEMBER_ID: 0198f54d-5c2a-7000-8000-000000000023
+      ZETTIDE_FAILURE_DOMAIN: rack-b
+      ZETTIDE_ISCSI_TARGET: iqn.2026-08.io.zettide:e2e-2
+    ports:
+      - "3262:3260"
+      - "7002:7001"
+    volumes:
+      - cluster-bootstrap:/bootstrap:ro
+      - data-node-2-data:/var/lib/zettide-data-node
+    networks:
+      zettide:
+        ipv4_address: 172.30.0.12
+
+  data-node-3:
+    <<: *data-node-service
+    environment:
+      <<: *data-node-environment
+      ZETTIDE_DATA_NODE_ADVERTISE: 172.30.0.13:7001
+      ZETTIDE_DATA_NODE_HOST: data-node-3
+      ZETTIDE_NODE_ID: 0198f54d-5c2a-7000-8000-000000000031
+      ZETTIDE_REQUEST_ID: 0198f54d-5c2a-7000-8000-000000000032
+      ZETTIDE_MEMBER_ID: 0198f54d-5c2a-7000-8000-000000000033
+      ZETTIDE_FAILURE_DOMAIN: rack-c
+      ZETTIDE_ISCSI_TARGET: iqn.2026-08.io.zettide:e2e-3
+    ports:
+      - "3263:3260"
+      - "7003:7001"
+    volumes:
+      - cluster-bootstrap:/bootstrap:ro
+      - data-node-3-data:/var/lib/zettide-data-node
+    networks:
+      zettide:
+        ipv4_address: 172.30.0.13
 
   smoke:
     profiles: ["smoke"]
@@ -109,7 +159,11 @@ services:
     depends_on:
       controller:
         condition: service_healthy
-      data-node:
+      data-node-1:
+        condition: service_healthy
+      data-node-2:
+        condition: service_healthy
+      data-node-3:
         condition: service_healthy
     volumes:
       - cluster-bootstrap:/bootstrap:ro
@@ -125,4 +179,6 @@ networks:
 volumes:
   cluster-bootstrap:
   controller-data:
-  data-node-data:
+  data-node-1-data:
+  data-node-2-data:
+  data-node-3-data:
