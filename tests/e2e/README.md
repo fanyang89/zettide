@@ -10,7 +10,8 @@ This Docker Compose environment starts:
 - one file-backed iSCSI LUN in each data-node container;
 - an optional smoke container that creates a Volume, verifies real DataService
   reconciliation reaches `ACTIVE` with allocated capacity on all three Members,
-  and connects to node 1's independent TGT LUN
+  records the initial write epoch and heartbeat incarnations, and connects to
+  node 1's independent TGT LUN
   with libiscsi (`iscsi-ls`, `iscsi-inq`,
   `iscsi-readcapacity16`, and `iscsi-md5sum`).
 
@@ -21,6 +22,9 @@ SCSI commands, and reads without requiring SPDK, host
 iSCSI kernel modules, or privileged containers. The TGT LUN and registered file
 Member intentionally use separate backing files, so the SCSI checks are an
 orthogonal transport smoke—not managed Volume or Replica data-path coverage.
+A second smoke can restart every controller/data-node process, verify Replica
+recovery/reconciliation and heartbeat reincarnation, and wait for authority replacement
+at a strictly higher write epoch.
 The service containers use `seccomp=unconfined` because grpc-lite's
 libxev runtime uses io_uring syscalls blocked by Docker's default seccomp
 profile. Production Catalog publication remains on the SPDK path.
@@ -32,6 +36,20 @@ docker compose -f tests/e2e/docker-compose.yml up -d --build \
   controller bootstrap data-node-1 data-node-2 data-node-3
 docker compose -f tests/e2e/docker-compose.yml run --rm --build smoke
 ```
+
+To exercise process restart, state recovery, lease expiry, and primary failover
+without deleting the named volumes:
+
+```sh
+docker compose -f tests/e2e/docker-compose.yml restart \
+  controller data-node-1 data-node-2 data-node-3
+docker compose -f tests/e2e/docker-compose.yml run --rm \
+  --entrypoint /usr/local/bin/zettide-e2e-restart-smoke smoke
+```
+
+The failover check normally takes at least the configured 30-second lease
+window. It requires the new Volume write epoch to exceed the value captured by
+the initial smoke.
 
 Inspect the registered services or logs with:
 

@@ -21,7 +21,9 @@ pub const Backend = struct {
         /// Validate a binding without mutating backend or admission state.
         validate: ?*const fn (*anyopaque, Binding) anyerror!void = null,
         /// Implement this when backend state can be verified before replaying a mutation.
+        /// An active result must contain the same nonzero identity digest as ensure.
         inspect: ?*const fn (*anyopaque, Binding) anyerror!BackendState = null,
+        /// Return a stable, nonzero digest that identifies the durable backend object.
         ensure: *const fn (*anyopaque, Binding) anyerror!Digest,
         delete: *const fn (*anyopaque, Binding) anyerror!void,
     };
@@ -76,6 +78,7 @@ pub const Store = struct {
         check_healthy: *const fn (*anyopaque) anyerror!void,
         find_operation: *const fn (*anyopaque, Id) ?OperationRecord,
         find_replica_record: *const fn (*anyopaque, Id) ?OperationRecord,
+        find_allocation_record: *const fn (*anyopaque, Id) ?OperationRecord,
         find_allocation_conflict: *const fn (*anyopaque, Binding) ?ReplicaState,
         append: *const fn (*anyopaque, OperationRecord) anyerror!void,
     };
@@ -90,6 +93,10 @@ pub const Store = struct {
 
     fn findReplicaRecord(self: Store, target_placement_id: Id) ?OperationRecord {
         return self.vtable.find_replica_record(self.context, target_placement_id);
+    }
+
+    fn findAllocationRecord(self: Store, target_allocation_id: Id) ?OperationRecord {
+        return self.vtable.find_allocation_record(self.context, target_allocation_id);
     }
 
     fn findAllocationConflict(self: Store, binding: Binding) ?ReplicaState {
@@ -143,6 +150,8 @@ pub const Service = struct {
             }
             if (current.state == .active) return error.PlacementStillActive;
         }
+        if (self.store.findAllocationRecord(parsed.binding.allocation_id)) |record|
+            if (!std.meta.eql(record.result.attestation.binding, parsed.binding)) return error.BindingConflict;
         if (self.store.findAllocationConflict(parsed.binding)) |state| return switch (state) {
             .active => error.AllocationOverlap,
             .tombstoned => error.AllocationQuarantined,
@@ -229,6 +238,7 @@ pub const Service = struct {
             .active => |digest| digest,
             .absent, .deleted => try self.backend.ensure(prepared.result.attestation.binding),
         } else try self.backend.ensure(prepared.result.attestation.binding);
+        if (isZero(&digest)) return error.InvalidBackendDigest;
         var completed = prepared;
         completed.status = .completed;
         completed.result.attestation.backend_digest = digest;
@@ -314,6 +324,16 @@ fn findReplicaRecord(records: []const OperationRecord, target_placement_id: Id) 
     return null;
 }
 
+fn findAllocationRecord(records: []const OperationRecord, target_allocation_id: Id) ?OperationRecord {
+    var index = records.len;
+    while (index != 0) {
+        index -= 1;
+        const record = records[index];
+        if (std.mem.eql(u8, &record.result.attestation.binding.allocation_id, &target_allocation_id)) return record;
+    }
+    return null;
+}
+
 fn findAllocationConflict(records: []const OperationRecord, requested: Binding) ?ReplicaState {
     var index = records.len;
     while (index != 0) {
@@ -321,12 +341,135 @@ fn findAllocationConflict(records: []const OperationRecord, requested: Binding) 
         const replica = records[index].result;
         const binding = replica.attestation.binding;
         if (!std.mem.eql(u8, &binding.member_id, &requested.member_id)) continue;
-        const binding_end = binding.offset_bytes + binding.length_bytes;
-        const requested_end = requested.offset_bytes + requested.length_bytes;
-        if (binding.offset_bytes < requested_end and requested.offset_bytes < binding_end)
-            return replica.state;
+        if (rangesOverlap(binding, requested)) return replica.state;
     }
     return null;
+}
+
+fn rangesOverlap(a: Binding, b: Binding) bool {
+    return a.offset_bytes < b.offset_bytes + b.length_bytes and b.offset_bytes < a.offset_bytes + a.length_bytes;
+}
+
+fn validateHistory(allocator: std.mem.Allocator, records: []const OperationRecord, file_version: u16) !void {
+    var operations: std.AutoHashMapUnmanaged(Id, void) = .empty;
+    defer operations.deinit(allocator);
+    var allocations: std.AutoHashMapUnmanaged(Id, Binding) = .empty;
+    defer allocations.deinit(allocator);
+    var placements: std.AutoHashMapUnmanaged(Id, OperationRecord) = .empty;
+    defer placements.deinit(allocator);
+    try operations.ensureTotalCapacity(allocator, @intCast(records.len));
+    try allocations.ensureTotalCapacity(allocator, @intCast(records.len));
+    try placements.ensureTotalCapacity(allocator, @intCast(records.len));
+
+    var pending: ?OperationRecord = null;
+    for (records) |record| {
+        const binding = record.result.attestation.binding;
+        const allocation = allocations.getOrPutAssumeCapacity(binding.allocation_id);
+        if (allocation.found_existing) {
+            if (!std.meta.eql(allocation.value_ptr.*, binding)) return error.StoreCorrupt;
+        } else allocation.value_ptr.* = binding;
+        const current = placements.get(binding.placement_id);
+
+        switch (record.status) {
+            .prepared => {
+                if (pending != null or operations.contains(record.operation_id)) return error.StoreCorrupt;
+                try validatePreparedRecord(record, current);
+                operations.putAssumeCapacity(record.operation_id, {});
+                pending = record;
+            },
+            .completed => {
+                if (isZero(&record.result.attestation.backend_digest)) return error.StoreCorrupt;
+                if (pending) |prepared| {
+                    if (!std.mem.eql(u8, &prepared.operation_id, &record.operation_id) or
+                        prepared.kind != record.kind or
+                        !std.meta.eql(prepared.result.attestation.binding, binding) or
+                        prepared.result.state != record.result.state or
+                        (record.kind == .delete and
+                            !std.mem.eql(u8, &prepared.result.attestation.backend_digest, &record.result.attestation.backend_digest)))
+                        return error.StoreCorrupt;
+                    pending = null;
+                } else {
+                    if (operations.contains(record.operation_id)) return error.StoreCorrupt;
+                    if (file_version != FileStore.legacy_version and !validDirectCompletion(record, current))
+                        return error.StoreCorrupt;
+                    if (file_version == FileStore.legacy_version and !validLegacyCompletion(record, current))
+                        return error.StoreCorrupt;
+                    operations.putAssumeCapacity(record.operation_id, {});
+                }
+            },
+        }
+        placements.putAssumeCapacity(binding.placement_id, record);
+    }
+
+    const bindings = try allocator.alloc(Binding, allocations.count());
+    defer allocator.free(bindings);
+    var values = allocations.valueIterator();
+    var index: usize = 0;
+    while (values.next()) |binding| : (index += 1) bindings[index] = binding.*;
+    std.mem.sort(Binding, bindings, {}, bindingLessThan);
+    if (bindings.len > 1) for (bindings[1..], bindings[0 .. bindings.len - 1]) |binding, previous| {
+        if (std.mem.eql(u8, &binding.member_id, &previous.member_id) and rangesOverlap(binding, previous))
+            return error.StoreCorrupt;
+    };
+}
+
+fn bindingLessThan(_: void, a: Binding, b: Binding) bool {
+    return switch (std.mem.order(u8, &a.member_id, &b.member_id)) {
+        .lt => true,
+        .gt => false,
+        .eq => a.offset_bytes < b.offset_bytes,
+    };
+}
+
+fn validatePreparedRecord(record: OperationRecord, current: ?OperationRecord) !void {
+    const digest = record.result.attestation.backend_digest;
+    switch (record.kind) {
+        .ensure => {
+            if (!isZero(&digest)) return error.StoreCorrupt;
+            if (current) |existing| {
+                const existing_binding = existing.result.attestation.binding;
+                if (existing.status != .completed or existing.result.state != .tombstoned or
+                    record.result.attestation.binding.generation <= existing_binding.generation or
+                    !std.mem.eql(u8, &record.result.attestation.binding.volume_id, &existing_binding.volume_id))
+                    return error.StoreCorrupt;
+            }
+        },
+        .delete => {
+            if (isZero(&digest)) return error.StoreCorrupt;
+            const existing = current orelse return error.StoreCorrupt;
+            if (existing.status != .completed or existing.result.state != .active or
+                !std.meta.eql(existing.result.attestation.binding, record.result.attestation.binding) or
+                !std.mem.eql(u8, &existing.result.attestation.backend_digest, &digest))
+                return error.StoreCorrupt;
+        },
+    }
+}
+
+fn validDirectCompletion(record: OperationRecord, current_record: ?OperationRecord) bool {
+    const current = current_record orelse return false;
+    if (current.status != .completed or
+        !std.meta.eql(current.result.attestation.binding, record.result.attestation.binding) or
+        !std.mem.eql(u8, &current.result.attestation.backend_digest, &record.result.attestation.backend_digest))
+        return false;
+    return switch (record.kind) {
+        .ensure => current.result.state == .active,
+        .delete => current.result.state == .tombstoned,
+    };
+}
+
+fn validLegacyCompletion(record: OperationRecord, current_record: ?OperationRecord) bool {
+    const current = current_record orelse
+        return record.kind == .ensure;
+    const current_binding = current.result.attestation.binding;
+    if (std.meta.eql(current_binding, record.result.attestation.binding) and
+        std.mem.eql(u8, &current.result.attestation.backend_digest, &record.result.attestation.backend_digest))
+        return switch (record.kind) {
+            .ensure => current.result.state == .active,
+            .delete => true,
+        };
+    return record.kind == .ensure and current.result.state == .tombstoned and
+        record.result.attestation.binding.generation > current_binding.generation and
+        std.mem.eql(u8, &record.result.attestation.binding.volume_id, &current_binding.volume_id);
 }
 
 pub const MemoryStore = struct {
@@ -358,6 +501,11 @@ pub const MemoryStore = struct {
         return findReplicaRecord(self.records, target_placement_id);
     }
 
+    fn findAllocationRecordOpaque(context: *anyopaque, target_allocation_id: Id) ?OperationRecord {
+        const self: *MemoryStore = @ptrCast(@alignCast(context));
+        return findAllocationRecord(self.records, target_allocation_id);
+    }
+
     fn findAllocationConflictOpaque(context: *anyopaque, binding: Binding) ?ReplicaState {
         const self: *MemoryStore = @ptrCast(@alignCast(context));
         return findAllocationConflict(self.records, binding);
@@ -376,6 +524,7 @@ pub const MemoryStore = struct {
         .check_healthy = checkHealthyOpaque,
         .find_operation = findOperationOpaque,
         .find_replica_record = findReplicaRecordOpaque,
+        .find_allocation_record = findAllocationRecordOpaque,
         .find_allocation_conflict = findAllocationConflictOpaque,
         .append = appendOpaque,
     };
@@ -585,6 +734,11 @@ pub const FileStore = struct {
         return findReplicaRecord(self.records, target_placement_id);
     }
 
+    fn findAllocationRecordOpaque(context: *anyopaque, target_allocation_id: Id) ?OperationRecord {
+        const self: *FileStore = @ptrCast(@alignCast(context));
+        return findAllocationRecord(self.records, target_allocation_id);
+    }
+
     fn findAllocationConflictOpaque(context: *anyopaque, binding: Binding) ?ReplicaState {
         const self: *FileStore = @ptrCast(@alignCast(context));
         return findAllocationConflict(self.records, binding);
@@ -650,6 +804,7 @@ pub const FileStore = struct {
         .check_healthy = checkHealthyOpaque,
         .find_operation = findOperationOpaque,
         .find_replica_record = findReplicaRecordOpaque,
+        .find_allocation_record = findAllocationRecordOpaque,
         .find_allocation_conflict = findAllocationConflictOpaque,
         .append = appendOpaque,
     };
@@ -683,6 +838,7 @@ pub const FileStore = struct {
             bytes[header_size + index * record_size ..][0..record_size],
             file_version,
         );
+        try validateHistory(allocator, records, file_version);
         return records;
     }
 
@@ -749,6 +905,7 @@ const FakeBackend = struct {
     delete_calls: usize = 0,
     binding: ?Binding = null,
     active: bool = false,
+    return_zero_digest: bool = false,
 
     fn backend(self: *FakeBackend) Backend {
         return .{ .context = self, .vtable = &vtable };
@@ -763,12 +920,12 @@ const FakeBackend = struct {
         self.ensure_calls += 1;
         if (self.binding) |existing| {
             if (self.active and !std.meta.eql(existing, binding)) return error.BackendBindingConflict;
-            if (self.active) return digestOf(binding);
+            if (self.active) return self.reportedDigest(binding);
         }
         self.ensures += 1;
         self.binding = binding;
         self.active = true;
-        return digestOf(binding);
+        return self.reportedDigest(binding);
     }
 
     fn deleteOpaque(context: *anyopaque, binding: Binding) !void {
@@ -785,7 +942,11 @@ const FakeBackend = struct {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
         const existing = self.binding orelse return .absent;
         if (!std.meta.eql(existing, binding)) return if (self.active) error.BackendBindingConflict else .absent;
-        return if (self.active) .{ .active = digestOf(binding) } else .deleted;
+        return if (self.active) .{ .active = self.reportedDigest(binding) } else .deleted;
+    }
+
+    fn reportedDigest(self: *FakeBackend, binding: Binding) Digest {
+        return if (self.return_zero_digest) @splat(0) else digestOf(binding);
     }
 
     fn digestOf(binding: Binding) Digest {
@@ -814,6 +975,14 @@ const ensure_operation_id = "0198f54d-5c2a-7000-8000-000000000014";
 const delete_operation_id = "0198f54d-5c2a-7000-8000-000000000015";
 const inspect_operation_id = "0198f54d-5c2a-7000-8000-000000000016";
 const member_id: Id = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 0x20 };
+
+fn testOperationId(sequence: u64) Id {
+    var id: Id = @splat(0);
+    std.mem.writeInt(u64, id[0..8], sequence, .little);
+    id[6] = (id[6] & 0x0f) | 0x70;
+    id[8] = 0x80;
+    return id;
+}
 
 fn testRequest(operation_id: []const u8, generation: u64) Request {
     return .{
@@ -933,6 +1102,19 @@ test "overlapping active and tombstoned allocations are rejected" {
     try std.testing.expectError(error.AllocationQuarantined, service.ensureReplica(overlap));
 }
 
+test "allocation identity cannot be rebound to different geometry" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var service = Service.init(store.store(), backend.backend());
+    _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+
+    var rebound = testRequest("0198f54d-5c2a-7000-8000-000000000017", 1);
+    rebound.placement_id = "0198f54d-5c2a-7000-8000-000000000018";
+    rebound.offset_bytes = 32 * 1024;
+    try std.testing.expectError(error.BindingConflict, service.ensureReplica(rebound));
+}
+
 test "higher generations require deletion and cannot reuse quarantined extents" {
     var store = MemoryStore.init(std.testing.allocator);
     defer store.deinit();
@@ -1044,6 +1226,29 @@ test "FileStore tracks capacity and rejects configured Member identity drift" {
     try std.testing.expectError(error.MemberIdentityMismatch, file_store.validateMember(changed));
 }
 
+test "zero backend digest cannot create a completed record" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{ .return_zero_digest = true };
+    {
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        var service = Service.init(file_store.store(), backend.backend());
+        try std.testing.expectError(error.InvalidBackendDigest, service.ensureReplica(testRequest(ensure_operation_id, 1)));
+        try std.testing.expectEqual(@as(usize, 1), file_store.records.len);
+        try std.testing.expectEqual(OperationStatus.prepared, file_store.records[0].status);
+    }
+    {
+        var file_store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas");
+        defer file_store.deinit();
+        try std.testing.expectEqual(@as(usize, 1), file_store.records.len);
+        backend.return_zero_digest = false;
+        var service = Service.init(file_store.store(), backend.backend());
+        const recovered = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+        try std.testing.expect(!isZero(&recovered.replica.attestation.backend_digest));
+    }
+}
+
 test "directory sync failure before prepare poisons the store until reopen" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1103,6 +1308,65 @@ test "FileStore does not publish a record before directory sync succeeds" {
         try std.testing.expectEqual(@as(usize, 1), backend.ensures);
         try std.testing.expectEqual(@as(usize, 1), backend.ensure_calls);
     }
+}
+
+test "FileStore rejects checksum-valid impossible operation histories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var memory = MemoryStore.init(std.testing.allocator);
+    defer memory.deinit();
+    var backend: FakeBackend = .{};
+    var service = Service.init(memory.store(), backend.backend());
+    _ = try service.ensureReplica(testRequest(ensure_operation_id, 1));
+
+    {
+        const orphan = memory.records[1..2];
+        const bytes = try FileStore.encode(std.testing.allocator, orphan);
+        defer std.testing.allocator.free(bytes);
+        const file = try tmp.dir.createFile(std.testing.io, "replicas", .{ .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, bytes);
+    }
+    try std.testing.expectError(error.StoreCorrupt, FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas"));
+
+    var forged: [3]OperationRecord = undefined;
+    @memcpy(forged[0..2], memory.records);
+    forged[2] = memory.records[0];
+    forged[2].operation_id = try parseUuidV7("0198f54d-5c2a-7000-8000-000000000017");
+    forged[2].result.attestation.binding.placement_id = try parseUuidV7("0198f54d-5c2a-7000-8000-000000000018");
+    forged[2].result.attestation.binding.offset_bytes = 32 * 1024;
+    {
+        const bytes = try FileStore.encode(std.testing.allocator, &forged);
+        defer std.testing.allocator.free(bytes);
+        const file = try tmp.dir.createFile(std.testing.io, "replicas", .{ .truncate = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, bytes);
+    }
+    try std.testing.expectError(error.StoreCorrupt, FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas"));
+}
+
+test "semantic validation remains bounded at maximum journal size" {
+    const records = try std.testing.allocator.alloc(OperationRecord, FileStore.max_records);
+    defer std.testing.allocator.free(records);
+    const parsed = try parseRequest(testRequest(ensure_operation_id, 1));
+    const digest = FakeBackend.digestOf(parsed.binding);
+    records[0] = .{
+        .operation_id = testOperationId(1),
+        .kind = .ensure,
+        .status = .prepared,
+        .result = .{ .state = .active, .attestation = .{
+            .binding = parsed.binding,
+            .backend_digest = @splat(0),
+        } },
+    };
+    records[1] = records[0];
+    records[1].status = .completed;
+    records[1].result.attestation.backend_digest = digest;
+    for (records[2..], 2..) |*record, index| {
+        record.* = records[1];
+        record.operation_id = testOperationId(@intCast(index));
+    }
+    try validateHistory(std.testing.allocator, records, FileStore.version);
 }
 
 test "FileStore recovers operations and rejects truncation and corruption" {

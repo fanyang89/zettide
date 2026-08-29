@@ -109,6 +109,7 @@ echo "three-node Volume reconciliation: ok (${volume_id})"
 
 expected_allocated=$((8388608 / ZETTIDE_EXTENT_SIZE))
 expected_free_after=$((expected_free - expected_allocated))
+incarnations='{}'
 for node_id in "${node_ids[@]}"; do
     member_id=$(jq -er --arg pool "$pool_id" --arg node "$node_id" \
         '.members[]? | select(.poolId == $pool and .nodeId == $node) | .id' <<<"$members")
@@ -125,6 +126,9 @@ for node_id in "${node_ids[@]}"; do
                     .capacity.freeExtentCount == $free and
                     .capacity.allocatedExtentCount == $allocated)' \
                 >/dev/null <<<"$heartbeat"; then
+            incarnation=$(jq -er '.observation.incarnation' <<<"$heartbeat")
+            incarnations=$(jq -c --arg node "$node_id" --arg incarnation "$incarnation" \
+                '. + {($node): $incarnation}' <<<"$incarnations")
             allocation_observed=true
             break
         fi
@@ -136,6 +140,25 @@ for node_id in "${node_ids[@]}"; do
     }
 done
 echo "three-node Replica capacity evidence: ok (${expected_allocated} extents each)"
+
+volume=$(grpcurl -max-time 5 -plaintext -import-path /proto -proto "$controller_proto" \
+    -d "$(jq -cn --arg volumeId "$volume_id" '{volumeId:$volumeId}')" \
+    "$ZETTIDE_CONTROLLER_ENDPOINT" \
+    zettide.controller.v1.VolumeService/GetVolume)
+jq -e '.volume.lifecycleState == "VOLUME_LIFECYCLE_STATE_ACTIVE" and
+           .volume.availabilityState == "VOLUME_AVAILABILITY_STATE_HEALTHY" and
+           .volume.operationPhase == "VOLUME_OPERATION_PHASE_NONE"' >/dev/null <<<"$volume" || {
+    echo "Volume authority changed while capturing restart baseline" >&2
+    exit 1
+}
+write_epoch=$(jq -er '.volume.writeEpoch' <<<"$volume")
+jq -cn \
+    --arg volumeId "$volume_id" \
+    --arg writeEpoch "$write_epoch" \
+    --argjson incarnations "$incarnations" \
+    '{volumeId:$volumeId,writeEpoch:$writeEpoch,incarnations:$incarnations}' \
+    >/bootstrap/control-state.json.tmp
+mv /bootstrap/control-state.json.tmp /bootstrap/control-state.json
 
 portal_url="iscsi://${ZETTIDE_ISCSI_PORTAL}"
 lun_url="${portal_url}/${ZETTIDE_ISCSI_TARGET}/${ZETTIDE_ISCSI_LUN}"

@@ -166,7 +166,7 @@ services:
       data-node-3:
         condition: service_healthy
     volumes:
-      - cluster-bootstrap:/bootstrap:ro
+      - cluster-bootstrap:/bootstrap
     networks:
       - zettide
 

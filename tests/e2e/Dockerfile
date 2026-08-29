@@ -53,4 +53,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY services/controller/proto /proto
 COPY tests/e2e/bootstrap.sh /usr/local/bin/zettide-e2e-bootstrap
 COPY tests/e2e/smoke.sh /usr/local/bin/zettide-e2e-smoke
+COPY tests/e2e/restart-smoke.sh /usr/local/bin/zettide-e2e-restart-smoke
 ENTRYPOINT ["/usr/local/bin/zettide-e2e-smoke"]
