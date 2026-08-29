@@ -24,6 +24,7 @@ repositories retain their histories here as merged directory trees:
 | `libs/storage-engine/` | Reusable Pool, Catalog, Blob/BlobFilesystem, formats, and backend-neutral ports |
 | `services/data-node/` | Data-node service, compatible CLI, endpoint lifecycle, and platform/protocol adapters |
 | `services/controller/` | Raft-replicated metadata and cluster coordination |
+| `services/cli/` | Go gRPC administration CLI for controller management and data-node diagnostics |
 | `services/csi/` | CSI Node service and container image |
 | `services/nfs-fsal/` | NFS-Ganesha FSAL adapter |
 | `libs/txfs/` | Conditional-write transaction engine for shared writable filesystems |
@@ -108,7 +109,7 @@ consumer-bound Publication API or a Tier 1 end-to-end gate.
 ## Requirements
 
 - Zig 0.16.0 (managed by the root `mise.toml`)
-- Go 1.26.5 for `services/csi/` (managed by `services/csi/mise.toml`)
+- Go 1.26.5 for `services/cli/` and `services/csi/` (managed by each component's `mise.toml`)
 - Linux: libfuse3 development files for mounting support
 - Optional HTTP/WebDAV serving: `dufs` on `PATH` (tested with 0.46.0)
 - Optional Linux SMB3 feasibility tests: Samba server and client tools
@@ -142,10 +143,15 @@ zig build test-txfs
 zig build ci
 ```
 
-The CSI Node service has an independent Go gate:
+The Go CLI and CSI Node service have independent gates:
 
 ```sh
-cd services/csi
+cd services/cli
+mise trust
+mise install
+mise run check
+
+cd ../csi
 mise trust
 mise install
 mise run check
