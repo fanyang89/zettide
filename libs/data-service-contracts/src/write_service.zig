@@ -401,15 +401,19 @@ fn validateReplica(replica: ReplicaBinding) !void {
     _ = std.math.add(u64, replica.offset_bytes, replica.length_bytes) catch return error.InvalidReplica;
 }
 
-fn validateReplicaSet(replica_members: [3]Id, local_member: Id) !void {
-    var local_found = false;
+pub fn validateCanonicalReplicaMembers(replica_members: [3]Id) !void {
     for (replica_members, 0..) |member, index| {
         if (isZero(&member)) return error.InvalidReplicaSet;
-        if (std.mem.eql(u8, &member, &local_member)) local_found = true;
         if (index != 0 and std.mem.order(u8, &replica_members[index - 1], &member) != .lt)
             return error.InvalidReplicaSet;
     }
-    if (!local_found) return error.InvalidReplicaSet;
+}
+
+fn validateReplicaSet(replica_members: [3]Id, local_member: Id) !void {
+    try validateCanonicalReplicaMembers(replica_members);
+    for (replica_members) |member|
+        if (std.mem.eql(u8, &member, &local_member)) return;
+    return error.InvalidReplicaSet;
 }
 
 fn validateParticipantState(replica: ReplicaBinding, replica_members: [3]Id, state: State) !void {
@@ -498,6 +502,39 @@ fn normalizeCertificate(input: CommitCertificate) !CommitCertificate {
     return result;
 }
 
+/// Construct canonical coordinator evidence from two already authenticated
+/// PREPARE responses. The responses are transport-authenticated evidence only;
+/// this helper does not turn them into independently signed third-party proof.
+pub fn makeCommitCertificate(
+    attestations: [certificate_witness_count]PrepareAttestation,
+    transaction_digest: Digest,
+    prepared_history_digest: Digest,
+    replica_members: [3]Id,
+) !CommitCertificate {
+    try validateCanonicalReplicaMembers(replica_members);
+    var certificate = CommitCertificate{ .attestations = attestations };
+    certificate = try normalizeCertificate(certificate);
+    const first = certificate.attestations[0];
+    const second = certificate.attestations[1];
+    if (isZero(&transaction_digest) or isZero(&prepared_history_digest) or
+        isZero(&first.member_id) or isZero(&second.member_id) or
+        isZero(&first.prepare_digest) or isZero(&second.prepare_digest) or
+        std.mem.eql(u8, &first.member_id, &second.member_id))
+        return error.InvalidCertificate;
+    for (certificate.attestations) |attestation| {
+        var eligible = false;
+        for (replica_members) |member| if (std.mem.eql(u8, &member, &attestation.member_id)) {
+            eligible = true;
+            break;
+        };
+        if (!eligible) return error.CertificateMemberNotEligible;
+        if (!std.mem.eql(u8, &attestation.transaction_digest, &transaction_digest) or
+            !std.mem.eql(u8, &attestation.prepared_history_digest, &prepared_history_digest))
+            return error.CertificateMismatch;
+    }
+    return certificate;
+}
+
 fn sameWrite(a: WriteRequest, b: WriteRequest) bool {
     return std.meta.eql(a, b);
 }
@@ -539,7 +576,7 @@ fn digestPrepare(transaction_digest: Digest, replica: ReplicaBinding) Digest {
     return result;
 }
 
-fn digestPreparedHistory(previous: Digest, transaction_digest: Digest) Digest {
+pub fn digestPreparedHistory(previous: Digest, transaction_digest: Digest) Digest {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hasher, "zettide-replica-write-prepared-history-v1");
     hashField(&hasher, &previous);
@@ -549,7 +586,7 @@ fn digestPreparedHistory(previous: Digest, transaction_digest: Digest) Digest {
     return result;
 }
 
-fn digestCommitHistory(prepared_history: Digest, certificate: CommitCertificate) Digest {
+pub fn digestCommitHistory(prepared_history: Digest, certificate: CommitCertificate) Digest {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hasher, "zettide-replica-write-commit-history-v1");
     hashField(&hasher, &prepared_history);

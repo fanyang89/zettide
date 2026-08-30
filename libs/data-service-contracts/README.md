@@ -30,6 +30,25 @@ The payload-bearing protobuf service is never registered on the management
 listener. Consumers generate protobuf bindings with their own grpc/protobuf
 toolchain.
 
+`write_coordinator` adds a backend-neutral, node-local durable coordinator
+journal. Before any caller-owned PREPARE side effect it persists the exact write,
+payload, canonical three-Member set, and one fixed two-witness selection. It
+records PREPARE and COMMIT acknowledgements only after mandatory injected
+authenticated-evidence callbacks accept the pinned witness and exact metadata,
+persists one canonical certificate before any COMMIT side effect, and retains partial COMMIT
+progress for same-state-directory restart retry. It has no ABORT and never
+switches to the third Member after an unknown result. Its checksummed,
+fsync-backed atomic `FileStore` is another development full-snapshot baseline,
+not a streaming coordinator log.
+
+The coordinator is intentionally not wired into the data-node daemon or Replica
+RPC client yet and does not establish cross-node quorum durability. The contracts
+require injected PREPARE/COMMIT evidence checks but do not implement their
+authentication; callbacks do not create independently signed third-party
+attestations. There is still no outbound credential/topology route,
+production primary coordinator, client-facing payload write RPC, replacement
+coordinator recovery, confidentiality, or certified quorum repair.
+
 ```sh
 zig build test
 ```
