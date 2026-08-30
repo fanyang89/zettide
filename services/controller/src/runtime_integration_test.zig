@@ -779,6 +779,13 @@ test "runtime reconciler recovers unknown ensure and completes create" {
     try std.testing.expectEqual(@as(usize, 3), data_client.fence_drains);
     try std.testing.expect(data_client.recoveries >= 1);
     try std.testing.expect(data_client.mark_ready >= 1);
+    const readiness = try ReconcileDataClient.inspectPrimary(
+        &data_client,
+        "",
+        .{ .binding = data_client.staged.?.binding },
+    );
+    try std.testing.expect(readiness.current_active);
+    try std.testing.expect(readiness.current_admitting);
 
     try runtime.shutdown();
     try std.testing.expect(runtime.reconcile_thread == null);

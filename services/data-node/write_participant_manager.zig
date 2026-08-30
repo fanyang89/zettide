@@ -147,6 +147,25 @@ pub const WriteParticipantManager = struct {
         self.* = undefined;
     }
 
+    /// Fail startup closed if any durable catalog binding disagrees with the
+    /// node-local generation-1 signer. Retired history remains covered.
+    pub fn validateLocalIdentity(
+        self: *WriteParticipantManager,
+        local_identity: write_service.WitnessIdentity,
+    ) !void {
+        try protocol.write_evidence_contract.validateIdentity(local_identity);
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        for (self.catalog) |record| {
+            const expected = protocol.write_evidence_contract.identityForMember(
+                record.binding.witness_identities,
+                record.binding.replica.member_id,
+            ) orelse return error.ReplicaSignerIdentityMismatch;
+            if (!std.meta.eql(expected, local_identity)) return error.ReplicaSignerIdentityMismatch;
+        }
+    }
+
     /// Durably provisions the immutable participant identity before any write
     /// transport is allowed to use it. Identical retries are idempotent.
     pub fn configure(
@@ -179,8 +198,15 @@ pub const WriteParticipantManager = struct {
         return entry.participant.prepare(request);
     }
 
+    pub const CommittedEvidenceTuple = struct {
+        write: write_service.WriteRequest,
+        certificate: write_service.SignedCommitCertificate,
+        result: write_service.CommitResult,
+    };
+
     /// Authorize COMMIT against the durable PREPARE/completed authority and
-    /// validate physical identity atomically with participant commit admission.
+    /// return the exact evidence-signing tuple while still holding the manager
+    /// mutex. Later transactions cannot replace metadata for this response.
     pub fn commitConfigured(
         self: *WriteParticipantManager,
         binding: write_service.ParticipantBinding,
@@ -189,7 +215,7 @@ pub const WriteParticipantManager = struct {
         transaction_id: protocol.Id,
         expected_sequence: u64,
         commit_certificate: write_service.SignedCommitCertificate,
-    ) !write_service.CommitResult {
+    ) !CommittedEvidenceTuple {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
@@ -201,7 +227,10 @@ pub const WriteParticipantManager = struct {
             return error.AuthorityConflict;
         if (prepared_write.sequence != expected_sequence or expected_sequence == 0)
             return error.SequenceMismatch;
-        return entry.participant.commit(transaction_id, commit_certificate);
+        const canonical = try protocol.write_evidence_contract.normalizeSignedCertificate(commit_certificate);
+        if (!std.meta.eql(canonical, commit_certificate)) return error.InvalidCertificate;
+        const result = try entry.participant.commit(transaction_id, canonical);
+        return .{ .write = prepared_write, .certificate = canonical, .result = result };
     }
 
     pub fn inspectConfigured(
@@ -873,6 +902,7 @@ const FakeBackend = struct {
 
 const FakeReplicaBackend = struct {
     digest: protocol.Digest = @splat(0x33),
+    active: bool = false,
     fail_delete_once: bool = false,
     deletes: usize = 0,
 
@@ -881,7 +911,14 @@ const FakeReplicaBackend = struct {
     }
 
     fn ensureOpaque(context: *anyopaque, _: protocol.ReplicaBinding) !protocol.Digest {
-        return (@as(*FakeReplicaBackend, @ptrCast(@alignCast(context)))).digest;
+        const self: *FakeReplicaBackend = @ptrCast(@alignCast(context));
+        self.active = true;
+        return self.digest;
+    }
+
+    fn inspectOpaque(context: *anyopaque, _: protocol.ReplicaBinding) !protocol.replica_service.BackendState {
+        const self: *FakeReplicaBackend = @ptrCast(@alignCast(context));
+        return if (self.active) .{ .active = self.digest } else .absent;
     }
 
     fn deleteOpaque(context: *anyopaque, _: protocol.ReplicaBinding) !void {
@@ -891,9 +928,11 @@ const FakeReplicaBackend = struct {
             self.fail_delete_once = false;
             return error.InjectedDeleteFailure;
         }
+        self.active = false;
     }
 
     const vtable: protocol.replica_service.Backend.VTable = .{
+        .inspect = inspectOpaque,
         .ensure = ensureOpaque,
         .delete = deleteOpaque,
     };
@@ -1239,6 +1278,139 @@ test "manager durably configures an immutable participant before writes" {
         try reopened.configure(binding, ensured.replica.attestation.backend_digest);
         try std.testing.expectEqual(@as(u64, 0), (try reopened.inspect(binding)).frontier.sequence);
     }
+}
+
+test "commit evidence tuple survives barrier-controlled later completion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var replicas = try protocol.replica_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
+    defer replicas.deinit();
+    var replica_backend: FakeReplicaBackend = .{};
+    var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
+    const ensured = try replica_engine.ensureReplica(replicaRequest("0198f54d-5c2a-7000-8000-000000000004"));
+    const binding = participantBinding(ensured.replica.attestation.binding);
+    var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
+    defer fences.deinit();
+    var backend: FakeBackend = .{};
+    var validator: FakeAuthorityValidator = .{ .expected = testAuthority(binding.replica.volume_id) };
+    var fence_backend: FakeFenceBackend = .{};
+    var fence_engine = protocol.fence_service.Service.init(fences.store(), fence_backend.backend());
+    _ = try fence_engine.accept(fenceBinding(binding.replica, validator.expected));
+    var manager = try WriteParticipantManager.init(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        &replicas,
+        &replica_engine,
+        &fences,
+        backend.backend(),
+        validator.validator(),
+    );
+    defer manager.deinit();
+    try manager.configure(binding, ensured.replica.attestation.backend_digest);
+    const data: [4096]u8 = @splat(0x5a);
+    const first_request = prepareRequest(binding, validator.expected, &data);
+    const first_attestation = try manager.prepareConfigured(
+        binding,
+        ensured.replica.attestation.backend_digest,
+        first_request,
+    );
+    const first_certificate = certificate(first_request.write, first_attestation, binding);
+    const local_identity = protocol.write_evidence_contract.identityForMember(
+        binding.witness_identities,
+        binding.replica.member_id,
+    ).?;
+    var seed: protocol.write_evidence.Seed = undefined;
+    var identity_index: usize = 0;
+    while (!std.meta.eql(binding.witness_identities[identity_index], local_identity)) : (identity_index += 1) {}
+    @memset(&seed, @intCast(identity_index + 1));
+    defer std.crypto.secureZero(u8, &seed);
+    const signer = try protocol.write_evidence.Signer.init(
+        std.testing.allocator,
+        local_identity.member_id,
+        local_identity.node_id,
+        &seed,
+    );
+    defer signer.deinit();
+
+    const Context = struct {
+        manager: *WriteParticipantManager,
+        binding: write_service.ParticipantBinding,
+        digest: protocol.Digest,
+        request: write_service.PrepareRequest,
+        certificate: write_service.SignedCommitCertificate,
+        signer: *const protocol.write_evidence.Signer,
+        phase: std.atomic.Value(u8) = .init(0),
+        tuple: ?WriteParticipantManager.CommittedEvidenceTuple = null,
+        evidence: ?write_service.SignedCommitEvidence = null,
+        err: ?anyerror = null,
+
+        fn run(ctx: *@This()) void {
+            ctx.tuple = ctx.manager.commitConfigured(
+                ctx.binding,
+                ctx.digest,
+                ctx.request.write.authority,
+                ctx.request.write.transaction_id,
+                ctx.request.write.sequence,
+                ctx.certificate,
+            ) catch |err| {
+                ctx.err = err;
+                ctx.phase.store(3, .release);
+                return;
+            };
+            ctx.phase.store(1, .release);
+            while (ctx.phase.load(.acquire) != 2) std.atomic.spinLoopHint();
+            const tuple = ctx.tuple.?;
+            const projected = protocol.write_evidence_contract.certificateProjection(tuple.certificate) catch |err| {
+                ctx.err = err;
+                ctx.phase.store(3, .release);
+                return;
+            };
+            ctx.evidence = ctx.signer.signCommit(tuple.write, projected, tuple.result) catch |err| {
+                ctx.err = err;
+                ctx.phase.store(3, .release);
+                return;
+            };
+            ctx.phase.store(3, .release);
+        }
+    };
+    var context: Context = .{
+        .manager = &manager,
+        .binding = binding,
+        .digest = ensured.replica.attestation.backend_digest,
+        .request = first_request,
+        .certificate = first_certificate,
+        .signer = signer,
+    };
+    const commit_thread = try std.Thread.spawn(.{}, Context.run, .{&context});
+    while (context.phase.load(.acquire) == 0) std.atomic.spinLoopHint();
+    if (context.err) |err| return err;
+
+    var second_request = first_request;
+    second_request.write.sequence = 2;
+    second_request.write.transaction_id = testId(18);
+    second_request.write.previous_history_digest = context.tuple.?.result.history_digest;
+    const second_attestation = try manager.prepareConfigured(
+        binding,
+        ensured.replica.attestation.backend_digest,
+        second_request,
+    );
+    const second_tuple = try manager.commitConfigured(
+        binding,
+        ensured.replica.attestation.backend_digest,
+        second_request.write.authority,
+        second_request.write.transaction_id,
+        second_request.write.sequence,
+        certificate(second_request.write, second_attestation, binding),
+    );
+    context.phase.store(2, .release);
+    commit_thread.join();
+    if (context.err) |err| return err;
+    try std.testing.expectEqual(@as(u64, 1), context.tuple.?.write.sequence);
+    try std.testing.expectEqual(@as(u64, 2), second_tuple.write.sequence);
+    const first_projection = try protocol.write_evidence_contract.certificateProjection(context.tuple.?.certificate);
+    try protocol.write_evidence.verifyCommit(local_identity, context.tuple.?.write, first_projection, context.evidence.?);
+    try std.testing.expectEqual(@as(u64, 2), (try manager.inspectConfigured(binding, ensured.replica.attestation.backend_digest)).frontier.sequence);
 }
 
 test "manager completes a cataloged unbound participant on startup" {

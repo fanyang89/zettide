@@ -17,6 +17,8 @@ pub const WitnessIdentity = contract.WitnessIdentity;
 pub const SignedPrepareEvidence = contract.SignedPrepareEvidence;
 pub const SignedCommitEvidence = contract.SignedCommitEvidence;
 pub const SignedCommitCertificate = contract.SignedCommitCertificate;
+pub const normalizeSignedCertificate = contract.normalizeSignedCertificate;
+pub const certificateProjection = contract.certificateProjection;
 
 /// Seed-owning Ed25519 signer. The caller retains responsibility for scrubbing
 /// its source seed; this object never exposes private bytes and scrubs its copy.
@@ -25,11 +27,11 @@ pub const Signer = opaque {
         allocator: std.mem.Allocator,
         member_id: Id,
         node_id: Id,
-        seed_input: Seed,
+        seed_input: *const Seed,
     ) !*Signer {
-        if (isZero(&member_id) or isZero(&node_id) or isZero(&seed_input)) return error.InvalidSigningIdentity;
-        var seed = seed_input;
-        errdefer std.crypto.secureZero(u8, &seed);
+        var seed = seed_input.*;
+        defer std.crypto.secureZero(u8, &seed);
+        if (isZero(&member_id) or isZero(&node_id) or isZero(&seed)) return error.InvalidSigningIdentity;
         var key_pair = try Ed25519.KeyPair.generateDeterministic(seed);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
         const public_key = key_pair.public_key.toBytes();
@@ -42,7 +44,6 @@ pub const Signer = opaque {
         try validateIdentity(witness_identity);
         const inner = try allocator.create(SignerInner);
         inner.* = .{ .allocator = allocator, .seed = seed, .identity = witness_identity };
-        seed = @splat(0);
         return @ptrCast(inner);
     }
 
@@ -490,7 +491,7 @@ fn testResult(write: write_service.WriteRequest, certificate: write_service.Comm
 }
 
 test "prepare transcript directly hashes every identity write and attestation field" {
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer signer.deinit();
     const identity = signer.identity();
     const write = testWrite();
@@ -518,7 +519,7 @@ test "prepare transcript directly hashes every identity write and attestation fi
 }
 
 test "commit transcript directly hashes every identity write certificate and result field" {
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer signer.deinit();
     const identity = signer.identity();
     const write = testWrite();
@@ -560,7 +561,7 @@ test "commit transcript directly hashes every identity write certificate and res
 }
 
 test "parameterized prepare and commit transcripts bind phase domain and protocol version" {
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x51));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x51)));
     defer signer.deinit();
     const identity = signer.identity();
     const write = testWrite();
@@ -619,7 +620,7 @@ test "parameterized prepare and commit transcripts bind phase domain and protoco
 }
 
 test "deterministic Ed25519 prepare and commit evidence verifies strictly" {
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer signer.deinit();
     const write = testWrite();
     const attestation = testAttestation(write, testId(1), 1);
@@ -633,9 +634,9 @@ test "deterministic Ed25519 prepare and commit evidence verifies strictly" {
 }
 
 test "prepare evidence exhaustively binds every identity write attestation and outer field" {
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer signer.deinit();
-    const other = try Signer.init(std.testing.allocator, testId(2), testId(32), @splat(0x22));
+    const other = try Signer.init(std.testing.allocator, testId(2), testId(32), &@as(Seed, @splat(0x22)));
     defer other.deinit();
     const write = testWrite();
     const prepare = try signer.signPrepare(write, testAttestation(write, testId(1), 1));
@@ -699,7 +700,7 @@ test "prepare evidence exhaustively binds every identity write attestation and o
 }
 
 test "commit evidence exhaustively binds every write certificate result and outer field" {
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer signer.deinit();
     const write = testWrite();
     const certificate = testCertificate(write);
@@ -755,9 +756,9 @@ test "commit evidence exhaustively binds every write certificate result and oute
 }
 
 test "evidence rejects transcript identity key and cross-domain mutations" {
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer signer.deinit();
-    const other = try Signer.init(std.testing.allocator, testId(2), testId(32), @splat(0x22));
+    const other = try Signer.init(std.testing.allocator, testId(2), testId(32), &@as(Seed, @splat(0x22)));
     defer other.deinit();
     const write = testWrite();
     const attestation = testAttestation(write, testId(1), 1);
@@ -813,13 +814,29 @@ test "signer deinit scrubs owned seed bytes" {
     var backing: [2048]u8 = @splat(0xcc);
     var fixed = std.heap.FixedBufferAllocator.init(&backing);
     const seed: Seed = @splat(0xab);
-    const signer = try Signer.init(fixed.allocator(), testId(1), testId(31), seed);
+    const signer = try Signer.init(fixed.allocator(), testId(1), testId(31), &seed);
     signer.deinit();
     try std.testing.expect(std.mem.indexOf(u8, &backing, &seed) == null);
 }
 
+test "signer initialization failure does not retain secret copies" {
+    const seed: Seed = @splat(0xab);
+    var tiny_backing: [8]u8 = @splat(0xcc);
+    var fixed = std.heap.FixedBufferAllocator.init(&tiny_backing);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Signer.init(fixed.allocator(), testId(1), testId(31), &seed),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, &tiny_backing, &seed) == null);
+    try std.testing.expectEqual(@as(u8, 0xab), seed[0]);
+    try std.testing.expectError(
+        error.InvalidSigningIdentity,
+        Signer.init(std.testing.allocator, @splat(0), testId(31), &seed),
+    );
+}
+
 test "identity binding rejects malformed identity low-order and non-prime subgroup keys" {
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer signer.deinit();
     var cases: [5]PublicKey = undefined;
     cases[0] = @splat(0xff); // Non-canonical compressed point.
@@ -841,9 +858,9 @@ test "identity binding rejects malformed identity low-order and non-prime subgro
 test "zero signing identity and evidence fields fail closed" {
     try std.testing.expectError(
         error.InvalidSigningIdentity,
-        Signer.init(std.testing.allocator, @splat(0), testId(31), @splat(0x11)),
+        Signer.init(std.testing.allocator, @splat(0), testId(31), &@as(Seed, @splat(0x11))),
     );
-    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const signer = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer signer.deinit();
     const write = testWrite();
     var attestation = testAttestation(write, testId(1), 1);
@@ -856,11 +873,11 @@ test "zero signing identity and evidence fields fail closed" {
 }
 
 test "three witness identities are canonical distinct and key bound" {
-    const first = try Signer.init(std.testing.allocator, testId(1), testId(31), @splat(0x11));
+    const first = try Signer.init(std.testing.allocator, testId(1), testId(31), &@as(Seed, @splat(0x11)));
     defer first.deinit();
-    const second = try Signer.init(std.testing.allocator, testId(2), testId(32), @splat(0x22));
+    const second = try Signer.init(std.testing.allocator, testId(2), testId(32), &@as(Seed, @splat(0x22)));
     defer second.deinit();
-    const third = try Signer.init(std.testing.allocator, testId(3), testId(33), @splat(0x33));
+    const third = try Signer.init(std.testing.allocator, testId(3), testId(33), &@as(Seed, @splat(0x33)));
     defer third.deinit();
     const valid = [3]WitnessIdentity{ first.identity(), second.identity(), third.identity() };
     try validateIdentities(valid);

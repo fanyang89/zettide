@@ -5,6 +5,7 @@ const pb = @import("data_node_proto");
 const protocol = @import("zettide_data_service_contracts");
 const replica_rpc_auth = @import("replica_rpc_auth.zig");
 const write_service = protocol.write_service;
+const write_evidence = protocol.write_evidence;
 
 pub const Binding = struct {
     participant: write_service.ParticipantBinding,
@@ -21,7 +22,7 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     source_node_id: protocol.Id,
-    target_node_id: protocol.Id,
+    target_identity: write_service.WitnessIdentity,
     key: replica_rpc_auth.Key,
     options: Options,
 
@@ -34,19 +35,20 @@ pub const Client = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         source_node_id: protocol.Id,
-        target_node_id: protocol.Id,
+        target_identity: write_service.WitnessIdentity,
         key: replica_rpc_auth.Key,
         options: Options,
     ) !Client {
-        if (isZero(&source_node_id) or isZero(&target_node_id) or isZero(&key) or
-            std.mem.eql(u8, &source_node_id, &target_node_id) or
+        protocol.write_evidence_contract.validateIdentity(target_identity) catch return error.InvalidOptions;
+        if (isZero(&source_node_id) or isZero(&key) or
+            std.mem.eql(u8, &source_node_id, &target_identity.node_id) or
             options.timeout_ns == 0 or options.max_response_size == 0)
             return error.InvalidOptions;
         return .{
             .allocator = allocator,
             .io = io,
             .source_node_id = source_node_id,
-            .target_node_id = target_node_id,
+            .target_identity = target_identity,
             .key = key,
             .options = options,
         };
@@ -62,7 +64,8 @@ pub const Client = struct {
         endpoint: []const u8,
         binding: Binding,
         request: write_service.PrepareRequest,
-    ) !write_service.PrepareAttestation {
+    ) !write_service.SignedPrepareEvidence {
+        try self.validateTargetBinding(binding);
         var binding_views: BindingProtoViews = undefined;
         var write_member_views: [3][]const u8 = undefined;
         var response = try self.unary(
@@ -76,46 +79,61 @@ pub const Client = struct {
             pb.ReplicaPrepareResponse,
         );
         defer response.deinit(self.allocator);
-        const attestation = try parseAttestation(response.attestation orelse return error.MissingResponseField);
-        if (!std.mem.eql(u8, &attestation.member_id, &binding.participant.replica.member_id) or
-            !std.mem.eql(u8, &attestation.transaction_digest, &write_service.digestTransaction(request.write)))
-            return error.ResponseBindingMismatch;
-        return attestation;
+        if (response.attestation != null) return error.UnsignedResponse;
+        const evidence = try parseSignedPrepare(response.signed_evidence orelse return error.UnsignedResponse);
+        const pinned = protocol.write_evidence_contract.identityForMember(
+            binding.participant.witness_identities,
+            binding.participant.replica.member_id,
+        ) orelse return error.ResponseBindingMismatch;
+        if (!std.meta.eql(self.target_identity, pinned)) return error.ResponseBindingMismatch;
+        write_evidence.verifyPrepare(self.target_identity, request.write, evidence) catch
+            return error.UnverifiedPrepareEvidence;
+        return evidence;
     }
 
     pub fn commit(
         self: *Client,
         endpoint: []const u8,
         binding: Binding,
-        authority: protocol.AuthorityBinding,
-        transaction_id: protocol.Id,
-        expected_sequence: u64,
-        certificate: write_service.CommitCertificate,
-    ) !write_service.CommitResult {
-        if (expected_sequence == 0) return error.InvalidArgument;
+        write: write_service.WriteRequest,
+        certificate: write_service.SignedCommitCertificate,
+    ) !write_service.SignedCommitEvidence {
+        try self.validateTargetBinding(binding);
+        if (write.sequence == 0) return error.InvalidArgument;
+        const stable_certificate = try protocol.write_evidence_contract.normalizeSignedCertificate(certificate);
+        if (!std.meta.eql(stable_certificate, certificate)) return error.NonCanonicalCertificate;
         var binding_views: BindingProtoViews = undefined;
-        var stable_certificate = certificate;
-        var attestations: [write_service.certificate_witness_count]pb.DataPrepareAttestation = undefined;
-        for (&attestations, &stable_certificate.attestations) |*target, *value|
-            target.* = attestationProto(value);
+        var evidence_views: [write_service.certificate_witness_count]pb.DataSignedPrepareEvidence = undefined;
+        for (&evidence_views, &stable_certificate.prepare_evidence) |*target, *value|
+            target.* = signedPrepareProto(value);
         var response = try self.unary(
             endpoint,
             "Commit",
             pb.ReplicaCommitRequest{
                 .binding = bindingProto(&binding, &binding_views),
-                .authority = authorityProto(&authority),
-                .transaction_id = &transaction_id,
-                .attestations = .{ .items = &attestations, .capacity = attestations.len },
-                .sequence = expected_sequence,
+                .authority = authorityProto(&write.authority),
+                .transaction_id = &write.transaction_id,
+                .sequence = write.sequence,
+                .signed_certificate = .{
+                    .prepare_evidence = .{ .items = &evidence_views, .capacity = evidence_views.len },
+                },
             },
             pb.ReplicaCommitResponse,
         );
         defer response.deinit(self.allocator);
-        const result = try parseCommitResult(response);
-        if (!std.mem.eql(u8, &result.transaction_id, &transaction_id) or
-            result.sequence != expected_sequence)
-            return error.ResponseBindingMismatch;
-        return result;
+        if (response.transaction_id.len != 0 or response.sequence != 0 or response.history_digest.len != 0)
+            return error.UnsignedResponse;
+        const evidence = try parseSignedCommit(response.signed_evidence orelse return error.UnsignedResponse);
+        const pinned = protocol.write_evidence_contract.identityForMember(
+            binding.participant.witness_identities,
+            binding.participant.replica.member_id,
+        ) orelse return error.ResponseBindingMismatch;
+        if (!std.meta.eql(self.target_identity, pinned)) return error.ResponseBindingMismatch;
+        const projection = protocol.write_evidence_contract.certificateProjection(certificate) catch
+            return error.InvalidCertificate;
+        write_evidence.verifyCommit(self.target_identity, write, projection, evidence) catch
+            return error.UnverifiedCommitEvidence;
+        return evidence;
     }
 
     pub fn inspect(
@@ -151,6 +169,14 @@ pub const Client = struct {
         return inspection;
     }
 
+    fn validateTargetBinding(self: *const Client, binding: Binding) !void {
+        const pinned = protocol.write_evidence_contract.identityForMember(
+            binding.participant.witness_identities,
+            binding.participant.replica.member_id,
+        ) orelse return error.ResponseBindingMismatch;
+        if (!std.meta.eql(self.target_identity, pinned)) return error.ResponseBindingMismatch;
+    }
+
     fn unary(
         self: *Client,
         endpoint: []const u8,
@@ -166,7 +192,7 @@ pub const Client = struct {
         try self.io.randomSecure(&challenge);
         const signed = replica_rpc_auth.signedMetadata(
             self.source_node_id,
-            self.target_node_id,
+            self.target_identity.node_id,
             challenge,
             self.key,
             path,
@@ -188,7 +214,7 @@ pub const Client = struct {
         defer result.deinit();
         replica_rpc_auth.verifyResponse(
             self.source_node_id,
-            self.target_node_id,
+            self.target_identity.node_id,
             challenge,
             self.key,
             result.trailing_metadata.items(),
@@ -273,6 +299,34 @@ fn attestationProto(value: *const write_service.PrepareAttestation) pb.DataPrepa
     };
 }
 
+fn signedPrepareProto(value: *const write_service.SignedPrepareEvidence) pb.DataSignedPrepareEvidence {
+    return .{
+        .attestation = attestationProto(&value.attestation),
+        .signer_node_id = &value.signer_node_id,
+        .key_id = &value.key_id,
+        .signature = &value.signature,
+    };
+}
+
+fn parseSignedPrepare(value: pb.DataSignedPrepareEvidence) !write_service.SignedPrepareEvidence {
+    return .{
+        .attestation = try parseAttestation(value.attestation orelse return error.MissingResponseField),
+        .signer_node_id = try fixedId(value.signer_node_id),
+        .key_id = try fixedDigest(value.key_id),
+        .signature = try fixedSignature(value.signature),
+    };
+}
+
+fn parseSignedCommit(value: pb.DataSignedCommitEvidence) !write_service.SignedCommitEvidence {
+    return .{
+        .member_id = try fixedId(value.member_id),
+        .signer_node_id = try fixedId(value.signer_node_id),
+        .key_id = try fixedDigest(value.key_id),
+        .result = try parseCommitResult(value.result orelse return error.MissingResponseField),
+        .signature = try fixedSignature(value.signature),
+    };
+}
+
 fn parseWrite(value: ?pb.DataWriteRequest) !write_service.WriteRequest {
     const write = value orelse return error.MissingResponseField;
     if (write.replica_member_ids.items.len != 3) return error.InvalidProtobufResponse;
@@ -317,7 +371,7 @@ fn parseAttestation(value: pb.DataPrepareAttestation) !write_service.PrepareAtte
     };
 }
 
-fn parseCommitResult(value: pb.ReplicaCommitResponse) !write_service.CommitResult {
+fn parseCommitResult(value: anytype) !write_service.CommitResult {
     return .{
         .transaction_id = try fixedId(value.transaction_id),
         .sequence = value.sequence,
@@ -348,6 +402,12 @@ fn validateInspection(
             !std.mem.eql(u8, &completed.history_digest, &inspection.frontier.history_digest))
             return error.ResponseBindingMismatch;
     } else if (inspection.frontier.sequence != 0) return error.InvalidProtobufResponse;
+}
+
+fn fixedSignature(bytes: []const u8) !protocol.write_evidence_contract.Signature {
+    if (bytes.len != @sizeOf(protocol.write_evidence_contract.Signature))
+        return error.InvalidProtobufResponse;
+    return bytes[0..@sizeOf(protocol.write_evidence_contract.Signature)].*;
 }
 
 fn fixedId(bytes: []const u8) !protocol.Id {
@@ -402,20 +462,27 @@ test "client rejects invalid peer identities and call limits" {
     source[0] = 1;
     var target: protocol.Id = @splat(0);
     target[0] = 2;
+    var member: protocol.Id = @splat(0);
+    member[0] = 3;
+    const signer = try write_evidence.Signer.init(std.testing.allocator, member, target, &@as(write_evidence.Seed, @splat(7)));
+    defer signer.deinit();
+    const identity = signer.identity();
+    var same_node_identity = identity;
+    same_node_identity.node_id = source;
     try std.testing.expectError(
         error.InvalidOptions,
-        Client.init(std.testing.allocator, std.testing.io, @splat(0), target, @splat(1), .{}),
+        Client.init(std.testing.allocator, std.testing.io, @splat(0), identity, @splat(1), .{}),
     );
     try std.testing.expectError(
         error.InvalidOptions,
-        Client.init(std.testing.allocator, std.testing.io, source, source, @splat(1), .{}),
+        Client.init(std.testing.allocator, std.testing.io, source, same_node_identity, @splat(1), .{}),
     );
     try std.testing.expectError(
         error.InvalidOptions,
-        Client.init(std.testing.allocator, std.testing.io, source, target, @splat(0), .{}),
+        Client.init(std.testing.allocator, std.testing.io, source, identity, @splat(0), .{}),
     );
     try std.testing.expectError(
         error.InvalidOptions,
-        Client.init(std.testing.allocator, std.testing.io, source, target, @splat(1), .{ .timeout_ns = 0 }),
+        Client.init(std.testing.allocator, std.testing.io, source, identity, @splat(1), .{ .timeout_ns = 0 }),
     );
 }

@@ -22,7 +22,11 @@ for _ in {1..90}; do
             '[.nodes[]? | select(.id as $id | $ids | index($id)) | select((.replicaEndpoint // "") | test(":7443$"))] | length' <<<"$nodes")
         replica_endpoint_count=$(jq -r --argjson ids "$(printf '%s\n' "${node_ids[@]}" | jq -R . | jq -s .)" \
             '[.nodes[]? | select(.id as $id | $ids | index($id)) | .replicaEndpoint] | unique | length' <<<"$nodes")
-        [[ $registered_count == "${#node_ids[@]}" && $replica_endpoint_count == "${#node_ids[@]}" ]] && { registered=true; break; }
+        signing_key_count=$(jq -r --argjson ids "$(printf '%s\n' "${node_ids[@]}" | jq -R . | jq -s .)" \
+            '[.nodes[]? | select(.id as $id | $ids | index($id)) | (.signingPublicKey // "") | select(length > 0)] | unique | length' <<<"$nodes")
+        [[ $registered_count == "${#node_ids[@]}" &&
+           $replica_endpoint_count == "${#node_ids[@]}" &&
+           $signing_key_count == "${#node_ids[@]}" ]] && { registered=true; break; }
     fi
     sleep 1
 done
@@ -30,23 +34,25 @@ done
     echo "three data-nodes were not registered with the controller" >&2
     exit 1
 }
-echo "controller node registration: ok (${#node_ids[@]} nodes with Replica endpoints)"
+echo "controller node registration: ok (${#node_ids[@]} nodes with distinct Replica endpoints and pinned signing keys)"
 
 mapfile -t replica_endpoints < <(jq -r --argjson ids "$(printf '%s\n' "${node_ids[@]}" | jq -R . | jq -s .)" \
     '.nodes[]? | select(.id as $id | $ids | index($id)) | .replicaEndpoint' <<<"$nodes")
 for endpoint in "${replica_endpoints[@]}"; do
-    if unauthenticated=$(grpcurl -max-time 2 -plaintext -import-path /proto -proto /proto/zettide/controller/v1/data_service.proto \
-        -d '{}' "$endpoint" zettide.controller.v1.ReplicaTransport/Inspect 2>&1); then
-        echo "unauthenticated Replica INSPECT unexpectedly succeeded at $endpoint" >&2
-        exit 1
-    fi
-    grep -Fq 'Code: Unauthenticated' <<<"$unauthenticated" || {
-        echo "Replica listener did not fail closed for unauthenticated INSPECT at $endpoint" >&2
-        echo "$unauthenticated" >&2
-        exit 1
-    }
+    for method in Prepare Commit Inspect; do
+        if unauthenticated=$(grpcurl -max-time 2 -plaintext -import-path /proto -proto /proto/zettide/controller/v1/data_service.proto \
+            -d '{}' "$endpoint" "zettide.controller.v1.ReplicaTransport/${method}" 2>&1); then
+            echo "unauthenticated Replica ${method} unexpectedly succeeded at $endpoint" >&2
+            exit 1
+        fi
+        grep -Fq 'Code: Unauthenticated' <<<"$unauthenticated" || {
+            echo "Replica listener did not fail closed for unauthenticated ${method} at $endpoint" >&2
+            echo "$unauthenticated" >&2
+            exit 1
+        }
+    done
 done
-echo "Replica listener authentication rejection: ok (${#replica_endpoints[@]} nodes)"
+echo "Replica listener PREPARE/COMMIT/INSPECT authentication rejection: ok (${#replica_endpoints[@]} nodes)"
 
 pool_id=$(</bootstrap/pool-id)
 member_registered=false
@@ -123,12 +129,16 @@ done
     printf '%s\n' "${volume:-no GetVolume response}" >&2
     exit 1
 }
-echo "three-node Volume reconciliation: ok (${volume_id})"
+echo "three-node controller ACTIVE/HEALTHY reconciliation: ok (${volume_id}); runtime readiness is covered by the binding-scoped integration gate"
 
 expected_allocated=$((8388608 / ZETTIDE_EXTENT_SIZE))
 expected_free_after=$((expected_free - expected_allocated))
 incarnations='{}'
+signing_keys='{}'
 for node_id in "${node_ids[@]}"; do
+    signing_key=$(jq -er --arg node "$node_id" '.nodes[]? | select(.id == $node) | .signingPublicKey' <<<"$nodes")
+    signing_keys=$(jq -c --arg node "$node_id" --arg key "$signing_key" \
+        '. + {($node): $key}' <<<"$signing_keys")
     member_id=$(jq -er --arg pool "$pool_id" --arg node "$node_id" \
         '.members[]? | select(.poolId == $pool and .nodeId == $node) | .id' <<<"$members")
     allocation_observed=false
@@ -174,7 +184,8 @@ jq -cn \
     --arg volumeId "$volume_id" \
     --arg writeEpoch "$write_epoch" \
     --argjson incarnations "$incarnations" \
-    '{volumeId:$volumeId,writeEpoch:$writeEpoch,incarnations:$incarnations}' \
+    --argjson signingKeys "$signing_keys" \
+    '{volumeId:$volumeId,writeEpoch:$writeEpoch,incarnations:$incarnations,signingKeys:$signingKeys}' \
     >/bootstrap/control-state.json.tmp
 mv /bootstrap/control-state.json.tmp /bootstrap/control-state.json
 

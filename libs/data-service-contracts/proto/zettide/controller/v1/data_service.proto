@@ -150,22 +150,53 @@ message ReplicaPrepareRequest {
   bytes data = 3;
 }
 
-message ReplicaPrepareResponse {
+message DataSignedPrepareEvidence {
   DataPrepareAttestation attestation = 1;
+  bytes signer_node_id = 2;
+  bytes key_id = 3;
+  bytes signature = 4;
+}
+
+message DataSignedCommitCertificate {
+  repeated DataSignedPrepareEvidence prepare_evidence = 1;
+}
+
+message DataCommitResult {
+  bytes transaction_id = 1;
+  uint64 sequence = 2;
+  bytes history_digest = 3;
+}
+
+message DataSignedCommitEvidence {
+  bytes member_id = 1;
+  bytes signer_node_id = 2;
+  bytes key_id = 3;
+  DataCommitResult result = 4;
+  bytes signature = 5;
+}
+
+message ReplicaPrepareResponse {
+  // Field 1 is retained only for append-only wire compatibility. Signed
+  // transports never populate it and clients reject unsigned responses.
+  DataPrepareAttestation attestation = 1;
+  DataSignedPrepareEvidence signed_evidence = 2;
 }
 
 message ReplicaCommitRequest {
   DataWriteParticipantBinding binding = 1;
   DataAuthorityBinding authority = 2;
   bytes transaction_id = 3;
+  // Field 4 is the retired unsigned certificate and must remain empty.
   repeated DataPrepareAttestation attestations = 4;
   uint64 sequence = 5;
+  DataSignedCommitCertificate signed_certificate = 6;
 }
 
 message ReplicaCommitResponse {
   bytes transaction_id = 1;
   uint64 sequence = 2;
   bytes history_digest = 3;
+  DataSignedCommitEvidence signed_evidence = 4;
 }
 
 message ReplicaWriteInspectRequest {

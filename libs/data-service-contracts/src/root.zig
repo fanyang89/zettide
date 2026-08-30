@@ -43,11 +43,11 @@ fn evidenceTestId(value: u8) Id {
 }
 
 test "Signer transcripts are binary-compatible with cycle-free participant verification" {
-    const first = try write_evidence.Signer.init(std.testing.allocator, evidenceTestId(1), evidenceTestId(31), @splat(0x11));
+    const first = try write_evidence.Signer.init(std.testing.allocator, evidenceTestId(1), evidenceTestId(31), &@as(write_evidence.Seed, @splat(0x11)));
     defer first.deinit();
-    const second = try write_evidence.Signer.init(std.testing.allocator, evidenceTestId(2), evidenceTestId(32), @splat(0x22));
+    const second = try write_evidence.Signer.init(std.testing.allocator, evidenceTestId(2), evidenceTestId(32), &@as(write_evidence.Seed, @splat(0x22)));
     defer second.deinit();
-    const third = try write_evidence.Signer.init(std.testing.allocator, evidenceTestId(3), evidenceTestId(33), @splat(0x33));
+    const third = try write_evidence.Signer.init(std.testing.allocator, evidenceTestId(3), evidenceTestId(33), &@as(write_evidence.Seed, @splat(0x33)));
     defer third.deinit();
     const identities = [3]write_service.WitnessIdentity{ first.identity(), second.identity(), third.identity() };
     const write: write_service.WriteRequest = .{

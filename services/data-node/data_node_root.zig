@@ -4,6 +4,7 @@ pub const data_service = @import("data_node_service.zig");
 pub const replica_io_gate = @import("replica_io_gate.zig");
 pub const replica_rpc_auth = @import("replica_rpc_auth.zig");
 pub const replica_rpc_client = @import("replica_rpc_client.zig");
+pub const replica_signing_seed_file = @import("replica_signing_seed_file.zig");
 pub const write_participant_manager = @import("write_participant_manager.zig");
 pub const member_generation_store = @import("member_generation_store.zig");
 pub const endpoint_registry = @import("endpoint_registry.zig");

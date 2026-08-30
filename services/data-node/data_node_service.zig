@@ -9,6 +9,7 @@ const fence_service = protocol.fence_service;
 const lease = protocol.primary_lease;
 const replica_service = protocol.replica_service;
 const write_service = protocol.write_service;
+const write_evidence = protocol.write_evidence;
 const replica_io_gate = @import("replica_io_gate.zig");
 const replica_rpc_auth = @import("replica_rpc_auth.zig");
 const replica_rpc_client = @import("replica_rpc_client.zig");
@@ -24,11 +25,14 @@ pub const FileWriteBackend = file_member_backend.FileWriteBackend;
 pub const WriteParticipantManager = write_participant_manager.WriteParticipantManager;
 pub const ReplicaRpcPeerKey = replica_rpc_auth.PeerKey;
 pub const ReplicaRpcKey = replica_rpc_auth.Key;
+pub const WriteEvidenceSigner = write_evidence.Signer;
 
 pub const ReplicaTransportOptions = struct {
     host: []const u8,
     port: u16,
     local_node_id: protocol.Id,
+    // The signer is caller-owned and must outlive DataNodeServer.
+    signer: *const write_evidence.Signer,
     // Receiver-scoped pairwise keys indexed by authenticated source node.
     peer_keys: []const ReplicaRpcPeerKey,
 };
@@ -80,6 +84,10 @@ pub const DataNodeServer = struct {
             return error.IncompleteWriteConfiguration;
         if (options.replica_transport != null and !write_configured)
             return error.IncompleteReplicaTransportConfiguration;
+        if (options.replica_transport) |transport| {
+            if (!std.mem.eql(u8, &transport.signer.identity().node_id, &transport.local_node_id))
+                return error.ReplicaSignerIdentityMismatch;
+        }
         if (write_configured) {
             const expected_replica_store = options.write_replica_store.?.store();
             const expected_fence_store = options.write_fence_store.?.store();
@@ -173,6 +181,7 @@ const State = struct {
     authorities: std.AutoHashMapUnmanaged(protocol.Id, Authority) = .empty,
     writes: ?write_participant_manager.WriteParticipantManager = null,
     replica_authenticator: ?replica_rpc_auth.Authenticator = null,
+    replica_signer: ?*const write_evidence.Signer = null,
 
     const Authority = struct {
         binding: protocol.AuthorityBinding,
@@ -198,6 +207,7 @@ const State = struct {
                 null,
             .authority_store = options.authority_store,
             .replica_authenticator = authenticator,
+            .replica_signer = if (options.replica_transport) |transport| transport.signer else null,
         };
     }
 
@@ -212,6 +222,7 @@ const State = struct {
             options.write_backend.?,
             self.authorityValidator(),
         );
+        if (self.replica_signer) |signer| try self.writes.?.validateLocalIdentity(signer.identity());
     }
 
     fn deinit(self: *State) void {
@@ -275,6 +286,8 @@ const State = struct {
         self.replica_mutex.lockUncancelable(self.io);
         defer self.replica_mutex.unlock(self.io);
         const writes = if (self.writes) |*value| value else return fail(allocator, .failed_precondition, "write participant manager is not configured");
+        self.validateLocalSigner(configuration.binding) catch
+            return fail(allocator, .failed_precondition, "local signing identity mismatch");
         writes.configure(configuration.binding, configuration.backend_digest) catch |err|
             return writeConfigurationFailure(allocator, err);
         return encodeResponse(allocator, pb.ConfigureWriteParticipantResponse{ .binding = request.binding });
@@ -345,13 +358,17 @@ const State = struct {
         if (!std.mem.eql(u8, &source_node_id, &write.authority.primary_node_id))
             return fail(allocator, .permission_denied, "Replica coordinator identity mismatch");
         const writes = if (self.writes) |*value| value else return fail(allocator, .failed_precondition, "write participant manager is not configured");
+        self.validateLocalSigner(configuration.binding) catch
+            return fail(allocator, .failed_precondition, "local signing identity mismatch");
         const attestation = writes.prepareConfigured(
             configuration.binding,
             configuration.backend_digest,
             .{ .write = write, .data = request.data },
         ) catch |err| return replicaWriteFailure(allocator, err, "Replica PREPARE rejected");
+        var signed = self.replica_signer.?.signPrepare(write, attestation) catch
+            return fail(allocator, .internal, "Replica PREPARE evidence signing failed");
         return encodeResponse(allocator, pb.ReplicaPrepareResponse{
-            .attestation = attestationProto(&attestation),
+            .signed_evidence = signedPrepareProto(&signed),
         });
     }
 
@@ -376,7 +393,6 @@ const State = struct {
         source_node_id: protocol.Id,
         request_bytes: []const u8,
     ) !grpc.UnaryResponse {
-        _ = self;
         var reader: std.Io.Reader = .fixed(request_bytes);
         var request = pb.ReplicaCommitRequest.decode(&reader, allocator) catch
             return fail(allocator, .invalid_argument, "invalid Replica COMMIT request");
@@ -389,16 +405,31 @@ const State = struct {
             return fail(allocator, .invalid_argument, "invalid Replica COMMIT transaction");
         if (request.sequence == 0)
             return fail(allocator, .invalid_argument, "invalid Replica COMMIT sequence");
-        _ = parseCommitCertificate(request.attestations.items) catch
-            return fail(allocator, .invalid_argument, "invalid Replica COMMIT certificate");
+        if (request.attestations.items.len != 0)
+            return fail(allocator, .invalid_argument, "unsigned Replica COMMIT certificate is forbidden");
+        const signed_certificate = parseSignedCommitCertificate(request.signed_certificate) catch
+            return fail(allocator, .invalid_argument, "invalid signed Replica COMMIT certificate");
         if (!std.mem.eql(u8, &source_node_id, &authority.primary_node_id))
             return fail(allocator, .permission_denied, "Replica coordinator identity mismatch");
-        _ = configuration;
-        _ = transaction_id;
-        // M11a removes the unsigned participant COMMIT path. M11c will append
-        // signed PREPARE evidence to this internal protocol; until then the
-        // authenticated legacy wire method fails closed.
-        return fail(allocator, .failed_precondition, "signed Replica COMMIT evidence is required");
+        self.validateLocalSigner(configuration.binding) catch
+            return fail(allocator, .failed_precondition, "local signing identity mismatch");
+        const writes = if (self.writes) |*value| value else return fail(allocator, .failed_precondition, "write participant manager is not configured");
+        const committed = writes.commitConfigured(
+            configuration.binding,
+            configuration.backend_digest,
+            authority,
+            transaction_id,
+            request.sequence,
+            signed_certificate,
+        ) catch |err| return replicaWriteFailure(allocator, err, "Replica COMMIT rejected");
+        const certificate = protocol.write_evidence_contract.certificateProjection(committed.certificate) catch
+            return fail(allocator, .internal, "Replica COMMIT certificate projection failed");
+        var signed = self.replica_signer.?.signCommit(committed.write, certificate, committed.result) catch
+            return fail(allocator, .internal, "Replica COMMIT evidence signing failed");
+        var response_result = commitEvidenceResultProto(&signed.result);
+        return encodeResponse(allocator, pb.ReplicaCommitResponse{
+            .signed_evidence = signedCommitProto(&signed, &response_result),
+        });
     }
 
     fn inspectReplicaWrite(
@@ -439,6 +470,15 @@ const State = struct {
         ) catch |err|
             return replicaWriteFailure(allocator, err, "Replica INSPECT rejected");
         return encodeWriteInspection(allocator, inspection);
+    }
+
+    fn validateLocalSigner(self: *State, binding: write_service.ParticipantBinding) !void {
+        const signer = self.replica_signer orelse return error.ReplicaSignerUnavailable;
+        const expected = protocol.write_evidence_contract.identityForMember(
+            binding.witness_identities,
+            binding.replica.member_id,
+        ) orelse return error.ReplicaSignerIdentityMismatch;
+        if (!std.meta.eql(expected, signer.identity())) return error.ReplicaSignerIdentityMismatch;
     }
 
     fn authenticateReplicaCall(
@@ -1033,12 +1073,26 @@ fn parseWriteRequest(value: ?pb.DataWriteRequest) !write_service.WriteRequest {
     };
 }
 
-fn parseCommitCertificate(values: []const pb.DataPrepareAttestation) !write_service.CommitCertificate {
-    if (values.len != write_service.certificate_witness_count) return error.InvalidCertificate;
-    return .{ .attestations = .{
-        try parseAttestation(values[0]),
-        try parseAttestation(values[1]),
+fn parseSignedCommitCertificate(value: ?pb.DataSignedCommitCertificate) !write_service.SignedCommitCertificate {
+    const certificate = value orelse return error.MissingSignedCertificate;
+    if (certificate.prepare_evidence.items.len != write_service.certificate_witness_count)
+        return error.InvalidCertificate;
+    const parsed: write_service.SignedCommitCertificate = .{ .prepare_evidence = .{
+        try parseSignedPrepare(certificate.prepare_evidence.items[0]),
+        try parseSignedPrepare(certificate.prepare_evidence.items[1]),
     } };
+    const canonical = try protocol.write_evidence_contract.normalizeSignedCertificate(parsed);
+    if (!std.meta.eql(canonical, parsed)) return error.NonCanonicalCertificate;
+    return parsed;
+}
+
+fn parseSignedPrepare(value: pb.DataSignedPrepareEvidence) !write_service.SignedPrepareEvidence {
+    return .{
+        .attestation = try parseAttestation(value.attestation orelse return error.MissingAttestation),
+        .signer_node_id = try fixedId(value.signer_node_id),
+        .key_id = try fixedDigest(value.key_id),
+        .signature = try fixedSignature(value.signature),
+    };
 }
 
 fn parseAttestation(value: pb.DataPrepareAttestation) !write_service.PrepareAttestation {
@@ -1059,7 +1113,37 @@ fn attestationProto(value: *const write_service.PrepareAttestation) pb.DataPrepa
     };
 }
 
+fn signedPrepareProto(value: *const write_service.SignedPrepareEvidence) pb.DataSignedPrepareEvidence {
+    return .{
+        .attestation = attestationProto(&value.attestation),
+        .signer_node_id = &value.signer_node_id,
+        .key_id = &value.key_id,
+        .signature = &value.signature,
+    };
+}
+
+fn signedCommitProto(
+    value: *const write_service.SignedCommitEvidence,
+    result: *const pb.DataCommitResult,
+) pb.DataSignedCommitEvidence {
+    return .{
+        .member_id = &value.member_id,
+        .signer_node_id = &value.signer_node_id,
+        .key_id = &value.key_id,
+        .result = result.*,
+        .signature = &value.signature,
+    };
+}
+
 fn commitResultProto(value: *const write_service.CommitResult) pb.ReplicaCommitResponse {
+    return .{
+        .transaction_id = &value.transaction_id,
+        .sequence = value.sequence,
+        .history_digest = &value.history_digest,
+    };
+}
+
+fn commitEvidenceResultProto(value: *const write_service.CommitResult) pb.DataCommitResult {
     return .{
         .transaction_id = &value.transaction_id,
         .sequence = value.sequence,
@@ -1198,6 +1282,11 @@ fn isZero(bytes: []const u8) bool {
     return true;
 }
 
+fn fixedSignature(bytes: []const u8) !protocol.write_evidence_contract.Signature {
+    if (bytes.len != @sizeOf(protocol.write_evidence_contract.Signature)) return error.InvalidSignature;
+    return bytes[0..@sizeOf(protocol.write_evidence_contract.Signature)].*;
+}
+
 fn fixedId(bytes: []const u8) !protocol.Id {
     if (bytes.len != 16) return error.InvalidFixedId;
     return bytes[0..16].*;
@@ -1287,6 +1376,8 @@ test "data-node service persists Replica lifecycle through gRPC" {
     var coordinator_node = member;
     coordinator_node[15] = 0x41;
     const coordinator_key: replica_rpc_auth.Key = @splat(0x9b);
+    const local_signer = try write_evidence.Signer.init(std.testing.allocator, member, local_node, &@as(write_evidence.Seed, @splat(1)));
+    defer local_signer.deinit();
     const replica_peers = [_]ReplicaRpcPeerKey{.{
         .node_id = coordinator_node,
         .key = coordinator_key,
@@ -1336,6 +1427,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
             .host = "127.0.0.1",
             .port = 0,
             .local_node_id = local_node,
+            .signer = local_signer,
             .peer_keys = &replica_peers,
         },
     });
@@ -1484,8 +1576,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
     var unsigned_inspect = try testCallUnary(&replica_channel, replicaMethodPath("Inspect"), &replica_inspect_request);
     defer unsigned_inspect.deinit();
     try std.testing.expectEqual(grpc.StatusCode.unauthenticated, unsigned_inspect.status.code);
-    // Correctly authenticated payload RPC now carries the pinned binding, but
-    // signed PREPARE/COMMIT response payloads remain M11c scope.
+    // Correctly authenticated payload RPC carries the controller-pinned binding.
     var authenticated_inspect = try testCallUnaryAuthenticated(
         &replica_channel,
         replicaMethodPath("Inspect"),
@@ -1500,7 +1591,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
         std.testing.allocator,
         std.testing.io,
         coordinator_node,
-        local_node,
+        participant_identities[0],
         coordinator_key,
         .{},
     );
@@ -1701,54 +1792,77 @@ test "data-node service persists Replica lifecycle through gRPC" {
     const restored_before_prepare = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
     try restored_before_prepare.setLength(std.testing.io, 64 * 1024);
     restored_before_prepare.close(std.testing.io);
-    const local_attestation = try replica_client.prepare(replica_endpoint, participant_binding, .{
+    const local_evidence = try replica_client.prepare(replica_endpoint, participant_binding, .{
         .write = write_request,
         .data = &payload,
     });
-    var remote_attestation = local_attestation;
-    remote_attestation.member_id = participant_members[1];
-    remote_attestation.prepare_digest = @splat(0x88);
+    const remote_signer = try write_evidence.Signer.init(
+        std.testing.allocator,
+        participant_members[1],
+        coordinator_node,
+        &@as(write_evidence.Seed, @splat(2)),
+    );
+    defer remote_signer.deinit();
+    const remote_attestation: write_service.PrepareAttestation = .{
+        .member_id = participant_members[1],
+        .transaction_digest = local_evidence.attestation.transaction_digest,
+        .prepare_digest = @splat(0x88),
+        .prepared_history_digest = local_evidence.attestation.prepared_history_digest,
+    };
+    const remote_evidence = try remote_signer.signPrepare(write_request, remote_attestation);
+    const coordinator_store = try protocol.write_coordinator.FileStore.init(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        "rpc-coordinator.state",
+    );
+    defer coordinator_store.deinit();
+    const coordinator = try protocol.write_coordinator.Coordinator.initFile(
+        std.testing.allocator,
+        participant_identities,
+        coordinator_store,
+    );
+    defer coordinator.deinit();
+    _ = try coordinator.begin(.{
+        .write = write_request,
+        .data = &payload,
+        .witnesses = .{ participant_members[0], participant_members[1] },
+    });
+    try coordinator.recordPrepared(local_evidence);
+    try coordinator.recordPrepared(remote_evidence);
+    // Type-level production seam: the durable coordinator decision is already
+    // the exact signed certificate accepted by Replica RPC COMMIT.
+    const signed_certificate: write_service.SignedCommitCertificate = try coordinator.decide();
+    var wrong_sequence_write = write_request;
+    wrong_sequence_write.sequence += 1;
     try std.testing.expectError(
         error.FailedPrecondition,
-        replica_client.commit(
-            replica_endpoint,
-            participant_binding,
-            write_request.authority,
-            transaction_id,
-            write_request.sequence + 1,
-            .{ .attestations = .{ local_attestation, remote_attestation } },
-        ),
+        replica_client.commit(replica_endpoint, participant_binding, wrong_sequence_write, signed_certificate),
     );
     const drifted_before_commit = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
     try drifted_before_commit.setLength(std.testing.io, 32 * 1024);
     drifted_before_commit.close(std.testing.io);
     try std.testing.expectError(
         error.FailedPrecondition,
-        replica_client.commit(
-            replica_endpoint,
-            participant_binding,
-            write_request.authority,
-            transaction_id,
-            write_request.sequence,
-            .{ .attestations = .{ local_attestation, remote_attestation } },
-        ),
+        replica_client.commit(replica_endpoint, participant_binding, write_request, signed_certificate),
     );
     const restored_before_commit = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
     try restored_before_commit.setLength(std.testing.io, 64 * 1024);
     restored_before_commit.close(std.testing.io);
-    // The participant now rejects unsigned certificates. M11c extends the
-    // ReplicaTransport payload with signed evidence and resumes commit E2E.
-    try std.testing.expectError(
-        error.FailedPrecondition,
-        replica_client.commit(
-            replica_endpoint,
-            participant_binding,
-            write_request.authority,
-            transaction_id,
-            write_request.sequence,
-            .{ .attestations = .{ local_attestation, remote_attestation } },
-        ),
+    const committed = try replica_client.commit(
+        replica_endpoint,
+        participant_binding,
+        write_request,
+        signed_certificate,
     );
+    try std.testing.expectEqual(write_request.sequence, committed.result.sequence);
+    const retried = try replica_client.commit(
+        replica_endpoint,
+        participant_binding,
+        write_request,
+        signed_certificate,
+    );
+    try std.testing.expectEqualDeep(committed, retried);
 }
 
 fn testCallUnary(channel: *grpc.Channel, path: []const u8, request: anytype) !grpc.CallResult {

@@ -76,40 +76,52 @@ entry before allowing generation rollover.
 `ConfigureWriteParticipant` now carries both the legacy canonical Member list
 and exactly three controller-derived Member/Node/key identities. The management
 boundary strictly validates their ordering, equality, key IDs, Ed25519 points,
-and distinct signer Nodes/keys before cataloging the immutable binding. Legacy
-keyless configuration remains fail closed. The controller can pin and provision
-these identities, but the production daemon does not load or register its
-private signing seed until M11c, so keyless deployed Nodes cannot progress to
-participant readiness. PREPARE/COMMIT remain unavailable on the management
+and distinct signer Nodes/keys before cataloging the immutable binding. Legacy keyless configuration remains fail closed. The production daemon loads
+an owner-only signing seed, registers its public key through the controller's
+fill-once identity path, and requires the provisioned local witness identity to
+match before participant readiness. PREPARE/COMMIT remain unavailable on the management
 listener and cannot lazily create an unconfigured participant.
 
-The optional, separately bound legacy `ReplicaTransport` remains HMAC
-authenticated. Its binding metadata now carries the pinned trust set, but its
-unsigned COMMIT certificate and unsigned responses still fail closed. M11c must carry
-the original two signed PREPARE records and signed responses before payload
-mutation is re-enabled. Metadata listener separation and authentication remain.
+The optional, separately bound `ReplicaTransport` is HMAC authenticated and
+returns independently verifiable Ed25519 evidence. PREPARE signs the exact
+durable write and attestation; COMMIT accepts only the original two signed
+PREPARE records, persists/verifies that decision through the participant, and
+signs the exact completed result. Legacy unsigned requests and responses fail
+closed. Metadata listener separation and authentication remain.
 Requests are HMAC-SHA-256
 authenticated with receiver-scoped pairwise node keys and bind source node,
 target node, a fresh per-call challenge, method, and exact protobuf bytes. Every
 post-authentication response MAC binds that challenge plus status code, status
 message, and payload, so stale or success-to-failure substitutions fail closed.
-After M11c, captured mutation requests may still be replayed only with the same
-bytes and will rely on signed participant durable idempotency plus current
+Captured mutation requests may still be replayed only with the same bytes and
+rely on signed participant durable idempotency plus current
 physical-backend validation. Tests verify that this service and `DataService` are not
 registered on each other's listeners and that keyless, reordered, mismatched,
 wrong-key-ID, and duplicate-Node configurations fail closed.
 
 The daemon can enable this listener only when the file-member composition and
-all four explicit development options are present:
+all five explicit development options are present:
 
 ```text
 --replica-listen HOST:PORT
 --replica-advertise HOST:PORT
 --replica-key-file PATH
+--replica-signing-seed-file PATH
 --replica-allow-plaintext true
 ```
 
-The key file contains one `SOURCE_NODE_UUIDV7 64_HEX_KEY` pair per non-local
+The signing-seed file contains exactly one nonzero 32-byte Ed25519 seed as 64
+lowercase hexadecimal characters with an optional final LF. It must be owned by
+the daemon user and have no group/world permission bits; owner-only modes such
+as 0400, 0600, and 0700 are accepted. It is non-symlink, bounded,
+startup-loaded, retained only inside the scrubbed signer,
+and enrolled as the Node's immutable generation-1 public key. A controller key
+conflict, catalog/signer mismatch, or local Member/Node mismatch fails startup.
+The bounded `tests/e2e/registration-migration.sh` gate exercises these fills
+through the real controller RPC and daemon startup path. There is currently no
+online rotation or revocation protocol.
+
+The HMAC key file contains one `SOURCE_NODE_UUIDV7 64_HEX_KEY` pair per non-local
 peer. It must be a regular file owned by the daemon user with no group/world
 permission bits and is opened without following symlinks. It is bounded, parsed
 strictly, copied into the authenticator, and scrubbed on release. Keys are
@@ -126,8 +138,11 @@ duplicate, local-peer, malformed, or insecure-file configuration fails closed.
 `--replica-allow-plaintext true` is intentionally conspicuous: application HMAC
 provides request/response authenticity but not payload confidentiality. This
 mode is for the Docker/file-backend development profile, not production.
-Attestations are not independently signed, and there is no primary coordinator
-or cross-node 2/3 success path. Therefore a three-node Volume intent can reach
-`ACTIVE`, but user writes are still not replicated or published to hosts.
-Confidential transport, recovery/repair, and authority-gated Publication remain
+PREPARE and COMMIT results are independently signed and the participant verifies
+the controller-pinned two-witness decision, but there is still no production
+outbound route, primary coordinator client fanout, or cross-node 2/3 success
+path. Therefore a three-node Volume intent can reach `ACTIVE`, but user writes
+are still not replicated or published to hosts. Confidential transport, key
+rotation/revocation, replacement-coordinator recovery/repair, NVMf user-data
+replication, and authority-gated Publication remain
 subsequent steps. See `tests/e2e/README.md` for the Docker Compose profile.

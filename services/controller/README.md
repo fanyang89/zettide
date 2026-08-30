@@ -22,9 +22,18 @@ extents, ensures file-backed Replicas, configures the same immutable canonical
 three-Member write-participant set on all of them, including the canonical
 Member-to-Node-to-key trust set derived from active topology, and drives the
 current fence/recovery/authority lifecycle to `ACTIVE`. Keyless or inconsistent
-topology fails closed before participant readiness. The daemon key loader and
-signed Replica payloads remain M11c work. Publication, cross-node payload
+topology fails closed before participant readiness. The daemon enrolls its
+owner-only generation-1 signing seed and ReplicaTransport exchanges signed
+evidence verified against these pinned identities. Publication, cross-node payload
 transport, quorum commit, repair, and attachments remain separate layers.
+
+`zig build test-controller` includes the controller-state mixed-rollout gate: it
+restores persisted keyless Node records with an activated selected topology,
+proves readiness remains blocked as generation-1 keys are filled one Node at a
+time, then converges only after all three are pinned and rejects a replacement
+key. `tests/e2e/registration-migration.sh` separately exercises the real
+controller RPC plus data-node daemon registration path for legacy dedup replay,
+endpoint-first, key-first, atomic exact state, and conflicting-seed rejection.
 
 Pool, Volume, Node, and Member mutations are committed and applied through Raft
 before an RPC reports success. Reads use Raft ReadIndex rather than serving

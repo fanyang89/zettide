@@ -7,6 +7,7 @@ const grpc = @import("grpc_lite");
 const incarnation_store = @import("incarnation_store.zig");
 const member_generation_store = @import("member_generation_store.zig");
 const replica_rpc_key_file = @import("replica_rpc_key_file.zig");
+const replica_signing_seed_file = @import("replica_signing_seed_file.zig");
 
 const registration_attempts = 60;
 const registration_retry_delay = std.Io.Duration.fromSeconds(1);
@@ -26,6 +27,7 @@ const ReplicaRpcConfig = struct {
     listen_port: u16,
     advertise_endpoint: []const u8,
     key_file: []const u8,
+    signing_seed_file: []const u8,
 };
 
 const Config = struct {
@@ -39,7 +41,6 @@ const Config = struct {
     cluster_id: [16]u8,
     iscsi_endpoint: []const u8,
     failure_domain: []const u8,
-    // M11c supplies this from an owner-only signing seed file.
     signing_public_key: []const u8 = "",
     replica: ?ReplicaConfig,
     replica_rpc: ?ReplicaRpcConfig,
@@ -72,7 +73,7 @@ const Signals = struct {
 pub fn main(init: std.process.Init) !void {
     const config_allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(config_allocator);
-    const config = parseArgs(args) catch |err| {
+    var config = parseArgs(args) catch |err| {
         writeUsage();
         return err;
     };
@@ -100,6 +101,9 @@ pub fn main(init: std.process.Init) !void {
     var write_backend: ?data_node.FileWriteBackend = null;
     var replica_peer_keys: ?replica_rpc_key_file.PeerKeys = null;
     defer if (replica_peer_keys) |*keys| keys.deinit();
+    var replica_signer: ?*data_node.WriteEvidenceSigner = null;
+    defer if (replica_signer) |signer| signer.deinit();
+    var signing_public_key: [32]u8 = undefined;
     var server_options: data_node.Options = .{};
     if (config.replica) |replica| {
         state_dir = try std.Io.Dir.cwd().openDir(init.io, replica.state_dir, .{});
@@ -158,6 +162,20 @@ pub fn main(init: std.process.Init) !void {
         };
     }
     if (config.replica_rpc) |replica_rpc| {
+        var signing_seed = try replica_signing_seed_file.load(
+            init.io,
+            std.Io.Dir.cwd(),
+            replica_rpc.signing_seed_file,
+        );
+        defer signing_seed.deinit();
+        replica_signer = try data_node.WriteEvidenceSigner.init(
+            allocator,
+            config.replica.?.member_id,
+            config.node_id_bytes,
+            &signing_seed.seed,
+        );
+        signing_public_key = replica_signer.?.identity().public_key;
+        config.signing_public_key = &signing_public_key;
         replica_peer_keys = try replica_rpc_key_file.load(
             allocator,
             init.io,
@@ -168,6 +186,7 @@ pub fn main(init: std.process.Init) !void {
             .host = replica_rpc.listen_host,
             .port = replica_rpc.listen_port,
             .local_node_id = config.node_id_bytes,
+            .signer = replica_signer.?,
             .peer_keys = replica_peer_keys.?.values,
         };
         std.log.warn(
@@ -257,6 +276,7 @@ fn parseArgs(args: []const []const u8) !Config {
     var replica_listen: ?[]const u8 = null;
     var replica_advertise: ?[]const u8 = null;
     var replica_key_file: ?[]const u8 = null;
+    var replica_signing_seed_file_path: ?[]const u8 = null;
     var replica_allow_plaintext = false;
 
     var index: usize = 1;
@@ -306,6 +326,8 @@ fn parseArgs(args: []const []const u8) !Config {
             replica_advertise = value;
         } else if (std.mem.eql(u8, name, "--replica-key-file")) {
             replica_key_file = value;
+        } else if (std.mem.eql(u8, name, "--replica-signing-seed-file")) {
+            replica_signing_seed_file_path = value;
         } else if (std.mem.eql(u8, name, "--replica-allow-plaintext")) {
             if (!std.mem.eql(u8, value, "true")) return error.InvalidArguments;
             replica_allow_plaintext = true;
@@ -343,14 +365,16 @@ fn parseArgs(args: []const []const u8) !Config {
     const replica_rpc_field_count: u8 = @as(u8, @intFromBool(replica_listen != null)) +
         @as(u8, @intFromBool(replica_advertise != null)) +
         @as(u8, @intFromBool(replica_key_file != null)) +
+        @as(u8, @intFromBool(replica_signing_seed_file_path != null)) +
         @as(u8, @intFromBool(replica_allow_plaintext));
-    if (replica_rpc_field_count != 0 and replica_rpc_field_count != 4)
+    if (replica_rpc_field_count != 0 and replica_rpc_field_count != 5)
         return error.IncompleteReplicaRpcConfiguration;
-    if (replica_rpc_field_count == 4 and replica_field_count != 7)
+    if (replica_rpc_field_count == 5 and replica_field_count != 7)
         return error.ReplicaRpcRequiresReplicaConfiguration;
     const parsed_replica_listen = if (replica_listen) |value| try parseEndpoint(value) else null;
     if (replica_advertise) |value| _ = try parseEndpoint(value);
     if (replica_key_file) |value| if (value.len == 0) return error.InvalidArguments;
+    if (replica_signing_seed_file_path) |value| if (value.len == 0) return error.InvalidArguments;
 
     return .{
         .listen_host = parsed_listen.host,
@@ -372,11 +396,12 @@ fn parseArgs(args: []const []const u8) !Config {
             .capacity_bytes = member_capacity.?,
             .extent_size_bytes = extent_size.?,
         } else null,
-        .replica_rpc = if (replica_rpc_field_count == 4) .{
+        .replica_rpc = if (replica_rpc_field_count == 5) .{
             .listen_host = parsed_replica_listen.?.host,
             .listen_port = parsed_replica_listen.?.port,
             .advertise_endpoint = replica_advertise.?,
             .key_file = replica_key_file.?,
+            .signing_seed_file = replica_signing_seed_file_path.?,
         } else null,
     };
 }
@@ -464,45 +489,74 @@ fn registerNode(allocator: std.mem.Allocator, config: Config) !void {
 
 fn submitNodeRegistration(allocator: std.mem.Allocator, config: Config) !void {
     const desired_replica_endpoint = if (config.replica_rpc) |value| value.advertise_endpoint else "";
+    // New Nodes begin with the exact legacy registration. Endpoint and
+    // generation-1 signing identity each use distinct, domain-separated
+    // fill-once request IDs so old WAL deduplication remains valid.
     var request = controller_pb.RegisterNodeRequest{
         .request_id = config.request_id,
         .node_id = config.node_id,
         .cluster_id = &config.cluster_id,
         .control_endpoint = config.advertise_endpoint,
-        // The current controller schema has one data-plane endpoint field. The
-        // local E2E profile publishes its iSCSI URL through that field.
         .nvmf_endpoint = config.iscsi_endpoint,
-        // Preserve the legacy request only while no signing identity is
-        // supplied. M11c enrollment repeats the exact desired endpoint so an
-        // existing endpoint and empty key can be safely identity-matched.
-        .replica_endpoint = if (config.signing_public_key.len == 0) "" else desired_replica_endpoint,
-        .signing_public_key = config.signing_public_key,
         .failure_domain = config.failure_domain,
         .capability_bits = 1,
         .protocol_version = 1,
     };
-    var response = try callRegisterNode(allocator, config.controller_endpoint, request);
-    defer response.deinit(allocator);
-    const registered = response.node orelse return error.MissingRegisteredNode;
-    try validateRegisteredNode(config, registered);
-
-    if (desired_replica_endpoint.len == 0) {
-        if (registered.replica_endpoint.len != 0) return error.RegisteredNodeMismatch;
-        return;
-    }
-    if (std.mem.eql(u8, registered.replica_endpoint, desired_replica_endpoint)) return;
-    if (registered.replica_endpoint.len != 0) return error.RegisteredNodeMismatch;
-
-    const update_request_id = try derivedReplicaEndpointRequestId(config.request_id);
-    request.request_id = &update_request_id;
-    request.replica_endpoint = desired_replica_endpoint;
-    var updated_response = try callRegisterNode(allocator, config.controller_endpoint, request);
-    defer updated_response.deinit(allocator);
-    const updated = updated_response.node orelse return error.MissingRegisteredNode;
-    try validateRegisteredNode(config, updated);
-    if (!std.mem.eql(u8, updated.replica_endpoint, desired_replica_endpoint) or
-        !std.mem.eql(u8, updated.signing_public_key, config.signing_public_key))
+    // An earlier rollout may already have filled the exact identity atomically
+    // with the original request ID. Observe current state first so replaying a
+    // historical keyless fingerprint cannot conflict with that valid state.
+    var current_response = callGetNode(allocator, config.controller_endpoint, config.node_id) catch |err| switch (err) {
+        error.NodeNotFound => current: {
+            var response = try callRegisterNode(allocator, config.controller_endpoint, request);
+            response.deinit(allocator);
+            // Registration responses may be historical idempotency results;
+            // all fill planning starts from a fresh replicated read.
+            break :current try callGetNode(allocator, config.controller_endpoint, config.node_id);
+        },
+        else => return err,
+    };
+    defer current_response.deinit(allocator);
+    const current = current_response.node orelse return error.MissingRegisteredNode;
+    try validateRegisteredNode(config, current);
+    if (current.replica_endpoint.len != 0 and
+        !std.mem.eql(u8, current.replica_endpoint, desired_replica_endpoint))
         return error.RegisteredNodeMismatch;
+    if (current.signing_public_key.len != 0 and
+        !std.mem.eql(u8, current.signing_public_key, config.signing_public_key))
+        return error.RegisteredNodeMismatch;
+
+    var endpoint_filled = current.replica_endpoint.len != 0;
+    var signing_filled = current.signing_public_key.len != 0;
+    if (desired_replica_endpoint.len != 0 and !endpoint_filled) {
+        const endpoint_request_id = try derivedReplicaEndpointRequestId(config.request_id);
+        request.request_id = &endpoint_request_id;
+        request.replica_endpoint = desired_replica_endpoint;
+        // Echo every immutable field already filled by another rollout step.
+        request.signing_public_key = if (signing_filled) config.signing_public_key else "";
+        var endpoint_response = try callRegisterNode(allocator, config.controller_endpoint, request);
+        defer endpoint_response.deinit(allocator);
+        const endpoint_node = endpoint_response.node orelse return error.MissingRegisteredNode;
+        try validateRegisteredNode(config, endpoint_node);
+        if (!std.mem.eql(u8, endpoint_node.replica_endpoint, desired_replica_endpoint) or
+            (signing_filled and !std.mem.eql(u8, endpoint_node.signing_public_key, config.signing_public_key)))
+            return error.RegisteredNodeMismatch;
+        endpoint_filled = true;
+        signing_filled = endpoint_node.signing_public_key.len != 0;
+    }
+
+    if (config.signing_public_key.len != 0 and !signing_filled) {
+        const signing_request_id = try derivedSigningIdentityRequestId(config.request_id);
+        request.request_id = &signing_request_id;
+        request.replica_endpoint = if (endpoint_filled) desired_replica_endpoint else "";
+        request.signing_public_key = config.signing_public_key;
+        var signing_response = try callRegisterNode(allocator, config.controller_endpoint, request);
+        defer signing_response.deinit(allocator);
+        const signing_node = signing_response.node orelse return error.MissingRegisteredNode;
+        try validateRegisteredNode(config, signing_node);
+        if ((endpoint_filled and !std.mem.eql(u8, signing_node.replica_endpoint, desired_replica_endpoint)) or
+            !std.mem.eql(u8, signing_node.signing_public_key, config.signing_public_key))
+            return error.RegisteredNodeMismatch;
+    }
 }
 
 fn callGetNode(
@@ -523,6 +577,7 @@ fn callGetNode(
         .{ .timeout_ns = 5 * std.time.ns_per_s },
     );
     defer result.deinit();
+    if (result.status.code == .not_found) return error.NodeNotFound;
     if (!result.status.isOk()) return error.ControllerRejectedRegistration;
     var reader: std.Io.Reader = .fixed(result.payload);
     return controller_pb.GetNodeResponse.decode(&reader, allocator);
@@ -561,10 +616,18 @@ fn validateRegisteredNode(config: Config, registered: controller_pb.Node) !void 
 }
 
 fn derivedReplicaEndpointRequestId(source: []const u8) ![36]u8 {
+    return derivedRegistrationRequestId("zettide-node-replica-endpoint-request-v1", source);
+}
+
+fn derivedSigningIdentityRequestId(source: []const u8) ![36]u8 {
+    return derivedRegistrationRequestId("zettide-node-signing-identity-request-v1", source);
+}
+
+fn derivedRegistrationRequestId(domain: []const u8, source: []const u8) ![36]u8 {
     if (source.len != 36) return error.InvalidRequestId;
     _ = try parseUuid(source);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("zettide-node-replica-endpoint-request-v1");
+    hasher.update(domain);
     hasher.update(source);
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
@@ -656,6 +719,8 @@ test "replica file backend arguments are all-or-none" {
         "data-node:7443",
         "--replica-key-file",
         "/run/secrets/replica.keys",
+        "--replica-signing-seed-file",
+        "/run/secrets/replica.seed",
         "--replica-allow-plaintext",
         "true",
     };
@@ -675,6 +740,8 @@ test "replica file backend arguments are all-or-none" {
         "data-node:7443",
         "--replica-key-file",
         "/run/secrets/replica.keys",
+        "--replica-signing-seed-file",
+        "/run/secrets/replica.seed",
         "--replica-allow-plaintext",
         "true",
     };
@@ -687,6 +754,7 @@ test "replica file backend arguments are all-or-none" {
 test "Replica endpoint migration request ID is distinct from node and member registration" {
     const source = "0198f54d-5c2a-7000-8000-000000000003";
     const endpoint_request = try derivedReplicaEndpointRequestId(source);
+    const signing_request = try derivedSigningIdentityRequestId(source);
     const member_config = try controller_agent.MemberConfig.init(
         "127.0.0.1:8001",
         source,
@@ -700,7 +768,10 @@ test "Replica endpoint migration request ID is distinct from node and member reg
         4096,
     );
     try std.testing.expect(!std.mem.eql(u8, &endpoint_request, source));
+    try std.testing.expect(!std.mem.eql(u8, &signing_request, source));
+    try std.testing.expect(!std.mem.eql(u8, &endpoint_request, &signing_request));
     try std.testing.expect(!std.mem.eql(u8, &endpoint_request, &member_config.request_id));
+    try std.testing.expect(!std.mem.eql(u8, &signing_request, &member_config.request_id));
     try std.testing.expect(!std.mem.eql(u8, &endpoint_request, "0198f54d-5c2a-7000-8000-000000000001"));
     _ = try parseUuid(&endpoint_request);
 }
@@ -714,7 +785,8 @@ fn writeUsage() void {
         \\  [--state-dir PATH --member-file PATH --member-id UUIDv7 --pool-id UUIDv7
         \\   --member-metadata-capacity BYTES --member-capacity BYTES --extent-size BYTES]
         \\  [--replica-listen HOST:PORT --replica-advertise HOST:PORT
-        \\   --replica-key-file PATH --replica-allow-plaintext true]
+        \\   --replica-key-file PATH --replica-signing-seed-file PATH
+        \\   --replica-allow-plaintext true]
         \\
     , .{});
 }
@@ -722,4 +794,5 @@ fn writeUsage() void {
 test {
     _ = controller_agent;
     _ = incarnation_store;
+    _ = replica_signing_seed_file;
 }

@@ -111,13 +111,13 @@ replay；replay 携带旧 authority，可被不同或更高 durable fence 拒绝
 不是最终流式 journal。FileStore v2 仅迁移 structurally pristine v1；任何 unsigned
 pending/decided/history 返回 `UnsignedParticipantState`，不会合成历史签名。catalog v3
 持久 witness identities；非空 legacy v2 catalog 因缺少 provenance 而 fail closed。
-当前 controller 与 `ConfigureWriteParticipant` protobuf 尚只提供 Member set，因此 M11a
-显式拒绝 keyless 配置，等待 M11b 传播 controller-pinned identities。payload mutation
-仍未暴露到 management listener。
+Controller 与 `ConfigureWriteParticipant` 已传播 controller-pinned canonical
+Member/Node/key set；keyless 配置仍 fail closed。payload mutation 未暴露到 management listener。
 
-可选 Replica listener 仍保留 PREPARE、COMMIT 和 metadata-only INSPECT 的 HMAC seam，
-但现有 protobuf 没有 signed evidence；M11a 对 keyless 配置和 unsigned COMMIT fail closed，
-等待 M11c 扩展 wire 后再启用 payload mutation。每个 receiver 使用按 source Node 索引、receiver-scoped 的 pairwise
+可选 Replica listener 提供 PREPARE、COMMIT 和 metadata-only INSPECT。PREPARE 在持久化后
+返回 Ed25519 signed evidence；COMMIT 只接受两个原始 signed PREPARE、由 participant 独立
+验证并在 apply 完成后返回 signed COMMIT result。Unsigned wire payload fail closed。每个
+receiver 使用按 source Node 索引、receiver-scoped 的 pairwise
 HMAC-SHA-256 key；request MAC 同时绑定 source Node、target Node、fresh challenge、完整
 method path 与 exact protobuf bytes。所有通过 request authentication 后的 response MAC
 绑定同一 challenge、status code/message 与 payload，因此旧 INSPECT response 或把 COMMIT
@@ -127,7 +127,8 @@ controller-provisioned binding 与当前 physical backend digest；COMMIT 还必
 PREPARE 中的 authority 和已认证 source Node。
 
 Daemon 现在可通过完整 `--replica-listen`、`--replica-advertise`、
-`--replica-key-file` 和显式 `--replica-allow-plaintext true` 组合启用 listener；缺少任一项、
+`--replica-key-file`、`--replica-signing-seed-file` 和显式
+`--replica-allow-plaintext true` 组合启用 listener；缺少任一项、
 未启用 file Replica composition 或 key file malformed/zero/duplicate/local-peer 都会 fail
 closed。Key file 以 source Node 为索引并按 receiver 隔离，替换后需重启；advertised
 Replica endpoint 进入 controller Node metadata、snapshot 和 restart recovery。Docker
@@ -150,9 +151,9 @@ genesis 在 exact Member set 下迁移；任何 unsigned pending/decided/history
 RPC。participant contract 现在能独立验证 signed certificate；controller Node metadata 已
 以 fill-once 方式固定 generation-1 Ed25519 public key，并从 active Member/placement topology
 向三个 participant 配置同一 canonical Member/Node/key set。key ID 由 public key 派生，keyless、
-重复或 topology mismatch 均 fail closed。Replica binding metadata 也携带该 trust set，但 daemon
-尚未加载/注册 private signing seed，Replica RPC protobuf 也尚未传输 signed PREPARE/COMMIT
-payload，且没有 rotation 或 revocation，因此 production write seam 仍保持 fail closed。因此 replacement
+重复或 topology mismatch 均 fail closed。Replica binding metadata 携带该 trust set；daemon 从 owner-only seed file 加载签名能力、
+注册 generation-1 public key，并验证 local catalog identity。Replica RPC 传输 signed
+PREPARE/COMMIT payload，但尚无 rotation 或 revocation。因此 replacement
 coordinator 仍不能安全接管，development transport 也没有 confidentiality。当前仍没有
 production primary coordinator、真实 remote fanout 或 2/3 client success，这些控制面、本地
 participant、journal 和 authenticated seam 仍不等于三节点 quorum 数据路径。

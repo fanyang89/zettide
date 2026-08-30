@@ -21,11 +21,13 @@ set -euo pipefail
 : "${ZETTIDE_REPLICA_LISTEN:=0.0.0.0:7443}"
 : "${ZETTIDE_REPLICA_ADVERTISE:=${ZETTIDE_DATA_NODE_HOST}:7443}"
 : "${ZETTIDE_REPLICA_PEER_KEYS:?receiver-scoped Replica peer keys are required}"
+: "${ZETTIDE_REPLICA_SIGNING_SEED:?node-local Replica signing seed is required}"
 
 backing_file=/var/lib/zettide-data-node/lun.img
 member_file=/var/lib/zettide-data-node/member.img
 state_dir=/var/lib/zettide-data-node/control
 replica_key_file=$state_dir/replica.keys
+replica_signing_seed_file=$state_dir/replica-signing.seed
 pool_id=$(<"$ZETTIDE_POOL_ID_FILE")
 mkdir -p "$(dirname "$backing_file")" "$state_dir"
 umask 077
@@ -34,6 +36,11 @@ printf '%s\n' "$ZETTIDE_REPLICA_PEER_KEYS" >"$replica_key_tmp"
 chmod 600 "$replica_key_tmp"
 mv -f "$replica_key_tmp" "$replica_key_file"
 unset ZETTIDE_REPLICA_PEER_KEYS
+signing_seed_tmp=$(mktemp "$state_dir/.replica-signing.seed.XXXXXX")
+printf '%s\n' "$ZETTIDE_REPLICA_SIGNING_SEED" >"$signing_seed_tmp"
+chmod 600 "$signing_seed_tmp"
+mv -f "$signing_seed_tmp" "$replica_signing_seed_file"
+unset ZETTIDE_REPLICA_SIGNING_SEED
 
 ensure_geometry() {
     local path=$1
@@ -102,6 +109,7 @@ tgtadm --lld iscsi --op bind --mode target --tid 1 --initiator-address ALL
     --replica-listen "$ZETTIDE_REPLICA_LISTEN" \
     --replica-advertise "$ZETTIDE_REPLICA_ADVERTISE" \
     --replica-key-file "$replica_key_file" \
+    --replica-signing-seed-file "$replica_signing_seed_file" \
     --replica-allow-plaintext true &
 data_node_pid=$!
 

@@ -13,6 +13,7 @@ pub const Frontier = write_service.Frontier;
 pub const WitnessIdentity = write_evidence.WitnessIdentity;
 pub const SignedPrepareEvidence = write_evidence.SignedPrepareEvidence;
 pub const SignedCommitEvidence = write_evidence.SignedCommitEvidence;
+pub const SignedCommitCertificate = write_evidence.SignedCommitCertificate;
 
 pub const BeginRequest = struct {
     write: WriteRequest,
@@ -31,7 +32,7 @@ pub const PendingInspection = struct {
     data: []const u8,
     witnesses: [write_service.certificate_witness_count]Id,
     prepare_evidence: [write_service.certificate_witness_count]?SignedPrepareEvidence,
-    certificate: ?CommitCertificate,
+    signed_certificate: ?SignedCommitCertificate,
     commit_evidence: [write_service.certificate_witness_count]?SignedCommitEvidence,
 };
 
@@ -39,7 +40,7 @@ pub const CompletedInspection = struct {
     write: WriteRequest,
     witnesses: [write_service.certificate_witness_count]Id,
     prepare_evidence: [write_service.certificate_witness_count]SignedPrepareEvidence,
-    certificate: CommitCertificate,
+    signed_certificate: SignedCommitCertificate,
     commit_evidence: [write_service.certificate_witness_count]SignedCommitEvidence,
     result: CommitResult,
 };
@@ -146,7 +147,7 @@ pub const Coordinator = opaque {
         try managed.core.recordPrepared(evidence);
     }
 
-    pub fn decide(self: *Coordinator) !CommitCertificate {
+    pub fn decide(self: *Coordinator) !SignedCommitCertificate {
         const managed: *ManagedCoordinator = @ptrCast(@alignCast(self));
         managed.lock();
         defer managed.mutex.unlock();
@@ -249,12 +250,12 @@ const CoordinatorCore = struct {
         try self.store.save(next);
     }
 
-    fn decide(self: *CoordinatorCore) !CommitCertificate {
+    fn decide(self: *CoordinatorCore) !SignedCommitCertificate {
         try self.store.checkHealthy();
         const current = self.store.current();
         try validateStoredState(current);
         const intent = current.intent orelse return error.NoWriteInProgress;
-        if (current.decision) |decision| return decision.certificate;
+        if (current.decision != null) return signedCertificateFromIntent(intent);
         const first = (intent.prepare_evidence[0] orelse return error.PrepareQuorumMissing).attestation;
         const second = (intent.prepare_evidence[1] orelse return error.PrepareQuorumMissing).attestation;
         const transaction_digest = write_service.digestTransaction(intent.write);
@@ -270,7 +271,7 @@ const CoordinatorCore = struct {
         next.decision = .{ .certificate = certificate };
         try validateStoredState(next);
         try self.store.save(next);
-        return certificate;
+        return signedCertificateFromIntent(intent);
     }
 
     fn recordCommitted(self: *CoordinatorCore, evidence: SignedCommitEvidence) !?CommitResult {
@@ -327,6 +328,14 @@ const CoordinatorCore = struct {
     }
 };
 
+fn signedCertificateFromIntent(intent: Intent) !SignedCommitCertificate {
+    const signed: SignedCommitCertificate = .{ .prepare_evidence = .{
+        intent.prepare_evidence[0] orelse return error.PrepareQuorumMissing,
+        intent.prepare_evidence[1] orelse return error.PrepareQuorumMissing,
+    } };
+    return write_evidence.normalizeSignedCertificate(signed);
+}
+
 fn inspectionFromState(state: State) Inspection {
     const identities = state.identities.?;
     const pending: ?PendingInspection = if (state.intent) |intent| .{
@@ -334,14 +343,14 @@ fn inspectionFromState(state: State) Inspection {
         .data = intent.data,
         .witnesses = intent.witnesses,
         .prepare_evidence = intent.prepare_evidence,
-        .certificate = if (state.decision) |decision| decision.certificate else null,
+        .signed_certificate = if (state.decision != null) signedCertificateFromIntent(intent) catch unreachable else null,
         .commit_evidence = if (state.decision) |decision| decision.commit_evidence else .{ null, null },
     } else null;
     const completed: ?CompletedInspection = if (state.last_completed) |value| .{
         .write = value.write,
         .witnesses = value.witnesses,
         .prepare_evidence = value.prepare_evidence,
-        .certificate = value.certificate,
+        .signed_certificate = .{ .prepare_evidence = value.prepare_evidence },
         .commit_evidence = value.commit_evidence,
         .result = value.result,
     } else null;
@@ -1246,7 +1255,7 @@ const TestSigners = struct {
                 std.testing.allocator,
                 testId(@intCast(index + 1)),
                 testId(@intCast(index + 31)),
-                @splat(@intCast(index + 17)),
+                &@as(write_evidence.Seed, @splat(@intCast(index + 17))),
             );
             initialized += 1;
             result.identities[index] = signer.*.identity();
@@ -1263,7 +1272,8 @@ const TestSigners = struct {
         return self.values[index].signPrepare(write, testAttestation(write, testId(@intCast(index + 1)), salt));
     }
 
-    fn commit(self: *TestSigners, index: usize, write: WriteRequest, certificate: CommitCertificate) !SignedCommitEvidence {
+    fn commit(self: *TestSigners, index: usize, write: WriteRequest, signed_certificate: SignedCommitCertificate) !SignedCommitEvidence {
+        const certificate = try write_evidence.certificateProjection(signed_certificate);
         return self.values[index].signCommit(write, certificate, testCommitResult(write, certificate));
     }
 };
@@ -1367,7 +1377,7 @@ fn setupBeforeMutation(harness: *TestHarness, request: BeginRequest, stage: Muta
         try harness.coordinator.recordPrepared(try harness.signers.prepare(1, request.write, 2));
     if (@intFromEnum(stage) > @intFromEnum(MutationStage.decision)) _ = try harness.coordinator.decide();
     if (@intFromEnum(stage) > @intFromEnum(MutationStage.partial_commit)) {
-        const certificate = (try harness.coordinator.inspect()).pending.?.certificate.?;
+        const certificate = (try harness.coordinator.inspect()).pending.?.signed_certificate.?;
         _ = try harness.coordinator.recordCommitted(try harness.signers.commit(0, request.write, certificate));
     }
 }
@@ -1379,11 +1389,11 @@ fn applyMutation(harness: *TestHarness, request: BeginRequest, stage: MutationSt
         .second_prepare => try harness.coordinator.recordPrepared(try harness.signers.prepare(1, request.write, 2)),
         .decision => _ = try harness.coordinator.decide(),
         .partial_commit => {
-            const certificate = (try harness.coordinator.inspect()).pending.?.certificate.?;
+            const certificate = (try harness.coordinator.inspect()).pending.?.signed_certificate.?;
             _ = try harness.coordinator.recordCommitted(try harness.signers.commit(0, request.write, certificate));
         },
         .completion => {
-            const certificate = (try harness.coordinator.inspect()).pending.?.certificate.?;
+            const certificate = (try harness.coordinator.inspect()).pending.?.signed_certificate.?;
             _ = try harness.coordinator.recordCommitted(try harness.signers.commit(1, request.write, certificate));
         },
     }
@@ -1395,7 +1405,7 @@ fn mutationReached(coordinator: *Coordinator, stage: MutationStage) !bool {
         .intent => inspection.pending != null,
         .first_prepare => inspection.pending.?.prepare_evidence[0] != null,
         .second_prepare => inspection.pending.?.prepare_evidence[1] != null,
-        .decision => inspection.pending.?.certificate != null,
+        .decision => inspection.pending.?.signed_certificate != null,
         .partial_commit => inspection.pending.?.commit_evidence[0] != null,
         .completion => inspection.pending == null and inspection.frontier.sequence == 1,
     };
@@ -1468,7 +1478,9 @@ test "signed intent evidence decision and completion persist exact retries" {
     try std.testing.expectError(error.UnverifiedPrepareEvidence, harness.coordinator.recordPrepared(conflicting_prepare));
     try harness.coordinator.recordPrepared(try harness.signers.prepare(1, request.write, 2));
     const certificate = try harness.coordinator.decide();
+    try std.testing.expectEqualDeep(certificate, (try harness.coordinator.inspect()).pending.?.signed_certificate.?);
     try harness.reopen();
+    try std.testing.expectEqualDeep(certificate, (try harness.coordinator.inspect()).pending.?.signed_certificate.?);
     const commit_a = try harness.signers.commit(0, request.write, certificate);
     try std.testing.expect((try harness.coordinator.recordCommitted(commit_a)) == null);
     try std.testing.expect((try harness.coordinator.recordCommitted(commit_a)) == null);
@@ -1484,8 +1496,9 @@ test "signed intent evidence decision and completion persist exact retries" {
     try std.testing.expect(std.meta.eql(completed.commit_evidence[1], commit_b));
     try write_evidence.verifyPrepare(harness.signers.identities[0], request.write, completed.prepare_evidence[0]);
     try write_evidence.verifyPrepare(harness.signers.identities[1], request.write, completed.prepare_evidence[1]);
-    try write_evidence.verifyCommit(harness.signers.identities[0], request.write, certificate, completed.commit_evidence[0]);
-    try write_evidence.verifyCommit(harness.signers.identities[1], request.write, certificate, completed.commit_evidence[1]);
+    const projected_certificate = try write_evidence.certificateProjection(certificate);
+    try write_evidence.verifyCommit(harness.signers.identities[0], request.write, projected_certificate, completed.commit_evidence[0]);
+    try write_evidence.verifyCommit(harness.signers.identities[1], request.write, projected_certificate, completed.commit_evidence[1]);
     try std.testing.expect(std.meta.eql(completed.result, (try harness.coordinator.recordCommitted(commit_a)).?));
     var completed_conflict = commit_a;
     completed_conflict.signature[0] ^= 1;
@@ -1556,7 +1569,7 @@ test "wrong signed witness write and certificate fail closed" {
     try harness.coordinator.recordPrepared(try harness.signers.prepare(0, request.write, 1));
     try harness.coordinator.recordPrepared(try harness.signers.prepare(1, request.write, 2));
     const certificate = try harness.coordinator.decide();
-    var wrong_certificate = certificate;
+    var wrong_certificate = try write_evidence.certificateProjection(certificate);
     wrong_certificate.attestations[1].prepare_digest[0] ^= 1;
     const bad_commit = try harness.signers.values[0].signCommit(
         request.write,
@@ -1700,7 +1713,7 @@ test "only pristine unsigned v1 coordinator state migrates" {
         std.testing.allocator,
         testId(4),
         testId(34),
-        @splat(0x44),
+        &@as(write_evidence.Seed, @splat(0x44)),
     );
     defer replacement.deinit();
     var wrong_identities = signers.identities;

@@ -44,7 +44,9 @@ journal. Before any caller-owned PREPARE side effect it persists the exact write
 payload, immutable canonical three-witness identity set, and one fixed
 two-witness selection. It strictly verifies and persists signed PREPARE/COMMIT
 evidence, persists one canonical certificate before any COMMIT side effect, and
-retains both signed PREPARE records and both signed COMMIT records for the latest
+returns the canonical `SignedCommitCertificate` directly from `decide` and
+inspection so callers cannot accidentally drop witness signatures. It retains
+both signed PREPARE records and both signed COMMIT records for the latest
 completed transaction. A later completion replaces `last_completed`; this is not
 an append-only transaction history. Partial COMMIT progress supports
 same-state-directory restart retry.
@@ -54,15 +56,17 @@ full-snapshot baseline, not a streaming coordinator log. FileStore v2 migrates
 only pristine unsigned v1 genesis; any unsigned pending/decided/history state is
 quarantined as `UnsignedCoordinatorState` rather than fabricating signatures.
 
-The coordinator is intentionally not wired into the data-node daemon or Replica
-RPC client and does not establish cross-node quorum durability. Participant
+The coordinator is not yet production-wired into the data-node daemon and does
+not establish cross-node quorum durability. Its signed decision type is the
+exact Replica RPC client COMMIT input and is covered by a direct integration test. Participant
 contracts can now independently validate a signed certificate. Controller Node
 metadata pins an immutable generation-1 Ed25519 public key and participant
 configuration carries the canonical three Member/Node/key identities; key IDs
 are derived rather than caller supplied. Replica binding metadata carries that
-trust set too, but signed PREPARE/COMMIT RPC payloads and daemon private-key
-loading remain M11c and unsigned COMMIT fails closed. Rotation/revocation,
-outbound topology/credentials, production fanout,
+trust set, and ReplicaTransport exchanges strict signed PREPARE certificates and
+signed COMMIT results while continuing to reject unsigned payloads. The daemon
+enrolls an owner-only generation-1 signing seed. Rotation/revocation, outbound
+topology/credentials, production fanout,
 client-facing payload write RPC, replacement-coordinator recovery,
 confidentiality, and certified quorum repair remain future work.
 

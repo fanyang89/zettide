@@ -2413,4 +2413,61 @@ test "activated renewal after restart provisions canonical participants and reje
     try std.testing.expectError(error.InconsistentSnapshot, keyless_owner.runOnce());
     try std.testing.expectEqual(@as(usize, 0), keyless_client.participant_configuration_calls);
     try std.testing.expectEqual(@as(usize, 0), keyless_client.inspection_calls);
+
+    // Mixed rollout: fill one persisted legacy Node at a time. The selected
+    // three-node topology remains non-ready until the final key is pinned.
+    const domains = [_][]const u8{ "rack-a", "rack-b", "rack-c" };
+    for (test_node_ids, domains, 0..) |node_id, domain, index| {
+        const request_id = try std.fmt.allocPrint(allocator, "mixed-signing-fill-{d}", .{index});
+        defer allocator.free(request_id);
+        const signing_public_key = testSigningPublicKey(index);
+        const fill = try state_machine.encodeRegisterNodeCommand(allocator, .{
+            .request_id = request_id,
+            .node_id = node_id,
+            .cluster_id = &test_cluster_id,
+            .control_endpoint = "data:9000",
+            .nvmf_endpoint = "data:4420",
+            .replica_endpoint = "data:7443",
+            .signing_public_key = &signing_public_key,
+            .failure_domain = domain,
+            .capability_bits = 1,
+            .protocol_version = 1,
+            .proposed_registered_at_unix_ms = 1_753_744_000_100 + @as(i64, @intCast(index)),
+        });
+        defer allocator.free(fill);
+        try applySetup(&keyless, keyless_submitter.next_index, fill);
+        keyless_submitter.next_index += 1;
+        if (index != 2) {
+            try std.testing.expectError(error.InconsistentSnapshot, keyless_owner.runOnce());
+            try std.testing.expectEqual(@as(usize, 0), keyless_client.participant_configuration_calls);
+        }
+    }
+    try keyless_owner.runOnce();
+    try std.testing.expectEqual(@as(usize, 3), keyless_client.participant_configuration_calls);
+    try std.testing.expect(keyless_client.inspection_calls != 0);
+
+    // A replacement seed/public key is not a rotation protocol and remains
+    // rejected by the fill-once registration state machine.
+    var replacement_pair = try std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(0x7f));
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement_pair));
+    const replacement_key = replacement_pair.public_key.toBytes();
+    const conflict = try state_machine.encodeRegisterNodeCommand(allocator, .{
+        .request_id = "mixed-signing-conflict",
+        .node_id = test_node_ids[0],
+        .cluster_id = &test_cluster_id,
+        .control_endpoint = "data:9000",
+        .nvmf_endpoint = "data:4420",
+        .replica_endpoint = "data:7443",
+        .signing_public_key = &replacement_key,
+        .failure_domain = domains[0],
+        .capability_bits = 1,
+        .protocol_version = 1,
+        .proposed_registered_at_unix_ms = 1_753_744_000_200,
+    });
+    defer allocator.free(conflict);
+    try applySetup(&keyless, keyless_submitter.next_index, conflict);
+    var pinned = (try keyless.getNodeById(allocator, test_node_ids[0])).?;
+    defer pinned.deinit(allocator);
+    const expected_key = testSigningPublicKey(0);
+    try std.testing.expectEqualSlices(u8, &expected_key, pinned.signing_public_key);
 }

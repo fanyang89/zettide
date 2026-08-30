@@ -35,6 +35,19 @@ done
     exit 1
 }
 
+nodes=$(grpcurl -max-time 5 -plaintext -import-path /proto -proto "$controller_proto" \
+    -d '{"pageSize":100}' "$ZETTIDE_CONTROLLER_ENDPOINT" \
+    zettide.controller.v1.NodeService/ListNodes)
+for node_id in "${node_ids[@]}"; do
+    expected_signing_key=$(jq -er --arg node "$node_id" '.signingKeys[$node]' "$state_file")
+    actual_signing_key=$(jq -er --arg node "$node_id" '.nodes[]? | select(.id == $node) | .signingPublicKey' <<<"$nodes")
+    [[ $actual_signing_key == "$expected_signing_key" ]] || {
+        echo "pinned signing key changed across restart for ${node_id}" >&2
+        exit 1
+    }
+done
+echo "controller-pinned signing keys unchanged across restart: ok (${#node_ids[@]} nodes)"
+
 for node_id in "${node_ids[@]}"; do
     member_id=$(jq -er --arg pool "$pool_id" --arg node "$node_id" \
         '.members[]? | select(.poolId == $pool and .nodeId == $node) | .id' <<<"$members")

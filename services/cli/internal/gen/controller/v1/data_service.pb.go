@@ -1181,16 +1181,267 @@ func (x *ReplicaPrepareRequest) GetData() []byte {
 	return nil
 }
 
-type ReplicaPrepareResponse struct {
+type DataSignedPrepareEvidence struct {
 	state         protoimpl.MessageState  `protogen:"open.v1"`
 	Attestation   *DataPrepareAttestation `protobuf:"bytes,1,opt,name=attestation,proto3" json:"attestation,omitempty"`
+	SignerNodeId  []byte                  `protobuf:"bytes,2,opt,name=signer_node_id,json=signerNodeId,proto3" json:"signer_node_id,omitempty"`
+	KeyId         []byte                  `protobuf:"bytes,3,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	Signature     []byte                  `protobuf:"bytes,4,opt,name=signature,proto3" json:"signature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
+func (x *DataSignedPrepareEvidence) Reset() {
+	*x = DataSignedPrepareEvidence{}
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DataSignedPrepareEvidence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DataSignedPrepareEvidence) ProtoMessage() {}
+
+func (x *DataSignedPrepareEvidence) ProtoReflect() protoreflect.Message {
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DataSignedPrepareEvidence.ProtoReflect.Descriptor instead.
+func (*DataSignedPrepareEvidence) Descriptor() ([]byte, []int) {
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *DataSignedPrepareEvidence) GetAttestation() *DataPrepareAttestation {
+	if x != nil {
+		return x.Attestation
+	}
+	return nil
+}
+
+func (x *DataSignedPrepareEvidence) GetSignerNodeId() []byte {
+	if x != nil {
+		return x.SignerNodeId
+	}
+	return nil
+}
+
+func (x *DataSignedPrepareEvidence) GetKeyId() []byte {
+	if x != nil {
+		return x.KeyId
+	}
+	return nil
+}
+
+func (x *DataSignedPrepareEvidence) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+type DataSignedCommitCertificate struct {
+	state           protoimpl.MessageState       `protogen:"open.v1"`
+	PrepareEvidence []*DataSignedPrepareEvidence `protobuf:"bytes,1,rep,name=prepare_evidence,json=prepareEvidence,proto3" json:"prepare_evidence,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *DataSignedCommitCertificate) Reset() {
+	*x = DataSignedCommitCertificate{}
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DataSignedCommitCertificate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DataSignedCommitCertificate) ProtoMessage() {}
+
+func (x *DataSignedCommitCertificate) ProtoReflect() protoreflect.Message {
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DataSignedCommitCertificate.ProtoReflect.Descriptor instead.
+func (*DataSignedCommitCertificate) Descriptor() ([]byte, []int) {
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *DataSignedCommitCertificate) GetPrepareEvidence() []*DataSignedPrepareEvidence {
+	if x != nil {
+		return x.PrepareEvidence
+	}
+	return nil
+}
+
+type DataCommitResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TransactionId []byte                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	Sequence      uint64                 `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	HistoryDigest []byte                 `protobuf:"bytes,3,opt,name=history_digest,json=historyDigest,proto3" json:"history_digest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DataCommitResult) Reset() {
+	*x = DataCommitResult{}
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DataCommitResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DataCommitResult) ProtoMessage() {}
+
+func (x *DataCommitResult) ProtoReflect() protoreflect.Message {
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DataCommitResult.ProtoReflect.Descriptor instead.
+func (*DataCommitResult) Descriptor() ([]byte, []int) {
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *DataCommitResult) GetTransactionId() []byte {
+	if x != nil {
+		return x.TransactionId
+	}
+	return nil
+}
+
+func (x *DataCommitResult) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
+func (x *DataCommitResult) GetHistoryDigest() []byte {
+	if x != nil {
+		return x.HistoryDigest
+	}
+	return nil
+}
+
+type DataSignedCommitEvidence struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MemberId      []byte                 `protobuf:"bytes,1,opt,name=member_id,json=memberId,proto3" json:"member_id,omitempty"`
+	SignerNodeId  []byte                 `protobuf:"bytes,2,opt,name=signer_node_id,json=signerNodeId,proto3" json:"signer_node_id,omitempty"`
+	KeyId         []byte                 `protobuf:"bytes,3,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	Result        *DataCommitResult      `protobuf:"bytes,4,opt,name=result,proto3" json:"result,omitempty"`
+	Signature     []byte                 `protobuf:"bytes,5,opt,name=signature,proto3" json:"signature,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DataSignedCommitEvidence) Reset() {
+	*x = DataSignedCommitEvidence{}
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DataSignedCommitEvidence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DataSignedCommitEvidence) ProtoMessage() {}
+
+func (x *DataSignedCommitEvidence) ProtoReflect() protoreflect.Message {
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DataSignedCommitEvidence.ProtoReflect.Descriptor instead.
+func (*DataSignedCommitEvidence) Descriptor() ([]byte, []int) {
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *DataSignedCommitEvidence) GetMemberId() []byte {
+	if x != nil {
+		return x.MemberId
+	}
+	return nil
+}
+
+func (x *DataSignedCommitEvidence) GetSignerNodeId() []byte {
+	if x != nil {
+		return x.SignerNodeId
+	}
+	return nil
+}
+
+func (x *DataSignedCommitEvidence) GetKeyId() []byte {
+	if x != nil {
+		return x.KeyId
+	}
+	return nil
+}
+
+func (x *DataSignedCommitEvidence) GetResult() *DataCommitResult {
+	if x != nil {
+		return x.Result
+	}
+	return nil
+}
+
+func (x *DataSignedCommitEvidence) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+type ReplicaPrepareResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Field 1 is retained only for append-only wire compatibility. Signed
+	// transports never populate it and clients reject unsigned responses.
+	Attestation    *DataPrepareAttestation    `protobuf:"bytes,1,opt,name=attestation,proto3" json:"attestation,omitempty"`
+	SignedEvidence *DataSignedPrepareEvidence `protobuf:"bytes,2,opt,name=signed_evidence,json=signedEvidence,proto3" json:"signed_evidence,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
 func (x *ReplicaPrepareResponse) Reset() {
 	*x = ReplicaPrepareResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[15]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1202,7 +1453,7 @@ func (x *ReplicaPrepareResponse) String() string {
 func (*ReplicaPrepareResponse) ProtoMessage() {}
 
 func (x *ReplicaPrepareResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[15]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1215,7 +1466,7 @@ func (x *ReplicaPrepareResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaPrepareResponse.ProtoReflect.Descriptor instead.
 func (*ReplicaPrepareResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{15}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *ReplicaPrepareResponse) GetAttestation() *DataPrepareAttestation {
@@ -1225,20 +1476,29 @@ func (x *ReplicaPrepareResponse) GetAttestation() *DataPrepareAttestation {
 	return nil
 }
 
+func (x *ReplicaPrepareResponse) GetSignedEvidence() *DataSignedPrepareEvidence {
+	if x != nil {
+		return x.SignedEvidence
+	}
+	return nil
+}
+
 type ReplicaCommitRequest struct {
 	state         protoimpl.MessageState       `protogen:"open.v1"`
 	Binding       *DataWriteParticipantBinding `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
 	Authority     *DataAuthorityBinding        `protobuf:"bytes,2,opt,name=authority,proto3" json:"authority,omitempty"`
 	TransactionId []byte                       `protobuf:"bytes,3,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
-	Attestations  []*DataPrepareAttestation    `protobuf:"bytes,4,rep,name=attestations,proto3" json:"attestations,omitempty"`
-	Sequence      uint64                       `protobuf:"varint,5,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Field 4 is the retired unsigned certificate and must remain empty.
+	Attestations      []*DataPrepareAttestation    `protobuf:"bytes,4,rep,name=attestations,proto3" json:"attestations,omitempty"`
+	Sequence          uint64                       `protobuf:"varint,5,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	SignedCertificate *DataSignedCommitCertificate `protobuf:"bytes,6,opt,name=signed_certificate,json=signedCertificate,proto3" json:"signed_certificate,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ReplicaCommitRequest) Reset() {
 	*x = ReplicaCommitRequest{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[16]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1250,7 +1510,7 @@ func (x *ReplicaCommitRequest) String() string {
 func (*ReplicaCommitRequest) ProtoMessage() {}
 
 func (x *ReplicaCommitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[16]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1263,7 +1523,7 @@ func (x *ReplicaCommitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaCommitRequest.ProtoReflect.Descriptor instead.
 func (*ReplicaCommitRequest) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{16}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ReplicaCommitRequest) GetBinding() *DataWriteParticipantBinding {
@@ -1301,18 +1561,26 @@ func (x *ReplicaCommitRequest) GetSequence() uint64 {
 	return 0
 }
 
+func (x *ReplicaCommitRequest) GetSignedCertificate() *DataSignedCommitCertificate {
+	if x != nil {
+		return x.SignedCertificate
+	}
+	return nil
+}
+
 type ReplicaCommitResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TransactionId []byte                 `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
-	Sequence      uint64                 `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
-	HistoryDigest []byte                 `protobuf:"bytes,3,opt,name=history_digest,json=historyDigest,proto3" json:"history_digest,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState    `protogen:"open.v1"`
+	TransactionId  []byte                    `protobuf:"bytes,1,opt,name=transaction_id,json=transactionId,proto3" json:"transaction_id,omitempty"`
+	Sequence       uint64                    `protobuf:"varint,2,opt,name=sequence,proto3" json:"sequence,omitempty"`
+	HistoryDigest  []byte                    `protobuf:"bytes,3,opt,name=history_digest,json=historyDigest,proto3" json:"history_digest,omitempty"`
+	SignedEvidence *DataSignedCommitEvidence `protobuf:"bytes,4,opt,name=signed_evidence,json=signedEvidence,proto3" json:"signed_evidence,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ReplicaCommitResponse) Reset() {
 	*x = ReplicaCommitResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[17]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1324,7 +1592,7 @@ func (x *ReplicaCommitResponse) String() string {
 func (*ReplicaCommitResponse) ProtoMessage() {}
 
 func (x *ReplicaCommitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[17]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1337,7 +1605,7 @@ func (x *ReplicaCommitResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaCommitResponse.ProtoReflect.Descriptor instead.
 func (*ReplicaCommitResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{17}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ReplicaCommitResponse) GetTransactionId() []byte {
@@ -1361,6 +1629,13 @@ func (x *ReplicaCommitResponse) GetHistoryDigest() []byte {
 	return nil
 }
 
+func (x *ReplicaCommitResponse) GetSignedEvidence() *DataSignedCommitEvidence {
+	if x != nil {
+		return x.SignedEvidence
+	}
+	return nil
+}
+
 type ReplicaWriteInspectRequest struct {
 	state         protoimpl.MessageState       `protogen:"open.v1"`
 	Binding       *DataWriteParticipantBinding `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
@@ -1371,7 +1646,7 @@ type ReplicaWriteInspectRequest struct {
 
 func (x *ReplicaWriteInspectRequest) Reset() {
 	*x = ReplicaWriteInspectRequest{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[18]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1383,7 +1658,7 @@ func (x *ReplicaWriteInspectRequest) String() string {
 func (*ReplicaWriteInspectRequest) ProtoMessage() {}
 
 func (x *ReplicaWriteInspectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[18]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1396,7 +1671,7 @@ func (x *ReplicaWriteInspectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaWriteInspectRequest.ProtoReflect.Descriptor instead.
 func (*ReplicaWriteInspectRequest) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{18}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ReplicaWriteInspectRequest) GetBinding() *DataWriteParticipantBinding {
@@ -1424,7 +1699,7 @@ type DataPendingWrite struct {
 
 func (x *DataPendingWrite) Reset() {
 	*x = DataPendingWrite{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[19]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1436,7 +1711,7 @@ func (x *DataPendingWrite) String() string {
 func (*DataPendingWrite) ProtoMessage() {}
 
 func (x *DataPendingWrite) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[19]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1449,7 +1724,7 @@ func (x *DataPendingWrite) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataPendingWrite.ProtoReflect.Descriptor instead.
 func (*DataPendingWrite) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{19}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *DataPendingWrite) GetWrite() *DataWriteRequest {
@@ -1485,7 +1760,7 @@ type ReplicaWriteInspectResponse struct {
 
 func (x *ReplicaWriteInspectResponse) Reset() {
 	*x = ReplicaWriteInspectResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[20]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1497,7 +1772,7 @@ func (x *ReplicaWriteInspectResponse) String() string {
 func (*ReplicaWriteInspectResponse) ProtoMessage() {}
 
 func (x *ReplicaWriteInspectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[20]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1510,7 +1785,7 @@ func (x *ReplicaWriteInspectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaWriteInspectResponse.ProtoReflect.Descriptor instead.
 func (*ReplicaWriteInspectResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{20}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ReplicaWriteInspectResponse) GetFrontierSequence() uint64 {
@@ -1561,7 +1836,7 @@ type DataAuthorityBinding struct {
 
 func (x *DataAuthorityBinding) Reset() {
 	*x = DataAuthorityBinding{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[21]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1573,7 +1848,7 @@ func (x *DataAuthorityBinding) String() string {
 func (*DataAuthorityBinding) ProtoMessage() {}
 
 func (x *DataAuthorityBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[21]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1586,7 +1861,7 @@ func (x *DataAuthorityBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataAuthorityBinding.ProtoReflect.Descriptor instead.
 func (*DataAuthorityBinding) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{21}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *DataAuthorityBinding) GetVolumeId() []byte {
@@ -1667,7 +1942,7 @@ type IdentifyHolderRequest struct {
 
 func (x *IdentifyHolderRequest) Reset() {
 	*x = IdentifyHolderRequest{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[22]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1679,7 +1954,7 @@ func (x *IdentifyHolderRequest) String() string {
 func (*IdentifyHolderRequest) ProtoMessage() {}
 
 func (x *IdentifyHolderRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[22]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1692,7 +1967,7 @@ func (x *IdentifyHolderRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IdentifyHolderRequest.ProtoReflect.Descriptor instead.
 func (*IdentifyHolderRequest) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{22}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{26}
 }
 
 type IdentifyHolderResponse struct {
@@ -1704,7 +1979,7 @@ type IdentifyHolderResponse struct {
 
 func (x *IdentifyHolderResponse) Reset() {
 	*x = IdentifyHolderResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[23]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1716,7 +1991,7 @@ func (x *IdentifyHolderResponse) String() string {
 func (*IdentifyHolderResponse) ProtoMessage() {}
 
 func (x *IdentifyHolderResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[23]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1729,7 +2004,7 @@ func (x *IdentifyHolderResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IdentifyHolderResponse.ProtoReflect.Descriptor instead.
 func (*IdentifyHolderResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{23}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *IdentifyHolderResponse) GetHolderBootId() []byte {
@@ -1749,7 +2024,7 @@ type StagePrimaryRequest struct {
 
 func (x *StagePrimaryRequest) Reset() {
 	*x = StagePrimaryRequest{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[24]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1761,7 +2036,7 @@ func (x *StagePrimaryRequest) String() string {
 func (*StagePrimaryRequest) ProtoMessage() {}
 
 func (x *StagePrimaryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[24]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1774,7 +2049,7 @@ func (x *StagePrimaryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagePrimaryRequest.ProtoReflect.Descriptor instead.
 func (*StagePrimaryRequest) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{24}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *StagePrimaryRequest) GetBinding() *DataAuthorityBinding {
@@ -1801,7 +2076,7 @@ type StagePrimaryResponse struct {
 
 func (x *StagePrimaryResponse) Reset() {
 	*x = StagePrimaryResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[25]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1813,7 +2088,7 @@ func (x *StagePrimaryResponse) String() string {
 func (*StagePrimaryResponse) ProtoMessage() {}
 
 func (x *StagePrimaryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[25]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1826,7 +2101,7 @@ func (x *StagePrimaryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StagePrimaryResponse.ProtoReflect.Descriptor instead.
 func (*StagePrimaryResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{25}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *StagePrimaryResponse) GetBinding() *DataAuthorityBinding {
@@ -1859,7 +2134,7 @@ type DataReplicaFenceBinding struct {
 
 func (x *DataReplicaFenceBinding) Reset() {
 	*x = DataReplicaFenceBinding{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[26]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1871,7 +2146,7 @@ func (x *DataReplicaFenceBinding) String() string {
 func (*DataReplicaFenceBinding) ProtoMessage() {}
 
 func (x *DataReplicaFenceBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[26]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1884,7 +2159,7 @@ func (x *DataReplicaFenceBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataReplicaFenceBinding.ProtoReflect.Descriptor instead.
 func (*DataReplicaFenceBinding) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{26}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *DataReplicaFenceBinding) GetOperationId() []byte {
@@ -1952,7 +2227,7 @@ type FenceReplicaRequest struct {
 
 func (x *FenceReplicaRequest) Reset() {
 	*x = FenceReplicaRequest{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[27]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1964,7 +2239,7 @@ func (x *FenceReplicaRequest) String() string {
 func (*FenceReplicaRequest) ProtoMessage() {}
 
 func (x *FenceReplicaRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[27]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1977,7 +2252,7 @@ func (x *FenceReplicaRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FenceReplicaRequest.ProtoReflect.Descriptor instead.
 func (*FenceReplicaRequest) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{27}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *FenceReplicaRequest) GetBinding() *DataReplicaFenceBinding {
@@ -1997,7 +2272,7 @@ type FenceReplicaResponse struct {
 
 func (x *FenceReplicaResponse) Reset() {
 	*x = FenceReplicaResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[28]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2009,7 +2284,7 @@ func (x *FenceReplicaResponse) String() string {
 func (*FenceReplicaResponse) ProtoMessage() {}
 
 func (x *FenceReplicaResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[28]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2022,7 +2297,7 @@ func (x *FenceReplicaResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FenceReplicaResponse.ProtoReflect.Descriptor instead.
 func (*FenceReplicaResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{28}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *FenceReplicaResponse) GetBinding() *DataReplicaFenceBinding {
@@ -2048,7 +2323,7 @@ type RecoverPrimaryRequest struct {
 
 func (x *RecoverPrimaryRequest) Reset() {
 	*x = RecoverPrimaryRequest{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[29]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2060,7 +2335,7 @@ func (x *RecoverPrimaryRequest) String() string {
 func (*RecoverPrimaryRequest) ProtoMessage() {}
 
 func (x *RecoverPrimaryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[29]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2073,7 +2348,7 @@ func (x *RecoverPrimaryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoverPrimaryRequest.ProtoReflect.Descriptor instead.
 func (*RecoverPrimaryRequest) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{29}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *RecoverPrimaryRequest) GetBinding() *DataAuthorityBinding {
@@ -2095,7 +2370,7 @@ type RecoverPrimaryResponse struct {
 
 func (x *RecoverPrimaryResponse) Reset() {
 	*x = RecoverPrimaryResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[30]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2107,7 +2382,7 @@ func (x *RecoverPrimaryResponse) String() string {
 func (*RecoverPrimaryResponse) ProtoMessage() {}
 
 func (x *RecoverPrimaryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[30]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2120,7 +2395,7 @@ func (x *RecoverPrimaryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoverPrimaryResponse.ProtoReflect.Descriptor instead.
 func (*RecoverPrimaryResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{30}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *RecoverPrimaryResponse) GetBinding() *DataAuthorityBinding {
@@ -2160,7 +2435,7 @@ type MarkPrimaryReadyRequest struct {
 
 func (x *MarkPrimaryReadyRequest) Reset() {
 	*x = MarkPrimaryReadyRequest{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[31]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2172,7 +2447,7 @@ func (x *MarkPrimaryReadyRequest) String() string {
 func (*MarkPrimaryReadyRequest) ProtoMessage() {}
 
 func (x *MarkPrimaryReadyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[31]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2185,7 +2460,7 @@ func (x *MarkPrimaryReadyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MarkPrimaryReadyRequest.ProtoReflect.Descriptor instead.
 func (*MarkPrimaryReadyRequest) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{31}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *MarkPrimaryReadyRequest) GetBinding() *DataAuthorityBinding {
@@ -2204,7 +2479,7 @@ type MarkPrimaryReadyResponse struct {
 
 func (x *MarkPrimaryReadyResponse) Reset() {
 	*x = MarkPrimaryReadyResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[32]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2216,7 +2491,7 @@ func (x *MarkPrimaryReadyResponse) String() string {
 func (*MarkPrimaryReadyResponse) ProtoMessage() {}
 
 func (x *MarkPrimaryReadyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[32]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2229,7 +2504,7 @@ func (x *MarkPrimaryReadyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MarkPrimaryReadyResponse.ProtoReflect.Descriptor instead.
 func (*MarkPrimaryReadyResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{32}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *MarkPrimaryReadyResponse) GetBinding() *DataAuthorityBinding {
@@ -2248,7 +2523,7 @@ type InspectPrimaryRequest struct {
 
 func (x *InspectPrimaryRequest) Reset() {
 	*x = InspectPrimaryRequest{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[33]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2260,7 +2535,7 @@ func (x *InspectPrimaryRequest) String() string {
 func (*InspectPrimaryRequest) ProtoMessage() {}
 
 func (x *InspectPrimaryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[33]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2273,7 +2548,7 @@ func (x *InspectPrimaryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InspectPrimaryRequest.ProtoReflect.Descriptor instead.
 func (*InspectPrimaryRequest) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{33}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *InspectPrimaryRequest) GetBinding() *DataAuthorityBinding {
@@ -2296,7 +2571,7 @@ type InspectPrimaryResponse struct {
 
 func (x *InspectPrimaryResponse) Reset() {
 	*x = InspectPrimaryResponse{}
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[34]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2308,7 +2583,7 @@ func (x *InspectPrimaryResponse) String() string {
 func (*InspectPrimaryResponse) ProtoMessage() {}
 
 func (x *InspectPrimaryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[34]
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2321,7 +2596,7 @@ func (x *InspectPrimaryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InspectPrimaryResponse.ProtoReflect.Descriptor instead.
 func (*InspectPrimaryResponse) Descriptor() ([]byte, []int) {
-	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{34}
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *InspectPrimaryResponse) GetBinding() *DataAuthorityBinding {
@@ -2462,19 +2737,39 @@ const file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_
 	"\x15ReplicaPrepareRequest\x12L\n" +
 	"\abinding\x18\x01 \x01(\v22.zettide.controller.v1.DataWriteParticipantBindingR\abinding\x12=\n" +
 	"\x05write\x18\x02 \x01(\v2'.zettide.controller.v1.DataWriteRequestR\x05write\x12\x12\n" +
-	"\x04data\x18\x03 \x01(\fR\x04data\"i\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\"\xc7\x01\n" +
+	"\x19DataSignedPrepareEvidence\x12O\n" +
+	"\vattestation\x18\x01 \x01(\v2-.zettide.controller.v1.DataPrepareAttestationR\vattestation\x12$\n" +
+	"\x0esigner_node_id\x18\x02 \x01(\fR\fsignerNodeId\x12\x15\n" +
+	"\x06key_id\x18\x03 \x01(\fR\x05keyId\x12\x1c\n" +
+	"\tsignature\x18\x04 \x01(\fR\tsignature\"z\n" +
+	"\x1bDataSignedCommitCertificate\x12[\n" +
+	"\x10prepare_evidence\x18\x01 \x03(\v20.zettide.controller.v1.DataSignedPrepareEvidenceR\x0fprepareEvidence\"|\n" +
+	"\x10DataCommitResult\x12%\n" +
+	"\x0etransaction_id\x18\x01 \x01(\fR\rtransactionId\x12\x1a\n" +
+	"\bsequence\x18\x02 \x01(\x04R\bsequence\x12%\n" +
+	"\x0ehistory_digest\x18\x03 \x01(\fR\rhistoryDigest\"\xd3\x01\n" +
+	"\x18DataSignedCommitEvidence\x12\x1b\n" +
+	"\tmember_id\x18\x01 \x01(\fR\bmemberId\x12$\n" +
+	"\x0esigner_node_id\x18\x02 \x01(\fR\fsignerNodeId\x12\x15\n" +
+	"\x06key_id\x18\x03 \x01(\fR\x05keyId\x12?\n" +
+	"\x06result\x18\x04 \x01(\v2'.zettide.controller.v1.DataCommitResultR\x06result\x12\x1c\n" +
+	"\tsignature\x18\x05 \x01(\fR\tsignature\"\xc4\x01\n" +
 	"\x16ReplicaPrepareResponse\x12O\n" +
-	"\vattestation\x18\x01 \x01(\v2-.zettide.controller.v1.DataPrepareAttestationR\vattestation\"\xc5\x02\n" +
+	"\vattestation\x18\x01 \x01(\v2-.zettide.controller.v1.DataPrepareAttestationR\vattestation\x12Y\n" +
+	"\x0fsigned_evidence\x18\x02 \x01(\v20.zettide.controller.v1.DataSignedPrepareEvidenceR\x0esignedEvidence\"\xa8\x03\n" +
 	"\x14ReplicaCommitRequest\x12L\n" +
 	"\abinding\x18\x01 \x01(\v22.zettide.controller.v1.DataWriteParticipantBindingR\abinding\x12I\n" +
 	"\tauthority\x18\x02 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\tauthority\x12%\n" +
 	"\x0etransaction_id\x18\x03 \x01(\fR\rtransactionId\x12Q\n" +
 	"\fattestations\x18\x04 \x03(\v2-.zettide.controller.v1.DataPrepareAttestationR\fattestations\x12\x1a\n" +
-	"\bsequence\x18\x05 \x01(\x04R\bsequence\"\x81\x01\n" +
+	"\bsequence\x18\x05 \x01(\x04R\bsequence\x12a\n" +
+	"\x12signed_certificate\x18\x06 \x01(\v22.zettide.controller.v1.DataSignedCommitCertificateR\x11signedCertificate\"\xdb\x01\n" +
 	"\x15ReplicaCommitResponse\x12%\n" +
 	"\x0etransaction_id\x18\x01 \x01(\fR\rtransactionId\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x04R\bsequence\x12%\n" +
-	"\x0ehistory_digest\x18\x03 \x01(\fR\rhistoryDigest\"\xb5\x01\n" +
+	"\x0ehistory_digest\x18\x03 \x01(\fR\rhistoryDigest\x12X\n" +
+	"\x0fsigned_evidence\x18\x04 \x01(\v2/.zettide.controller.v1.DataSignedCommitEvidenceR\x0esignedEvidence\"\xb5\x01\n" +
 	"\x1aReplicaWriteInspectRequest\x12L\n" +
 	"\abinding\x18\x01 \x01(\v22.zettide.controller.v1.DataWriteParticipantBindingR\abinding\x12I\n" +
 	"\tauthority\x18\x02 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\tauthority\"\xc9\x01\n" +
@@ -2576,7 +2871,7 @@ func file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_p
 }
 
 var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
+var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
 var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_goTypes = []any{
 	(DataReplicaState)(0),                     // 0: zettide.controller.v1.DataReplicaState
 	(*DataReplicaAttestation)(nil),            // 1: zettide.controller.v1.DataReplicaAttestation
@@ -2594,26 +2889,30 @@ var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_pr
 	(*DataWriteRequest)(nil),                  // 13: zettide.controller.v1.DataWriteRequest
 	(*DataPrepareAttestation)(nil),            // 14: zettide.controller.v1.DataPrepareAttestation
 	(*ReplicaPrepareRequest)(nil),             // 15: zettide.controller.v1.ReplicaPrepareRequest
-	(*ReplicaPrepareResponse)(nil),            // 16: zettide.controller.v1.ReplicaPrepareResponse
-	(*ReplicaCommitRequest)(nil),              // 17: zettide.controller.v1.ReplicaCommitRequest
-	(*ReplicaCommitResponse)(nil),             // 18: zettide.controller.v1.ReplicaCommitResponse
-	(*ReplicaWriteInspectRequest)(nil),        // 19: zettide.controller.v1.ReplicaWriteInspectRequest
-	(*DataPendingWrite)(nil),                  // 20: zettide.controller.v1.DataPendingWrite
-	(*ReplicaWriteInspectResponse)(nil),       // 21: zettide.controller.v1.ReplicaWriteInspectResponse
-	(*DataAuthorityBinding)(nil),              // 22: zettide.controller.v1.DataAuthorityBinding
-	(*IdentifyHolderRequest)(nil),             // 23: zettide.controller.v1.IdentifyHolderRequest
-	(*IdentifyHolderResponse)(nil),            // 24: zettide.controller.v1.IdentifyHolderResponse
-	(*StagePrimaryRequest)(nil),               // 25: zettide.controller.v1.StagePrimaryRequest
-	(*StagePrimaryResponse)(nil),              // 26: zettide.controller.v1.StagePrimaryResponse
-	(*DataReplicaFenceBinding)(nil),           // 27: zettide.controller.v1.DataReplicaFenceBinding
-	(*FenceReplicaRequest)(nil),               // 28: zettide.controller.v1.FenceReplicaRequest
-	(*FenceReplicaResponse)(nil),              // 29: zettide.controller.v1.FenceReplicaResponse
-	(*RecoverPrimaryRequest)(nil),             // 30: zettide.controller.v1.RecoverPrimaryRequest
-	(*RecoverPrimaryResponse)(nil),            // 31: zettide.controller.v1.RecoverPrimaryResponse
-	(*MarkPrimaryReadyRequest)(nil),           // 32: zettide.controller.v1.MarkPrimaryReadyRequest
-	(*MarkPrimaryReadyResponse)(nil),          // 33: zettide.controller.v1.MarkPrimaryReadyResponse
-	(*InspectPrimaryRequest)(nil),             // 34: zettide.controller.v1.InspectPrimaryRequest
-	(*InspectPrimaryResponse)(nil),            // 35: zettide.controller.v1.InspectPrimaryResponse
+	(*DataSignedPrepareEvidence)(nil),         // 16: zettide.controller.v1.DataSignedPrepareEvidence
+	(*DataSignedCommitCertificate)(nil),       // 17: zettide.controller.v1.DataSignedCommitCertificate
+	(*DataCommitResult)(nil),                  // 18: zettide.controller.v1.DataCommitResult
+	(*DataSignedCommitEvidence)(nil),          // 19: zettide.controller.v1.DataSignedCommitEvidence
+	(*ReplicaPrepareResponse)(nil),            // 20: zettide.controller.v1.ReplicaPrepareResponse
+	(*ReplicaCommitRequest)(nil),              // 21: zettide.controller.v1.ReplicaCommitRequest
+	(*ReplicaCommitResponse)(nil),             // 22: zettide.controller.v1.ReplicaCommitResponse
+	(*ReplicaWriteInspectRequest)(nil),        // 23: zettide.controller.v1.ReplicaWriteInspectRequest
+	(*DataPendingWrite)(nil),                  // 24: zettide.controller.v1.DataPendingWrite
+	(*ReplicaWriteInspectResponse)(nil),       // 25: zettide.controller.v1.ReplicaWriteInspectResponse
+	(*DataAuthorityBinding)(nil),              // 26: zettide.controller.v1.DataAuthorityBinding
+	(*IdentifyHolderRequest)(nil),             // 27: zettide.controller.v1.IdentifyHolderRequest
+	(*IdentifyHolderResponse)(nil),            // 28: zettide.controller.v1.IdentifyHolderResponse
+	(*StagePrimaryRequest)(nil),               // 29: zettide.controller.v1.StagePrimaryRequest
+	(*StagePrimaryResponse)(nil),              // 30: zettide.controller.v1.StagePrimaryResponse
+	(*DataReplicaFenceBinding)(nil),           // 31: zettide.controller.v1.DataReplicaFenceBinding
+	(*FenceReplicaRequest)(nil),               // 32: zettide.controller.v1.FenceReplicaRequest
+	(*FenceReplicaResponse)(nil),              // 33: zettide.controller.v1.FenceReplicaResponse
+	(*RecoverPrimaryRequest)(nil),             // 34: zettide.controller.v1.RecoverPrimaryRequest
+	(*RecoverPrimaryResponse)(nil),            // 35: zettide.controller.v1.RecoverPrimaryResponse
+	(*MarkPrimaryReadyRequest)(nil),           // 36: zettide.controller.v1.MarkPrimaryReadyRequest
+	(*MarkPrimaryReadyResponse)(nil),          // 37: zettide.controller.v1.MarkPrimaryReadyResponse
+	(*InspectPrimaryRequest)(nil),             // 38: zettide.controller.v1.InspectPrimaryRequest
+	(*InspectPrimaryResponse)(nil),            // 39: zettide.controller.v1.InspectPrimaryResponse
 }
 var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_depIdxs = []int32{
 	0,  // 0: zettide.controller.v1.DataReplica.state:type_name -> zettide.controller.v1.DataReplicaState
@@ -2624,60 +2923,66 @@ var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_pr
 	9,  // 5: zettide.controller.v1.DataWriteParticipantBinding.witness_identities:type_name -> zettide.controller.v1.DataWitnessIdentity
 	10, // 6: zettide.controller.v1.ConfigureWriteParticipantRequest.binding:type_name -> zettide.controller.v1.DataWriteParticipantBinding
 	10, // 7: zettide.controller.v1.ConfigureWriteParticipantResponse.binding:type_name -> zettide.controller.v1.DataWriteParticipantBinding
-	22, // 8: zettide.controller.v1.DataWriteRequest.authority:type_name -> zettide.controller.v1.DataAuthorityBinding
+	26, // 8: zettide.controller.v1.DataWriteRequest.authority:type_name -> zettide.controller.v1.DataAuthorityBinding
 	10, // 9: zettide.controller.v1.ReplicaPrepareRequest.binding:type_name -> zettide.controller.v1.DataWriteParticipantBinding
 	13, // 10: zettide.controller.v1.ReplicaPrepareRequest.write:type_name -> zettide.controller.v1.DataWriteRequest
-	14, // 11: zettide.controller.v1.ReplicaPrepareResponse.attestation:type_name -> zettide.controller.v1.DataPrepareAttestation
-	10, // 12: zettide.controller.v1.ReplicaCommitRequest.binding:type_name -> zettide.controller.v1.DataWriteParticipantBinding
-	22, // 13: zettide.controller.v1.ReplicaCommitRequest.authority:type_name -> zettide.controller.v1.DataAuthorityBinding
-	14, // 14: zettide.controller.v1.ReplicaCommitRequest.attestations:type_name -> zettide.controller.v1.DataPrepareAttestation
-	10, // 15: zettide.controller.v1.ReplicaWriteInspectRequest.binding:type_name -> zettide.controller.v1.DataWriteParticipantBinding
-	22, // 16: zettide.controller.v1.ReplicaWriteInspectRequest.authority:type_name -> zettide.controller.v1.DataAuthorityBinding
-	13, // 17: zettide.controller.v1.DataPendingWrite.write:type_name -> zettide.controller.v1.DataWriteRequest
-	14, // 18: zettide.controller.v1.DataPendingWrite.attestation:type_name -> zettide.controller.v1.DataPrepareAttestation
-	20, // 19: zettide.controller.v1.ReplicaWriteInspectResponse.pending:type_name -> zettide.controller.v1.DataPendingWrite
-	18, // 20: zettide.controller.v1.ReplicaWriteInspectResponse.last_completed:type_name -> zettide.controller.v1.ReplicaCommitResponse
-	22, // 21: zettide.controller.v1.StagePrimaryRequest.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
-	22, // 22: zettide.controller.v1.StagePrimaryResponse.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
-	27, // 23: zettide.controller.v1.FenceReplicaRequest.binding:type_name -> zettide.controller.v1.DataReplicaFenceBinding
-	27, // 24: zettide.controller.v1.FenceReplicaResponse.binding:type_name -> zettide.controller.v1.DataReplicaFenceBinding
-	22, // 25: zettide.controller.v1.RecoverPrimaryRequest.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
-	22, // 26: zettide.controller.v1.RecoverPrimaryResponse.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
-	22, // 27: zettide.controller.v1.MarkPrimaryReadyRequest.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
-	22, // 28: zettide.controller.v1.MarkPrimaryReadyResponse.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
-	22, // 29: zettide.controller.v1.InspectPrimaryRequest.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
-	22, // 30: zettide.controller.v1.InspectPrimaryResponse.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
-	3,  // 31: zettide.controller.v1.DataService.EnsureReplica:input_type -> zettide.controller.v1.EnsureReplicaRequest
-	5,  // 32: zettide.controller.v1.DataService.InspectReplica:input_type -> zettide.controller.v1.InspectReplicaRequest
-	7,  // 33: zettide.controller.v1.DataService.DeleteReplica:input_type -> zettide.controller.v1.DeleteReplicaRequest
-	11, // 34: zettide.controller.v1.DataService.ConfigureWriteParticipant:input_type -> zettide.controller.v1.ConfigureWriteParticipantRequest
-	23, // 35: zettide.controller.v1.DataService.IdentifyHolder:input_type -> zettide.controller.v1.IdentifyHolderRequest
-	25, // 36: zettide.controller.v1.DataService.StagePrimary:input_type -> zettide.controller.v1.StagePrimaryRequest
-	28, // 37: zettide.controller.v1.DataService.FenceReplica:input_type -> zettide.controller.v1.FenceReplicaRequest
-	30, // 38: zettide.controller.v1.DataService.RecoverPrimary:input_type -> zettide.controller.v1.RecoverPrimaryRequest
-	32, // 39: zettide.controller.v1.DataService.MarkPrimaryReady:input_type -> zettide.controller.v1.MarkPrimaryReadyRequest
-	34, // 40: zettide.controller.v1.DataService.InspectPrimary:input_type -> zettide.controller.v1.InspectPrimaryRequest
-	15, // 41: zettide.controller.v1.ReplicaTransport.Prepare:input_type -> zettide.controller.v1.ReplicaPrepareRequest
-	17, // 42: zettide.controller.v1.ReplicaTransport.Commit:input_type -> zettide.controller.v1.ReplicaCommitRequest
-	19, // 43: zettide.controller.v1.ReplicaTransport.Inspect:input_type -> zettide.controller.v1.ReplicaWriteInspectRequest
-	4,  // 44: zettide.controller.v1.DataService.EnsureReplica:output_type -> zettide.controller.v1.EnsureReplicaResponse
-	6,  // 45: zettide.controller.v1.DataService.InspectReplica:output_type -> zettide.controller.v1.InspectReplicaResponse
-	8,  // 46: zettide.controller.v1.DataService.DeleteReplica:output_type -> zettide.controller.v1.DeleteReplicaResponse
-	12, // 47: zettide.controller.v1.DataService.ConfigureWriteParticipant:output_type -> zettide.controller.v1.ConfigureWriteParticipantResponse
-	24, // 48: zettide.controller.v1.DataService.IdentifyHolder:output_type -> zettide.controller.v1.IdentifyHolderResponse
-	26, // 49: zettide.controller.v1.DataService.StagePrimary:output_type -> zettide.controller.v1.StagePrimaryResponse
-	29, // 50: zettide.controller.v1.DataService.FenceReplica:output_type -> zettide.controller.v1.FenceReplicaResponse
-	31, // 51: zettide.controller.v1.DataService.RecoverPrimary:output_type -> zettide.controller.v1.RecoverPrimaryResponse
-	33, // 52: zettide.controller.v1.DataService.MarkPrimaryReady:output_type -> zettide.controller.v1.MarkPrimaryReadyResponse
-	35, // 53: zettide.controller.v1.DataService.InspectPrimary:output_type -> zettide.controller.v1.InspectPrimaryResponse
-	16, // 54: zettide.controller.v1.ReplicaTransport.Prepare:output_type -> zettide.controller.v1.ReplicaPrepareResponse
-	18, // 55: zettide.controller.v1.ReplicaTransport.Commit:output_type -> zettide.controller.v1.ReplicaCommitResponse
-	21, // 56: zettide.controller.v1.ReplicaTransport.Inspect:output_type -> zettide.controller.v1.ReplicaWriteInspectResponse
-	44, // [44:57] is the sub-list for method output_type
-	31, // [31:44] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	14, // 11: zettide.controller.v1.DataSignedPrepareEvidence.attestation:type_name -> zettide.controller.v1.DataPrepareAttestation
+	16, // 12: zettide.controller.v1.DataSignedCommitCertificate.prepare_evidence:type_name -> zettide.controller.v1.DataSignedPrepareEvidence
+	18, // 13: zettide.controller.v1.DataSignedCommitEvidence.result:type_name -> zettide.controller.v1.DataCommitResult
+	14, // 14: zettide.controller.v1.ReplicaPrepareResponse.attestation:type_name -> zettide.controller.v1.DataPrepareAttestation
+	16, // 15: zettide.controller.v1.ReplicaPrepareResponse.signed_evidence:type_name -> zettide.controller.v1.DataSignedPrepareEvidence
+	10, // 16: zettide.controller.v1.ReplicaCommitRequest.binding:type_name -> zettide.controller.v1.DataWriteParticipantBinding
+	26, // 17: zettide.controller.v1.ReplicaCommitRequest.authority:type_name -> zettide.controller.v1.DataAuthorityBinding
+	14, // 18: zettide.controller.v1.ReplicaCommitRequest.attestations:type_name -> zettide.controller.v1.DataPrepareAttestation
+	17, // 19: zettide.controller.v1.ReplicaCommitRequest.signed_certificate:type_name -> zettide.controller.v1.DataSignedCommitCertificate
+	19, // 20: zettide.controller.v1.ReplicaCommitResponse.signed_evidence:type_name -> zettide.controller.v1.DataSignedCommitEvidence
+	10, // 21: zettide.controller.v1.ReplicaWriteInspectRequest.binding:type_name -> zettide.controller.v1.DataWriteParticipantBinding
+	26, // 22: zettide.controller.v1.ReplicaWriteInspectRequest.authority:type_name -> zettide.controller.v1.DataAuthorityBinding
+	13, // 23: zettide.controller.v1.DataPendingWrite.write:type_name -> zettide.controller.v1.DataWriteRequest
+	14, // 24: zettide.controller.v1.DataPendingWrite.attestation:type_name -> zettide.controller.v1.DataPrepareAttestation
+	24, // 25: zettide.controller.v1.ReplicaWriteInspectResponse.pending:type_name -> zettide.controller.v1.DataPendingWrite
+	22, // 26: zettide.controller.v1.ReplicaWriteInspectResponse.last_completed:type_name -> zettide.controller.v1.ReplicaCommitResponse
+	26, // 27: zettide.controller.v1.StagePrimaryRequest.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
+	26, // 28: zettide.controller.v1.StagePrimaryResponse.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
+	31, // 29: zettide.controller.v1.FenceReplicaRequest.binding:type_name -> zettide.controller.v1.DataReplicaFenceBinding
+	31, // 30: zettide.controller.v1.FenceReplicaResponse.binding:type_name -> zettide.controller.v1.DataReplicaFenceBinding
+	26, // 31: zettide.controller.v1.RecoverPrimaryRequest.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
+	26, // 32: zettide.controller.v1.RecoverPrimaryResponse.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
+	26, // 33: zettide.controller.v1.MarkPrimaryReadyRequest.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
+	26, // 34: zettide.controller.v1.MarkPrimaryReadyResponse.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
+	26, // 35: zettide.controller.v1.InspectPrimaryRequest.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
+	26, // 36: zettide.controller.v1.InspectPrimaryResponse.binding:type_name -> zettide.controller.v1.DataAuthorityBinding
+	3,  // 37: zettide.controller.v1.DataService.EnsureReplica:input_type -> zettide.controller.v1.EnsureReplicaRequest
+	5,  // 38: zettide.controller.v1.DataService.InspectReplica:input_type -> zettide.controller.v1.InspectReplicaRequest
+	7,  // 39: zettide.controller.v1.DataService.DeleteReplica:input_type -> zettide.controller.v1.DeleteReplicaRequest
+	11, // 40: zettide.controller.v1.DataService.ConfigureWriteParticipant:input_type -> zettide.controller.v1.ConfigureWriteParticipantRequest
+	27, // 41: zettide.controller.v1.DataService.IdentifyHolder:input_type -> zettide.controller.v1.IdentifyHolderRequest
+	29, // 42: zettide.controller.v1.DataService.StagePrimary:input_type -> zettide.controller.v1.StagePrimaryRequest
+	32, // 43: zettide.controller.v1.DataService.FenceReplica:input_type -> zettide.controller.v1.FenceReplicaRequest
+	34, // 44: zettide.controller.v1.DataService.RecoverPrimary:input_type -> zettide.controller.v1.RecoverPrimaryRequest
+	36, // 45: zettide.controller.v1.DataService.MarkPrimaryReady:input_type -> zettide.controller.v1.MarkPrimaryReadyRequest
+	38, // 46: zettide.controller.v1.DataService.InspectPrimary:input_type -> zettide.controller.v1.InspectPrimaryRequest
+	15, // 47: zettide.controller.v1.ReplicaTransport.Prepare:input_type -> zettide.controller.v1.ReplicaPrepareRequest
+	21, // 48: zettide.controller.v1.ReplicaTransport.Commit:input_type -> zettide.controller.v1.ReplicaCommitRequest
+	23, // 49: zettide.controller.v1.ReplicaTransport.Inspect:input_type -> zettide.controller.v1.ReplicaWriteInspectRequest
+	4,  // 50: zettide.controller.v1.DataService.EnsureReplica:output_type -> zettide.controller.v1.EnsureReplicaResponse
+	6,  // 51: zettide.controller.v1.DataService.InspectReplica:output_type -> zettide.controller.v1.InspectReplicaResponse
+	8,  // 52: zettide.controller.v1.DataService.DeleteReplica:output_type -> zettide.controller.v1.DeleteReplicaResponse
+	12, // 53: zettide.controller.v1.DataService.ConfigureWriteParticipant:output_type -> zettide.controller.v1.ConfigureWriteParticipantResponse
+	28, // 54: zettide.controller.v1.DataService.IdentifyHolder:output_type -> zettide.controller.v1.IdentifyHolderResponse
+	30, // 55: zettide.controller.v1.DataService.StagePrimary:output_type -> zettide.controller.v1.StagePrimaryResponse
+	33, // 56: zettide.controller.v1.DataService.FenceReplica:output_type -> zettide.controller.v1.FenceReplicaResponse
+	35, // 57: zettide.controller.v1.DataService.RecoverPrimary:output_type -> zettide.controller.v1.RecoverPrimaryResponse
+	37, // 58: zettide.controller.v1.DataService.MarkPrimaryReady:output_type -> zettide.controller.v1.MarkPrimaryReadyResponse
+	39, // 59: zettide.controller.v1.DataService.InspectPrimary:output_type -> zettide.controller.v1.InspectPrimaryResponse
+	20, // 60: zettide.controller.v1.ReplicaTransport.Prepare:output_type -> zettide.controller.v1.ReplicaPrepareResponse
+	22, // 61: zettide.controller.v1.ReplicaTransport.Commit:output_type -> zettide.controller.v1.ReplicaCommitResponse
+	25, // 62: zettide.controller.v1.ReplicaTransport.Inspect:output_type -> zettide.controller.v1.ReplicaWriteInspectResponse
+	50, // [50:63] is the sub-list for method output_type
+	37, // [37:50] is the sub-list for method input_type
+	37, // [37:37] is the sub-list for extension type_name
+	37, // [37:37] is the sub-list for extension extendee
+	0,  // [0:37] is the sub-list for field type_name
 }
 
 func init() { file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_init() }
@@ -2691,7 +2996,7 @@ func file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_p
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDesc), len(file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   35,
+			NumMessages:   39,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
