@@ -129,20 +129,24 @@ closed。Key file 以 source Node 为索引并按 receiver 隔离，替换后需
 Replica endpoint 进入 controller Node metadata、snapshot 和 restart recovery。Docker
 三节点 profile 验证三个 listener 已启动且 unauthenticated INSPECT 被拒绝。
 
-Contracts 现新增 backend-neutral durable coordinator journal。它在调用方执行任何 PREPARE
-前持久 exact authority/transaction/sequence/history/range/digest/payload、canonical three-Member
-set 和固定两个 witness；unknown result 后不得切换第三个 Member。两个 PREPARE
-acknowledgement 必须分别通过调用方注入的 authenticated-evidence callback 后才会持久；journal
-随后先持久 canonical certificate，再允许调用方发出 COMMIT。每个 COMMIT acknowledgement
-也必须由独立 callback 校验 pinned witness、exact certificate 和 result 后才持久，两个 exact
-result 收敛后才推进 coordinator frontier。已决定
-事务不会因 lease 过期被 journal 丢弃或重新解释，可由同 state directory 重启后继续重试。
-其 atomic full-snapshot FileStore 仍只是开发基线。
+Contracts 现新增 shared Ed25519 write evidence 与 backend-neutral durable coordinator
+journal。每个 immutable witness identity 绑定 Member、signer Node、key ID 与 public key；
+domain-separated transcript 绑定 protocol version、exact transaction digest、完整 PREPARE
+attestation 或 exact canonical certificate/COMMIT result，并使用 strict Ed25519 verification。
+Journal 在调用方执行任何 PREPARE 前持久 exact authority/transaction/sequence/history/range/
+digest/payload、canonical three-witness identity set 和固定两个 witness；unknown result 后不得
+切换第三个 Member。两个 signed PREPARE evidence 持久后才生成并持久 certificate，之后才允许
+外部 COMMIT。两个 signed COMMIT evidence 收敛后才推进 frontier；`last_completed` 只保留
+最新完成 transaction 的四份签名供同 state directory reopen 重新验证，后续 completion 会覆盖
+它，并不是 append-only history。FileStore v2 只允许 pristine unsigned v1
+genesis 在 exact Member set 下迁移；任何 unsigned pending/decided/history 都以
+`UnsignedCoordinatorState` fail closed。Atomic full-snapshot 仍只是开发基线。
 
 该 journal 尚未接入 daemon、Replica RPC client 或 controller topology route，也没有
-client-facing payload write RPC。Contracts 只强制调用方注入 PREPARE/COMMIT evidence check，
-并不实现 pairwise-HMAC 认证本身；callback 也不是 participant 可独立验证的签名 attestation，
-replacement coordinator 不能据此恢复。Development transport 仍没有 confidentiality 或在线 key rotation。因此当前仍没有
+client-facing payload write RPC。当前 participant `CommitCertificate` 与 Replica RPC protobuf
+仍只携带 unsigned attestation，participant 尚不能独立验证 coordinator 保存的签名证据；
+controller 也尚未提供 key provenance、distribution、rotation 或 revocation。因此 replacement
+coordinator 仍不能安全接管，development transport 也没有 confidentiality。当前仍没有
 production primary coordinator、真实 remote fanout 或 2/3 client success，这些控制面、本地
 participant、journal 和 authenticated seam 仍不等于三节点 quorum 数据路径。
 
