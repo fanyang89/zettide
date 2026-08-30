@@ -1566,6 +1566,31 @@ test "wrong signed witness write and certificate fail closed" {
     try std.testing.expectError(error.UnverifiedCommitEvidence, harness.coordinator.recordCommitted(bad_commit));
 }
 
+test "coordinator v2 completed snapshot binary golden" {
+    var harness = try TestHarness.init();
+    defer harness.deinit();
+    const data = [_]u8{0x6d} ** 4096;
+    const request = testBegin(1, @splat(0), 29, &data, .{ testId(1), testId(2) });
+    _ = try harness.coordinator.begin(request);
+    try harness.coordinator.recordPrepared(try harness.signers.prepare(0, request.write, 1));
+    try harness.coordinator.recordPrepared(try harness.signers.prepare(1, request.write, 2));
+    const certificate = try harness.coordinator.decide();
+    _ = try harness.coordinator.recordCommitted(try harness.signers.commit(0, request.write, certificate));
+    _ = try harness.coordinator.recordCommitted(try harness.signers.commit(1, request.write, certificate));
+    const bytes = try harness.tmp.dir.readFileAlloc(
+        std.testing.io,
+        "coordinator.state",
+        std.testing.allocator,
+        .limited(FileStoreInner.max_file_size),
+    );
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(@as(usize, FileStoreInner.metadata_size + FileStoreInner.checksum_size), bytes.len);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    try std.testing.expectEqualStrings("3db1192eb5cb0015ca3ce96e8d43859294d681cc0b36d7edbabd327811d34b73", &hex);
+}
+
 test "v2 reopen preserves every signed phase" {
     var harness = try TestHarness.init();
     defer harness.deinit();

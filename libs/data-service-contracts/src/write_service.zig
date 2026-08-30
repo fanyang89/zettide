@@ -1,10 +1,15 @@
 const std = @import("std");
 const model = @import("model.zig");
+const evidence_contract = @import("write_evidence_contract.zig");
 
 pub const Id = model.Id;
 pub const Digest = model.Digest;
 pub const ReplicaBinding = model.ReplicaBinding;
 pub const AuthorityBinding = model.AuthorityBinding;
+pub const WitnessIdentity = evidence_contract.WitnessIdentity;
+pub const SignedPrepareEvidence = evidence_contract.SignedPrepareEvidence;
+pub const SignedCommitEvidence = evidence_contract.SignedCommitEvidence;
+pub const SignedCommitCertificate = evidence_contract.SignedCommitCertificate;
 
 pub const max_payload_size: usize = 1024 * 1024;
 pub const certificate_witness_count: usize = 2;
@@ -14,32 +19,15 @@ pub const Frontier = struct {
     history_digest: Digest = @splat(0),
 };
 
-pub const WriteRequest = struct {
-    authority: AuthorityBinding,
-    replica_members: [3]Id,
-    sequence: u64,
-    transaction_id: Id,
-    previous_history_digest: Digest,
-    offset_bytes: u64,
-    length_bytes: u64,
-    data_digest: Digest,
-};
+pub const WriteRequest = evidence_contract.WriteRequest;
 
 pub const PrepareRequest = struct {
     write: WriteRequest,
     data: []const u8,
 };
 
-pub const PrepareAttestation = struct {
-    member_id: Id,
-    transaction_digest: Digest,
-    prepare_digest: Digest,
-    prepared_history_digest: Digest,
-};
-
-pub const CommitCertificate = struct {
-    attestations: [certificate_witness_count]PrepareAttestation,
-};
+pub const PrepareAttestation = evidence_contract.PrepareAttestation;
+pub const CommitCertificate = evidence_contract.CommitCertificate;
 
 const PreparedRecord = struct {
     replica: ReplicaBinding,
@@ -48,35 +36,40 @@ const PreparedRecord = struct {
     data: []const u8,
 };
 
-pub const CommitResult = struct {
-    transaction_id: Id,
-    sequence: u64,
-    history_digest: Digest,
-};
+pub const CommitResult = evidence_contract.CommitResult;
 
 const CompletedRecord = struct {
     replica: ReplicaBinding,
     write: WriteRequest,
     attestation: PrepareAttestation,
-    certificate: CommitCertificate,
+    certificate: SignedCommitCertificate,
     result: CommitResult,
 };
 
 pub const ParticipantBinding = struct {
     replica: ReplicaBinding,
     replica_members: [3]Id,
+    witness_identities: [3]WitnessIdentity = @splat(.{}),
 };
 
 pub fn validateParticipantBinding(binding: ParticipantBinding) !void {
     try validateReplica(binding.replica);
     try validateReplicaSet(binding.replica_members, binding.replica.member_id);
+    try evidence_contract.validateIdentities(binding.witness_identities);
+    if (!std.meta.eql(binding.replica_members, evidence_contract.members(binding.witness_identities)))
+        return error.WitnessBindingMismatch;
 }
+
+const LegacyBinding = struct {
+    replica: ReplicaBinding,
+    replica_members: [3]Id,
+};
 
 const State = struct {
     binding: ?ParticipantBinding = null,
     frontier: Frontier = .{},
     pending: ?PreparedRecord = null,
-    certificate: ?CommitCertificate = null,
+    certificate: ?SignedCommitCertificate = null,
     last_completed: ?CompletedRecord = null,
 };
 
@@ -103,7 +96,7 @@ const Store = struct {
         check_healthy: *const fn (*anyopaque) anyerror!void,
         current: *const fn (*anyopaque) State,
         save_prepared: *const fn (*anyopaque, PreparedRecord) anyerror!void,
-        save_committed: *const fn (*anyopaque, CommitCertificate) anyerror!void,
+        save_committed: *const fn (*anyopaque, SignedCommitCertificate) anyerror!void,
         save_applied: *const fn (*anyopaque, CompletedRecord) anyerror!void,
     };
 
@@ -119,7 +112,7 @@ const Store = struct {
         try self.vtable.save_prepared(self.context, prepared);
     }
 
-    fn saveCommitted(self: Store, certificate: CommitCertificate) !void {
+    fn saveCommitted(self: Store, certificate: SignedCommitCertificate) !void {
         try self.vtable.save_committed(self.context, certificate);
     }
 
@@ -172,18 +165,17 @@ pub const Admission = struct {
 pub const Participant = opaque {
     pub fn initFile(
         allocator: std.mem.Allocator,
-        replica: ReplicaBinding,
-        replica_members: [3]Id,
+        binding: ParticipantBinding,
         file_store: *FileStore,
         backend: Backend,
         admission: Admission,
     ) !*Participant {
-        try file_store.bind(.{ .replica = replica, .replica_members = replica_members });
+        try file_store.bind(binding);
         const managed = try allocator.create(ManagedParticipant);
         errdefer allocator.destroy(managed);
         managed.* = .{
             .allocator = allocator,
-            .core = try ParticipantCore.init(replica, replica_members, file_store.store(), backend, admission),
+            .core = try ParticipantCore.init(binding, file_store.store(), backend, admission),
         };
         return @ptrCast(managed);
     }
@@ -200,7 +192,7 @@ pub const Participant = opaque {
         return managed.core.prepare(request);
     }
 
-    pub fn commit(self: *Participant, transaction_id: Id, certificate: CommitCertificate) !CommitResult {
+    pub fn commit(self: *Participant, transaction_id: Id, certificate: SignedCommitCertificate) !CommitResult {
         const managed: *ManagedParticipant = @ptrCast(@alignCast(self));
         return managed.core.commit(transaction_id, certificate);
     }
@@ -216,13 +208,12 @@ pub const Participant = opaque {
     }
 
     fn init(
-        replica: ReplicaBinding,
-        replica_members: [3]Id,
+        binding: ParticipantBinding,
         store: Store,
         backend: Backend,
         admission: Admission,
     ) !ParticipantCore {
-        return ParticipantCore.init(replica, replica_members, store, backend, admission);
+        return ParticipantCore.init(binding, store, backend, admission);
     }
 };
 
@@ -232,27 +223,23 @@ const ManagedParticipant = struct {
 };
 
 const ParticipantCore = struct {
-    replica: ReplicaBinding,
-    replica_members: [3]Id,
+    binding: ParticipantBinding,
     store: Store,
     backend: Backend,
     admission: Admission,
     transaction_lock: std.atomic.Mutex = .unlocked,
 
     fn init(
-        replica: ReplicaBinding,
-        replica_members: [3]Id,
+        binding: ParticipantBinding,
         store: Store,
         backend: Backend,
         admission: Admission,
     ) !ParticipantCore {
-        try validateReplica(replica);
-        try validateReplicaSet(replica_members, replica.member_id);
+        try validateParticipantBinding(binding);
         try store.checkHealthy();
-        try validateParticipantState(replica, replica_members, store.current());
+        try validateParticipantState(binding, store.current());
         return .{
-            .replica = replica,
-            .replica_members = replica_members,
+            .binding = binding,
             .store = store,
             .backend = backend,
             .admission = admission,
@@ -269,10 +256,10 @@ const ParticipantCore = struct {
         try self.store.checkHealthy();
         try self.admission.begin(request.write.authority);
         defer self.admission.end();
-        try validatePrepareRequest(self.replica, self.replica_members, request);
+        try validatePrepareRequest(self.binding.replica, self.binding.replica_members, request);
 
         const state = self.store.current();
-        try validateParticipantState(self.replica, self.replica_members, state);
+        try validateParticipantState(self.binding, state);
         if (state.last_completed) |completed| {
             if (std.mem.eql(u8, &completed.write.transaction_id, &request.write.transaction_id)) {
                 if (!sameWrite(completed.write, request.write)) return error.OperationConflict;
@@ -289,16 +276,16 @@ const ParticipantCore = struct {
 
         const transaction_digest = digestTransaction(request.write);
         const attestation: PrepareAttestation = .{
-            .member_id = self.replica.member_id,
+            .member_id = self.binding.replica.member_id,
             .transaction_digest = transaction_digest,
-            .prepare_digest = digestPrepare(transaction_digest, self.replica),
+            .prepare_digest = digestPrepare(transaction_digest, self.binding.replica),
             .prepared_history_digest = digestPreparedHistory(
                 request.write.previous_history_digest,
                 transaction_digest,
             ),
         };
         try self.store.savePrepared(.{
-            .replica = self.replica,
+            .replica = self.binding.replica,
             .write = request.write,
             .attestation = attestation,
             .data = request.data,
@@ -306,16 +293,21 @@ const ParticipantCore = struct {
         return attestation;
     }
 
-    pub fn commit(self: *ParticipantCore, transaction_id: Id, certificate_input: CommitCertificate) !CommitResult {
+    pub fn commit(self: *ParticipantCore, transaction_id: Id, certificate_input: SignedCommitCertificate) !CommitResult {
         self.lock();
         defer self.transaction_lock.unlock();
         try self.store.checkHealthy();
-        const certificate = try normalizeCertificate(certificate_input);
         var state = self.store.current();
-        try validateParticipantState(self.replica, self.replica_members, state);
+        try validateParticipantState(self.binding, state);
 
         if (state.last_completed) |completed| {
             if (std.mem.eql(u8, &completed.write.transaction_id, &transaction_id)) {
+                const certificate = try evidence_contract.verifySignedCertificate(
+                    self.binding.witness_identities,
+                    completed.write,
+                    completed.attestation,
+                    certificate_input,
+                );
                 if (!std.meta.eql(completed.certificate, certificate)) return error.CertificateConflict;
                 return completed.result;
             }
@@ -323,16 +315,22 @@ const ParticipantCore = struct {
 
         const pending = state.pending orelse return error.TransactionNotFound;
         if (!std.mem.eql(u8, &pending.write.transaction_id, &transaction_id)) return error.TransactionNotFound;
-        try validateCertificate(certificate, pending.attestation, self.replica_members);
+        const certificate = try evidence_contract.verifySignedCertificate(
+            self.binding.witness_identities,
+            pending.write,
+            pending.attestation,
+            certificate_input,
+        );
+
+        // A valid independently signed quorum decision is already durable at
+        // its witnesses. It must drain against fencing even if the live lease
+        // expired before this participant first persisted the certificate.
+        try self.admission.beginReplay(pending.write.authority);
+        defer self.admission.end();
         if (state.certificate) |existing| {
             if (!std.meta.eql(existing, certificate)) return error.CertificateConflict;
-            try self.admission.beginReplay(pending.write.authority);
-            defer self.admission.end();
             return self.applyCommitted(state);
         }
-
-        try self.admission.begin(pending.write.authority);
-        defer self.admission.end();
         try self.store.saveCommitted(certificate);
         state = self.store.current();
         return self.applyCommitted(state);
@@ -346,7 +344,7 @@ const ParticipantCore = struct {
         defer self.transaction_lock.unlock();
         try self.store.checkHealthy();
         const state = self.store.current();
-        try validateParticipantState(self.replica, self.replica_members, state);
+        try validateParticipantState(self.binding, state);
         if (state.pending == null or state.certificate == null) return null;
         const pending = state.pending.?;
         try self.admission.beginReplay(pending.write.authority);
@@ -359,7 +357,7 @@ const ParticipantCore = struct {
         defer self.transaction_lock.unlock();
         try self.store.checkHealthy();
         const state = self.store.current();
-        try validateParticipantState(self.replica, self.replica_members, state);
+        try validateParticipantState(self.binding, state);
         return .{
             .frontier = state.frontier,
             .pending = if (state.pending) |pending| .{
@@ -373,15 +371,21 @@ const ParticipantCore = struct {
     }
 
     fn applyCommitted(self: *ParticipantCore, state: State) !CommitResult {
-        try validateParticipantState(self.replica, self.replica_members, state);
+        try validateParticipantState(self.binding, state);
         const pending = state.pending orelse return error.StoreCorrupt;
         const certificate = state.certificate orelse return error.StoreCorrupt;
-        try validateCertificate(certificate, pending.attestation, self.replica_members);
+        const verified = evidence_contract.verifySignedCertificate(
+            self.binding.witness_identities,
+            pending.write,
+            pending.attestation,
+            certificate,
+        ) catch return error.StoreCorrupt;
+        const projection = evidence_contract.certificateProjection(verified) catch return error.StoreCorrupt;
         try self.backend.apply(pending.replica, pending.write.offset_bytes, pending.data);
         const result: CommitResult = .{
             .transaction_id = pending.write.transaction_id,
             .sequence = pending.write.sequence,
-            .history_digest = digestCommitHistory(pending.attestation.prepared_history_digest, certificate),
+            .history_digest = digestCommitHistory(pending.attestation.prepared_history_digest, projection),
         };
         try self.store.saveApplied(.{
             .replica = pending.replica,
@@ -416,17 +420,15 @@ fn validateReplicaSet(replica_members: [3]Id, local_member: Id) !void {
     return error.InvalidReplicaSet;
 }
 
-fn validateParticipantState(replica: ReplicaBinding, replica_members: [3]Id, state: State) !void {
-    if (state.binding) |binding|
-        if (!std.meta.eql(replica, binding.replica) or !std.meta.eql(replica_members, binding.replica_members))
-            return error.ReplicaStateMismatch;
+fn validateParticipantState(binding: ParticipantBinding, state: State) !void {
+    if (state.binding) |stored| if (!std.meta.eql(binding, stored)) return error.ReplicaStateMismatch;
     if (state.pending) |pending| {
-        if (!std.meta.eql(replica, pending.replica) or !std.meta.eql(replica_members, pending.write.replica_members))
-            return error.ReplicaStateMismatch;
+        if (!std.meta.eql(binding.replica, pending.replica) or
+            !std.meta.eql(binding.replica_members, pending.write.replica_members)) return error.ReplicaStateMismatch;
     }
     if (state.last_completed) |completed| {
-        if (!std.meta.eql(replica, completed.replica) or !std.meta.eql(replica_members, completed.write.replica_members))
-            return error.ReplicaStateMismatch;
+        if (!std.meta.eql(binding.replica, completed.replica) or
+            !std.meta.eql(binding.replica_members, completed.write.replica_members)) return error.ReplicaStateMismatch;
     }
 }
 
@@ -666,7 +668,7 @@ const MemoryStore = struct {
         self.state.certificate = null;
     }
 
-    fn saveCommittedOpaque(context: *anyopaque, certificate: CommitCertificate) !void {
+    fn saveCommittedOpaque(context: *anyopaque, certificate: SignedCommitCertificate) !void {
         const self: *MemoryStore = @ptrCast(@alignCast(context));
         if (self.state.pending == null or self.state.certificate != null) return error.StoreConflict;
         self.state.certificate = certificate;
@@ -751,13 +753,16 @@ const FileStoreInner = struct {
     lock_basename: []u8,
     lock_file: std.Io.File,
     state: State = .{},
+    legacy_binding: ?LegacyBinding = null,
     storage: []u8 = &.{},
     poisoned: bool = false,
     faults: ?*Faults = null,
 
     const magic = "ZETWRIT1".*;
-    const version: u16 = 1;
-    const metadata_size: usize = 2048;
+    const version: u16 = 2;
+    const legacy_version: u16 = 1;
+    const metadata_size: usize = 4096;
+    const legacy_metadata_size: usize = 2048;
     const checksum_size: usize = 4;
     const max_file_size: usize = metadata_size + max_payload_size + checksum_size;
 
@@ -792,6 +797,24 @@ const FileStoreInner = struct {
             else => return err,
         };
         errdefer allocator.free(bytes);
+        const file_version = if (bytes.len >= 10 and std.mem.eql(u8, bytes[0..8], &magic))
+            std.mem.readInt(u16, bytes[8..10], .little)
+        else
+            return error.StoreCorrupt;
+        if (file_version == legacy_version) {
+            const legacy_binding = try decodePristineV1(bytes);
+            return .{
+                .allocator = allocator,
+                .io = io,
+                .parent = parent,
+                .basename = basename,
+                .lock_basename = lock_basename,
+                .lock_file = lock_file,
+                .legacy_binding = legacy_binding,
+                .storage = bytes,
+            };
+        }
+        if (file_version != version) return error.StoreCorrupt;
         const state = try decodeSnapshot(bytes);
         return .{
             .allocator = allocator,
@@ -818,8 +841,16 @@ const FileStoreInner = struct {
 
     fn bind(self: *FileStoreInner, expected: ParticipantBinding) !void {
         if (self.poisoned) return error.StorePoisoned;
-        try validateReplica(expected.replica);
-        try validateReplicaSet(expected.replica_members, expected.replica.member_id);
+        try validateParticipantBinding(expected);
+        if (self.legacy_binding) |legacy| {
+            if (!std.meta.eql(legacy.replica, expected.replica) or
+                !std.meta.eql(legacy.replica_members, expected.replica_members))
+                return error.ReplicaStateMismatch;
+            const migrated: State = .{ .binding = expected };
+            try self.install(migrated);
+            self.legacy_binding = null;
+            return;
+        }
         if (self.state.binding) |existing| {
             if (!std.meta.eql(existing, expected)) return error.ReplicaStateMismatch;
             return;
@@ -860,7 +891,7 @@ const FileStoreInner = struct {
         try self.install(next);
     }
 
-    fn saveCommittedOpaque(context: *anyopaque, certificate: CommitCertificate) !void {
+    fn saveCommittedOpaque(context: *anyopaque, certificate: SignedCommitCertificate) !void {
         const self: *FileStoreInner = @ptrCast(@alignCast(context));
         if (self.poisoned) return error.StorePoisoned;
         if (self.state.pending == null or self.state.certificate != null) return error.StoreConflict;
@@ -946,13 +977,14 @@ const FileStoreInner = struct {
         var offset: usize = 24;
         putFrontier(bytes, &offset, state.frontier);
         if (state.pending) |pending| putPrepared(bytes, &offset, pending) else offset += prepared_encoded_size;
-        if (state.certificate) |certificate| putCertificate(bytes, &offset, certificate) else offset += certificate_encoded_size;
+        if (state.certificate) |certificate| putSignedCertificate(bytes, &offset, certificate) else offset += signed_certificate_encoded_size;
         if (state.last_completed) |completed| putCompleted(bytes, &offset, completed) else offset += completed_encoded_size;
         bytes[offset] = @intFromBool(state.binding != null);
         offset += 1;
         if (state.binding) |binding| {
             putReplica(bytes, &offset, binding.replica);
             for (binding.replica_members) |member| putBytes(bytes, &offset, &member);
+            for (binding.witness_identities) |identity| putIdentity(bytes, &offset, identity);
         } else offset += participant_binding_encoded_size;
         if (offset > metadata_size) return error.StoreEncodingOverflow;
         @memcpy(bytes[metadata_size..][0..payload.len], payload);
@@ -976,12 +1008,27 @@ const FileStoreInner = struct {
 
         var offset: usize = 24;
         var state: State = .{ .frontier = getFrontier(bytes, &offset) };
+        if (has_last == 0 and (state.frontier.sequence != 0 or !isZero(&state.frontier.history_digest)))
+            return error.StoreCorrupt;
         if (phase != 0) {
             state.pending = getPrepared(bytes, &offset);
             state.pending.?.data = snapshotPayload(bytes);
-        } else offset += prepared_encoded_size;
-        if (phase == 2) state.certificate = getCertificate(bytes, &offset) else offset += certificate_encoded_size;
-        if (has_last == 1) state.last_completed = getCompleted(bytes, &offset) else offset += completed_encoded_size;
+        } else {
+            if (payload_len != 0 or !isZero(bytes[offset .. offset + prepared_encoded_size])) return error.StoreCorrupt;
+            offset += prepared_encoded_size;
+        }
+        if (phase == 2) {
+            state.certificate = getSignedCertificate(bytes, &offset);
+        } else {
+            if (!isZero(bytes[offset .. offset + signed_certificate_encoded_size])) return error.StoreCorrupt;
+            offset += signed_certificate_encoded_size;
+        }
+        if (has_last == 1) {
+            state.last_completed = getCompleted(bytes, &offset);
+        } else {
+            if (!isZero(bytes[offset .. offset + completed_encoded_size])) return error.StoreCorrupt;
+            offset += completed_encoded_size;
+        }
         const has_binding = bytes[offset];
         offset += 1;
         if (has_binding > 1) return error.StoreCorrupt;
@@ -993,11 +1040,117 @@ const FileStoreInner = struct {
                     getArray(16, bytes, &offset),
                     getArray(16, bytes, &offset),
                 },
+                .witness_identities = .{
+                    getIdentity(bytes, &offset),
+                    getIdentity(bytes, &offset),
+                    getIdentity(bytes, &offset),
+                },
             };
-        } else offset += participant_binding_encoded_size;
+        } else {
+            if (!isZero(bytes[offset .. offset + participant_binding_encoded_size])) return error.StoreCorrupt;
+            offset += participant_binding_encoded_size;
+        }
         if (!isZero(bytes[offset..metadata_size])) return error.StoreCorrupt;
         try validateStoredState(state);
         return state;
+    }
+
+    fn decodePristineV1(bytes: []u8) !?LegacyBinding {
+        if (bytes.len < legacy_metadata_size + checksum_size or
+            !std.mem.eql(u8, bytes[0..8], &magic) or
+            std.mem.readInt(u16, bytes[8..10], .little) != legacy_version or
+            std.mem.readInt(u32, bytes[12..16], .little) != legacy_metadata_size or
+            !isZero(bytes[20..24])) return error.StoreCorrupt;
+        const phase = bytes[10];
+        const has_last = bytes[11];
+        if (phase > 2 or has_last > 1) return error.StoreCorrupt;
+        const payload_len = std.mem.readInt(u32, bytes[16..20], .little);
+        if (payload_len > max_payload_size or
+            bytes.len != legacy_metadata_size + @as(usize, payload_len) + checksum_size or
+            std.mem.readInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], .little) !=
+                std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size])) return error.StoreCorrupt;
+
+        var offset: usize = 24;
+        const frontier = getFrontier(bytes, &offset);
+        const prepared_start = offset;
+        offset += prepared_encoded_size;
+        const certificate_start = offset;
+        offset += certificate_encoded_size;
+        const completed_start = offset;
+        offset += legacy_completed_encoded_size;
+        const has_binding = bytes[offset];
+        offset += 1;
+        if (has_binding > 1) return error.StoreCorrupt;
+        var binding: ?LegacyBinding = null;
+        if (has_binding == 1) {
+            binding = .{
+                .replica = getReplica(bytes, &offset),
+                .replica_members = .{
+                    getArray(16, bytes, &offset), getArray(16, bytes, &offset), getArray(16, bytes, &offset),
+                },
+            };
+            validateReplica(binding.?.replica) catch return error.StoreCorrupt;
+            validateReplicaSet(binding.?.replica_members, binding.?.replica.member_id) catch return error.StoreCorrupt;
+        } else {
+            if (!isZero(bytes[offset .. offset + legacy_participant_binding_encoded_size])) return error.StoreCorrupt;
+            offset += legacy_participant_binding_encoded_size;
+        }
+        if (!isZero(bytes[offset..legacy_metadata_size])) return error.StoreCorrupt;
+
+        // Only a structurally empty unsigned state may acquire identities.
+        if (phase == 0 and has_last == 0 and payload_len == 0 and frontier.sequence == 0 and
+            isZero(&frontier.history_digest) and isZero(bytes[prepared_start .. prepared_start + prepared_encoded_size]) and
+            isZero(bytes[certificate_start .. certificate_start + certificate_encoded_size]) and
+            isZero(bytes[completed_start .. completed_start + legacy_completed_encoded_size])) return binding;
+
+        // Validate all occupied legacy records before distinguishing unsigned
+        // history from byte corruption.
+        if ((frontier.sequence == 0) != isZero(&frontier.history_digest) or
+            (has_last == 0 and (frontier.sequence != 0 or !isZero(&frontier.history_digest))))
+            return error.StoreCorrupt;
+        var pending: ?PreparedRecord = null;
+        if (phase != 0) {
+            var cursor = prepared_start;
+            pending = getPrepared(bytes, &cursor);
+            pending.?.data = bytes[legacy_metadata_size .. bytes.len - checksum_size];
+            validateReplica(pending.?.replica) catch return error.StoreCorrupt;
+            validatePrepareRequest(pending.?.replica, pending.?.write.replica_members, .{
+                .write = pending.?.write,
+                .data = pending.?.data,
+            }) catch return error.StoreCorrupt;
+            validateNextWrite(frontier, pending.?.write) catch return error.StoreCorrupt;
+            const tx = digestTransaction(pending.?.write);
+            const expected: PrepareAttestation = .{
+                .member_id = pending.?.replica.member_id,
+                .transaction_digest = tx,
+                .prepare_digest = digestPrepare(tx, pending.?.replica),
+                .prepared_history_digest = digestPreparedHistory(pending.?.write.previous_history_digest, tx),
+            };
+            if (!std.meta.eql(expected, pending.?.attestation)) return error.StoreCorrupt;
+            if (binding) |bound| if (!std.meta.eql(bound.replica, pending.?.replica) or
+                !std.meta.eql(bound.replica_members, pending.?.write.replica_members)) return error.StoreCorrupt;
+        } else if (payload_len != 0 or !isZero(bytes[prepared_start .. prepared_start + prepared_encoded_size])) return error.StoreCorrupt;
+        if (phase == 2) {
+            if (pending == null) return error.StoreCorrupt;
+            var cursor = certificate_start;
+            const certificate = getCertificate(bytes, &cursor);
+            validateCertificate(certificate, pending.?.attestation, pending.?.write.replica_members) catch return error.StoreCorrupt;
+        } else if (!isZero(bytes[certificate_start .. certificate_start + certificate_encoded_size])) return error.StoreCorrupt;
+        var completed: ?LegacyCompletedRecord = null;
+        if (has_last == 1) {
+            var cursor = completed_start;
+            completed = getLegacyCompleted(bytes, &cursor);
+            validateLegacyCompleted(frontier, binding, completed.?) catch return error.StoreCorrupt;
+        } else if (!isZero(bytes[completed_start .. completed_start + legacy_completed_encoded_size])) return error.StoreCorrupt;
+        if (pending != null and completed != null) {
+            if (!std.meta.eql(pending.?.replica, completed.?.replica) or
+                !std.meta.eql(pending.?.write.replica_members, completed.?.write.replica_members) or
+                pending.?.write.authority.write_epoch < completed.?.write.authority.write_epoch or
+                pending.?.write.authority.authority_generation < completed.?.write.authority.authority_generation or
+                pending.?.write.authority.placement_revision < completed.?.write.authority.placement_revision)
+                return error.StoreCorrupt;
+        }
+        return error.UnsignedParticipantState;
     }
 
     fn snapshotPayload(bytes: []u8) []u8 {
@@ -1006,14 +1159,27 @@ const FileStoreInner = struct {
 };
 
 const replica_encoded_size: usize = 88;
-const participant_binding_encoded_size: usize = replica_encoded_size + 3 * @sizeOf(Id);
+const legacy_participant_binding_encoded_size: usize = replica_encoded_size + 3 * @sizeOf(Id);
+const identity_encoded_size: usize = 16 + 16 + 32 + 32;
+const participant_binding_encoded_size: usize = replica_encoded_size + 3 * @sizeOf(Id) + 3 * identity_encoded_size;
 const authority_encoded_size: usize = 152;
 const write_encoded_size: usize = authority_encoded_size + 3 * @sizeOf(Id) + 104;
 const attestation_encoded_size: usize = 112;
 const certificate_encoded_size: usize = certificate_witness_count * attestation_encoded_size;
+const signed_prepare_encoded_size: usize = attestation_encoded_size + 16 + 32 + 64;
+const signed_certificate_encoded_size: usize = certificate_witness_count * signed_prepare_encoded_size;
 const prepared_encoded_size: usize = replica_encoded_size + write_encoded_size + attestation_encoded_size;
 const result_encoded_size: usize = 56;
-const completed_encoded_size: usize = replica_encoded_size + write_encoded_size + attestation_encoded_size + certificate_encoded_size + result_encoded_size;
+const completed_encoded_size: usize = replica_encoded_size + write_encoded_size + attestation_encoded_size + signed_certificate_encoded_size + result_encoded_size;
+const legacy_completed_encoded_size: usize = replica_encoded_size + write_encoded_size + attestation_encoded_size + certificate_encoded_size + result_encoded_size;
+
+const LegacyCompletedRecord = struct {
+    replica: ReplicaBinding,
+    write: WriteRequest,
+    attestation: PrepareAttestation,
+    certificate: CommitCertificate,
+    result: CommitResult,
+};
 
 fn putFrontier(bytes: []u8, offset: *usize, frontier: Frontier) void {
     putU64(bytes, offset, frontier.sequence);
@@ -1128,6 +1294,46 @@ fn getCertificate(bytes: []const u8, offset: *usize) CommitCertificate {
     return result;
 }
 
+fn putIdentity(bytes: []u8, offset: *usize, identity: WitnessIdentity) void {
+    putBytes(bytes, offset, &identity.member_id);
+    putBytes(bytes, offset, &identity.node_id);
+    putBytes(bytes, offset, &identity.key_id);
+    putBytes(bytes, offset, &identity.public_key);
+}
+
+fn getIdentity(bytes: []const u8, offset: *usize) WitnessIdentity {
+    return .{
+        .member_id = getArray(16, bytes, offset),
+        .node_id = getArray(16, bytes, offset),
+        .key_id = getArray(32, bytes, offset),
+        .public_key = getArray(32, bytes, offset),
+    };
+}
+
+fn putSignedPrepare(bytes: []u8, offset: *usize, evidence: SignedPrepareEvidence) void {
+    putAttestation(bytes, offset, evidence.attestation);
+    putBytes(bytes, offset, &evidence.signer_node_id);
+    putBytes(bytes, offset, &evidence.key_id);
+    putBytes(bytes, offset, &evidence.signature);
+}
+
+fn getSignedPrepare(bytes: []const u8, offset: *usize) SignedPrepareEvidence {
+    return .{
+        .attestation = getAttestation(bytes, offset),
+        .signer_node_id = getArray(16, bytes, offset),
+        .key_id = getArray(32, bytes, offset),
+        .signature = getArray(64, bytes, offset),
+    };
+}
+
+fn putSignedCertificate(bytes: []u8, offset: *usize, certificate: SignedCommitCertificate) void {
+    for (certificate.prepare_evidence) |evidence| putSignedPrepare(bytes, offset, evidence);
+}
+
+fn getSignedCertificate(bytes: []const u8, offset: *usize) SignedCommitCertificate {
+    return .{ .prepare_evidence = .{ getSignedPrepare(bytes, offset), getSignedPrepare(bytes, offset) } };
+}
+
 fn putPrepared(bytes: []u8, offset: *usize, prepared: PreparedRecord) void {
     putReplica(bytes, offset, prepared.replica);
     putWrite(bytes, offset, prepared.write);
@@ -1161,7 +1367,7 @@ fn putCompleted(bytes: []u8, offset: *usize, completed: CompletedRecord) void {
     putReplica(bytes, offset, completed.replica);
     putWrite(bytes, offset, completed.write);
     putAttestation(bytes, offset, completed.attestation);
-    putCertificate(bytes, offset, completed.certificate);
+    putSignedCertificate(bytes, offset, completed.certificate);
     putResult(bytes, offset, completed.result);
 }
 
@@ -1170,9 +1376,37 @@ fn getCompleted(bytes: []const u8, offset: *usize) CompletedRecord {
         .replica = getReplica(bytes, offset),
         .write = getWrite(bytes, offset),
         .attestation = getAttestation(bytes, offset),
+        .certificate = getSignedCertificate(bytes, offset),
+        .result = getResult(bytes, offset),
+    };
+}
+
+fn getLegacyCompleted(bytes: []const u8, offset: *usize) LegacyCompletedRecord {
+    return .{
+        .replica = getReplica(bytes, offset),
+        .write = getWrite(bytes, offset),
+        .attestation = getAttestation(bytes, offset),
         .certificate = getCertificate(bytes, offset),
         .result = getResult(bytes, offset),
     };
+}
+
+fn validateLegacyCompleted(frontier: Frontier, binding: ?LegacyBinding, completed: LegacyCompletedRecord) !void {
+    try validateReplica(completed.replica);
+    try validateWriteMetadata(completed.replica, completed.write.replica_members, completed.write);
+    if (binding) |bound| if (!std.meta.eql(bound.replica, completed.replica) or
+        !std.meta.eql(bound.replica_members, completed.write.replica_members)) return error.StoreCorrupt;
+    if (!std.mem.eql(u8, &completed.attestation.member_id, &completed.replica.member_id) or
+        completed.write.sequence != completed.result.sequence or
+        !std.mem.eql(u8, &completed.write.transaction_id, &completed.result.transaction_id) or
+        !std.mem.eql(u8, &completed.attestation.transaction_digest, &digestTransaction(completed.write)) or
+        !std.mem.eql(u8, &completed.attestation.prepare_digest, &digestPrepare(completed.attestation.transaction_digest, completed.replica)) or
+        !std.mem.eql(u8, &completed.attestation.prepared_history_digest, &digestPreparedHistory(completed.write.previous_history_digest, completed.attestation.transaction_digest))) return error.StoreCorrupt;
+    try validateCertificate(completed.certificate, completed.attestation, completed.write.replica_members);
+    const expected_history = digestCommitHistory(completed.attestation.prepared_history_digest, completed.certificate);
+    if (!std.mem.eql(u8, &completed.result.history_digest, &expected_history) or
+        frontier.sequence != completed.result.sequence or
+        !std.mem.eql(u8, &frontier.history_digest, &expected_history)) return error.StoreCorrupt;
 }
 
 fn putBytes(bytes: []u8, offset: *usize, value: []const u8) void {
@@ -1198,10 +1432,7 @@ fn getU64(bytes: []const u8, offset: *usize) u64 {
 }
 
 fn validateStoredState(state: State) !void {
-    if (state.binding) |binding| {
-        validateReplica(binding.replica) catch return error.StoreCorrupt;
-        validateReplicaSet(binding.replica_members, binding.replica.member_id) catch return error.StoreCorrupt;
-    }
+    if (state.binding) |binding| validateParticipantBinding(binding) catch return error.StoreCorrupt;
     if ((state.frontier.sequence == 0) != isZero(&state.frontier.history_digest)) return error.StoreCorrupt;
     if (state.certificate != null and state.pending == null) return error.StoreCorrupt;
     if (state.pending) |pending| {
@@ -1220,8 +1451,15 @@ fn validateStoredState(state: State) !void {
             .prepared_history_digest = digestPreparedHistory(pending.write.previous_history_digest, transaction_digest),
         };
         if (!std.meta.eql(expected, pending.attestation)) return error.StoreCorrupt;
-        if (state.certificate) |certificate|
-            validateCertificate(certificate, pending.attestation, pending.write.replica_members) catch return error.StoreCorrupt;
+        if (state.certificate) |certificate| {
+            const binding = state.binding orelse return error.StoreCorrupt;
+            _ = evidence_contract.verifySignedCertificate(
+                binding.witness_identities,
+                pending.write,
+                pending.attestation,
+                certificate,
+            ) catch return error.StoreCorrupt;
+        }
     }
     if (state.last_completed) |completed| {
         if (state.binding) |binding|
@@ -1238,8 +1476,15 @@ fn validateStoredState(state: State) !void {
             !std.mem.eql(u8, &completed.attestation.prepare_digest, &digestPrepare(completed.attestation.transaction_digest, completed.replica)) or
             !std.mem.eql(u8, &completed.attestation.prepared_history_digest, &digestPreparedHistory(completed.write.previous_history_digest, completed.attestation.transaction_digest)))
             return error.StoreCorrupt;
-        validateCertificate(completed.certificate, completed.attestation, completed.write.replica_members) catch return error.StoreCorrupt;
-        const expected_history = digestCommitHistory(completed.attestation.prepared_history_digest, completed.certificate);
+        const binding = state.binding orelse return error.StoreCorrupt;
+        const signed = evidence_contract.verifySignedCertificate(
+            binding.witness_identities,
+            completed.write,
+            completed.attestation,
+            completed.certificate,
+        ) catch return error.StoreCorrupt;
+        const projection = evidence_contract.certificateProjection(signed) catch return error.StoreCorrupt;
+        const expected_history = digestCommitHistory(completed.attestation.prepared_history_digest, projection);
         if (!std.mem.eql(u8, &completed.result.history_digest, &expected_history) or
             state.frontier.sequence != completed.result.sequence or
             !std.mem.eql(u8, &state.frontier.history_digest, &expected_history)) return error.StoreCorrupt;
@@ -1345,6 +1590,51 @@ fn testReplicaMembers() [3]Id {
     return .{ testId(1), testId(2), testId(3) };
 }
 
+fn testIdentity(member: u8) WitnessIdentity {
+    var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(member)) catch unreachable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    const public_key = key_pair.public_key.toBytes();
+    return .{
+        .member_id = testId(member),
+        .node_id = testId(40 + member),
+        .key_id = evidence_contract.keyId(public_key),
+        .public_key = public_key,
+    };
+}
+
+fn testIdentities() [3]WitnessIdentity {
+    return .{ testIdentity(1), testIdentity(2), testIdentity(3) };
+}
+
+fn testBinding(member: u8) ParticipantBinding {
+    return .{
+        .replica = testReplica(member),
+        .replica_members = testReplicaMembers(),
+        .witness_identities = testIdentities(),
+    };
+}
+
+fn signTestPrepare(write: WriteRequest, attestation: PrepareAttestation) SignedPrepareEvidence {
+    const member = attestation.member_id[0];
+    const identity = testIdentity(member);
+    var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(member)) catch unreachable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    const transcript = evidence_contract.prepareTranscript(identity, write, attestation);
+    return .{
+        .attestation = attestation,
+        .signer_node_id = identity.node_id,
+        .key_id = identity.key_id,
+        .signature = (key_pair.sign(&transcript, null) catch unreachable).toBytes(),
+    };
+}
+
+fn testSignedCertificate(write: WriteRequest, certificate: CommitCertificate) SignedCommitCertificate {
+    return .{ .prepare_evidence = .{
+        signTestPrepare(write, certificate.attestations[0]),
+        signTestPrepare(write, certificate.attestations[1]),
+    } };
+}
+
 fn testPrepare(authority: AuthorityBinding, data: []const u8) PrepareRequest {
     return .{ .write = .{
         .authority = authority,
@@ -1358,11 +1648,11 @@ fn testPrepare(authority: AuthorityBinding, data: []const u8) PrepareRequest {
     }, .data = data };
 }
 
-fn structuralCertificate(local: PrepareAttestation) CommitCertificate {
+fn structuralCertificate(write: WriteRequest, local: PrepareAttestation) SignedCommitCertificate {
     var remote = local;
     remote.member_id = testId(2);
     remote.prepare_digest[0] ^= 1;
-    return .{ .attestations = .{ local, remote } };
+    return testSignedCertificate(write, .{ .attestations = .{ local, remote } });
 }
 
 fn testParticipant(
@@ -1371,12 +1661,295 @@ fn testParticipant(
     backend: *FakeBackend,
     admission: *FakeAdmission,
 ) !ParticipantCore {
+    store.state.binding = testBinding(member);
     return Participant.init(
-        testReplica(member),
-        testReplicaMembers(),
+        testBinding(member),
         store.store(),
         backend.backend(),
         admission.admission(),
+    );
+}
+
+const LegacyTestPhase = enum { pristine, pending, decided, completed };
+
+fn writeLegacyV1(
+    dir: std.Io.Dir,
+    basename: []const u8,
+    binding: LegacyBinding,
+    request: PrepareRequest,
+    phase: LegacyTestPhase,
+) !void {
+    const has_pending = phase == .pending or phase == .decided;
+    const payload = if (has_pending) request.data else &.{};
+    const bytes = try std.testing.allocator.alloc(u8, FileStoreInner.legacy_metadata_size + payload.len + FileStoreInner.checksum_size);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..8], &FileStoreInner.magic);
+    std.mem.writeInt(u16, bytes[8..10], FileStoreInner.legacy_version, .little);
+    bytes[10] = if (phase == .pending) 1 else if (phase == .decided) 2 else 0;
+    bytes[11] = @intFromBool(phase == .completed);
+    std.mem.writeInt(u32, bytes[12..16], FileStoreInner.legacy_metadata_size, .little);
+    std.mem.writeInt(u32, bytes[16..20], @intCast(payload.len), .little);
+    const tx = digestTransaction(request.write);
+    const local: PrepareAttestation = .{
+        .member_id = binding.replica.member_id,
+        .transaction_digest = tx,
+        .prepare_digest = digestPrepare(tx, binding.replica),
+        .prepared_history_digest = digestPreparedHistory(request.write.previous_history_digest, tx),
+    };
+    var remote = local;
+    remote.member_id = binding.replica_members[1];
+    remote.prepare_digest[0] ^= 1;
+    const certificate = makeCommitCertificate(.{ local, remote }, tx, local.prepared_history_digest, binding.replica_members) catch unreachable;
+    const history = digestCommitHistory(local.prepared_history_digest, certificate);
+    var offset: usize = 24;
+    putFrontier(bytes, &offset, if (phase == .completed) .{ .sequence = request.write.sequence, .history_digest = history } else .{});
+    if (has_pending) putPrepared(bytes, &offset, .{
+        .replica = binding.replica,
+        .write = request.write,
+        .attestation = local,
+        .data = request.data,
+    }) else offset += prepared_encoded_size;
+    if (phase == .decided) putCertificate(bytes, &offset, certificate) else offset += certificate_encoded_size;
+    if (phase == .completed) {
+        putReplica(bytes, &offset, binding.replica);
+        putWrite(bytes, &offset, request.write);
+        putAttestation(bytes, &offset, local);
+        putCertificate(bytes, &offset, certificate);
+        putResult(bytes, &offset, .{
+            .transaction_id = request.write.transaction_id,
+            .sequence = request.write.sequence,
+            .history_digest = history,
+        });
+    } else offset += legacy_completed_encoded_size;
+    bytes[offset] = 1;
+    offset += 1;
+    putReplica(bytes, &offset, binding.replica);
+    for (binding.replica_members) |member| putBytes(bytes, &offset, &member);
+    @memcpy(bytes[FileStoreInner.legacy_metadata_size..][0..payload.len], payload);
+    std.mem.writeInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]), .little);
+    try dir.writeFile(std.testing.io, .{ .sub_path = basename, .data = bytes });
+}
+
+fn rewriteSnapshotChecksum(bytes: []u8) void {
+    std.mem.writeInt(
+        u32,
+        bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size],
+        std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]),
+        .little,
+    );
+}
+
+fn expectCorruptSnapshot(dir: std.Io.Dir, basename: []const u8, bytes: []u8) !void {
+    rewriteSnapshotChecksum(bytes);
+    try dir.writeFile(std.testing.io, .{ .sub_path = basename, .data = bytes });
+    try std.testing.expectError(
+        error.StoreCorrupt,
+        FileStore.init(std.testing.allocator, std.testing.io, dir, basename),
+    );
+}
+
+test "v1 and v2 reject CRC-valid absent-slot and frontier corruption" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const legacy: LegacyBinding = .{ .replica = testReplica(1), .replica_members = testReplicaMembers() };
+    const request = testPrepare(testAuthority(), "semantic");
+    try writeLegacyV1(tmp.dir, "legacy-base.state", legacy, request, .pristine);
+    const legacy_base = try tmp.dir.readFileAlloc(std.testing.io, "legacy-base.state", std.testing.allocator, .limited(FileStoreInner.max_file_size));
+    defer std.testing.allocator.free(legacy_base);
+    const legacy_prepared_start = 24 + 40;
+    const legacy_certificate_start = legacy_prepared_start + prepared_encoded_size;
+    const legacy_completed_start = legacy_certificate_start + certificate_encoded_size;
+    const legacy_binding_flag = legacy_completed_start + legacy_completed_encoded_size;
+    for ([_]usize{
+        legacy_prepared_start,
+        legacy_certificate_start,
+        legacy_completed_start,
+    }, 0..) |mutation_offset, index| {
+        const mutated = try std.testing.allocator.dupe(u8, legacy_base);
+        defer std.testing.allocator.free(mutated);
+        mutated[mutation_offset] = 1;
+        var name_buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "legacy-slot-{d}.state", .{index});
+        try expectCorruptSnapshot(tmp.dir, name, mutated);
+    }
+    {
+        const mutated = try std.testing.allocator.dupe(u8, legacy_base);
+        defer std.testing.allocator.free(mutated);
+        mutated[legacy_binding_flag] = 0;
+        // The now-absent fixed-width binding remains nonzero.
+        try expectCorruptSnapshot(tmp.dir, "legacy-binding.state", mutated);
+    }
+    {
+        const mutated = try std.testing.allocator.dupe(u8, legacy_base);
+        defer std.testing.allocator.free(mutated);
+        std.mem.writeInt(u64, mutated[24..32], 1, .little);
+        @memset(mutated[32..64], 0x5a);
+        try expectCorruptSnapshot(tmp.dir, "legacy-frontier.state", mutated);
+    }
+
+    var backend: FakeBackend = .{};
+    var admission: FakeAdmission = .{ .expected = testAuthority() };
+    {
+        const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "v2-base.state");
+        defer store.deinit();
+        const participant = try Participant.initFile(std.testing.allocator, testBinding(1), store, backend.backend(), admission.admission());
+        participant.deinit();
+    }
+    const v2_base = try tmp.dir.readFileAlloc(std.testing.io, "v2-base.state", std.testing.allocator, .limited(FileStoreInner.max_file_size));
+    defer std.testing.allocator.free(v2_base);
+    const v2_prepared_start = 24 + 40;
+    const v2_certificate_start = v2_prepared_start + prepared_encoded_size;
+    const v2_completed_start = v2_certificate_start + signed_certificate_encoded_size;
+    for ([_]usize{ v2_prepared_start, v2_certificate_start, v2_completed_start }, 0..) |mutation_offset, index| {
+        const mutated = try std.testing.allocator.dupe(u8, v2_base);
+        defer std.testing.allocator.free(mutated);
+        mutated[mutation_offset] = 1;
+        var name_buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "v2-slot-{d}.state", .{index});
+        try expectCorruptSnapshot(tmp.dir, name, mutated);
+    }
+    {
+        const mutated = try std.testing.allocator.dupe(u8, v2_base);
+        defer std.testing.allocator.free(mutated);
+        std.mem.writeInt(u64, mutated[24..32], 1, .little);
+        @memset(mutated[32..64], 0x6b);
+        try expectCorruptSnapshot(tmp.dir, "v2-frontier.state", mutated);
+    }
+    {
+        const empty = try FileStoreInner.encodeSnapshot(std.testing.allocator, .{});
+        defer std.testing.allocator.free(empty);
+        const binding_flag = 24 + 40 + prepared_encoded_size + signed_certificate_encoded_size + completed_encoded_size;
+        empty[binding_flag + 1] = 1;
+        try expectCorruptSnapshot(tmp.dir, "v2-binding.state", empty);
+    }
+}
+
+test "only pristine unsigned v1 participant state migrates" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const legacy: LegacyBinding = .{ .replica = testReplica(1), .replica_members = testReplicaMembers() };
+    const request = testPrepare(testAuthority(), "unsigned");
+    try writeLegacyV1(tmp.dir, "pristine.state", legacy, request, .pristine);
+    var backend: FakeBackend = .{};
+    var admission: FakeAdmission = .{ .expected = testAuthority() };
+    {
+        const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "pristine.state");
+        defer store.deinit();
+        try std.testing.expect((try store.binding()) == null);
+        const participant = try Participant.initFile(std.testing.allocator, testBinding(1), store, backend.backend(), admission.admission());
+        defer participant.deinit();
+        try std.testing.expectEqual(testBinding(1), (try store.binding()).?);
+    }
+    {
+        const reopened = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "pristine.state");
+        defer reopened.deinit();
+        try std.testing.expectEqual(testBinding(1), (try reopened.binding()).?);
+    }
+
+    for ([_]LegacyTestPhase{ .pending, .decided, .completed }) |phase| {
+        const basename = switch (phase) {
+            .pending => "pending.state",
+            .decided => "decided.state",
+            .completed => "completed.state",
+            .pristine => unreachable,
+        };
+        try writeLegacyV1(tmp.dir, basename, legacy, request, phase);
+        try std.testing.expectError(
+            error.UnsignedParticipantState,
+            FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, basename),
+        );
+    }
+}
+
+test "identity migration and signed decision mutation faults fail closed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const legacy: LegacyBinding = .{ .replica = testReplica(1), .replica_members = testReplicaMembers() };
+    const request = testPrepare(testAuthority(), "faulted");
+    try writeLegacyV1(tmp.dir, "migration.state", legacy, request, .pristine);
+    var backend: FakeBackend = .{};
+    var admission: FakeAdmission = .{ .expected = testAuthority() };
+    {
+        const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "migration.state");
+        defer store.deinit();
+        var faults: FileStore.Faults = .{ .fail_directory_sync_once = true };
+        store.setFaults(&faults);
+        try std.testing.expectError(
+            error.InjectedDirectorySyncFailure,
+            Participant.initFile(std.testing.allocator, testBinding(1), store, backend.backend(), admission.admission()),
+        );
+        try std.testing.expect(store.isPoisoned());
+    }
+    {
+        const reopened = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "migration.state");
+        defer reopened.deinit();
+        try std.testing.expectEqual(testBinding(1), (try reopened.binding()).?);
+    }
+
+    const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "decision.state");
+    defer store.deinit();
+    const participant = try Participant.initFile(std.testing.allocator, testBinding(1), store, backend.backend(), admission.admission());
+    defer participant.deinit();
+    const local = try participant.prepare(request);
+    const certificate = structuralCertificate(request.write, local);
+    var faults: FileStore.Faults = .{ .fail_replace_once = true };
+    store.setFaults(&faults);
+    try std.testing.expectError(
+        error.InjectedReplaceFailure,
+        participant.commit(request.write.transaction_id, certificate),
+    );
+    try std.testing.expect(!(try participant.inspect()).pending.?.commit_decided);
+    const result = try participant.commit(request.write.transaction_id, certificate);
+    try std.testing.expectEqual(@as(u64, 1), result.sequence);
+}
+
+test "first signed decision drains after lease expiry and forged witness fails" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var admission: FakeAdmission = .{ .expected = testAuthority() };
+    var participant = try testParticipant(1, &store, &backend, &admission);
+    const request = testPrepare(testAuthority(), "expired");
+    const local = try participant.prepare(request);
+    const valid = structuralCertificate(request.write, local);
+    var forged = valid;
+    forged.prepare_evidence[1].signature[0] ^= 1;
+    try std.testing.expectError(
+        error.InvalidEvidenceSignature,
+        participant.commit(request.write.transaction_id, forged),
+    );
+    admission.active = false;
+    const result = try participant.commit(request.write.transaction_id, valid);
+    try std.testing.expectEqual(@as(u64, 1), result.sequence);
+    try std.testing.expectEqualStrings("expired", backend.bytes[8..15]);
+}
+
+test "v2 reopen rejects mutated persisted signed certificate" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{};
+    var admission: FakeAdmission = .{ .expected = testAuthority() };
+    const request = testPrepare(testAuthority(), "signed");
+    {
+        const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "signed.state");
+        defer store.deinit();
+        const participant = try Participant.initFile(std.testing.allocator, testBinding(1), store, backend.backend(), admission.admission());
+        defer participant.deinit();
+        const local = try participant.prepare(request);
+        _ = try participant.commit(request.write.transaction_id, structuralCertificate(request.write, local));
+    }
+    var bytes = try tmp.dir.readFileAlloc(std.testing.io, "signed.state", std.testing.allocator, .limited(FileStoreInner.max_file_size));
+    defer std.testing.allocator.free(bytes);
+    const completed_start = 24 + 40 + prepared_encoded_size + signed_certificate_encoded_size;
+    const first_signature = completed_start + replica_encoded_size + write_encoded_size + attestation_encoded_size +
+        attestation_encoded_size + 16 + 32;
+    bytes[first_signature] ^= 1;
+    std.mem.writeInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]), .little);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mutated.state", .data = bytes });
+    try std.testing.expectError(
+        error.StoreCorrupt,
+        FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "mutated.state"),
     );
 }
 
@@ -1389,8 +1962,7 @@ test "opaque public Participant exposes metadata without Store state" {
     var admission: FakeAdmission = .{ .expected = testAuthority() };
     const participant = try Participant.initFile(
         std.testing.allocator,
-        testReplica(1),
-        testReplicaMembers(),
+        testBinding(1),
         store,
         backend.backend(),
         admission.admission(),
@@ -1412,15 +1984,14 @@ test "public Participant persists immutable binding before the first PREPARE" {
         defer store.deinit();
         const participant = try Participant.initFile(
             std.testing.allocator,
-            testReplica(1),
-            testReplicaMembers(),
+            testBinding(1),
             store,
             backend.backend(),
             admission.admission(),
         );
         defer participant.deinit();
         try std.testing.expectEqual(
-            ParticipantBinding{ .replica = testReplica(1), .replica_members = testReplicaMembers() },
+            testBinding(1),
             (try store.binding()).?,
         );
         try std.testing.expect((try participant.inspect()).pending == null);
@@ -1429,15 +2000,14 @@ test "public Participant persists immutable binding before the first PREPARE" {
         const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
         defer store.deinit();
         try std.testing.expectEqual(
-            ParticipantBinding{ .replica = testReplica(1), .replica_members = testReplicaMembers() },
+            testBinding(1),
             (try store.binding()).?,
         );
         try std.testing.expectError(
             error.ReplicaStateMismatch,
             Participant.initFile(
                 std.testing.allocator,
-                testReplica(2),
-                testReplicaMembers(),
+                testBinding(2),
                 store,
                 backend.backend(),
                 admission.admission(),
@@ -1456,7 +2026,8 @@ test "FileStore persists prepare apply and idempotent completion" {
     {
         var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
         defer store.deinit();
-        var participant = try Participant.init(testReplica(1), testReplicaMembers(), store.store(), backend.backend(), admission.admission());
+        try store.bind(testBinding(1));
+        var participant = try Participant.init(testBinding(1), store.store(), backend.backend(), admission.admission());
         prepared = try participant.prepare(request);
         try std.testing.expect((try participant.inspect()).pending != null);
     }
@@ -1464,18 +2035,20 @@ test "FileStore persists prepare apply and idempotent completion" {
     {
         var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
         defer store.deinit();
-        var participant = try Participant.init(testReplica(1), testReplicaMembers(), store.store(), backend.backend(), admission.admission());
-        result = try participant.commit(request.write.transaction_id, structuralCertificate(prepared));
+        try store.bind(testBinding(1));
+        var participant = try Participant.init(testBinding(1), store.store(), backend.backend(), admission.admission());
+        result = try participant.commit(request.write.transaction_id, structuralCertificate(request.write, prepared));
         try std.testing.expectEqualStrings("persist", backend.bytes[8..15]);
     }
     {
         var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
         defer store.deinit();
-        var participant = try Participant.init(testReplica(1), testReplicaMembers(), store.store(), backend.backend(), admission.admission());
+        try store.bind(testBinding(1));
+        var participant = try Participant.init(testBinding(1), store.store(), backend.backend(), admission.admission());
         const inspection = try participant.inspect();
         try std.testing.expect(inspection.pending == null);
         try std.testing.expectEqual(result, inspection.last_completed.?);
-        try std.testing.expectEqual(result, try participant.commit(request.write.transaction_id, structuralCertificate(prepared)));
+        try std.testing.expectEqual(result, try participant.commit(request.write.transaction_id, structuralCertificate(request.write, prepared)));
         try std.testing.expectEqual(prepared, try participant.prepare(request));
     }
 }
@@ -1494,11 +2067,13 @@ test "two FileStores persist prepare and certificate quorum evidence" {
         defer store_a.deinit();
         var store_b = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "b.state");
         defer store_b.deinit();
-        var a = try Participant.init(testReplica(1), testReplicaMembers(), store_a.store(), backend_a.backend(), admission_a.admission());
-        var b = try Participant.init(testReplica(2), testReplicaMembers(), store_b.store(), backend_b.backend(), admission_b.admission());
+        try store_a.bind(testBinding(1));
+        var a = try Participant.init(testBinding(1), store_a.store(), backend_a.backend(), admission_a.admission());
+        try store_b.bind(testBinding(2));
+        var b = try Participant.init(testBinding(2), store_b.store(), backend_b.backend(), admission_b.admission());
         const prepared_a = try a.prepare(request);
         const prepared_b = try b.prepare(request);
-        const certificate: CommitCertificate = .{ .attestations = .{ prepared_a, prepared_b } };
+        const certificate = testSignedCertificate(request.write, .{ .attestations = .{ prepared_a, prepared_b } });
         result = try a.commit(request.write.transaction_id, certificate);
         try std.testing.expectEqual(result, try b.commit(request.write.transaction_id, certificate));
     }
@@ -1507,8 +2082,10 @@ test "two FileStores persist prepare and certificate quorum evidence" {
         defer store_a.deinit();
         var store_b = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "b.state");
         defer store_b.deinit();
-        var a = try Participant.init(testReplica(1), testReplicaMembers(), store_a.store(), backend_a.backend(), admission_a.admission());
-        var b = try Participant.init(testReplica(2), testReplicaMembers(), store_b.store(), backend_b.backend(), admission_b.admission());
+        try store_a.bind(testBinding(1));
+        var a = try Participant.init(testBinding(1), store_a.store(), backend_a.backend(), admission_a.admission());
+        try store_b.bind(testBinding(2));
+        var b = try Participant.init(testBinding(2), store_b.store(), backend_b.backend(), admission_b.admission());
         const inspection_a = try a.inspect();
         const inspection_b = try b.inspect();
         try std.testing.expectEqual(result, inspection_a.last_completed.?);
@@ -1530,7 +2107,8 @@ test "FileStore binds persisted state and ownership to one Replica" {
             error.StateFileLocked,
             FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state"),
         );
-        var participant = try Participant.init(testReplica(1), testReplicaMembers(), store.store(), backend.backend(), admission.admission());
+        try store.bind(testBinding(1));
+        var participant = try Participant.init(testBinding(1), store.store(), backend.backend(), admission.admission());
         _ = try participant.prepare(request);
     }
     {
@@ -1538,7 +2116,7 @@ test "FileStore binds persisted state and ownership to one Replica" {
         defer store.deinit();
         try std.testing.expectError(
             error.ReplicaStateMismatch,
-            Participant.init(testReplica(2), testReplicaMembers(), store.store(), backend.backend(), admission.admission()),
+            Participant.init(testBinding(2), store.store(), backend.backend(), admission.admission()),
         );
     }
 }
@@ -1549,13 +2127,14 @@ test "FileStore retries a durable certificate after lease expiry" {
     var backend: FakeBackend = .{ .fail_sync_once = true };
     var admission: FakeAdmission = .{ .expected = testAuthority() };
     const request = testPrepare(testAuthority(), "recover");
-    var certificate: CommitCertificate = undefined;
+    var certificate: SignedCommitCertificate = undefined;
     {
         var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
         defer store.deinit();
-        var participant = try Participant.init(testReplica(1), testReplicaMembers(), store.store(), backend.backend(), admission.admission());
+        try store.bind(testBinding(1));
+        var participant = try Participant.init(testBinding(1), store.store(), backend.backend(), admission.admission());
         const prepared = try participant.prepare(request);
-        certificate = structuralCertificate(prepared);
+        certificate = structuralCertificate(request.write, prepared);
         try std.testing.expectError(
             error.InjectedSyncFailure,
             participant.commit(request.write.transaction_id, certificate),
@@ -1566,7 +2145,8 @@ test "FileStore retries a durable certificate after lease expiry" {
     {
         var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
         defer store.deinit();
-        var participant = try Participant.init(testReplica(1), testReplicaMembers(), store.store(), backend.backend(), admission.admission());
+        try store.bind(testBinding(1));
+        var participant = try Participant.init(testBinding(1), store.store(), backend.backend(), admission.admission());
         const recovered = try participant.commit(request.write.transaction_id, certificate);
         try std.testing.expectEqual(@as(u64, 1), recovered.sequence);
         try std.testing.expectEqualStrings("recover", backend.bytes[8..15]);
@@ -1582,8 +2162,9 @@ test "FileStore poisons uncertain directory sync and validates corruption" {
         var faults: FileStore.Faults = .{ .fail_directory_sync_once = true };
         var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
         defer store.deinit();
+        try store.bind(testBinding(1));
         store.setFaults(&faults);
-        var participant = try Participant.init(testReplica(1), testReplicaMembers(), store.store(), backend.backend(), admission.admission());
+        var participant = try Participant.init(testBinding(1), store.store(), backend.backend(), admission.admission());
         try std.testing.expectError(
             error.InjectedDirectorySyncFailure,
             participant.prepare(testPrepare(testAuthority(), "poison")),
@@ -1594,7 +2175,8 @@ test "FileStore poisons uncertain directory sync and validates corruption" {
     {
         var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "writes.state");
         defer store.deinit();
-        var participant = try Participant.init(testReplica(1), testReplicaMembers(), store.store(), backend.backend(), admission.admission());
+        try store.bind(testBinding(1));
+        var participant = try Participant.init(testBinding(1), store.store(), backend.backend(), admission.admission());
         try std.testing.expect((try participant.inspect()).pending != null);
     }
     const file = try tmp.dir.openFile(std.testing.io, "writes.state", .{ .mode = .read_write });
@@ -1621,7 +2203,7 @@ test "two distinct in-memory prepares certify and apply one write" {
 
     const prepared_a = try a.prepare(request);
     const prepared_b = try b.prepare(request);
-    const certificate: CommitCertificate = .{ .attestations = .{ prepared_b, prepared_a } };
+    const certificate = testSignedCertificate(request.write, .{ .attestations = .{ prepared_b, prepared_a } });
     const result_a = try a.commit(request.write.transaction_id, certificate);
     const result_b = try b.commit(request.write.transaction_id, certificate);
 
@@ -1641,7 +2223,7 @@ test "two distinct in-memory prepares certify and apply one write" {
     next.write.data_digest = digestData(next.data);
     const next_a = try a.prepare(next);
     const next_b = try b.prepare(next);
-    const next_certificate: CommitCertificate = .{ .attestations = .{ next_a, next_b } };
+    const next_certificate = testSignedCertificate(next.write, .{ .attestations = .{ next_a, next_b } });
     const next_result = try a.commit(next.write.transaction_id, next_certificate);
     _ = try b.commit(next.write.transaction_id, next_certificate);
     try std.testing.expectEqual(@as(u64, 2), next_result.sequence);
@@ -1681,7 +2263,7 @@ test "committed decision recovers without reviving the expired lease" {
     var remote = local;
     remote.member_id = testId(2);
     remote.prepare_digest[0] ^= 1;
-    const certificate: CommitCertificate = .{ .attestations = .{ local, remote } };
+    const certificate = testSignedCertificate(request.write, .{ .attestations = .{ local, remote } });
 
     try std.testing.expectError(
         error.InjectedSyncFailure,
@@ -1704,16 +2286,17 @@ test "certificate requires two distinct matching witnesses" {
     const request = testPrepare(testAuthority(), "certify");
     const local = try participant.prepare(request);
 
+    const signed_local = signTestPrepare(request.write, local);
     try std.testing.expectError(
         error.DuplicateWitness,
-        participant.commit(request.write.transaction_id, .{ .attestations = .{ local, local } }),
+        participant.commit(request.write.transaction_id, .{ .prepare_evidence = .{ signed_local, signed_local } }),
     );
     var mismatched = local;
     mismatched.member_id = testId(2);
     mismatched.transaction_digest[0] ^= 1;
     try std.testing.expectError(
         error.CertificateMismatch,
-        participant.commit(request.write.transaction_id, .{ .attestations = .{ local, mismatched } }),
+        participant.commit(request.write.transaction_id, testSignedCertificate(request.write, .{ .attestations = .{ local, mismatched } })),
     );
 
     var ineligible = local;
@@ -1721,7 +2304,7 @@ test "certificate requires two distinct matching witnesses" {
     ineligible.prepare_digest[0] ^= 1;
     try std.testing.expectError(
         error.CertificateMemberNotEligible,
-        participant.commit(request.write.transaction_id, .{ .attestations = .{ local, ineligible } }),
+        participant.commit(request.write.transaction_id, testSignedCertificate(request.write, .{ .attestations = .{ local, ineligible } })),
     );
 
     var second = local;
@@ -1732,7 +2315,7 @@ test "certificate requires two distinct matching witnesses" {
     third.prepare_digest[0] ^= 2;
     try std.testing.expectError(
         error.LocalWitnessMissing,
-        participant.commit(request.write.transaction_id, .{ .attestations = .{ second, third } }),
+        participant.commit(request.write.transaction_id, testSignedCertificate(request.write, .{ .attestations = .{ second, third } })),
     );
 }
 
@@ -1744,7 +2327,7 @@ test "completed state binds its local attestation to the Replica member" {
     var participant = try testParticipant(1, &store, &backend, &admission);
     const request = testPrepare(testAuthority(), "member");
     const local = try participant.prepare(request);
-    _ = try participant.commit(request.write.transaction_id, structuralCertificate(local));
+    _ = try participant.commit(request.write.transaction_id, structuralCertificate(request.write, local));
     store.state.last_completed.?.attestation.member_id = testId(2);
     try std.testing.expectError(error.StoreCorrupt, validateStoredState(store.state));
 }
@@ -1760,7 +2343,7 @@ test "apply rejects store state rebound after Participant initialization" {
     store.state.pending.?.replica = testReplica(2);
     try std.testing.expectError(
         error.ReplicaStateMismatch,
-        participant.commit(request.write.transaction_id, structuralCertificate(local)),
+        participant.commit(request.write.transaction_id, structuralCertificate(request.write, local)),
     );
     try std.testing.expectEqual(@as(usize, 0), backend.writes);
 }

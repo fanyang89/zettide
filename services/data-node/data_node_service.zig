@@ -376,6 +376,7 @@ const State = struct {
         source_node_id: protocol.Id,
         request_bytes: []const u8,
     ) !grpc.UnaryResponse {
+        _ = self;
         var reader: std.Io.Reader = .fixed(request_bytes);
         var request = pb.ReplicaCommitRequest.decode(&reader, allocator) catch
             return fail(allocator, .invalid_argument, "invalid Replica COMMIT request");
@@ -388,20 +389,16 @@ const State = struct {
             return fail(allocator, .invalid_argument, "invalid Replica COMMIT transaction");
         if (request.sequence == 0)
             return fail(allocator, .invalid_argument, "invalid Replica COMMIT sequence");
-        const certificate = parseCommitCertificate(request.attestations.items) catch
+        _ = parseCommitCertificate(request.attestations.items) catch
             return fail(allocator, .invalid_argument, "invalid Replica COMMIT certificate");
         if (!std.mem.eql(u8, &source_node_id, &authority.primary_node_id))
             return fail(allocator, .permission_denied, "Replica coordinator identity mismatch");
-        const writes = if (self.writes) |*value| value else return fail(allocator, .failed_precondition, "write participant manager is not configured");
-        const result = writes.commitConfigured(
-            configuration.binding,
-            configuration.backend_digest,
-            authority,
-            transaction_id,
-            request.sequence,
-            certificate,
-        ) catch |err| return replicaWriteFailure(allocator, err, "Replica COMMIT rejected");
-        return encodeResponse(allocator, commitResultProto(&result));
+        _ = configuration;
+        _ = transaction_id;
+        // M11a removes the unsigned participant COMMIT path. M11c will append
+        // signed PREPARE evidence to this internal protocol; until then the
+        // authenticated legacy wire method fails closed.
+        return fail(allocator, .failed_precondition, "signed Replica COMMIT evidence is required");
     }
 
     fn inspectReplicaWrite(
@@ -1008,10 +1005,11 @@ fn parseWriteParticipantConfiguration(value: ?pb.DataWriteParticipantBinding) !W
         break;
     };
     if (!contains_local) return error.MemberNotInReplicaSet;
-    return .{
-        .binding = .{ .replica = parsed, .replica_members = members },
-        .backend_digest = try digest(binding.backend_digest),
-    };
+    // The legacy protobuf has no controller-pinned witness identities. M11b
+    // appends them; accepting this keyless binding would re-enable unsigned
+    // participant history.
+    _ = try digest(binding.backend_digest);
+    return error.SignedIdentityRequired;
 }
 
 fn parseWriteRequest(value: ?pb.DataWriteRequest) !write_service.WriteRequest {
@@ -1384,10 +1382,12 @@ test "data-node service persists Replica lifecycle through gRPC" {
     } };
     var configure_result = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
     defer configure_result.deinit();
-    try std.testing.expect(configure_result.status.isOk());
+    // M11a deliberately rejects the legacy keyless configuration wire until
+    // M11b propagates controller-pinned witness identities.
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, configure_result.status.code);
     var configure_retry = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
     defer configure_retry.deinit();
-    try std.testing.expect(configure_retry.status.isOk());
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, configure_retry.status.code);
     participant_member_views[1] = &participant_members[0];
     var invalid_configuration = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
     defer invalid_configuration.deinit();
@@ -1430,6 +1430,33 @@ test "data-node service persists Replica lifecycle through gRPC" {
     var unsigned_inspect = try testCallUnary(&replica_channel, replicaMethodPath("Inspect"), &replica_inspect_request);
     defer unsigned_inspect.deinit();
     try std.testing.expectEqual(grpc.StatusCode.unauthenticated, unsigned_inspect.status.code);
+    // A correctly authenticated request still receives an authenticated,
+    // fail-closed keyless-binding status; the client verifies its response MAC.
+    var fail_closed_client = try replica_rpc_client.Client.init(
+        std.testing.allocator,
+        std.testing.io,
+        coordinator_node,
+        local_node,
+        coordinator_key,
+        .{},
+    );
+    defer fail_closed_client.deinit();
+    try std.testing.expectError(
+        error.InvalidArgument,
+        fail_closed_client.inspect(
+            replica_endpoint,
+            .{
+                .participant = .{
+                    .replica = replica_binding,
+                    .replica_members = participant_members,
+                },
+                .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
+            },
+            try parseAuthorityBinding(replica_inspect_request.authority),
+        ),
+    );
+    // Signed participant configuration and payload RPC resume in M11b/M11c.
+    if (configure_result.status.code == .invalid_argument) return;
     var authenticated_inspect = try testCallUnaryAuthenticated(
         &replica_channel,
         replicaMethodPath("Inspect"),

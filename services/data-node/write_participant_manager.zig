@@ -9,14 +9,44 @@ const state_suffix = ".state";
 const state_name_len = state_prefix.len + 32 + 1 + 16 + state_suffix.len;
 const catalog_basename = "write-catalog.state";
 const catalog_marker_basename = "write-catalog.required";
-const catalog_magic = "ZETWCAT2".*;
+const catalog_lock_basename = "write-catalog.state.lock";
+const catalog_magic = "ZETWCAT3".*;
+const legacy_catalog_magic = "ZETWCAT2".*;
 const catalog_marker_magic = "ZETWREQ1".*;
-const catalog_version: u16 = 2;
+const catalog_version: u16 = 3;
+const legacy_catalog_version: u16 = 2;
 const catalog_header_size: usize = 24;
-const catalog_record_size: usize = 144;
+const legacy_catalog_record_size: usize = 144;
+const catalog_identity_size: usize = 96;
+const catalog_record_size: usize = legacy_catalog_record_size + 3 * catalog_identity_size;
 const catalog_checksum_size: usize = 4;
 const max_participants: usize = 16 * 1024;
 const max_catalog_size = catalog_header_size + max_participants * catalog_record_size + catalog_checksum_size;
+
+fn openCatalogLock(io: std.Io, parent: std.Io.Dir) !std.Io.File {
+    while (true) {
+        const file = parent.openFile(io, catalog_lock_basename, .{
+            .mode = .read_write,
+            .allow_directory = false,
+            .follow_symlinks = false,
+        }) catch |open_error| switch (open_error) {
+            error.FileNotFound => parent.createFile(io, catalog_lock_basename, .{
+                .read = true,
+                .truncate = false,
+                .exclusive = true,
+                .permissions = @enumFromInt(0o600),
+            }) catch |create_error| switch (create_error) {
+                error.PathAlreadyExists => continue,
+                else => return create_error,
+            },
+            else => return open_error,
+        };
+        errdefer file.close(io);
+        if ((try file.stat(io)).kind != .file) return error.InvalidCatalogLockFile;
+        if (!try file.tryLock(io, .exclusive)) return error.StateFileLocked;
+        return file;
+    }
+}
 
 /// Owns one immutable, file-backed write participant per local Replica
 /// generation. Existing participants are discovered and any durable COMMIT is
@@ -31,6 +61,7 @@ pub const WriteParticipantManager = struct {
     fences: *protocol.fence_service.FileStore,
     backend: write_service.Backend,
     authority_validator: replica_io_gate.AuthorityValidator,
+    catalog_lock_file: std.Io.File,
     mutex: std.Io.Mutex = .init,
     entries: std.AutoHashMapUnmanaged(Key, *Entry) = .empty,
     catalog: []CatalogRecord = &.{},
@@ -84,6 +115,9 @@ pub const WriteParticipantManager = struct {
         backend: write_service.Backend,
         authority_validator: replica_io_gate.AuthorityValidator,
     ) !WriteParticipantManager {
+        const catalog_lock_file = try openCatalogLock(io, parent);
+        var lock_owned = true;
+        errdefer if (lock_owned) catalog_lock_file.close(io);
         var self: WriteParticipantManager = .{
             .allocator = allocator,
             .io = io,
@@ -93,7 +127,10 @@ pub const WriteParticipantManager = struct {
             .fences = fences,
             .backend = backend,
             .authority_validator = authority_validator,
+            .catalog_lock_file = catalog_lock_file,
         };
+        // Ownership has moved into self; all later failures release the lock.
+        lock_owned = false;
         errdefer self.deinit();
         self.catalog = try self.initializeAndReadCatalog();
         try self.recoverCatalogReplicaOperations();
@@ -106,6 +143,7 @@ pub const WriteParticipantManager = struct {
         while (iterator.next()) |entry_ptr| self.destroyEntry(entry_ptr.*);
         self.entries.deinit(self.allocator);
         if (self.catalog.len != 0) self.allocator.free(self.catalog);
+        self.catalog_lock_file.close(self.io);
         self.* = undefined;
     }
 
@@ -150,7 +188,7 @@ pub const WriteParticipantManager = struct {
         authority: protocol.AuthorityBinding,
         transaction_id: protocol.Id,
         expected_sequence: u64,
-        commit_certificate: write_service.CommitCertificate,
+        commit_certificate: write_service.SignedCommitCertificate,
     ) !write_service.CommitResult {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -195,7 +233,7 @@ pub const WriteParticipantManager = struct {
         self: *WriteParticipantManager,
         binding: write_service.ParticipantBinding,
         transaction_id: protocol.Id,
-        commit_certificate: write_service.CommitCertificate,
+        commit_certificate: write_service.SignedCommitCertificate,
     ) !write_service.CommitResult {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -526,8 +564,7 @@ pub const WriteParticipantManager = struct {
         };
         entry.participant = try write_service.Participant.initFile(
             self.allocator,
-            binding.replica,
-            binding.replica_members,
+            binding,
             store,
             self.backend,
             entry.gate.admission(),
@@ -578,6 +615,12 @@ fn encodeCatalog(
         catalogPutU64(bytes, &offset, binding.replica.offset_bytes);
         catalogPutU64(bytes, &offset, binding.replica.length_bytes);
         for (binding.replica_members) |member| catalogPutBytes(bytes, &offset, &member);
+        for (binding.witness_identities) |identity| {
+            catalogPutBytes(bytes, &offset, &identity.member_id);
+            catalogPutBytes(bytes, &offset, &identity.node_id);
+            catalogPutBytes(bytes, &offset, &identity.key_id);
+            catalogPutBytes(bytes, &offset, &identity.public_key);
+        }
     }
     std.mem.writeInt(
         u32,
@@ -588,22 +631,77 @@ fn encodeCatalog(
     return bytes;
 }
 
+const LegacyCatalogBinding = struct {
+    replica: protocol.ReplicaBinding,
+    replica_members: [3]protocol.Id,
+};
+
+fn validateLegacyCatalogBinding(binding: LegacyCatalogBinding) !void {
+    const replica = binding.replica;
+    if (isZero(&replica.volume_id) or isZero(&replica.placement_id) or
+        isZero(&replica.allocation_id) or isZero(&replica.member_id) or
+        replica.generation == 0 or replica.length_bytes == 0)
+        return error.InvalidReplica;
+    _ = std.math.add(u64, replica.offset_bytes, replica.length_bytes) catch return error.InvalidReplica;
+    try write_service.validateCanonicalReplicaMembers(binding.replica_members);
+    for (binding.replica_members) |member|
+        if (std.mem.eql(u8, &member, &replica.member_id)) return;
+    return error.InvalidReplicaSet;
+}
+
 fn decodeCatalog(
     allocator: std.mem.Allocator,
     bytes: []const u8,
 ) ![]WriteParticipantManager.CatalogRecord {
     if (bytes.len < catalog_header_size + catalog_checksum_size or
-        !std.mem.eql(u8, bytes[0..8], &catalog_magic) or
-        std.mem.readInt(u16, bytes[8..10], .little) != catalog_version or
-        std.mem.readInt(u16, bytes[10..12], .little) != catalog_record_size or
-        !isZero(bytes[16..catalog_header_size]))
-        return error.StoreCorrupt;
+        !isZero(bytes[16..catalog_header_size])) return error.StoreCorrupt;
+    const version = std.mem.readInt(u16, bytes[8..10], .little);
+    const record_size = std.mem.readInt(u16, bytes[10..12], .little);
+    const legacy = version == legacy_catalog_version and record_size == legacy_catalog_record_size and
+        std.mem.eql(u8, bytes[0..8], &legacy_catalog_magic);
+    if (!legacy and !(version == catalog_version and record_size == catalog_record_size and
+        std.mem.eql(u8, bytes[0..8], &catalog_magic))) return error.StoreCorrupt;
     const count = std.mem.readInt(u32, bytes[12..16], .little);
     if (count > max_participants or
-        bytes.len != catalog_header_size + @as(usize, count) * catalog_record_size + catalog_checksum_size or
+        bytes.len != catalog_header_size + @as(usize, count) * record_size + catalog_checksum_size or
         std.mem.readInt(u32, bytes[bytes.len - catalog_checksum_size ..][0..catalog_checksum_size], .little) !=
-            std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - catalog_checksum_size]))
-        return error.StoreCorrupt;
+            std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - catalog_checksum_size])) return error.StoreCorrupt;
+    // A non-empty v2 catalog has no signer identities. Decode and validate
+    // every fixed-width record before classifying valid history as unsigned;
+    // byte or semantic corruption must remain distinguishable.
+    if (legacy and count != 0) {
+        var seen: std.AutoHashMapUnmanaged(WriteParticipantManager.Key, void) = .empty;
+        defer seen.deinit(allocator);
+        try seen.ensureTotalCapacity(allocator, count);
+        var offset: usize = catalog_header_size;
+        var index: u32 = 0;
+        while (index < count) : (index += 1) {
+            const retired = bytes[offset];
+            if (retired > 1 or !isZero(bytes[offset + 1 .. offset + 8])) return error.StoreCorrupt;
+            offset += 8;
+            const binding: LegacyCatalogBinding = .{
+                .replica = .{
+                    .volume_id = catalogGetArray(16, bytes, &offset),
+                    .placement_id = catalogGetArray(16, bytes, &offset),
+                    .allocation_id = catalogGetArray(16, bytes, &offset),
+                    .generation = catalogGetU64(bytes, &offset),
+                    .member_id = catalogGetArray(16, bytes, &offset),
+                    .offset_bytes = catalogGetU64(bytes, &offset),
+                    .length_bytes = catalogGetU64(bytes, &offset),
+                },
+                .replica_members = .{
+                    catalogGetArray(16, bytes, &offset),
+                    catalogGetArray(16, bytes, &offset),
+                    catalogGetArray(16, bytes, &offset),
+                },
+            };
+            validateLegacyCatalogBinding(binding) catch return error.StoreCorrupt;
+            const entry = seen.getOrPutAssumeCapacity(keyOf(binding.replica));
+            if (entry.found_existing) return error.StoreCorrupt;
+        }
+        if (offset != bytes.len - catalog_checksum_size) return error.StoreCorrupt;
+        return error.UnsignedParticipantState;
+    }
     if (count == 0) return &.{};
     const result = try allocator.alloc(WriteParticipantManager.CatalogRecord, count);
     errdefer allocator.free(result);
@@ -626,6 +724,11 @@ fn decodeCatalog(
                 catalogGetArray(16, bytes, &offset),
                 catalogGetArray(16, bytes, &offset),
                 catalogGetArray(16, bytes, &offset),
+            },
+            .witness_identities = .{
+                getCatalogIdentity(bytes, &offset),
+                getCatalogIdentity(bytes, &offset),
+                getCatalogIdentity(bytes, &offset),
             },
         }, .retired = retired == 1 };
     }
@@ -654,6 +757,15 @@ fn catalogGetU64(bytes: []const u8, offset: *usize) u64 {
     return value;
 }
 
+fn getCatalogIdentity(bytes: []const u8, offset: *usize) write_service.WitnessIdentity {
+    return .{
+        .member_id = catalogGetArray(16, bytes, offset),
+        .node_id = catalogGetArray(16, bytes, offset),
+        .key_id = catalogGetArray(32, bytes, offset),
+        .public_key = catalogGetArray(32, bytes, offset),
+    };
+}
+
 fn commitRetryWrite(
     inspection: write_service.Inspection,
     transaction_id: protocol.Id,
@@ -670,25 +782,32 @@ fn isZero(bytes: []const u8) bool {
     return true;
 }
 
-fn stateName(allocator: std.mem.Allocator, replica: protocol.ReplicaBinding) ![]u8 {
-    const name = try allocator.alloc(u8, state_name_len);
+fn writeStateName(name: []u8, placement_id: protocol.Id, generation_value: u64) void {
+    std.debug.assert(name.len == state_name_len);
     var offset: usize = 0;
     @memcpy(name[offset..][0..state_prefix.len], state_prefix);
     offset += state_prefix.len;
-    putHex(name[offset..][0..32], &replica.placement_id);
+    putHex(name[offset..][0..32], &placement_id);
     offset += 32;
     name[offset] = '-';
     offset += 1;
     var generation: [8]u8 = undefined;
-    std.mem.writeInt(u64, &generation, replica.generation, .little);
+    std.mem.writeInt(u64, &generation, generation_value, .little);
     putHex(name[offset..][0..16], &generation);
     offset += 16;
     @memcpy(name[offset..][0..state_suffix.len], state_suffix);
+}
+
+fn stateName(allocator: std.mem.Allocator, replica: protocol.ReplicaBinding) ![]u8 {
+    const name = try allocator.alloc(u8, state_name_len);
+    writeStateName(name, replica.placement_id, replica.generation);
     return name;
 }
 
 fn parseStateKey(name: []const u8) !?WriteParticipantManager.Key {
-    if (std.mem.eql(u8, name, catalog_basename) or std.mem.eql(u8, name, catalog_marker_basename)) return null;
+    if (std.mem.eql(u8, name, catalog_basename) or
+        std.mem.eql(u8, name, catalog_marker_basename) or
+        std.mem.eql(u8, name, catalog_lock_basename)) return null;
     if (!std.mem.startsWith(u8, name, state_prefix)) return null;
     if (std.mem.endsWith(u8, name, state_suffix ++ ".lock")) {
         if (name.len != state_name_len + ".lock".len) return error.StoreCorrupt;
@@ -705,6 +824,9 @@ fn parseStateKey(name: []const u8) !?WriteParticipantManager.Key {
     const generation_bytes = try parseHex(8, name[offset..][0..16]);
     const generation = std.mem.readInt(u64, &generation_bytes, .little);
     if (generation == 0) return error.StoreCorrupt;
+    var canonical: [state_name_len]u8 = undefined;
+    writeStateName(&canonical, placement_id, generation);
+    if (!std.mem.eql(u8, name, &canonical)) return error.StoreCorrupt;
     return key(placement_id, generation);
 }
 
@@ -885,17 +1007,167 @@ fn prepareRequest(
     };
 }
 
-fn certificate(local: write_service.PrepareAttestation, binding: write_service.ParticipantBinding) write_service.CommitCertificate {
+fn testWitnessIdentities(members: [3]protocol.Id) [3]write_service.WitnessIdentity {
+    var result: [3]write_service.WitnessIdentity = undefined;
+    for (&result, 0..) |*identity, index| {
+        const seed: [32]u8 = @splat(@intCast(index + 1));
+        var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed) catch unreachable;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+        const public_key = key_pair.public_key.toBytes();
+        identity.* = .{
+            .member_id = members[index],
+            .node_id = testId(@intCast(40 + index)),
+            .key_id = protocol.write_evidence.keyId(public_key),
+            .public_key = public_key,
+        };
+    }
+    return result;
+}
+
+fn participantBinding(replica: protocol.ReplicaBinding) write_service.ParticipantBinding {
+    const members = canonicalMembers(replica.member_id);
+    return .{
+        .replica = replica,
+        .replica_members = members,
+        .witness_identities = testWitnessIdentities(members),
+    };
+}
+
+fn signedPrepare(
+    write: write_service.WriteRequest,
+    attestation: write_service.PrepareAttestation,
+    binding: write_service.ParticipantBinding,
+) write_service.SignedPrepareEvidence {
+    var index: usize = 0;
+    while (!std.mem.eql(u8, &binding.witness_identities[index].member_id, &attestation.member_id)) : (index += 1) {}
+    const seed: [32]u8 = @splat(@intCast(index + 1));
+    var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed) catch unreachable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    const identity = binding.witness_identities[index];
+    const transcript = protocol.write_evidence_contract.prepareTranscript(identity, write, attestation);
+    return .{
+        .attestation = attestation,
+        .signer_node_id = identity.node_id,
+        .key_id = identity.key_id,
+        .signature = (key_pair.sign(&transcript, null) catch unreachable).toBytes(),
+    };
+}
+
+fn certificate(
+    write: write_service.WriteRequest,
+    local: write_service.PrepareAttestation,
+    binding: write_service.ParticipantBinding,
+) write_service.SignedCommitCertificate {
     var remote = local;
     for (binding.replica_members) |member| if (!std.mem.eql(u8, &member, &local.member_id)) {
         remote.member_id = member;
         break;
     };
     remote.prepare_digest[0] ^= 1;
-    return if (std.mem.order(u8, &local.member_id, &remote.member_id) == .lt)
-        .{ .attestations = .{ local, remote } }
-    else
-        .{ .attestations = .{ remote, local } };
+    return .{ .prepare_evidence = .{
+        signedPrepare(write, local, binding),
+        signedPrepare(write, remote, binding),
+    } };
+}
+
+fn catalogTestBinding() write_service.ParticipantBinding {
+    return participantBinding(.{
+        .volume_id = testId(1),
+        .placement_id = testId(2),
+        .allocation_id = testId(3),
+        .generation = 1,
+        .member_id = testId(13),
+        .offset_bytes = 0,
+        .length_bytes = 4096,
+    });
+}
+
+fn legacyCatalogBytes(allocator: std.mem.Allocator, count: u32) ![]u8 {
+    const size = catalog_header_size + @as(usize, count) * legacy_catalog_record_size + catalog_checksum_size;
+    const bytes = try allocator.alloc(u8, size);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..8], &legacy_catalog_magic);
+    std.mem.writeInt(u16, bytes[8..10], legacy_catalog_version, .little);
+    std.mem.writeInt(u16, bytes[10..12], legacy_catalog_record_size, .little);
+    std.mem.writeInt(u32, bytes[12..16], count, .little);
+    var offset: usize = catalog_header_size;
+    var index: u32 = 0;
+    while (index < count) : (index += 1) {
+        offset += 8;
+        const binding = catalogTestBinding();
+        catalogPutBytes(bytes, &offset, &binding.replica.volume_id);
+        catalogPutBytes(bytes, &offset, &binding.replica.placement_id);
+        catalogPutBytes(bytes, &offset, &binding.replica.allocation_id);
+        catalogPutU64(bytes, &offset, binding.replica.generation);
+        catalogPutBytes(bytes, &offset, &binding.replica.member_id);
+        catalogPutU64(bytes, &offset, binding.replica.offset_bytes);
+        catalogPutU64(bytes, &offset, binding.replica.length_bytes);
+        for (binding.replica_members) |member| catalogPutBytes(bytes, &offset, &member);
+    }
+    std.mem.writeInt(u32, bytes[bytes.len - catalog_checksum_size ..][0..catalog_checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - catalog_checksum_size]), .little);
+    return bytes;
+}
+
+fn rewriteCatalogChecksum(bytes: []u8) void {
+    std.mem.writeInt(
+        u32,
+        bytes[bytes.len - catalog_checksum_size ..][0..catalog_checksum_size],
+        std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - catalog_checksum_size]),
+        .little,
+    );
+}
+
+test "catalog lock rejects symlinks" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "lock-target",
+        .data = "not a lock alias",
+        .flags = .{ .permissions = @enumFromInt(0o600) },
+    });
+    try tmp.dir.symLink(std.testing.io, "lock-target", catalog_lock_basename, .{});
+    try std.testing.expectError(error.SymLinkLoop, openCatalogLock(std.testing.io, tmp.dir));
+}
+
+test "catalog v3 persists identities and unsigned v2 is fail closed" {
+    const record: WriteParticipantManager.CatalogRecord = .{ .binding = catalogTestBinding() };
+    const bytes = try encodeCatalog(std.testing.allocator, &.{record});
+    defer std.testing.allocator.free(bytes);
+    const decoded = try decodeCatalog(std.testing.allocator, bytes);
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqual(record, decoded[0]);
+    try write_service.validateParticipantBinding(decoded[0].binding);
+
+    const empty_v2 = try legacyCatalogBytes(std.testing.allocator, 0);
+    defer std.testing.allocator.free(empty_v2);
+    try std.testing.expectEqual(@as(usize, 0), (try decodeCatalog(std.testing.allocator, empty_v2)).len);
+    const occupied_v2 = try legacyCatalogBytes(std.testing.allocator, 1);
+    defer std.testing.allocator.free(occupied_v2);
+    try std.testing.expectError(error.UnsignedParticipantState, decodeCatalog(std.testing.allocator, occupied_v2));
+    const duplicate_v2 = try legacyCatalogBytes(std.testing.allocator, 2);
+    defer std.testing.allocator.free(duplicate_v2);
+    try std.testing.expectError(error.StoreCorrupt, decodeCatalog(std.testing.allocator, duplicate_v2));
+
+    const Mutation = enum { retired, reserved, generation, canonical_members, range_overflow };
+    for (std.enums.values(Mutation)) |mutation| {
+        const corrupt = try std.testing.allocator.dupe(u8, occupied_v2);
+        defer std.testing.allocator.free(corrupt);
+        switch (mutation) {
+            .retired => corrupt[catalog_header_size] = 2,
+            .reserved => corrupt[catalog_header_size + 1] = 1,
+            .generation => @memset(corrupt[catalog_header_size + 56 ..][0..8], 0),
+            .canonical_members => @memcpy(
+                corrupt[catalog_header_size + 8 + 88 + 16 ..][0..16],
+                corrupt[catalog_header_size + 8 + 88 ..][0..16],
+            ),
+            .range_overflow => {
+                std.mem.writeInt(u64, corrupt[catalog_header_size + 8 + 72 ..][0..8], std.math.maxInt(u64), .little);
+                std.mem.writeInt(u64, corrupt[catalog_header_size + 8 + 80 ..][0..8], 2, .little);
+            },
+        }
+        rewriteCatalogChecksum(corrupt);
+        try std.testing.expectError(error.StoreCorrupt, decodeCatalog(std.testing.allocator, corrupt));
+    }
 }
 
 test "manager durably configures an immutable participant before writes" {
@@ -906,10 +1178,7 @@ test "manager durably configures an immutable participant before writes" {
     var replica_backend: FakeReplicaBackend = .{};
     var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
     const ensured = try replica_engine.ensureReplica(replicaRequest("0198f54d-5c2a-7000-8000-000000000004"));
-    const binding: write_service.ParticipantBinding = .{
-        .replica = ensured.replica.attestation.binding,
-        .replica_members = canonicalMembers(ensured.replica.attestation.binding.member_id),
-    };
+    const binding = participantBinding(ensured.replica.attestation.binding);
     var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
     defer fences.deinit();
     var backend: FakeBackend = .{};
@@ -926,6 +1195,19 @@ test "manager durably configures an immutable participant before writes" {
             validator.validator(),
         );
         defer manager.deinit();
+        try std.testing.expectError(
+            error.StateFileLocked,
+            WriteParticipantManager.init(
+                std.testing.allocator,
+                std.testing.io,
+                tmp.dir,
+                &replicas,
+                &replica_engine,
+                &fences,
+                backend.backend(),
+                validator.validator(),
+            ),
+        );
         var invalid_binding = binding;
         invalid_binding.replica_members = .{ @splat(0), binding.replica.member_id, testId(14) };
         try std.testing.expectError(
@@ -967,10 +1249,7 @@ test "manager completes a cataloged unbound participant on startup" {
     var replica_backend: FakeReplicaBackend = .{};
     var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
     const ensured = try replica_engine.ensureReplica(replicaRequest("0198f54d-5c2a-7000-8000-000000000004"));
-    const binding: write_service.ParticipantBinding = .{
-        .replica = ensured.replica.attestation.binding,
-        .replica_members = canonicalMembers(ensured.replica.attestation.binding.member_id),
-    };
+    const binding = participantBinding(ensured.replica.attestation.binding);
     var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
     defer fences.deinit();
     var backend: FakeBackend = .{};
@@ -1013,10 +1292,7 @@ test "startup rejects a malformed catalog before Replica recovery" {
     var replica_backend: FakeReplicaBackend = .{};
     var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
     const ensured = try replica_engine.ensureReplica(replicaRequest("0198f54d-5c2a-7000-8000-000000000004"));
-    const binding: write_service.ParticipantBinding = .{
-        .replica = ensured.replica.attestation.binding,
-        .replica_members = canonicalMembers(ensured.replica.attestation.binding.member_id),
-    };
+    const binding = participantBinding(ensured.replica.attestation.binding);
     var invalid_binding = binding;
     invalid_binding.replica_members = .{ @splat(0), binding.replica.member_id, testId(14) };
     var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
@@ -1069,10 +1345,7 @@ test "manager discovers and replays a durable COMMIT before returning" {
     const ensured = try replica_engine.ensureReplica(
         replicaRequest("0198f54d-5c2a-7000-8000-000000000004"),
     );
-    const binding: write_service.ParticipantBinding = .{
-        .replica = ensured.replica.attestation.binding,
-        .replica_members = canonicalMembers(ensured.replica.attestation.binding.member_id),
-    };
+    const binding = participantBinding(ensured.replica.attestation.binding);
 
     var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
     defer fences.deinit();
@@ -1099,9 +1372,12 @@ test "manager discovers and replays a durable COMMIT before returning" {
         defer manager.deinit();
         try manager.configure(binding, ensured.replica.attestation.backend_digest);
         const prepared = try manager.prepare(binding, request);
+        // The quorum certificate may arrive after the process-local lease
+        // window expires; the same fence drain guard still authorizes it.
+        validator.active = false;
         try std.testing.expectError(
             error.InjectedApplyFailure,
-            manager.commit(binding, request.write.transaction_id, certificate(prepared, binding)),
+            manager.commit(binding, request.write.transaction_id, certificate(request.write, prepared, binding)),
         );
         try std.testing.expect((try manager.inspect(binding)).pending.?.commit_decided);
         backend.fail_once = true;
@@ -1159,10 +1435,7 @@ test "manager discovers and replays a durable COMMIT before returning" {
     next_request.offset_bytes = 12 * 1024;
     next_request.length_bytes = 4096;
     const next_replica = (try replica_engine.ensureReplica(next_request)).replica.attestation.binding;
-    const next_binding: write_service.ParticipantBinding = .{
-        .replica = next_replica,
-        .replica_members = canonicalMembers(next_replica.member_id),
-    };
+    const next_binding = participantBinding(next_replica);
     {
         var reopened = try WriteParticipantManager.init(
             std.testing.allocator,
@@ -1222,6 +1495,63 @@ test "manager rejects an uncataloged participant state file" {
     orphan.close(std.testing.io);
     try std.testing.expectError(
         error.OrphanParticipantState,
+        WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        ),
+    );
+}
+
+test "startup rejects uppercase participant state filename aliases" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var replicas = try protocol.replica_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
+    defer replicas.deinit();
+    var replica_backend: FakeReplicaBackend = .{};
+    var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
+    var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
+    defer fences.deinit();
+    var backend: FakeBackend = .{};
+    var validator: FakeAuthorityValidator = .{ .expected = testAuthority(testId(1)) };
+    {
+        var manager = try WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        );
+        manager.deinit();
+    }
+    const replica: protocol.ReplicaBinding = .{
+        .volume_id = testId(1),
+        .placement_id = testId(0xab),
+        .allocation_id = testId(3),
+        .generation = 0xab,
+        .member_id = test_member_id,
+        .offset_bytes = 4096,
+        .length_bytes = 4096,
+    };
+    const canonical = try stateName(std.testing.allocator, replica);
+    defer std.testing.allocator.free(canonical);
+    const alias = try std.testing.allocator.dupe(u8, canonical);
+    defer std.testing.allocator.free(alias);
+    for (alias[state_prefix.len .. state_prefix.len + 32]) |*character| {
+        if (character.* >= 'a' and character.* <= 'f') character.* -= 'a' - 'A';
+    }
+    const file = try tmp.dir.createFile(std.testing.io, alias, .{});
+    file.close(std.testing.io);
+    try std.testing.expectError(
+        error.StoreCorrupt,
         WriteParticipantManager.init(
             std.testing.allocator,
             std.testing.io,

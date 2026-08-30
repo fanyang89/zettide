@@ -16,12 +16,14 @@ identity and sorts Member intervals, keeping maximum-size journal startup
 bounded rather than performing pairwise history scans.
 
 `write_service` adds the backend-neutral local participant for the future
-internal Replica protocol. It durably stages payload bytes, accepts only a
-canonical two-Member prepare certificate, persists that decision before applying
-and synchronizing the Replica extent, and can finish a decided write after
-restart without reviving an expired lease. Certified replay carries its original
-authority into the fencing gate. File-backed participants persist an immutable
-Replica/canonical-Member genesis binding before the first PREPARE. Their atomic
+internal Replica protocol. It durably stages payload bytes and accepts only two
+strictly verified Ed25519 `SignedPrepareEvidence` records from its immutable,
+canonical three-witness binding. It persists the full signed decision before
+applying and synchronizing the Replica extent. A first-time signed decision and
+restart replay both use the fencing drain guard without reviving an expired
+lease. File-backed participant v2 persists identities and the full signed
+certificate; only structurally pristine v1 state may migrate, while unsigned v1
+history is quarantined as `UnsignedParticipantState`. Their atomic
 snapshot remains a development baseline, not the final streaming journal or
 network transport. Data-node composition requires an explicitly configured
 participant binding before PREPARE/COMMIT; controller reconciliation derives the
@@ -53,10 +55,11 @@ only pristine unsigned v1 genesis; any unsigned pending/decided/history state is
 quarantined as `UnsignedCoordinatorState` rather than fabricating signatures.
 
 The coordinator is intentionally not wired into the data-node daemon or Replica
-RPC client and does not establish cross-node quorum durability. The current
-participant `CommitCertificate` and Replica RPC protobuf still carry unsigned
-attestations, so participants cannot independently validate the coordinator's
-signed evidence. Controller-proven key provenance, durable distribution,
+RPC client and does not establish cross-node quorum durability. Participant
+contracts can now independently validate a signed certificate, but the current
+controller binding protobuf and Replica RPC protobuf still carry no signing
+identities/signatures. Those legacy production seams fail closed until the next
+rollout. Controller-proven key provenance, durable distribution,
 rotation/revocation, outbound topology/credentials, production fanout,
 client-facing payload write RPC, replacement-coordinator recovery,
 confidentiality, and certified quorum repair remain future work.

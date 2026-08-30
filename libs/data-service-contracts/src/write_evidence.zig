@@ -1,40 +1,22 @@
 const std = @import("std");
 const model = @import("model.zig");
 const write_service = @import("write_service.zig");
+const contract = @import("write_evidence_contract.zig");
 
 pub const Id = model.Id;
 pub const Digest = model.Digest;
-pub const PublicKey = [32]u8;
-pub const KeyId = [32]u8;
-pub const Signature = [64]u8;
+pub const PublicKey = contract.PublicKey;
+pub const KeyId = contract.KeyId;
+pub const Signature = contract.Signature;
 pub const Seed = [32]u8;
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const protocol_version: u16 = 1;
 
-/// Public signer identity. Trust/provenance and rotation are supplied by the
-/// future controller rollout; this contract only validates exact cryptographic binding.
-pub const WitnessIdentity = struct {
-    member_id: Id,
-    node_id: Id,
-    key_id: KeyId,
-    public_key: PublicKey,
-};
-
-pub const SignedPrepareEvidence = struct {
-    attestation: write_service.PrepareAttestation,
-    signer_node_id: Id,
-    key_id: KeyId,
-    signature: Signature,
-};
-
-pub const SignedCommitEvidence = struct {
-    member_id: Id,
-    signer_node_id: Id,
-    key_id: KeyId,
-    result: write_service.CommitResult,
-    signature: Signature,
-};
+pub const WitnessIdentity = contract.WitnessIdentity;
+pub const SignedPrepareEvidence = contract.SignedPrepareEvidence;
+pub const SignedCommitEvidence = contract.SignedCommitEvidence;
+pub const SignedCommitCertificate = contract.SignedCommitCertificate;
 
 /// Seed-owning Ed25519 signer. The caller retains responsibility for scrubbing
 /// its source seed; this object never exposes private bytes and scrubs its copy.

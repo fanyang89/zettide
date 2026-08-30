@@ -59,38 +59,43 @@ all seven options keeps Replica, fence, recovery, and Member
 heartbeat operations disabled while holder/lease diagnostics remain available.
 
 This file-member backend now includes a node-local, daemon-owned write
-participant manager. It persists an immutable Replica/canonical-Member binding
-and catalog, retains retired generations for recovery evidence, validates the
-complete active Replica and physical-object generation before each 4 KiB-aligned
-positional write, synchronizes the member file, and eagerly drains
-a durable COMMIT on startup. Normal admission checks the exact live ready
-authority and durable fence; certified replay bypasses lease expiry but is
+participant manager. Its lifetime-held exclusive catalog lock prevents duplicate
+manager attachment. Catalog v3 and participant FileStore v2 persist an immutable
+Replica/canonical-Member/controller-pinned witness binding plus the
+full signed certificate. The manager retains retired generations for recovery
+evidence, validates the complete active Replica and physical-object generation
+before each 4 KiB-aligned positional write, synchronizes the member file, and
+eagerly drains a durable signed COMMIT on startup. Normal admission checks the exact live ready
+authority and durable fence; first-time certified decisions and replay bypass
+lease expiry through the same drain guard but are
 rejected after a different/higher fence. Replica mutation and fencing take the
 same participant/control barrier through the durable fence append; undecided or
 poisoned state blocks deletion/fencing, and deletion durably retires the catalog
 entry before allowing generation rollover.
 
-The internal `ConfigureWriteParticipant` control RPC now durably installs the
-same controller-derived, bytewise-canonical three-Member set on every active
-Replica before initial authority proposal, authority readiness, or stable
-authority inspection. Configuration validates the exact active Replica and its
-backend digest, is immutable and idempotent, and is cataloged before the
-participant state file is bound so startup can finish that crash window without
-hiding history. PREPARE/COMMIT remain unavailable on the management listener and
+The existing `ConfigureWriteParticipant` protobuf carries only Member IDs, not
+the three controller-pinned witness identities now required by the participant.
+M11a therefore rejects that legacy keyless configuration rather than creating
+unsigned history. M11b must append and provision identities before initial authority proposal,
+readiness, or stable authority inspection. The internal value-level configuration
+still validates the exact active Replica/backend digest, is immutable and
+idempotent, and is cataloged before the participant state file is bound. PREPARE/COMMIT remain unavailable on the management listener and
 cannot lazily create an unconfigured participant.
 
-An optional, separately bound `ReplicaTransport` gRPC server and client now
-provide PREPARE, COMMIT, and metadata-only INSPECT. Requests are HMAC-SHA-256
+The optional, separately bound legacy `ReplicaTransport` remains HMAC
+authenticated, but its unsigned COMMIT protobuf now fails closed. M11c must carry
+the original two signed PREPARE records and signed responses before payload
+mutation is re-enabled. Metadata listener separation and authentication remain.
+Requests are HMAC-SHA-256
 authenticated with receiver-scoped pairwise node keys and bind source node,
 target node, a fresh per-call challenge, method, and exact protobuf bytes. Every
 post-authentication response MAC binds that challenge plus status code, status
 message, and payload, so stale or success-to-failure substitutions fail closed.
-Captured mutation requests may still be replayed only with the same bytes and
-therefore rely on the participant's durable idempotency. Every call revalidates
-the controller-provisioned binding and current physical backend digest,
-and COMMIT additionally matches the authenticated coordinator to the durable
-PREPARE authority. Tests verify that this service and `DataService` are not
-registered on each other's listeners and exercise authenticated PREPARE/COMMIT.
+After M11c, captured mutation requests may still be replayed only with the same
+bytes and will rely on signed participant durable idempotency plus current
+physical-backend validation. Tests verify that this service and `DataService` are not
+registered on each other's listeners; M11a specifically verifies unauthenticated
+rejection and signed-evidence-required failure.
 
 The daemon can enable this listener only when the file-member composition and
 all four explicit development options are present:

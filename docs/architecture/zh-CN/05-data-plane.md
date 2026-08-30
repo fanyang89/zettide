@@ -92,28 +92,32 @@ flowchart LR
 最终内部 Replica NVMf vendor-specific command 尚未实现。当前先增加了独立于 management
 listener 的 `ReplicaTransport` gRPC seam；共享 `write_service` 提供 node-local participant：
 它校验 authority、sequence、history、range
-和 payload digest，将最多 1 MiB payload 持久化为单一未决 PREPARE，接受两个不同
-Member 的 canonical attestation certificate，先持久化 COMMIT 决定，再写入并同步本地
-Replica extent，最后推进 applied frontier。标准 NVMe command 不携带这些证据，因此
+和 payload digest，将最多 1 MiB payload 持久化为单一未决 PREPARE；COMMIT 只接受
+immutable canonical three-witness binding 中两个不同 Member 的 strict Ed25519 signed
+PREPARE evidence，先持久化完整签名决定，再写入并同步本地 Replica extent，最后推进
+applied frontier。首次收到的有效签名决定与重启 replay 都通过 fence drain guard，不能因
+lease 已过期而丢弃，但不同或更高 fence 仍会拒绝。标准 NVMe command 不携带这些证据，因此
 不能直接把当前标准 NVMf export 当成 Replica transport implementation。
 
-Data-node daemon 已组合持久 participant catalog、首次 PREPARE 前的 immutable
-Replica/canonical-Member binding、完整 active Replica/backend identity 校验、4 KiB 对齐
+Data-node 已组合 participant catalog v3、participant FileStore v2、首次 PREPARE 前的
+immutable Replica/canonical-Member/witness identity binding、完整 active Replica/backend
+identity 校验、4 KiB 对齐
 file apply，以及 normal admission、certified replay、Replica mutation 和 durable fence
 append 共用的 per-placement gate。启动在开放 server 前发现 catalog 并完成已持久 COMMIT
 replay；replay 携带旧 authority，可被不同或更高 durable fence 拒绝。非空本地 history
 不会继续伪装成 empty-frontier recovery evidence。
 
 当前 file snapshot 每次原子替换完整的单未决状态，只用于 crash-ordering 和协议测试，
-不是最终流式 journal。controller reconciliation 现已从三个 active placement/allocation
-推导 bytewise-canonical Member set，并通过内部 `ConfigureWriteParticipant` control RPC 在
-初始 authority proposal、readiness 和稳定 authority inspection 前，将同一 immutable set
-持久配置到三个 data node。配置必须匹配完整 active Replica 与 backend digest；catalog
-先于 participant file binding 持久，启动可补完该 crash window，PREPARE/COMMIT 也不能
-惰性创建未配置 participant。payload mutation 仍未暴露到 management listener。
+不是最终流式 journal。FileStore v2 仅迁移 structurally pristine v1；任何 unsigned
+pending/decided/history 返回 `UnsignedParticipantState`，不会合成历史签名。catalog v3
+持久 witness identities；非空 legacy v2 catalog 因缺少 provenance 而 fail closed。
+当前 controller 与 `ConfigureWriteParticipant` protobuf 尚只提供 Member set，因此 M11a
+显式拒绝 keyless 配置，等待 M11b 传播 controller-pinned identities。payload mutation
+仍未暴露到 management listener。
 
-可选 Replica listener 已实现 PREPARE、COMMIT 和 metadata-only INSPECT target handler，
-并有对应同步 client。每个 receiver 使用按 source Node 索引、receiver-scoped 的 pairwise
+可选 Replica listener 仍保留 PREPARE、COMMIT 和 metadata-only INSPECT 的 HMAC seam，
+但现有 protobuf 没有 signed evidence；M11a 对 keyless 配置和 unsigned COMMIT fail closed，
+等待 M11c 扩展 wire 后再启用 payload mutation。每个 receiver 使用按 source Node 索引、receiver-scoped 的 pairwise
 HMAC-SHA-256 key；request MAC 同时绑定 source Node、target Node、fresh challenge、完整
 method path 与 exact protobuf bytes。所有通过 request authentication 后的 response MAC
 绑定同一 challenge、status code/message 与 payload，因此旧 INSPECT response 或把 COMMIT
@@ -143,9 +147,9 @@ genesis 在 exact Member set 下迁移；任何 unsigned pending/decided/history
 `UnsignedCoordinatorState` fail closed。Atomic full-snapshot 仍只是开发基线。
 
 该 journal 尚未接入 daemon、Replica RPC client 或 controller topology route，也没有
-client-facing payload write RPC。当前 participant `CommitCertificate` 与 Replica RPC protobuf
-仍只携带 unsigned attestation，participant 尚不能独立验证 coordinator 保存的签名证据；
-controller 也尚未提供 key provenance、distribution、rotation 或 revocation。因此 replacement
+client-facing payload write RPC。participant contract 现在能独立验证 signed certificate，
+但 Replica RPC protobuf 尚未传输签名，controller 也尚未提供 key provenance、distribution、
+rotation 或 revocation，因此 production seam 保持 fail closed。因此 replacement
 coordinator 仍不能安全接管，development transport 也没有 confidentiality。当前仍没有
 production primary coordinator、真实 remote fanout 或 2/3 client success，这些控制面、本地
 participant、journal 和 authenticated seam 仍不等于三节点 quorum 数据路径。
