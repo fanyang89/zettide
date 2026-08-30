@@ -445,6 +445,7 @@ pub const PoolService = struct {
             .cluster_id = request.cluster_id,
             .control_endpoint = request.control_endpoint,
             .nvmf_endpoint = request.nvmf_endpoint,
+            .replica_endpoint = request.replica_endpoint,
             .failure_domain = request.failure_domain,
             .capability_bits = request.capability_bits,
             .protocol_version = request.protocol_version,
@@ -1209,7 +1210,9 @@ const RegisterNodePending = struct {
         };
         defer response.deinit(arena.allocator());
         switch (response.code) {
-            .REGISTER_NODE_APPLY_CODE_REGISTERED => {
+            .REGISTER_NODE_APPLY_CODE_REGISTERED,
+            .REGISTER_NODE_APPLY_CODE_REPLICA_ENDPOINT_FILLED,
+            => {
                 const node = response.node orelse {
                     self.completion.invoke(internalError());
                     return;
@@ -2095,6 +2098,7 @@ fn testRegisterNodeRequest(request_id: []const u8, node_id: []const u8, cluster_
         .cluster_id = cluster_id,
         .control_endpoint = control_endpoint,
         .nvmf_endpoint = "127.0.0.1:4420",
+        .replica_endpoint = "127.0.0.1:7443",
         .failure_domain = "rack-a",
         .capability_bits = 5,
         .protocol_version = 1,

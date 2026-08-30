@@ -48,7 +48,7 @@ fencing、failover、repair 和 republish。
 | Catalog | 部分 | multi-Volume catalog、extent mapping、writable backend 和 endpoint registry 已存在；在线扩容/保护迁移未接线 |
 | SPDK | 部分 | managed runtime、provider bdev、Catalog NVMf TCP/RDMA export、vhost-user-blk 与 initiator wrapper 有 focused tests |
 | `zettide-controller` | 基础 | Pool/Node/Member/Volume metadata、heartbeat、Raft/WAL/snapshot/ReadIndex、placement、authority/lease state machine 与 leader reconciliation 已接线；公开 Lease/Publication API 仍不存在 |
-| Tier 3 Replica protocol | 基础 | 三节点 file Replica fencing/authority 生命周期与 restart failover 已验证；controller 配置 canonical three-Member set，daemon 组合持久 participant、active-Replica file apply 与共享 fence/replay gate；另有尚未 daemon-enabled 的独立 pairwise-HMAC Replica gRPC seam 和单节点 PREPARE/COMMIT E2E；仍无 confidentiality、key lifecycle、vendor-specific NVMf commands、跨节点 coordinator、独立签名 attestation、quorum recovery/repair 或 publication |
+| Tier 3 Replica protocol | 基础 | 三节点 file Replica fencing/authority 生命周期与 restart failover 已验证；controller 配置 canonical three-Member set，daemon 组合持久 participant、active-Replica file apply 与共享 fence/replay gate；daemon 可从启动时加载、owner-only 的 receiver-scoped key file 启动独立 pairwise-HMAC Replica gRPC listener，并把 endpoint 持久注册到 controller；仍无 confidentiality、在线 key rotation、vendor-specific NVMf commands、跨节点 coordinator、独立签名 attestation、quorum recovery/repair 或 publication |
 | TxFS shared qcow2 | 部分 | transaction、SCSI CAW/data transport、voting 和 allocator 基础存在；POSIX/FUSE 与 qtr 未接线 |
 
 ## 两种 Pool
@@ -63,7 +63,7 @@ fencing、failover、repair 和 republish。
 ## 两种 NVMf
 
 - **标准 host-facing NVMf publication**：Catalog Volume 到虚拟化 host 的标准 NVMe block interface，支持 TCP/RDMA；当前已有部分实现。
-- **内部 Replica transport**：Tier 3 primary 到 Replica 的协议，需要携带 Zettide epoch、sequence 和 commit evidence；当前 controller 已配置 canonical set，daemon 已有 node-local participant manager 与 gated file apply，并新增独立 pairwise-HMAC gRPC 协议 seam，但尚未完成 daemon key/config rollout、真实跨节点 coordinator 或最终 NVMf transport。
+- **内部 Replica transport**：Tier 3 primary 到 Replica 的协议，需要携带 Zettide epoch、sequence 和 commit evidence；当前 controller 已配置 canonical set，daemon 已有 node-local participant manager、gated file apply、显式 plaintext-development opt-in、receiver-scoped key file 与持久注册的独立 Replica endpoint，但尚未实现 confidentiality、在线 key rotation、真实跨节点 coordinator 或最终 NVMf transport。
 
 标准 NVMf export 的存在不证明 Tier 3 Replica protocol 已实现；反过来，Tier 3 设计也不能把标准 host-facing NVMf 写成仅供内部使用。
 

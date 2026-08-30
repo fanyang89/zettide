@@ -51,6 +51,7 @@ pub const Node = struct {
     cluster_id: []u8,
     control_endpoint: []u8,
     nvmf_endpoint: []u8,
+    replica_endpoint: []u8,
     failure_domain: []u8,
     capability_bits: u64,
     protocol_version: u32,
@@ -66,12 +67,15 @@ pub const Node = struct {
         errdefer allocator.free(control_endpoint);
         const nvmf_endpoint = try allocator.dupe(u8, source.nvmf_endpoint);
         errdefer allocator.free(nvmf_endpoint);
+        const replica_endpoint = try allocator.dupe(u8, source.replica_endpoint);
+        errdefer allocator.free(replica_endpoint);
         const failure_domain = try allocator.dupe(u8, source.failure_domain);
         return .{
             .id = id,
             .cluster_id = cluster_id,
             .control_endpoint = control_endpoint,
             .nvmf_endpoint = nvmf_endpoint,
+            .replica_endpoint = replica_endpoint,
             .failure_domain = failure_domain,
             .capability_bits = source.capability_bits,
             .protocol_version = source.protocol_version,
@@ -85,6 +89,7 @@ pub const Node = struct {
         allocator.free(self.cluster_id);
         allocator.free(self.control_endpoint);
         allocator.free(self.nvmf_endpoint);
+        allocator.free(self.replica_endpoint);
         allocator.free(self.failure_domain);
         self.* = undefined;
     }
@@ -95,6 +100,7 @@ pub const Node = struct {
             .cluster_id = self.cluster_id,
             .control_endpoint = self.control_endpoint,
             .nvmf_endpoint = self.nvmf_endpoint,
+            .replica_endpoint = self.replica_endpoint,
             .failure_domain = self.failure_domain,
             .capability_bits = self.capability_bits,
             .protocol_version = self.protocol_version,

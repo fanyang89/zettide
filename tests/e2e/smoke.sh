@@ -19,8 +19,10 @@ for _ in {1..90}; do
         -d '{"pageSize":100}' "$ZETTIDE_CONTROLLER_ENDPOINT" \
         zettide.controller.v1.NodeService/ListNodes 2>/dev/null); then
         registered_count=$(jq -r --argjson ids "$(printf '%s\n' "${node_ids[@]}" | jq -R . | jq -s .)" \
-            '[.nodes[]?.id | select(. as $id | $ids | index($id))] | length' <<<"$nodes")
-        [[ $registered_count == "${#node_ids[@]}" ]] && { registered=true; break; }
+            '[.nodes[]? | select(.id as $id | $ids | index($id)) | select((.replicaEndpoint // "") | test(":7443$"))] | length' <<<"$nodes")
+        replica_endpoint_count=$(jq -r --argjson ids "$(printf '%s\n' "${node_ids[@]}" | jq -R . | jq -s .)" \
+            '[.nodes[]? | select(.id as $id | $ids | index($id)) | .replicaEndpoint] | unique | length' <<<"$nodes")
+        [[ $registered_count == "${#node_ids[@]}" && $replica_endpoint_count == "${#node_ids[@]}" ]] && { registered=true; break; }
     fi
     sleep 1
 done
@@ -28,7 +30,23 @@ done
     echo "three data-nodes were not registered with the controller" >&2
     exit 1
 }
-echo "controller node registration: ok (${#node_ids[@]} nodes)"
+echo "controller node registration: ok (${#node_ids[@]} nodes with Replica endpoints)"
+
+mapfile -t replica_endpoints < <(jq -r --argjson ids "$(printf '%s\n' "${node_ids[@]}" | jq -R . | jq -s .)" \
+    '.nodes[]? | select(.id as $id | $ids | index($id)) | .replicaEndpoint' <<<"$nodes")
+for endpoint in "${replica_endpoints[@]}"; do
+    if unauthenticated=$(grpcurl -max-time 2 -plaintext -import-path /proto -proto /proto/zettide/controller/v1/data_service.proto \
+        -d '{}' "$endpoint" zettide.controller.v1.ReplicaTransport/Inspect 2>&1); then
+        echo "unauthenticated Replica INSPECT unexpectedly succeeded at $endpoint" >&2
+        exit 1
+    fi
+    grep -Fq 'Code: Unauthenticated' <<<"$unauthenticated" || {
+        echo "Replica listener did not fail closed for unauthenticated INSPECT at $endpoint" >&2
+        echo "$unauthenticated" >&2
+        exit 1
+    }
+done
+echo "Replica listener authentication rejection: ok (${#replica_endpoints[@]} nodes)"
 
 pool_id=$(</bootstrap/pool-id)
 member_registered=false

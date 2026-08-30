@@ -122,11 +122,17 @@ participant 的持久幂等语义收敛。每次调用在 participant mutation �
 controller-provisioned binding 与当前 physical backend digest；COMMIT 还必须匹配 durable
 PREPARE 中的 authority 和已认证 source Node。
 
-该 listener 尚未由 production daemon 参数启用，也没有 durable key distribution/rotation
-或传输保密；certificate attestation 本身也未独立签名。当前只有单节点 loopback
-PREPARE/COMMIT transport E2E，没有 primary coordinator、真实 remote fanout 或 2/3 client
-success。因此这些控制面、本地 participant 和 authenticated seam 仍不等于三节点 quorum
-数据路径。
+Daemon 现在可通过完整 `--replica-listen`、`--replica-advertise`、
+`--replica-key-file` 和显式 `--replica-allow-plaintext true` 组合启用 listener；缺少任一项、
+未启用 file Replica composition 或 key file malformed/zero/duplicate/local-peer 都会 fail
+closed。Key file 以 source Node 为索引并按 receiver 隔离，替换后需重启；advertised
+Replica endpoint 进入 controller Node metadata、snapshot 和 restart recovery。Docker
+三节点 profile 验证三个 listener 已启动且 unauthenticated INSPECT 被拒绝。
+
+该 development transport 仍没有 confidentiality 或在线 key rotation；certificate
+attestation 本身也未独立签名。当前只有单节点 authenticated PREPARE/COMMIT transport E2E，
+没有 primary coordinator、真实 remote fanout 或 2/3 client success。因此这些控制面、本地
+participant 和 authenticated seam 仍不等于三节点 quorum 数据路径。
 
 目标 vendor-specific command 至少携带：
 

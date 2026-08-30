@@ -759,7 +759,24 @@ pub const PoolStateMachine = struct {
             return .{ .response = try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_REQUEST_LIMIT, null) };
         }
 
-        if (self.state.nodes_by_id.get(command.node_id)) |existing| {
+        if (self.state.nodes_by_id.getPtr(command.node_id)) |existing| {
+            if (existing.replica_endpoint.len == 0 and command.replica_endpoint.len != 0 and
+                nodeRegistrationMatchesCommand(existing.*, command))
+            {
+                const replica_endpoint = try self.allocator.dupe(u8, command.replica_endpoint);
+                errdefer self.allocator.free(replica_endpoint);
+                var updated = existing.proto();
+                updated.replica_endpoint = replica_endpoint;
+                const result = try self.recordNodeResponse(
+                    command,
+                    fingerprint,
+                    try encodeRegisterNodeApplyResponse(self.allocator, .REGISTER_NODE_APPLY_CODE_REPLICA_ENDPOINT_FILLED, updated),
+                    revision,
+                );
+                self.allocator.free(existing.replica_endpoint);
+                existing.replica_endpoint = replica_endpoint;
+                return result;
+            }
             return self.recordNodeResponse(
                 command,
                 fingerprint,
@@ -781,6 +798,7 @@ pub const PoolStateMachine = struct {
             .cluster_id = command.cluster_id,
             .control_endpoint = command.control_endpoint,
             .nvmf_endpoint = command.nvmf_endpoint,
+            .replica_endpoint = command.replica_endpoint,
             .failure_domain = command.failure_domain,
             .capability_bits = command.capability_bits,
             .protocol_version = command.protocol_version,
@@ -1946,6 +1964,10 @@ pub const PoolStateMachine = struct {
         defer created_pool_ids.deinit(self.allocator);
         var registered_node_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer registered_node_ids.deinit(self.allocator);
+        var nodes_needing_replica_endpoint_fill: std.StringHashMapUnmanaged(void) = .empty;
+        defer nodes_needing_replica_endpoint_fill.deinit(self.allocator);
+        var nodes_with_replica_endpoint_fill: std.StringHashMapUnmanaged(void) = .empty;
+        defer nodes_with_replica_endpoint_fill.deinit(self.allocator);
         var registered_member_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer registered_member_ids.deinit(self.allocator);
         var created_volume_ids: std.StringHashMapUnmanaged(void) = .empty;
@@ -1972,6 +1994,15 @@ pub const PoolStateMachine = struct {
                         if (registered_node_ids.contains(id)) return error.PayloadParseFailed;
                         try registered_node_ids.put(self.allocator, id, {});
                     },
+                    .node_needs_replica_endpoint_fill => |id| {
+                        if (registered_node_ids.contains(id)) return error.PayloadParseFailed;
+                        try registered_node_ids.put(self.allocator, id, {});
+                        try nodes_needing_replica_endpoint_fill.put(self.allocator, id, {});
+                    },
+                    .node_replica_endpoint_filled => |id| {
+                        if (nodes_with_replica_endpoint_fill.contains(id)) return error.PayloadParseFailed;
+                        try nodes_with_replica_endpoint_fill.put(self.allocator, id, {});
+                    },
                     .member => |id| {
                         if (registered_member_ids.contains(id)) return error.PayloadParseFailed;
                         try registered_member_ids.put(self.allocator, id, {});
@@ -1987,6 +2018,13 @@ pub const PoolStateMachine = struct {
                 }
             }
         }
+        if (nodes_needing_replica_endpoint_fill.count() != nodes_with_replica_endpoint_fill.count())
+            return error.PayloadParseFailed;
+        var fill_iterator = nodes_needing_replica_endpoint_fill.keyIterator();
+        while (fill_iterator.next()) |node_id| {
+            if (!nodes_with_replica_endpoint_fill.contains(node_id.*)) return error.PayloadParseFailed;
+        }
+
         var request_backed_tombstone_count: usize = 0;
         var restored_tombstone_iterator = restored.volume_tombstones_by_id.valueIterator();
         while (restored_tombstone_iterator.next()) |tombstone| if (tombstone.volume.lifecycle_state != .VOLUME_LIFECYCLE_STATE_DELETING) {
@@ -2203,6 +2241,7 @@ fn validateRegisterNodeCommand(command: pb.RegisterNodeCommand) raft.Error!void 
     if (!validClusterId(command.cluster_id)) return error.PayloadParseFailed;
     if (!validText(command.control_endpoint, max_node_endpoint_bytes, false)) return error.PayloadParseFailed;
     if (!validText(command.nvmf_endpoint, max_node_endpoint_bytes, false)) return error.PayloadParseFailed;
+    if (!validText(command.replica_endpoint, max_node_endpoint_bytes, true)) return error.PayloadParseFailed;
     if (!validText(command.failure_domain, max_failure_domain_bytes, false)) return error.PayloadParseFailed;
     if (command.protocol_version == 0 or command.proposed_registered_at_unix_ms <= 0) return error.PayloadParseFailed;
 }
@@ -2212,6 +2251,7 @@ fn validateNode(node: pb.Node) raft.Error!void {
     if (!validClusterId(node.cluster_id)) return error.PayloadParseFailed;
     if (!validText(node.control_endpoint, max_node_endpoint_bytes, false)) return error.PayloadParseFailed;
     if (!validText(node.nvmf_endpoint, max_node_endpoint_bytes, false)) return error.PayloadParseFailed;
+    if (!validText(node.replica_endpoint, max_node_endpoint_bytes, true)) return error.PayloadParseFailed;
     if (!validText(node.failure_domain, max_failure_domain_bytes, false)) return error.PayloadParseFailed;
     if (node.protocol_version == 0 or node.registered_at_unix_ms <= 0 or node.registered_revision == 0) return error.PayloadParseFailed;
 }
@@ -2429,6 +2469,9 @@ fn registerNodeFingerprint(command: pb.RegisterNodeCommand) Fingerprint {
     hashField(&hasher, command.cluster_id);
     hashField(&hasher, command.control_endpoint);
     hashField(&hasher, command.nvmf_endpoint);
+    // Preserve the pre-Replica-endpoint fingerprint for legacy commands and
+    // snapshots where the newly added protobuf field decodes as empty.
+    if (command.replica_endpoint.len != 0) hashField(&hasher, command.replica_endpoint);
     hashField(&hasher, command.failure_domain);
     hashInt(&hasher, u64, command.capability_bits);
     hashInt(&hasher, u32, command.protocol_version);
@@ -2890,6 +2933,8 @@ fn validVolumeAttachmentState(value: pb.VolumeAttachmentState) bool {
 const RestoredCreation = union(enum) {
     pool: []const u8,
     node: []const u8,
+    node_needs_replica_endpoint_fill: []const u8,
+    node_replica_endpoint_filled: []const u8,
     member: []const u8,
     volume: []const u8,
     volume_deleted: []const u8,
@@ -2938,13 +2983,13 @@ fn restoreRequest(
             var response_reader: std.Io.Reader = .fixed(source.encoded_response);
             var response = pb.RegisterNodeApplyResponse.decode(&response_reader, decode_allocator) catch |err| return mapDecodeError(err);
             defer response.deinit(decode_allocator);
-            const registered_node_id = try validateStoredNodeResponse(state, command, response, source.applied_revision);
+            const node_event = try validateStoredNodeResponse(state, command, response, source.applied_revision);
             const encoded_response = try encodeRegisterNodeApplyResponse(allocator, response.code, response.node);
             errdefer allocator.free(encoded_response);
             const encoded_command = try encodeRegisterNodeCommand(allocator, command);
             errdefer allocator.free(encoded_command);
             try insertRestoredRequest(allocator, state, source, .register_node, encoded_response, encoded_command);
-            return if (registered_node_id) |id| RestoredCreation{ .node = id } else null;
+            return node_event;
         },
         .register_member => |command| {
             if (snapshot_version < 4) return error.PayloadParseFailed;
@@ -3146,16 +3191,17 @@ fn validateStoredNodeResponse(
     command: pb.RegisterNodeCommand,
     response: pb.RegisterNodeApplyResponse,
     applied_revision: u64,
-) raft.Error!?[]const u8 {
+) raft.Error!?RestoredCreation {
     switch (response.code) {
         .REGISTER_NODE_APPLY_CODE_REGISTERED => {
             const response_node = response.node orelse return error.PayloadParseFailed;
             const stored_node = state.nodes_by_id.get(response_node.id) orelse return error.PayloadParseFailed;
-            if (!nodesEqual(stored_node.proto(), response_node) or
+            if (!nodesEqualExceptReplicaEndpoint(stored_node.proto(), response_node) or
                 !std.mem.eql(u8, command.node_id, response_node.id) or
                 !std.mem.eql(u8, command.cluster_id, response_node.cluster_id) or
                 !std.mem.eql(u8, command.control_endpoint, response_node.control_endpoint) or
                 !std.mem.eql(u8, command.nvmf_endpoint, response_node.nvmf_endpoint) or
+                !std.mem.eql(u8, command.replica_endpoint, response_node.replica_endpoint) or
                 !std.mem.eql(u8, command.failure_domain, response_node.failure_domain) or
                 command.capability_bits != response_node.capability_bits or
                 command.protocol_version != response_node.protocol_version or
@@ -3164,14 +3210,40 @@ fn validateStoredNodeResponse(
             {
                 return error.PayloadParseFailed;
             }
-            return stored_node.id;
+            if (response_node.replica_endpoint.len != 0 and
+                !std.mem.eql(u8, stored_node.replica_endpoint, response_node.replica_endpoint))
+                return error.PayloadParseFailed;
+            return if (response_node.replica_endpoint.len == 0 and stored_node.replica_endpoint.len != 0)
+                RestoredCreation{ .node_needs_replica_endpoint_fill = stored_node.id }
+            else
+                RestoredCreation{ .node = stored_node.id };
         },
-        .REGISTER_NODE_APPLY_CODE_ID_EXISTS => {
+        .REGISTER_NODE_APPLY_CODE_REPLICA_ENDPOINT_FILLED => {
             const response_node = response.node orelse return error.PayloadParseFailed;
             const stored_node = state.nodes_by_id.get(response_node.id) orelse return error.PayloadParseFailed;
             if (!nodesEqual(stored_node.proto(), response_node) or
                 !std.mem.eql(u8, command.node_id, response_node.id) or
+                !std.mem.eql(u8, command.cluster_id, response_node.cluster_id) or
+                !std.mem.eql(u8, command.control_endpoint, response_node.control_endpoint) or
+                !std.mem.eql(u8, command.nvmf_endpoint, response_node.nvmf_endpoint) or
+                !std.mem.eql(u8, command.replica_endpoint, response_node.replica_endpoint) or
+                !std.mem.eql(u8, command.failure_domain, response_node.failure_domain) or
+                command.capability_bits != response_node.capability_bits or
+                command.protocol_version != response_node.protocol_version or
                 response_node.registered_revision >= applied_revision)
+            {
+                return error.PayloadParseFailed;
+            }
+            return RestoredCreation{ .node_replica_endpoint_filled = stored_node.id };
+        },
+        .REGISTER_NODE_APPLY_CODE_ID_EXISTS => {
+            const response_node = response.node orelse return error.PayloadParseFailed;
+            const stored_node = state.nodes_by_id.get(response_node.id) orelse return error.PayloadParseFailed;
+            if (!nodesEqualExceptReplicaEndpoint(stored_node.proto(), response_node) or
+                !std.mem.eql(u8, command.node_id, response_node.id) or
+                response_node.registered_revision >= applied_revision or
+                (response_node.replica_endpoint.len != 0 and
+                    !std.mem.eql(u8, stored_node.replica_endpoint, response_node.replica_endpoint)))
             {
                 return error.PayloadParseFailed;
             }
@@ -3494,11 +3566,33 @@ fn poolsEqual(lhs: pb.Pool, rhs: pb.Pool) bool {
         lhs.created_revision == rhs.created_revision;
 }
 
+fn nodeRegistrationMatchesCommand(node: Node, command: pb.RegisterNodeCommand) bool {
+    return std.mem.eql(u8, node.cluster_id, command.cluster_id) and
+        std.mem.eql(u8, node.control_endpoint, command.control_endpoint) and
+        std.mem.eql(u8, node.nvmf_endpoint, command.nvmf_endpoint) and
+        std.mem.eql(u8, node.failure_domain, command.failure_domain) and
+        node.capability_bits == command.capability_bits and
+        node.protocol_version == command.protocol_version;
+}
+
+fn nodesEqualExceptReplicaEndpoint(lhs: pb.Node, rhs: pb.Node) bool {
+    return std.mem.eql(u8, lhs.id, rhs.id) and
+        std.mem.eql(u8, lhs.cluster_id, rhs.cluster_id) and
+        std.mem.eql(u8, lhs.control_endpoint, rhs.control_endpoint) and
+        std.mem.eql(u8, lhs.nvmf_endpoint, rhs.nvmf_endpoint) and
+        std.mem.eql(u8, lhs.failure_domain, rhs.failure_domain) and
+        lhs.capability_bits == rhs.capability_bits and
+        lhs.protocol_version == rhs.protocol_version and
+        lhs.registered_at_unix_ms == rhs.registered_at_unix_ms and
+        lhs.registered_revision == rhs.registered_revision;
+}
+
 fn nodesEqual(lhs: pb.Node, rhs: pb.Node) bool {
     return std.mem.eql(u8, lhs.id, rhs.id) and
         std.mem.eql(u8, lhs.cluster_id, rhs.cluster_id) and
         std.mem.eql(u8, lhs.control_endpoint, rhs.control_endpoint) and
         std.mem.eql(u8, lhs.nvmf_endpoint, rhs.nvmf_endpoint) and
+        std.mem.eql(u8, lhs.replica_endpoint, rhs.replica_endpoint) and
         std.mem.eql(u8, lhs.failure_domain, rhs.failure_domain) and
         lhs.capability_bits == rhs.capability_bits and
         lhs.protocol_version == rhs.protocol_version and
@@ -3970,6 +4064,7 @@ fn testNodeCommand(request_id: []const u8, node_id: []const u8, control_endpoint
         .cluster_id = &test_cluster_id,
         .control_endpoint = control_endpoint,
         .nvmf_endpoint = "127.0.0.1:4420",
+        .replica_endpoint = "127.0.0.1:7443",
         .failure_domain = "rack-a",
         .capability_bits = 5,
         .protocol_version = 1,
@@ -5393,6 +5488,7 @@ test "replica placement restore rejects same node and failure domain" {
         .cluster_id = &test_cluster_id,
         .control_endpoint = "127.0.0.2:9000",
         .nvmf_endpoint = "127.0.0.2:4420",
+        .replica_endpoint = "127.0.0.2:7443",
         .failure_domain = "rack-a",
         .capability_bits = 5,
         .protocol_version = 1,
@@ -6386,6 +6482,86 @@ test "request ids conflict across pool and node command kinds" {
     var pool_response = try decodeApplyResponse(allocator, pool_conflict.response.?);
     defer pool_response.deinit(allocator);
     try std.testing.expectEqual(pb.ApplyCode.APPLY_CODE_REQUEST_CONFLICT, pool_response.code);
+}
+
+test "legacy node registration can durably fill only its empty replica endpoint" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    const node_id = "0198f54d-5c2a-7000-8000-000000000011";
+    var original_command = testNodeCommand(
+        "node-request-1",
+        node_id,
+        "127.0.0.1:9000",
+        1_753_744_000_000,
+    );
+    original_command.replica_endpoint = "";
+    var original = try applyTestNodeCommand(allocator, &machine, 1, original_command);
+    defer original.deinit(allocator);
+    var legacy_snapshot = try machine.stateMachine().takeSnapshot(allocator, 1, 1, .{});
+    defer legacy_snapshot.deinit(allocator);
+    var upgraded = PoolStateMachine.init(allocator);
+    defer upgraded.deinit();
+    var legacy_reader = TestSnapshotReader{ .data = legacy_snapshot.data };
+    try upgraded.stateMachine().restoreSnapshot(legacy_snapshot.metadata, legacy_reader.reader());
+
+    var mismatched_command = original_command;
+    mismatched_command.request_id = "node-request-mismatch";
+    mismatched_command.control_endpoint = "127.0.0.2:9000";
+    mismatched_command.replica_endpoint = "127.0.0.1:7443";
+    var mismatched = try applyTestNodeCommand(allocator, &upgraded, 2, mismatched_command);
+    defer mismatched.deinit(allocator);
+    var mismatched_response = try decodeRegisterNodeApplyResponse(allocator, mismatched.response.?);
+    defer mismatched_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterNodeApplyCode.REGISTER_NODE_APPLY_CODE_ID_EXISTS, mismatched_response.code);
+    try std.testing.expectEqualStrings("", mismatched_response.node.?.replica_endpoint);
+
+    var fill_command = original_command;
+    fill_command.request_id = "node-request-fill";
+    fill_command.replica_endpoint = "127.0.0.1:7443";
+    var filled = try applyTestNodeCommand(allocator, &upgraded, 3, fill_command);
+    defer filled.deinit(allocator);
+    var filled_response = try decodeRegisterNodeApplyResponse(allocator, filled.response.?);
+    defer filled_response.deinit(allocator);
+    try std.testing.expectEqual(pb.RegisterNodeApplyCode.REGISTER_NODE_APPLY_CODE_REPLICA_ENDPOINT_FILLED, filled_response.code);
+    try std.testing.expectEqualStrings("127.0.0.1:7443", filled_response.node.?.replica_endpoint);
+    try std.testing.expectEqual(@as(u64, 1), filled_response.node.?.registered_revision);
+
+    var replace_command = fill_command;
+    replace_command.request_id = "node-request-replace";
+    replace_command.replica_endpoint = "127.0.0.2:7443";
+    var replace = try applyTestNodeCommand(allocator, &upgraded, 4, replace_command);
+    defer replace.deinit(allocator);
+    var replace_response = try decodeRegisterNodeApplyResponse(allocator, replace.response.?);
+    defer replace_response.deinit(allocator);
+    try std.testing.expectEqualStrings("127.0.0.1:7443", replace_response.node.?.replica_endpoint);
+
+    var snapshot = try upgraded.stateMachine().takeSnapshot(allocator, 4, 1, .{});
+    defer snapshot.deinit(allocator);
+    var missing_fill_arena: std.heap.ArenaAllocator = .init(allocator);
+    defer missing_fill_arena.deinit();
+    var snapshot_reader: std.Io.Reader = .fixed(snapshot.data);
+    var missing_fill = try pb.StateSnapshot.decode(&snapshot_reader, missing_fill_arena.allocator());
+    var fill_index: usize = 0;
+    while (!std.mem.eql(u8, missing_fill.requests.items[fill_index].request_id, "node-request-fill")) : (fill_index += 1) {}
+    _ = missing_fill.requests.orderedRemove(fill_index);
+    const missing_fill_wire = try encodeMessage(allocator, missing_fill);
+    defer allocator.free(missing_fill_wire);
+    var missing_fill_machine = PoolStateMachine.init(allocator);
+    defer missing_fill_machine.deinit();
+    var missing_fill_reader = TestSnapshotReader{ .data = missing_fill_wire };
+    try std.testing.expectError(
+        error.PayloadParseFailed,
+        missing_fill_machine.stateMachine().restoreSnapshot(snapshot.metadata, missing_fill_reader.reader()),
+    );
+
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var reader = TestSnapshotReader{ .data = snapshot.data };
+    try restored.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
+    var replay = try applyTestNodeCommand(allocator, &restored, 5, fill_command);
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, filled.response.?, replay.response.?);
 }
 
 test "node id exists response is durable" {

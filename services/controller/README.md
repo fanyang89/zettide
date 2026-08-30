@@ -5,8 +5,12 @@ Replicated metadata control plane for Zettide.
 The service manages virtual Pools, durable Volume metadata, durable Data Node
 registrations, and durable local Member bindings. A Pool is a global namespace
 for Volumes. Node
-registration records stable identity, cluster binding, endpoints, failure
-domain, capabilities, and protocol version. Member registration binds a native
+registration records stable identity, cluster binding, management/NVMf/internal
+Replica endpoints, failure domain, capabilities, and protocol version. The
+optional Replica endpoint is snapshot- and restart-stable while remaining empty
+for nodes that do not enable the internal listener. Legacy empty endpoints have
+one narrow Raft-applied migration: a new request may fill the endpoint only when
+all immutable registration fields match; replacement remains rejected. Member registration binds a native
 media identity and local set to a controller-managed Pool and Node, with immutable slot and
 allocation geometry. Leader-local heartbeats currently observe Node
 incarnation/sequence, Member presence, and optional extent capacity. Volume

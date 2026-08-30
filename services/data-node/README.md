@@ -92,10 +92,35 @@ and COMMIT additionally matches the authenticated coordinator to the durable
 PREPARE authority. Tests verify that this service and `DataService` are not
 registered on each other's listeners and exercise authenticated PREPARE/COMMIT.
 
-This listener is not yet enabled by `zettide-data-node`: durable pairwise-key
-configuration/rotation and transport confidentiality are still required before
-deployment. Attestations are not independently signed, and there is no primary
-coordinator or cross-node 2/3 success path. Therefore a three-node Volume intent
-can reach `ACTIVE`, but user writes are still not replicated or published to
-hosts. Recovery/repair and authority-gated Publication also remain subsequent
-steps. See `tests/e2e/README.md` for the Docker Compose profile.
+The daemon can enable this listener only when the file-member composition and
+all four explicit development options are present:
+
+```text
+--replica-listen HOST:PORT
+--replica-advertise HOST:PORT
+--replica-key-file PATH
+--replica-allow-plaintext true
+```
+
+The key file contains one `SOURCE_NODE_UUIDV7 64_HEX_KEY` pair per non-local
+peer. It must be a regular file owned by the daemon user with no group/world
+permission bits and is opened without following symlinks. It is bounded, parsed
+strictly, copied into the authenticator, and scrubbed on release. Keys are
+receiver-scoped: the same source uses a different key for each target. This
+option currently configures inbound receiver verification only; outbound target
+credentials belong to the future coordinator rollout. Keys are startup-loaded
+configuration, not a versioned or rollback-protected durable key
+ledger; replacement currently requires a daemon restart. The advertised endpoint
+is persisted in controller Node metadata and survives snapshot/restart. Upgrade
+from a legacy empty endpoint uses a Raft-applied, identity-matched fill-once
+transition; a different existing endpoint fails closed. Missing, partial, zero,
+duplicate, local-peer, malformed, or insecure-file configuration fails closed.
+
+`--replica-allow-plaintext true` is intentionally conspicuous: application HMAC
+provides request/response authenticity but not payload confidentiality. This
+mode is for the Docker/file-backend development profile, not production.
+Attestations are not independently signed, and there is no primary coordinator
+or cross-node 2/3 success path. Therefore a three-node Volume intent can reach
+`ACTIVE`, but user writes are still not replicated or published to hosts.
+Confidential transport, recovery/repair, and authority-gated Publication remain
+subsequent steps. See `tests/e2e/README.md` for the Docker Compose profile.

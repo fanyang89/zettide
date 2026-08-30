@@ -58,7 +58,10 @@ pub const Authenticator = struct {
         if (isZero(&local_node_id)) return error.InvalidLocalNodeId;
         if (peers.len == 0) return error.EmptyPeerKeySet;
         const owned = try allocator.dupe(PeerKey, peers);
-        errdefer allocator.free(owned);
+        errdefer {
+            for (owned) |*peer| std.crypto.secureZero(u8, &peer.key);
+            allocator.free(owned);
+        }
         for (owned, 0..) |peer, index| {
             if (isZero(&peer.node_id) or std.mem.eql(u8, &peer.node_id, &local_node_id))
                 return error.InvalidPeerNodeId;
@@ -357,6 +360,21 @@ test "authentication rejects unknown peers and duplicate metadata" {
         error.DuplicateAuthenticationMetadata,
         authenticator.verify(&duplicate, "/method", "request"),
     );
+}
+
+test "invalid peer key configuration scrubs duplicated secret bytes" {
+    var backing: [1024]u8 = @splat(0xcc);
+    var fixed = std.heap.FixedBufferAllocator.init(&backing);
+    const local: Id = @splat(0x11);
+    const secret: Key = @splat(0xab);
+    try std.testing.expectError(
+        error.InvalidPeerNodeId,
+        Authenticator.init(fixed.allocator(), local, &.{.{
+            .node_id = local,
+            .key = secret,
+        }}),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, &backing, &secret) == null);
 }
 
 test "peer key configuration rejects zero local peer and duplicate identities" {

@@ -195,9 +195,9 @@ fn preflightCreatePool(bytes: []const u8) WireError!void {
 
 fn preflightRegisterNode(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen: [10]bool = @splat(false);
+    var seen: [11]bool = @splat(false);
     while (try cursor.next()) |field| {
-        if (field.number > 9 or seen[field.number]) return error.InvalidWire;
+        if (field.number > 10 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
         switch (field.number) {
             1 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_request_id_bytes), max_request_id_bytes, false)) return error.InvalidWire,
@@ -219,6 +219,7 @@ fn preflightRegisterNode(bytes: []const u8) WireError!void {
                 const timestamp = try cursor.readVarint();
                 if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
             },
+            10 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_node_endpoint_bytes), max_node_endpoint_bytes, true)) return error.InvalidWire,
             else => unreachable,
         }
     }
@@ -807,9 +808,9 @@ fn preflightPool(bytes: []const u8) WireError!void {
 
 fn preflightNode(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen: [10]bool = @splat(false);
+    var seen: [11]bool = @splat(false);
     while (try cursor.next()) |field| {
-        if (field.number > 9 or seen[field.number]) return error.InvalidWire;
+        if (field.number > 10 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
         switch (field.number) {
             1 => if (field.wire_type != 2 or !validUuidV7(try cursor.readBytes(36))) return error.InvalidWire,
@@ -831,6 +832,7 @@ fn preflightNode(bytes: []const u8) WireError!void {
                 if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
             },
             9 => if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire,
+            10 => if (field.wire_type != 2 or !validText(try cursor.readBytes(max_node_endpoint_bytes), max_node_endpoint_bytes, true)) return error.InvalidWire,
             else => unreachable,
         }
     }
@@ -1200,7 +1202,7 @@ fn preflightRegisterNodeApplyResponse(bytes: []const u8) WireError!void {
             if (field.wire_type != 0 or seen_code) return error.InvalidWire;
             seen_code = true;
             const code = try cursor.readVarint();
-            if (code == 0 or code > 5) return error.InvalidWire;
+            if (code == 0 or code > 6) return error.InvalidWire;
         },
         2 => {
             if (field.wire_type != 2 or seen_node) return error.InvalidWire;

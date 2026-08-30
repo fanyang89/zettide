@@ -128,6 +128,7 @@ func (a *app) registerNode(ctx context.Context, args []string) error {
 	clusterID := fs.String("cluster-id", "", "16-byte cluster UUID (required)")
 	controlEndpoint := fs.String("control-endpoint", "", "data-node gRPC endpoint (required)")
 	nvmfEndpoint := fs.String("nvmf-endpoint", "", "NVMf endpoint")
+	replicaEndpoint := fs.String("replica-endpoint", "", "internal Replica RPC endpoint")
 	failureDomain := fs.String("failure-domain", "", "failure-domain label")
 	capabilityBits := fs.Uint64("capability-bits", 0, "capability bit mask")
 	protocolVersion := fs.Uint64("protocol-version", 0, "data-node protocol version")
@@ -166,6 +167,7 @@ func (a *app) registerNode(ctx context.Context, args []string) error {
 		ClusterId:       cluster,
 		ControlEndpoint: *controlEndpoint,
 		NvmfEndpoint:    *nvmfEndpoint,
+		ReplicaEndpoint: *replicaEndpoint,
 		FailureDomain:   *failureDomain,
 		CapabilityBits:  *capabilityBits,
 		ProtocolVersion: version,

@@ -1469,6 +1469,7 @@ fn setupMachine(machine: *state_machine.PoolStateMachine, domains: [3][]const u8
             .cluster_id = &test_cluster_id,
             .control_endpoint = "data:9000",
             .nvmf_endpoint = "data:4420",
+            .replica_endpoint = "data:7443",
             .failure_domain = domain,
             .capability_bits = 1,
             .protocol_version = 1,

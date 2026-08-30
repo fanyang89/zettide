@@ -15,6 +15,7 @@ const runtime_allocator = std.heap.smp_allocator;
 
 const node_control_endpoint = "127.0.0.1:9000";
 const node_nvmf_endpoint = "127.0.0.1:4420";
+const node_replica_endpoint = "127.0.0.1:7443";
 const node_failure_domain = "rack-a";
 const node_capability_bits: u64 = 5;
 const data_node_protocol_version: u32 = 1;
@@ -1063,6 +1064,7 @@ fn registerNode(
         .cluster_id = &config.cluster_id,
         .control_endpoint = node_control_endpoint,
         .nvmf_endpoint = node_nvmf_endpoint,
+        .replica_endpoint = node_replica_endpoint,
         .failure_domain = node_failure_domain,
         .capability_bits = node_capability_bits,
         .protocol_version = data_node_protocol_version,
@@ -1132,6 +1134,7 @@ fn registerReconcileNode(
         .cluster_id = &config.cluster_id,
         .control_endpoint = node_control_endpoint,
         .nvmf_endpoint = node_nvmf_endpoint,
+        .replica_endpoint = node_replica_endpoint,
         .failure_domain = failure_domain,
         .capability_bits = node_capability_bits,
         .protocol_version = data_node_protocol_version,
@@ -1344,6 +1347,7 @@ fn expectNode(
     try std.testing.expectEqualSlices(u8, &config.cluster_id, node.cluster_id);
     try std.testing.expectEqualStrings(node_control_endpoint, node.control_endpoint);
     try std.testing.expectEqualStrings(node_nvmf_endpoint, node.nvmf_endpoint);
+    try std.testing.expectEqualStrings(node_replica_endpoint, node.replica_endpoint);
     try std.testing.expectEqualStrings(node_failure_domain, node.failure_domain);
     try std.testing.expectEqual(node_capability_bits, node.capability_bits);
     try std.testing.expectEqual(data_node_protocol_version, node.protocol_version);

@@ -18,12 +18,22 @@ set -euo pipefail
 : "${ZETTIDE_ISCSI_LUN:=1}"
 : "${ZETTIDE_ISCSI_SIZE:=64M}"
 : "${ZETTIDE_FAILURE_DOMAIN:=local/docker}"
+: "${ZETTIDE_REPLICA_LISTEN:=0.0.0.0:7443}"
+: "${ZETTIDE_REPLICA_ADVERTISE:=${ZETTIDE_DATA_NODE_HOST}:7443}"
+: "${ZETTIDE_REPLICA_PEER_KEYS:?receiver-scoped Replica peer keys are required}"
 
 backing_file=/var/lib/zettide-data-node/lun.img
 member_file=/var/lib/zettide-data-node/member.img
 state_dir=/var/lib/zettide-data-node/control
+replica_key_file=$state_dir/replica.keys
 pool_id=$(<"$ZETTIDE_POOL_ID_FILE")
 mkdir -p "$(dirname "$backing_file")" "$state_dir"
+umask 077
+replica_key_tmp=$(mktemp "$state_dir/.replica.keys.XXXXXX")
+printf '%s\n' "$ZETTIDE_REPLICA_PEER_KEYS" >"$replica_key_tmp"
+chmod 600 "$replica_key_tmp"
+mv -f "$replica_key_tmp" "$replica_key_file"
+unset ZETTIDE_REPLICA_PEER_KEYS
 
 ensure_geometry() {
     local path=$1
@@ -88,7 +98,11 @@ tgtadm --lld iscsi --op bind --mode target --tid 1 --initiator-address ALL
     --pool-id "$pool_id" \
     --member-metadata-capacity "$ZETTIDE_MEMBER_METADATA_CAPACITY" \
     --member-capacity "$ZETTIDE_MEMBER_CAPACITY" \
-    --extent-size "$ZETTIDE_EXTENT_SIZE" &
+    --extent-size "$ZETTIDE_EXTENT_SIZE" \
+    --replica-listen "$ZETTIDE_REPLICA_LISTEN" \
+    --replica-advertise "$ZETTIDE_REPLICA_ADVERTISE" \
+    --replica-key-file "$replica_key_file" \
+    --replica-allow-plaintext true &
 data_node_pid=$!
 
 wait -n "$tgtd_pid" "$data_node_pid"

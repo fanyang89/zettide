@@ -6,7 +6,9 @@ This Docker Compose environment starts:
 - a one-shot bootstrap job that creates a controller Pool and publishes its ID
   through a shared volume;
 - three `zettide-data-node` instances in distinct failure domains; each registers
-  its Node/file Member, advances durable heartbeat incarnation, and reports capacity;
+  its Node/file Member plus a distinct internal Replica endpoint, loads
+  receiver-scoped development keys, advances durable heartbeat incarnation, and
+  reports capacity;
 - one file-backed iSCSI LUN in each data-node container;
 - an optional smoke container that creates a Volume, verifies real DataService
   reconciliation reaches `ACTIVE` with allocated capacity on all three Members,
@@ -16,9 +18,10 @@ This Docker Compose environment starts:
   `iscsi-readcapacity16`, and `iscsi-md5sum`).
 
 The local profile uses TGT as a lightweight iSCSI transport harness. It tests
-service composition, three-node Node/Member registration, fresh capacity
-heartbeats, Replica ensure plus canonical write-participant configuration,
-fence/recovery/ready reconciliation, discovery, login-free SCSI commands, and
+service composition, three-node Node/Member/Replica-endpoint registration,
+unauthenticated Replica INSPECT rejection, fresh capacity heartbeats, Replica
+ensure plus canonical write-participant configuration, fence/recovery/ready
+reconciliation, discovery, login-free SCSI commands, and
 reads without requiring SPDK, host
 iSCSI kernel modules, or privileged containers. The TGT LUN and registered file
 Member intentionally use separate backing files, so the SCSI checks are an
@@ -73,7 +76,10 @@ docker compose -f tests/e2e/docker-compose.yml down -v
 ```
 
 The controller management port is `8001`; data-node control ports are
-`7001`–`7003`, and host iSCSI ports are `3261`–`3263`. The single-voter Raft
+`7001`–`7003`, internal Replica listeners use container port `7443`, and host
+iSCSI ports are `3261`–`3263`. Replica RPC is explicitly plaintext in this local
+profile, with application-layer pairwise HMAC authentication; it is not a
+production confidentiality configuration. The single-voter Raft
 transport stays on the controller container's loopback interface. The Compose
 network assigns `172.30.0.10` to the controller because the prototype data-node
 client accepts an IPv4 target directly but does not yet initialize grpc-lite's

@@ -23,6 +23,7 @@ pub const FileFenceBackend = file_member_backend.FileFenceBackend;
 pub const FileWriteBackend = file_member_backend.FileWriteBackend;
 pub const WriteParticipantManager = write_participant_manager.WriteParticipantManager;
 pub const ReplicaRpcPeerKey = replica_rpc_auth.PeerKey;
+pub const ReplicaRpcKey = replica_rpc_auth.Key;
 
 pub const ReplicaTransportOptions = struct {
     host: []const u8,

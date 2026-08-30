@@ -190,9 +190,9 @@ pub fn preflightDeleteVolumeRequest(payload: []const u8) wire.Error!void {
 pub fn preflightRegisterNodeRequest(payload: []const u8) wire.Error!void {
     if (payload.len > max_request_wire_bytes) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = payload };
-    var seen: [9]bool = @splat(false);
+    var seen: [10]bool = @splat(false);
     while (try cursor.next()) |field| {
-        if (field.number > 8) {
+        if (field.number > 9) {
             try cursor.skip(field, max_request_wire_bytes);
             continue;
         }
@@ -204,6 +204,7 @@ pub fn preflightRegisterNodeRequest(payload: []const u8) wire.Error!void {
             3 => if (field.wire_type != 2 or !validClusterId(try cursor.readBytes(16))) return error.InvalidWire,
             4, 5 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_node_endpoint_bytes), state_machine.max_node_endpoint_bytes, false)) return error.InvalidWire,
             6 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_failure_domain_bytes), state_machine.max_failure_domain_bytes, false)) return error.InvalidWire,
+            9 => if (field.wire_type != 2 or !validText(try cursor.readBytes(state_machine.max_node_endpoint_bytes), state_machine.max_node_endpoint_bytes, true)) return error.InvalidWire,
             7 => {
                 if (field.wire_type != 0) return error.InvalidWire;
                 _ = try cursor.readVarint();

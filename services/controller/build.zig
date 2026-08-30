@@ -134,6 +134,7 @@ pub fn addComponent(
     // this component remains independently buildable from services/controller.
     var run_data_node_service_tests: ?*std.Build.Step.Run = null;
     var run_replica_rpc_client_tests: ?*std.Build.Step.Run = null;
+    var run_replica_rpc_key_file_tests: ?*std.Build.Step.Run = null;
     var run_data_node_main_tests: ?*std.Build.Step.Run = null;
     if (base_dir.len != 0) {
         const data_node_service = b.createModule(.{
@@ -160,6 +161,14 @@ pub fn addComponent(
         });
         const replica_rpc_client_tests = b.addTest(.{ .root_module = replica_rpc_client });
         run_replica_rpc_client_tests = b.addRunArtifact(replica_rpc_client_tests);
+        const replica_rpc_key_file = b.createModule(.{
+            .root_source_file = componentPath(b, base_dir, "../data-node/replica_rpc_key_file.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "data_node_service", .module = data_node_service }},
+        });
+        const replica_rpc_key_file_tests = b.addTest(.{ .root_module = replica_rpc_key_file });
+        run_replica_rpc_key_file_tests = b.addRunArtifact(replica_rpc_key_file_tests);
         const data_node_executable_module = b.createModule(.{
             .root_source_file = componentPath(b, base_dir, "../data-node/data_node_main.zig"),
             .target = target,
@@ -190,6 +199,7 @@ pub fn addComponent(
     test_step.dependOn(&run_tests.step);
     if (run_data_node_service_tests) |run| test_step.dependOn(&run.step);
     if (run_replica_rpc_client_tests) |run| test_step.dependOn(&run.step);
+    if (run_replica_rpc_key_file_tests) |run| test_step.dependOn(&run.step);
     if (run_data_node_main_tests) |run| test_step.dependOn(&run.step);
     return test_step;
 }
