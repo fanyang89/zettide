@@ -89,8 +89,9 @@ flowchart LR
     V -.->|vendor-specific NVMf| R2[Remote Replica C]
 ```
 
-内部 Replica 的网络协议和 NVMf vendor-specific command 尚未实现。当前共享
-`write_service` 提供 node-local participant：它校验 authority、sequence、history、range
+最终内部 Replica NVMf vendor-specific command 尚未实现。当前先增加了独立于 management
+listener 的 `ReplicaTransport` gRPC seam；共享 `write_service` 提供 node-local participant：
+它校验 authority、sequence、history、range
 和 payload digest，将最多 1 MiB payload 持久化为单一未决 PREPARE，接受两个不同
 Member 的 canonical attestation certificate，先持久化 COMMIT 决定，再写入并同步本地
 Replica extent，最后推进 applied frontier。标准 NVMe command 不携带这些证据，因此
@@ -109,9 +110,23 @@ replay；replay 携带旧 authority，可被不同或更高 durable fence 拒绝
 初始 authority proposal、readiness 和稳定 authority inspection 前，将同一 immutable set
 持久配置到三个 data node。配置必须匹配完整 active Replica 与 backend digest；catalog
 先于 participant file binding 持久，启动可补完该 crash window，PREPARE/COMMIT 也不能
-惰性创建未配置 participant。payload mutation 仍未暴露到 management listener；
-certificate attestation 尚无网络认证、remote target handler 或 primary coordinator。
-因此这些控制面与本地组合测试仍不等于三节点 quorum success。
+惰性创建未配置 participant。payload mutation 仍未暴露到 management listener。
+
+可选 Replica listener 已实现 PREPARE、COMMIT 和 metadata-only INSPECT target handler，
+并有对应同步 client。每个 receiver 使用按 source Node 索引、receiver-scoped 的 pairwise
+HMAC-SHA-256 key；request MAC 同时绑定 source Node、target Node、fresh challenge、完整
+method path 与 exact protobuf bytes。所有通过 request authentication 后的 response MAC
+绑定同一 challenge、status code/message 与 payload，因此旧 INSPECT response 或把 COMMIT
+success 改写为 failure 都会 fail closed。捕获的 mutation request 仍可原样 replay，并由
+participant 的持久幂等语义收敛。每次调用在 participant mutation 的同一临界区重新校验
+controller-provisioned binding 与当前 physical backend digest；COMMIT 还必须匹配 durable
+PREPARE 中的 authority 和已认证 source Node。
+
+该 listener 尚未由 production daemon 参数启用，也没有 durable key distribution/rotation
+或传输保密；certificate attestation 本身也未独立签名。当前只有单节点 loopback
+PREPARE/COMMIT transport E2E，没有 primary coordinator、真实 remote fanout 或 2/3 client
+success。因此这些控制面、本地 participant 和 authenticated seam 仍不等于三节点 quorum
+数据路径。
 
 目标 vendor-specific command 至少携带：
 

@@ -2,8 +2,10 @@
 
 Shared data-service API contracts and authority safety model for Zettide.
 
-The package contains no Raft, CLI, transport, or physical storage backend
-dependencies. It owns the wire-neutral Replica/authority models plus the
+The package contains no Raft, CLI, transport implementation, or physical
+storage backend dependencies. It owns the wire-neutral Replica/authority models,
+the protobuf contract for the separately hosted internal Replica RPC service,
+and the
 idempotent Replica and fence operation engines and their checksummed,
 fsync-backed journals. Replica journal reopen validates complete operation
 history—not only bytes and CRC—including prepare/complete pairing, allocation
@@ -24,7 +26,9 @@ snapshot remains a development baseline, not the final streaming journal or
 network transport. Data-node composition requires an explicitly configured
 participant binding before PREPARE/COMMIT; controller reconciliation derives the
 same bytewise-canonical three-Member set from active placement/allocation state.
-Consumers generate protobuf bindings with their own grpc/protobuf toolchain.
+The payload-bearing protobuf service is never registered on the management
+listener. Consumers generate protobuf bindings with their own grpc/protobuf
+toolchain.
 
 ```sh
 zig build test

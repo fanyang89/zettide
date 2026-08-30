@@ -199,6 +199,33 @@ pub const Service = struct {
         return .{ .operation_id = parsed.operation_id, .replica = replica };
     }
 
+    /// Validate the exact durable active Replica against the current physical
+    /// backend object. Backends used for write admission must implement inspect
+    /// so identity drift cannot be mistaken for durable catalog validity.
+    pub fn validateActiveBackend(self: *Service, expected: Binding) !Attestation {
+        self.lockTransaction();
+        defer self.transaction_lock.unlock();
+        try self.store.checkHealthy();
+        const record = self.store.findReplicaRecord(expected.placement_id) orelse
+            return error.ReplicaNotFound;
+        if (record.status != .completed) return error.OperationInProgress;
+        const replica = record.result;
+        if (!std.meta.eql(replica.attestation.binding, expected))
+            return error.ReplicaStateMismatch;
+        if (replica.state != .active) return error.ReplicaNotActive;
+        try self.backend.validate(expected);
+        const backend_state = try self.backend.inspect(expected) orelse
+            return error.BackendInspectionUnavailable;
+        const backend_digest = switch (backend_state) {
+            .active => |value| value,
+            .absent, .deleted => return error.ReplicaBackendNotActive,
+        };
+        if (isZero(&backend_digest)) return error.InvalidBackendDigest;
+        if (!std.mem.eql(u8, &backend_digest, &replica.attestation.backend_digest))
+            return error.MemberBackendIdentityMismatch;
+        return replica.attestation;
+    }
+
     pub fn deleteReplica(self: *Service, request: Request) !Response {
         self.lockTransaction();
         defer self.transaction_lock.unlock();

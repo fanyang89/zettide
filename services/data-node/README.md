@@ -77,8 +77,25 @@ authority inspection. Configuration validates the exact active Replica and its
 backend digest, is immutable and idempotent, and is cataloged before the
 participant state file is bound so startup can finish that crash window without
 hiding history. PREPARE/COMMIT remain unavailable on the management listener and
-cannot lazily create an unconfigured participant. Therefore a three-node Volume
-intent can reach `ACTIVE`, but user writes are still not replicated or published
-to hosts. Authenticated cross-node Replica transport, primary coordination, 2/3
-success, recovery/repair, and authority-gated Publication remain subsequent
+cannot lazily create an unconfigured participant.
+
+An optional, separately bound `ReplicaTransport` gRPC server and client now
+provide PREPARE, COMMIT, and metadata-only INSPECT. Requests are HMAC-SHA-256
+authenticated with receiver-scoped pairwise node keys and bind source node,
+target node, a fresh per-call challenge, method, and exact protobuf bytes. Every
+post-authentication response MAC binds that challenge plus status code, status
+message, and payload, so stale or success-to-failure substitutions fail closed.
+Captured mutation requests may still be replayed only with the same bytes and
+therefore rely on the participant's durable idempotency. Every call revalidates
+the controller-provisioned binding and current physical backend digest,
+and COMMIT additionally matches the authenticated coordinator to the durable
+PREPARE authority. Tests verify that this service and `DataService` are not
+registered on each other's listeners and exercise authenticated PREPARE/COMMIT.
+
+This listener is not yet enabled by `zettide-data-node`: durable pairwise-key
+configuration/rotation and transport confidentiality are still required before
+deployment. Attestations are not independently signed, and there is no primary
+coordinator or cross-node 2/3 success path. Therefore a three-node Volume intent
+can reach `ACTIVE`, but user writes are still not replicated or published to
+hosts. Recovery/repair and authority-gated Publication also remain subsequent
 steps. See `tests/e2e/README.md` for the Docker Compose profile.

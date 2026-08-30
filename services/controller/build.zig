@@ -133,6 +133,7 @@ pub fn addComponent(
     // The repository root owns the product-level data-node composition while
     // this component remains independently buildable from services/controller.
     var run_data_node_service_tests: ?*std.Build.Step.Run = null;
+    var run_replica_rpc_client_tests: ?*std.Build.Step.Run = null;
     var run_data_node_main_tests: ?*std.Build.Step.Run = null;
     if (base_dir.len != 0) {
         const data_node_service = b.createModule(.{
@@ -147,6 +148,18 @@ pub fn addComponent(
         });
         const data_node_service_tests = b.addTest(.{ .root_module = data_node_service });
         run_data_node_service_tests = b.addRunArtifact(data_node_service_tests);
+        const replica_rpc_client = b.createModule(.{
+            .root_source_file = componentPath(b, base_dir, "../data-node/replica_rpc_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "data_node_proto", .module = data_node_proto },
+                .{ .name = "grpc_lite", .module = grpc_module },
+                .{ .name = "zettide_data_service_contracts", .module = data_service_contracts_dependency.module("zettide_data_service_contracts") },
+            },
+        });
+        const replica_rpc_client_tests = b.addTest(.{ .root_module = replica_rpc_client });
+        run_replica_rpc_client_tests = b.addRunArtifact(replica_rpc_client_tests);
         const data_node_executable_module = b.createModule(.{
             .root_source_file = componentPath(b, base_dir, "../data-node/data_node_main.zig"),
             .target = target,
@@ -176,6 +189,7 @@ pub fn addComponent(
     const test_step = b.step(step_names.tests, "Run controller unit tests");
     test_step.dependOn(&run_tests.step);
     if (run_data_node_service_tests) |run| test_step.dependOn(&run.step);
+    if (run_replica_rpc_client_tests) |run| test_step.dependOn(&run.step);
     if (run_data_node_main_tests) |run| test_step.dependOn(&run.step);
     return test_step;
 }

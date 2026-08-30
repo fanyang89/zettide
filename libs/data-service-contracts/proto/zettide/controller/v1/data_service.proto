@@ -15,6 +15,16 @@ service DataService {
   rpc InspectPrimary(InspectPrimaryRequest) returns (InspectPrimaryResponse);
 }
 
+// Internal payload-bearing Replica protocol. Implementations must expose this
+// service on a listener separate from DataService and authenticate every call.
+// Authentication metadata is outside protobuf so its MAC covers the exact
+// serialized request bytes and full method path.
+service ReplicaTransport {
+  rpc Prepare(ReplicaPrepareRequest) returns (ReplicaPrepareResponse);
+  rpc Commit(ReplicaCommitRequest) returns (ReplicaCommitResponse);
+  rpc Inspect(ReplicaWriteInspectRequest) returns (ReplicaWriteInspectResponse);
+}
+
 enum DataReplicaState {
   DATA_REPLICA_STATE_UNSPECIFIED = 0;
   DATA_REPLICA_STATE_ACTIVE = 1;
@@ -105,6 +115,66 @@ message ConfigureWriteParticipantRequest {
 
 message ConfigureWriteParticipantResponse {
   DataWriteParticipantBinding binding = 1;
+}
+
+message DataWriteRequest {
+  DataAuthorityBinding authority = 1;
+  repeated bytes replica_member_ids = 2;
+  uint64 sequence = 3;
+  bytes transaction_id = 4;
+  bytes previous_history_digest = 5;
+  uint64 offset_bytes = 6;
+  uint64 length_bytes = 7;
+  bytes data_digest = 8;
+}
+
+message DataPrepareAttestation {
+  bytes member_id = 1;
+  bytes transaction_digest = 2;
+  bytes prepare_digest = 3;
+  bytes prepared_history_digest = 4;
+}
+
+message ReplicaPrepareRequest {
+  DataWriteParticipantBinding binding = 1;
+  DataWriteRequest write = 2;
+  bytes data = 3;
+}
+
+message ReplicaPrepareResponse {
+  DataPrepareAttestation attestation = 1;
+}
+
+message ReplicaCommitRequest {
+  DataWriteParticipantBinding binding = 1;
+  DataAuthorityBinding authority = 2;
+  bytes transaction_id = 3;
+  repeated DataPrepareAttestation attestations = 4;
+  uint64 sequence = 5;
+}
+
+message ReplicaCommitResponse {
+  bytes transaction_id = 1;
+  uint64 sequence = 2;
+  bytes history_digest = 3;
+}
+
+message ReplicaWriteInspectRequest {
+  DataWriteParticipantBinding binding = 1;
+  DataAuthorityBinding authority = 2;
+}
+
+message DataPendingWrite {
+  DataWriteRequest write = 1;
+  DataPrepareAttestation attestation = 2;
+  bool commit_decided = 3;
+}
+
+message ReplicaWriteInspectResponse {
+  uint64 frontier_sequence = 1;
+  bytes frontier_history_digest = 2;
+  DataPendingWrite pending = 3;
+  ReplicaCommitResponse last_completed = 4;
 }
 
 // Node-local identities are canonical UUIDv7 values encoded as exactly 16 bytes.

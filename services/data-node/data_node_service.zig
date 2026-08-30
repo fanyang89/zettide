@@ -10,6 +10,8 @@ const lease = protocol.primary_lease;
 const replica_service = protocol.replica_service;
 const write_service = protocol.write_service;
 const replica_io_gate = @import("replica_io_gate.zig");
+const replica_rpc_auth = @import("replica_rpc_auth.zig");
+const replica_rpc_client = @import("replica_rpc_client.zig");
 const write_participant_manager = @import("write_participant_manager.zig");
 
 pub const ReplicaFileStore = replica_service.FileStore;
@@ -20,6 +22,15 @@ pub const FileMemberBackend = file_member_backend.FileMemberBackend;
 pub const FileFenceBackend = file_member_backend.FileFenceBackend;
 pub const FileWriteBackend = file_member_backend.FileWriteBackend;
 pub const WriteParticipantManager = write_participant_manager.WriteParticipantManager;
+pub const ReplicaRpcPeerKey = replica_rpc_auth.PeerKey;
+
+pub const ReplicaTransportOptions = struct {
+    host: []const u8,
+    port: u16,
+    local_node_id: protocol.Id,
+    // Receiver-scoped pairwise keys indexed by authenticated source node.
+    peer_keys: []const ReplicaRpcPeerKey,
+};
 
 pub const Options = struct {
     replica_store: ?replica_service.Store = null,
@@ -31,11 +42,13 @@ pub const Options = struct {
     write_replica_store: ?*replica_service.FileStore = null,
     write_fence_store: ?*fence_service.FileStore = null,
     write_backend: ?write_service.Backend = null,
+    replica_transport: ?ReplicaTransportOptions = null,
 };
 
 pub const DataNodeServer = struct {
     state: *State,
     server: grpc.Server,
+    replica_server: ?grpc.Server,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -64,6 +77,8 @@ pub const DataNodeServer = struct {
                 options.replica_store == null or options.replica_backend == null or
                 options.fence_store == null or options.fence_backend == null)))
             return error.IncompleteWriteConfiguration;
+        if (options.replica_transport != null and !write_configured)
+            return error.IncompleteReplicaTransportConfiguration;
         if (write_configured) {
             const expected_replica_store = options.write_replica_store.?.store();
             const expected_fence_store = options.write_fence_store.?.store();
@@ -90,27 +105,52 @@ pub const DataNodeServer = struct {
         try server.registerUnary(methodPath("RecoverPrimary"), grpc.UnaryHandler.bind(State, state, State.recoverPrimary));
         try server.registerUnary(methodPath("MarkPrimaryReady"), grpc.UnaryHandler.bind(State, state, State.markPrimaryReady));
         try server.registerUnary(methodPath("InspectPrimary"), grpc.UnaryHandler.bind(State, state, State.inspectPrimary));
-        return .{ .state = state, .server = server };
+        var replica_server: ?grpc.Server = null;
+        errdefer if (replica_server) |*value| value.deinit();
+        if (options.replica_transport) |transport| {
+            var value = try grpc.Server.init(allocator, .{ .host = transport.host, .port = transport.port });
+            errdefer value.deinit();
+            try value.registerUnary(replicaMethodPath("Prepare"), grpc.UnaryHandler.bind(State, state, State.prepareReplicaWrite));
+            try value.registerUnary(replicaMethodPath("Commit"), grpc.UnaryHandler.bind(State, state, State.commitReplicaWrite));
+            try value.registerUnary(replicaMethodPath("Inspect"), grpc.UnaryHandler.bind(State, state, State.inspectReplicaWrite));
+            replica_server = value;
+        }
+        return .{ .state = state, .server = server, .replica_server = replica_server };
     }
 
     pub fn start(self: *DataNodeServer) !void {
-        try self.server.start();
+        if (self.replica_server) |*server| try server.start();
+        self.server.start() catch |err| {
+            if (self.replica_server) |*server| {
+                server.shutdownGracefully(0);
+                server.wait();
+            }
+            return err;
+        };
     }
 
     pub fn localAddress(self: *const DataNodeServer) !grpc.ServerLocalAddress {
         return self.server.localAddress();
     }
 
+    pub fn replicaLocalAddress(self: *const DataNodeServer) !grpc.ServerLocalAddress {
+        const server = if (self.replica_server) |*value| value else return error.ReplicaTransportDisabled;
+        return server.localAddress();
+    }
+
     pub fn shutdownGracefully(self: *DataNodeServer, timeout_ns: u64) void {
         self.server.shutdownGracefully(timeout_ns);
+        if (self.replica_server) |*server| server.shutdownGracefully(timeout_ns);
     }
 
     pub fn wait(self: *DataNodeServer) void {
         self.server.wait();
+        if (self.replica_server) |*server| server.wait();
     }
 
     pub fn deinit(self: *DataNodeServer) void {
         const allocator = self.state.allocator;
+        if (self.replica_server) |*server| server.deinit();
         self.server.deinit();
         self.state.deinit();
         allocator.destroy(self.state);
@@ -131,6 +171,7 @@ const State = struct {
     authority_store: ?*authority_file_store.FileStore,
     authorities: std.AutoHashMapUnmanaged(protocol.Id, Authority) = .empty,
     writes: ?write_participant_manager.WriteParticipantManager = null,
+    replica_authenticator: ?replica_rpc_auth.Authenticator = null,
 
     const Authority = struct {
         binding: protocol.AuthorityBinding,
@@ -138,6 +179,10 @@ const State = struct {
     };
 
     fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) !State {
+        var authenticator: ?replica_rpc_auth.Authenticator = null;
+        errdefer if (authenticator) |*value| value.deinit();
+        if (options.replica_transport) |transport|
+            authenticator = try .init(allocator, transport.local_node_id, transport.peer_keys);
         return .{
             .allocator = allocator,
             .io = io,
@@ -151,6 +196,7 @@ const State = struct {
             else
                 null,
             .authority_store = options.authority_store,
+            .replica_authenticator = authenticator,
         };
     }
 
@@ -169,6 +215,7 @@ const State = struct {
 
     fn deinit(self: *State) void {
         if (self.writes) |*writes| writes.deinit();
+        if (self.replica_authenticator) |*authenticator| authenticator.deinit();
         self.authorities.deinit(self.allocator);
         self.* = undefined;
     }
@@ -263,6 +310,169 @@ const State = struct {
         if (method == .delete) if (control_guard) |*guard|
             guard.retire() catch |err| return writeControlFailure(allocator, err);
         return encodeReplicaResponse(allocator, ResponseType, response);
+    }
+
+    fn prepareReplicaWrite(
+        self: *State,
+        allocator: std.mem.Allocator,
+        context: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        const method_path = replicaMethodPath("Prepare");
+        const verified = self.authenticateReplicaCall(context, method_path, request_bytes) catch
+            return fail(allocator, .unauthenticated, "Replica RPC authentication failed");
+        var response = try self.handlePrepareReplicaWrite(allocator, verified.source_node_id, request_bytes);
+        errdefer response.deinit();
+        try self.authenticateReplicaResponse(context, verified, method_path, request_bytes, &response);
+        return response;
+    }
+
+    fn handlePrepareReplicaWrite(
+        self: *State,
+        allocator: std.mem.Allocator,
+        source_node_id: protocol.Id,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.ReplicaPrepareRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid Replica PREPARE request");
+        defer request.deinit(allocator);
+        const configuration = parseWriteParticipantConfiguration(request.binding) catch
+            return fail(allocator, .invalid_argument, "invalid Replica PREPARE binding");
+        const write = parseWriteRequest(request.write) catch
+            return fail(allocator, .invalid_argument, "invalid Replica PREPARE metadata");
+        if (!std.mem.eql(u8, &source_node_id, &write.authority.primary_node_id))
+            return fail(allocator, .permission_denied, "Replica coordinator identity mismatch");
+        const writes = if (self.writes) |*value| value else return fail(allocator, .failed_precondition, "write participant manager is not configured");
+        const attestation = writes.prepareConfigured(
+            configuration.binding,
+            configuration.backend_digest,
+            .{ .write = write, .data = request.data },
+        ) catch |err| return replicaWriteFailure(allocator, err, "Replica PREPARE rejected");
+        return encodeResponse(allocator, pb.ReplicaPrepareResponse{
+            .attestation = attestationProto(&attestation),
+        });
+    }
+
+    fn commitReplicaWrite(
+        self: *State,
+        allocator: std.mem.Allocator,
+        context: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        const method_path = replicaMethodPath("Commit");
+        const verified = self.authenticateReplicaCall(context, method_path, request_bytes) catch
+            return fail(allocator, .unauthenticated, "Replica RPC authentication failed");
+        var response = try self.handleCommitReplicaWrite(allocator, verified.source_node_id, request_bytes);
+        errdefer response.deinit();
+        try self.authenticateReplicaResponse(context, verified, method_path, request_bytes, &response);
+        return response;
+    }
+
+    fn handleCommitReplicaWrite(
+        self: *State,
+        allocator: std.mem.Allocator,
+        source_node_id: protocol.Id,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.ReplicaCommitRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid Replica COMMIT request");
+        defer request.deinit(allocator);
+        const configuration = parseWriteParticipantConfiguration(request.binding) catch
+            return fail(allocator, .invalid_argument, "invalid Replica COMMIT binding");
+        const authority = parseAuthorityBinding(request.authority) catch
+            return fail(allocator, .invalid_argument, "invalid Replica COMMIT authority");
+        const transaction_id = fixedId(request.transaction_id) catch
+            return fail(allocator, .invalid_argument, "invalid Replica COMMIT transaction");
+        if (request.sequence == 0)
+            return fail(allocator, .invalid_argument, "invalid Replica COMMIT sequence");
+        const certificate = parseCommitCertificate(request.attestations.items) catch
+            return fail(allocator, .invalid_argument, "invalid Replica COMMIT certificate");
+        if (!std.mem.eql(u8, &source_node_id, &authority.primary_node_id))
+            return fail(allocator, .permission_denied, "Replica coordinator identity mismatch");
+        const writes = if (self.writes) |*value| value else return fail(allocator, .failed_precondition, "write participant manager is not configured");
+        const result = writes.commitConfigured(
+            configuration.binding,
+            configuration.backend_digest,
+            authority,
+            transaction_id,
+            request.sequence,
+            certificate,
+        ) catch |err| return replicaWriteFailure(allocator, err, "Replica COMMIT rejected");
+        return encodeResponse(allocator, commitResultProto(&result));
+    }
+
+    fn inspectReplicaWrite(
+        self: *State,
+        allocator: std.mem.Allocator,
+        context: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        const method_path = replicaMethodPath("Inspect");
+        const verified = self.authenticateReplicaCall(context, method_path, request_bytes) catch
+            return fail(allocator, .unauthenticated, "Replica RPC authentication failed");
+        var response = try self.handleInspectReplicaWrite(allocator, verified.source_node_id, request_bytes);
+        errdefer response.deinit();
+        try self.authenticateReplicaResponse(context, verified, method_path, request_bytes, &response);
+        return response;
+    }
+
+    fn handleInspectReplicaWrite(
+        self: *State,
+        allocator: std.mem.Allocator,
+        source_node_id: protocol.Id,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.ReplicaWriteInspectRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid Replica INSPECT request");
+        defer request.deinit(allocator);
+        const configuration = parseWriteParticipantConfiguration(request.binding) catch
+            return fail(allocator, .invalid_argument, "invalid Replica INSPECT binding");
+        const authority = parseAuthorityBinding(request.authority) catch
+            return fail(allocator, .invalid_argument, "invalid Replica INSPECT authority");
+        if (!std.mem.eql(u8, &source_node_id, &authority.primary_node_id))
+            return fail(allocator, .permission_denied, "Replica coordinator identity mismatch");
+        const writes = if (self.writes) |*value| value else return fail(allocator, .failed_precondition, "write participant manager is not configured");
+        const inspection = writes.inspectConfigured(
+            configuration.binding,
+            configuration.backend_digest,
+        ) catch |err|
+            return replicaWriteFailure(allocator, err, "Replica INSPECT rejected");
+        return encodeWriteInspection(allocator, inspection);
+    }
+
+    fn authenticateReplicaCall(
+        self: *State,
+        context: *grpc.ServerContext,
+        method_path: []const u8,
+        request_bytes: []const u8,
+    ) !replica_rpc_auth.VerifiedRequest {
+        const authenticator = if (self.replica_authenticator) |*value| value else return error.ReplicaAuthenticationUnavailable;
+        return authenticator.verify(context.request_metadata.items(), method_path, request_bytes) catch
+            return error.ReplicaAuthenticationFailed;
+    }
+
+    fn authenticateReplicaResponse(
+        self: *State,
+        context: *grpc.ServerContext,
+        verified: replica_rpc_auth.VerifiedRequest,
+        method_path: []const u8,
+        request_bytes: []const u8,
+        response: *const grpc.UnaryResponse,
+    ) !void {
+        const authenticator = if (self.replica_authenticator) |*value| value else return error.ReplicaAuthenticationUnavailable;
+        const tag = try authenticator.responseTag(
+            verified.source_node_id,
+            verified.challenge,
+            method_path,
+            request_bytes,
+            @intFromEnum(response.status.code),
+            response.status.message,
+            response.payload,
+        );
+        try context.addTrailingMetadata(replica_rpc_auth.response_authentication_metadata, &tag);
     }
 
     fn identifyHolder(
@@ -661,6 +871,57 @@ fn writeConfigurationFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.
     };
 }
 
+fn replicaWriteFailure(
+    allocator: std.mem.Allocator,
+    err: anyerror,
+    message: []const u8,
+) !grpc.UnaryResponse {
+    return switch (err) {
+        error.ParticipantNotConfigured => fail(allocator, .not_found, "write participant is not configured"),
+        error.InvalidWrite,
+        error.InvalidAuthority,
+        error.InvalidCertificate,
+        error.InvalidReplicaSet,
+        error.MemberNotInReplicaSet,
+        error.DataDigestMismatch,
+        error.WriteOutOfBounds,
+        error.VolumeMismatch,
+        => fail(allocator, .invalid_argument, message),
+        error.AuthorityFenced,
+        error.FenceRequired,
+        error.FenceGenerationMismatch,
+        error.AuthorityConflict,
+        error.StaleAuthority,
+        error.LeaseExpired,
+        error.LeaseMismatch,
+        error.ReplicaNotFound,
+        error.ReplicaNotActive,
+        error.ReplicaRetired,
+        error.ReplicaStateMismatch,
+        error.MemberBackendIdentityMismatch,
+        error.BackendInspectionUnavailable,
+        error.ReplicaBackendNotActive,
+        error.MemberIdentityMismatch,
+        error.MemberMismatch,
+        error.UnalignedAllocation,
+        error.AllocationOutOfBounds,
+        error.MemberGeometryChanged,
+        error.SequenceMismatch,
+        error.HistoryMismatch,
+        error.TransactionConflict,
+        error.TransactionNotFound,
+        error.WriteInProgress,
+        error.DuplicateWitness,
+        error.NonCanonicalCertificate,
+        error.CertificateMemberNotEligible,
+        error.CertificateMismatch,
+        error.LocalAttestationRequired,
+        => fail(allocator, .failed_precondition, message),
+        error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "write participant state exhausted"),
+        else => fail(allocator, .internal, message),
+    };
+}
+
 fn writeControlFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
     return switch (err) {
         error.WriteInProgress,
@@ -750,6 +1011,93 @@ fn parseWriteParticipantConfiguration(value: ?pb.DataWriteParticipantBinding) !W
         .binding = .{ .replica = parsed, .replica_members = members },
         .backend_digest = try digest(binding.backend_digest),
     };
+}
+
+fn parseWriteRequest(value: ?pb.DataWriteRequest) !write_service.WriteRequest {
+    const write = value orelse return error.MissingWrite;
+    if (write.replica_member_ids.items.len != 3) return error.InvalidReplicaSet;
+    return .{
+        .authority = try parseAuthorityBinding(write.authority),
+        .replica_members = .{
+            try fixedId(write.replica_member_ids.items[0]),
+            try fixedId(write.replica_member_ids.items[1]),
+            try fixedId(write.replica_member_ids.items[2]),
+        },
+        .sequence = write.sequence,
+        .transaction_id = try fixedId(write.transaction_id),
+        .previous_history_digest = try fixedDigest(write.previous_history_digest),
+        .offset_bytes = write.offset_bytes,
+        .length_bytes = write.length_bytes,
+        .data_digest = try digest(write.data_digest),
+    };
+}
+
+fn parseCommitCertificate(values: []const pb.DataPrepareAttestation) !write_service.CommitCertificate {
+    if (values.len != write_service.certificate_witness_count) return error.InvalidCertificate;
+    return .{ .attestations = .{
+        try parseAttestation(values[0]),
+        try parseAttestation(values[1]),
+    } };
+}
+
+fn parseAttestation(value: pb.DataPrepareAttestation) !write_service.PrepareAttestation {
+    return .{
+        .member_id = try fixedId(value.member_id),
+        .transaction_digest = try digest(value.transaction_digest),
+        .prepare_digest = try digest(value.prepare_digest),
+        .prepared_history_digest = try digest(value.prepared_history_digest),
+    };
+}
+
+fn attestationProto(value: *const write_service.PrepareAttestation) pb.DataPrepareAttestation {
+    return .{
+        .member_id = &value.member_id,
+        .transaction_digest = &value.transaction_digest,
+        .prepare_digest = &value.prepare_digest,
+        .prepared_history_digest = &value.prepared_history_digest,
+    };
+}
+
+fn commitResultProto(value: *const write_service.CommitResult) pb.ReplicaCommitResponse {
+    return .{
+        .transaction_id = &value.transaction_id,
+        .sequence = value.sequence,
+        .history_digest = &value.history_digest,
+    };
+}
+
+fn encodeWriteInspection(
+    allocator: std.mem.Allocator,
+    inspection: write_service.Inspection,
+) !grpc.UnaryResponse {
+    var stable = inspection;
+    var member_ids: std.ArrayList([]const u8) = .empty;
+    defer member_ids.deinit(allocator);
+    var pending: ?pb.DataPendingWrite = null;
+    if (stable.pending) |*value| {
+        for (&value.write.replica_members) |*member_id| try member_ids.append(allocator, member_id);
+        pending = .{
+            .write = .{
+                .authority = authorityProto(&value.write.authority),
+                .replica_member_ids = member_ids,
+                .sequence = value.write.sequence,
+                .transaction_id = &value.write.transaction_id,
+                .previous_history_digest = &value.write.previous_history_digest,
+                .offset_bytes = value.write.offset_bytes,
+                .length_bytes = value.write.length_bytes,
+                .data_digest = &value.write.data_digest,
+            },
+            .attestation = attestationProto(&value.attestation),
+            .commit_decided = value.commit_decided,
+        };
+    }
+    const last_completed = if (stable.last_completed) |*value| commitResultProto(value) else null;
+    return encodeResponse(allocator, pb.ReplicaWriteInspectResponse{
+        .frontier_sequence = stable.frontier.sequence,
+        .frontier_history_digest = &stable.frontier.history_digest,
+        .pending = pending,
+        .last_completed = last_completed,
+    });
 }
 
 fn parseFenceBinding(binding: ?pb.DataReplicaFenceBinding) !fence_service.Binding {
@@ -861,9 +1209,13 @@ fn uuid(bytes: []const u8) !protocol.Id {
     return id;
 }
 
-fn digest(bytes: []const u8) !protocol.Digest {
+fn fixedDigest(bytes: []const u8) !protocol.Digest {
     if (bytes.len != 32) return error.InvalidDigest;
-    const value = bytes[0..32].*;
+    return bytes[0..32].*;
+}
+
+fn digest(bytes: []const u8) !protocol.Digest {
+    const value = try fixedDigest(bytes);
     for (value) |byte| if (byte != 0) return value;
     return error.InvalidDigest;
 }
@@ -882,6 +1234,10 @@ fn fail(allocator: std.mem.Allocator, code: grpc.StatusCode, message: []const u8
 
 fn methodPath(comptime method: []const u8) []const u8 {
     return "/zettide.controller.v1.DataService/" ++ method;
+}
+
+fn replicaMethodPath(comptime method: []const u8) []const u8 {
+    return "/zettide.controller.v1.ReplicaTransport/" ++ method;
 }
 
 test "data-node service persists Replica lifecycle through gRPC" {
@@ -913,6 +1269,15 @@ test "data-node service persists Replica lifecycle through gRPC" {
     var write_backend = FileWriteBackend.init(&backend, &store);
     var other_store = try ReplicaFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "other-replicas.state");
     defer other_store.deinit();
+    var local_node = member;
+    local_node[15] = 0x40;
+    var coordinator_node = member;
+    coordinator_node[15] = 0x41;
+    const coordinator_key: replica_rpc_auth.Key = @splat(0x9b);
+    const replica_peers = [_]ReplicaRpcPeerKey{.{
+        .node_id = coordinator_node,
+        .key = coordinator_key,
+    }};
     try std.testing.expectError(
         error.MismatchedWriteConfiguration,
         DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
@@ -954,6 +1319,12 @@ test "data-node service persists Replica lifecycle through gRPC" {
         .write_replica_store = &store,
         .write_fence_store = &fence_store,
         .write_backend = write_backend.backend(),
+        .replica_transport = .{
+            .host = "127.0.0.1",
+            .port = 0,
+            .local_node_id = local_node,
+            .peer_keys = &replica_peers,
+        },
     });
     defer server.deinit();
     try server.start();
@@ -1022,6 +1393,140 @@ test "data-node service persists Replica lifecycle through gRPC" {
     try std.testing.expectEqual(grpc.StatusCode.invalid_argument, invalid_configuration.status.code);
     participant_member_views[1] = &participant_members[1];
 
+    var replica_endpoint_buffer: [32]u8 = undefined;
+    const replica_address = try server.replicaLocalAddress();
+    const replica_endpoint = try std.fmt.bufPrint(
+        &replica_endpoint_buffer,
+        "{s}:{d}",
+        .{ replica_address.host, replica_address.port },
+    );
+    var replica_channel = try grpc.Channel.init(std.testing.allocator, replica_endpoint, .{});
+    defer replica_channel.deinit();
+    const authority_digest_for_inspect: protocol.Digest = @splat(0x77);
+    var authority_placement = coordinator_node;
+    authority_placement[15] = 0x42;
+    var authority_lease = coordinator_node;
+    authority_lease[15] = 0x43;
+    var authority_boot = coordinator_node;
+    authority_boot[15] = 0x44;
+    var authority_nonce = coordinator_node;
+    authority_nonce[15] = 0x45;
+    var replica_inspect_request: pb.ReplicaWriteInspectRequest = .{
+        .binding = configure_request.binding,
+        .authority = .{
+            .volume_id = &replica_binding.volume_id,
+            .primary_placement_id = &authority_placement,
+            .primary_node_id = &coordinator_node,
+            .lease_id = &authority_lease,
+            .holder_boot_id = &authority_boot,
+            .authority_generation = 1,
+            .write_epoch = 1,
+            .placement_revision = 1,
+            .activation_nonce = &authority_nonce,
+            .authority_digest = &authority_digest_for_inspect,
+        },
+    };
+    var unsigned_inspect = try testCallUnary(&replica_channel, replicaMethodPath("Inspect"), &replica_inspect_request);
+    defer unsigned_inspect.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.unauthenticated, unsigned_inspect.status.code);
+    var authenticated_inspect = try testCallUnaryAuthenticated(
+        &replica_channel,
+        replicaMethodPath("Inspect"),
+        &replica_inspect_request,
+        coordinator_node,
+        local_node,
+        coordinator_key,
+    );
+    defer authenticated_inspect.deinit();
+    try std.testing.expect(authenticated_inspect.status.isOk());
+    var replica_client = try replica_rpc_client.Client.init(
+        std.testing.allocator,
+        std.testing.io,
+        coordinator_node,
+        local_node,
+        coordinator_key,
+        .{},
+    );
+    defer replica_client.deinit();
+    const remote_inspection = try replica_client.inspect(
+        replica_endpoint,
+        .{
+            .participant = .{
+                .replica = replica_binding,
+                .replica_members = participant_members,
+            },
+            .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
+        },
+        try parseAuthorityBinding(replica_inspect_request.authority),
+    );
+    try std.testing.expectEqual(@as(u64, 0), remote_inspection.frontier.sequence);
+    try std.testing.expect(remote_inspection.pending == null);
+    var wrong_coordinator_authority = try parseAuthorityBinding(replica_inspect_request.authority);
+    wrong_coordinator_authority.primary_node_id = local_node;
+    try std.testing.expectError(
+        error.PermissionDenied,
+        replica_client.inspect(
+            replica_endpoint,
+            .{
+                .participant = .{
+                    .replica = replica_binding,
+                    .replica_members = participant_members,
+                },
+                .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
+            },
+            wrong_coordinator_authority,
+        ),
+    );
+    var wrong_backend_binding: replica_rpc_client.Binding = .{
+        .participant = .{
+            .replica = replica_binding,
+            .replica_members = participant_members,
+        },
+        .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
+    };
+    wrong_backend_binding.backend_digest[0] ^= 0xff;
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        replica_client.inspect(
+            replica_endpoint,
+            wrong_backend_binding,
+            try parseAuthorityBinding(replica_inspect_request.authority),
+        ),
+    );
+    const drifted_before_inspect = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
+    try drifted_before_inspect.setLength(std.testing.io, 32 * 1024);
+    drifted_before_inspect.close(std.testing.io);
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        replica_client.inspect(
+            replica_endpoint,
+            .{
+                .participant = .{
+                    .replica = replica_binding,
+                    .replica_members = participant_members,
+                },
+                .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
+            },
+            try parseAuthorityBinding(replica_inspect_request.authority),
+        ),
+    );
+    const restored_after_inspect = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
+    try restored_after_inspect.setLength(std.testing.io, 64 * 1024);
+    restored_after_inspect.close(std.testing.io);
+    var wrong_listener = try testCallUnaryAuthenticated(
+        &channel,
+        replicaMethodPath("Inspect"),
+        &replica_inspect_request,
+        coordinator_node,
+        local_node,
+        coordinator_key,
+    );
+    defer wrong_listener.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.unimplemented, wrong_listener.status.code);
+    var management_on_replica = try testCallUnary(&replica_channel, methodPath("InspectReplica"), &pb.InspectReplicaRequest{});
+    defer management_on_replica.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.unimplemented, management_on_replica.status.code);
+
     var inspect_request: pb.InspectReplicaRequest = .{
         .operation_id = "0198f54d-5c2a-7000-8000-000000000025",
         .volume_id = ensure_request.volume_id,
@@ -1042,11 +1547,38 @@ test "data-node service persists Replica lifecycle through gRPC" {
     placement_bytes[15] = 0x23;
     var operation_bytes = member;
     operation_bytes[15] = 0x31;
-    var primary_node = member;
-    primary_node[15] = 0x32;
+    const primary_node = coordinator_node;
     var lease_id = member;
     lease_id[15] = 0x33;
     const authority_digest: protocol.Digest = @splat(0x44);
+    var identify_holder_request: pb.IdentifyHolderRequest = .{};
+    var identify_holder_result = try testCallUnary(&channel, methodPath("IdentifyHolder"), &identify_holder_request);
+    defer identify_holder_result.deinit();
+    try std.testing.expect(identify_holder_result.status.isOk());
+    var identify_holder_reader: std.Io.Reader = .fixed(identify_holder_result.payload);
+    var identified_holder = try pb.IdentifyHolderResponse.decode(&identify_holder_reader, std.testing.allocator);
+    defer identified_holder.deinit(std.testing.allocator);
+    var activation_nonce = member;
+    activation_nonce[15] = 0x34;
+    const authority_binding: pb.DataAuthorityBinding = .{
+        .volume_id = &volume_bytes,
+        .primary_placement_id = &placement_bytes,
+        .primary_node_id = &primary_node,
+        .lease_id = &lease_id,
+        .holder_boot_id = identified_holder.holder_boot_id,
+        .authority_generation = 1,
+        .write_epoch = 1,
+        .placement_revision = 1,
+        .activation_nonce = &activation_nonce,
+        .authority_digest = &authority_digest,
+    };
+    var stage_request: pb.StagePrimaryRequest = .{
+        .binding = authority_binding,
+        .lease_duration_ms = lease.duration_ms,
+    };
+    var stage_result = try testCallUnary(&channel, methodPath("StagePrimary"), &stage_request);
+    defer stage_result.deinit();
+    try std.testing.expect(stage_result.status.isOk());
     var fence_request: pb.FenceReplicaRequest = .{ .binding = .{
         .operation_id = &operation_bytes,
         .volume_id = &volume_bytes,
@@ -1064,6 +1596,111 @@ test "data-node service persists Replica lifecycle through gRPC" {
     var fenced = try pb.FenceReplicaResponse.decode(&fence_reader, std.testing.allocator);
     defer fenced.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 32), fenced.fence_digest.len);
+
+    var recover_request: pb.RecoverPrimaryRequest = .{ .binding = authority_binding };
+    var recover_result = try testCallUnary(&channel, methodPath("RecoverPrimary"), &recover_request);
+    defer recover_result.deinit();
+    try std.testing.expect(recover_result.status.isOk());
+    var ready_request: pb.MarkPrimaryReadyRequest = .{ .binding = authority_binding };
+    var ready_result = try testCallUnary(&channel, methodPath("MarkPrimaryReady"), &ready_request);
+    defer ready_result.deinit();
+    try std.testing.expect(ready_result.status.isOk());
+
+    const payload: [4096]u8 = @splat(0xa7);
+    var transaction_id = member;
+    transaction_id[15] = 0x51;
+    const participant_binding: replica_rpc_client.Binding = .{
+        .participant = .{
+            .replica = replica_binding,
+            .replica_members = participant_members,
+        },
+        .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
+    };
+    const write_request: write_service.WriteRequest = .{
+        .authority = try parseAuthorityBinding(authority_binding),
+        .replica_members = participant_members,
+        .sequence = 1,
+        .transaction_id = transaction_id,
+        .previous_history_digest = @splat(0),
+        .offset_bytes = 0,
+        .length_bytes = payload.len,
+        .data_digest = write_service.digestData(&payload),
+    };
+    const drifted_before_prepare = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
+    try drifted_before_prepare.setLength(std.testing.io, 32 * 1024);
+    drifted_before_prepare.close(std.testing.io);
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        replica_client.prepare(replica_endpoint, participant_binding, .{
+            .write = write_request,
+            .data = &payload,
+        }),
+    );
+    const restored_before_prepare = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
+    try restored_before_prepare.setLength(std.testing.io, 64 * 1024);
+    restored_before_prepare.close(std.testing.io);
+    const local_attestation = try replica_client.prepare(replica_endpoint, participant_binding, .{
+        .write = write_request,
+        .data = &payload,
+    });
+    var remote_attestation = local_attestation;
+    remote_attestation.member_id = participant_members[1];
+    remote_attestation.prepare_digest = @splat(0x88);
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        replica_client.commit(
+            replica_endpoint,
+            participant_binding,
+            write_request.authority,
+            transaction_id,
+            write_request.sequence + 1,
+            .{ .attestations = .{ local_attestation, remote_attestation } },
+        ),
+    );
+    const drifted_before_commit = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
+    try drifted_before_commit.setLength(std.testing.io, 32 * 1024);
+    drifted_before_commit.close(std.testing.io);
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        replica_client.commit(
+            replica_endpoint,
+            participant_binding,
+            write_request.authority,
+            transaction_id,
+            write_request.sequence,
+            .{ .attestations = .{ local_attestation, remote_attestation } },
+        ),
+    );
+    const restored_before_commit = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
+    try restored_before_commit.setLength(std.testing.io, 64 * 1024);
+    restored_before_commit.close(std.testing.io);
+    const committed = try replica_client.commit(
+        replica_endpoint,
+        participant_binding,
+        write_request.authority,
+        transaction_id,
+        write_request.sequence,
+        .{ .attestations = .{ local_attestation, remote_attestation } },
+    );
+    try std.testing.expectEqual(@as(u64, 1), committed.sequence);
+    try std.testing.expectEqual(
+        committed,
+        try replica_client.commit(
+            replica_endpoint,
+            participant_binding,
+            write_request.authority,
+            transaction_id,
+            write_request.sequence,
+            .{ .attestations = .{ local_attestation, remote_attestation } },
+        ),
+    );
+    const committed_inspection = try replica_client.inspect(
+        replica_endpoint,
+        participant_binding,
+        write_request.authority,
+    );
+    try std.testing.expectEqual(@as(u64, 1), committed_inspection.frontier.sequence);
+    try std.testing.expectEqual(committed, committed_inspection.last_completed.?);
 
     var delete_request: pb.DeleteReplicaRequest = .{
         .operation_id = "0198f54d-5c2a-7000-8000-000000000026",
@@ -1101,6 +1738,37 @@ fn testCallUnary(channel: *grpc.Channel, path: []const u8, request: anytype) !gr
     defer writer.deinit();
     try request.encode(&writer.writer, std.testing.allocator);
     return channel.callUnary(std.testing.allocator, path, writer.written(), .{});
+}
+
+fn testCallUnaryAuthenticated(
+    channel: *grpc.Channel,
+    path: []const u8,
+    request: anytype,
+    source_node_id: protocol.Id,
+    target_node_id: protocol.Id,
+    key: replica_rpc_auth.Key,
+) !grpc.CallResult {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try request.encode(&writer.writer, std.testing.allocator);
+    const challenge: replica_rpc_auth.Challenge = @splat(0x7e);
+    const signed = replica_rpc_auth.signedMetadata(
+        source_node_id,
+        target_node_id,
+        challenge,
+        key,
+        path,
+        writer.written(),
+    );
+    const entries = signed.entries();
+    const metadata_entries = [_]grpc.MetadataEntry{
+        .{ .key = entries[0].key, .value = entries[0].value },
+        .{ .key = entries[1].key, .value = entries[1].value },
+        .{ .key = entries[2].key, .value = entries[2].value },
+    };
+    return channel.callUnary(std.testing.allocator, path, writer.written(), .{
+        .metadata = &metadata_entries,
+    });
 }
 
 test "data-node service recovers and marks a staged primary ready" {

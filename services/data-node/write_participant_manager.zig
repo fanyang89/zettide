@@ -125,6 +125,59 @@ pub const WriteParticipantManager = struct {
         _ = try self.openLocked(binding);
     }
 
+    /// Transport admission validates the already configured participant and
+    /// current physical backend inside the same manager critical section as the
+    /// durable PREPARE mutation.
+    pub fn prepareConfigured(
+        self: *WriteParticipantManager,
+        binding: write_service.ParticipantBinding,
+        backend_digest: protocol.Digest,
+        request: write_service.PrepareRequest,
+    ) !write_service.PrepareAttestation {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        const entry = try self.validateConfiguredBackendLocked(binding, backend_digest);
+        return entry.participant.prepare(request);
+    }
+
+    /// Authorize COMMIT against the durable PREPARE/completed authority and
+    /// validate physical identity atomically with participant commit admission.
+    pub fn commitConfigured(
+        self: *WriteParticipantManager,
+        binding: write_service.ParticipantBinding,
+        backend_digest: protocol.Digest,
+        authority: protocol.AuthorityBinding,
+        transaction_id: protocol.Id,
+        expected_sequence: u64,
+        commit_certificate: write_service.CommitCertificate,
+    ) !write_service.CommitResult {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        const entry = try self.validateConfiguredBackendLocked(binding, backend_digest);
+        const inspection = try entry.participant.inspect();
+        const prepared_write = commitRetryWrite(inspection, transaction_id) orelse
+            return error.TransactionNotFound;
+        if (!std.meta.eql(prepared_write.authority, authority))
+            return error.AuthorityConflict;
+        if (prepared_write.sequence != expected_sequence or expected_sequence == 0)
+            return error.SequenceMismatch;
+        return entry.participant.commit(transaction_id, commit_certificate);
+    }
+
+    pub fn inspectConfigured(
+        self: *WriteParticipantManager,
+        binding: write_service.ParticipantBinding,
+        backend_digest: protocol.Digest,
+    ) !write_service.Inspection {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        const entry = try self.validateConfiguredBackendLocked(binding, backend_digest);
+        return entry.participant.inspect();
+    }
+
     pub fn prepare(
         self: *WriteParticipantManager,
         binding: write_service.ParticipantBinding,
@@ -204,6 +257,18 @@ pub const WriteParticipantManager = struct {
             value.gate.beginExclusive();
         }
         return .{ .manager = self, .entry = entry };
+    }
+
+    fn validateConfiguredBackendLocked(
+        self: *WriteParticipantManager,
+        binding: write_service.ParticipantBinding,
+        backend_digest: protocol.Digest,
+    ) !*Entry {
+        const entry = try self.configuredLocked(binding);
+        const attestation = try self.replica_control.validateActiveBackend(binding.replica);
+        if (!std.mem.eql(u8, &attestation.backend_digest, &backend_digest))
+            return error.MemberBackendIdentityMismatch;
+        return entry;
     }
 
     fn configuredLocked(self: *WriteParticipantManager, binding: write_service.ParticipantBinding) !*Entry {
@@ -587,6 +652,17 @@ fn catalogGetU64(bytes: []const u8, offset: *usize) u64 {
     const value = std.mem.readInt(u64, bytes[offset.*..][0..8], .little);
     offset.* += 8;
     return value;
+}
+
+fn commitRetryWrite(
+    inspection: write_service.Inspection,
+    transaction_id: protocol.Id,
+) ?write_service.WriteRequest {
+    if (inspection.pending) |pending|
+        if (std.mem.eql(u8, &pending.write.transaction_id, &transaction_id)) return pending.write;
+    if (inspection.last_completed_write) |write|
+        if (std.mem.eql(u8, &write.transaction_id, &transaction_id)) return write;
+    return null;
 }
 
 fn isZero(bytes: []const u8) bool {

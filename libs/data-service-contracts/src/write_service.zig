@@ -90,6 +90,9 @@ pub const Inspection = struct {
     frontier: Frontier,
     pending: ?PendingInspection,
     last_completed: ?CommitResult,
+    // Retained for authenticated COMMIT retry authorization. This exposes only
+    // write metadata; payload bytes remain private to the durable participant.
+    last_completed_write: ?WriteRequest,
 };
 
 const Store = struct {
@@ -365,6 +368,7 @@ const ParticipantCore = struct {
                 .commit_decided = state.certificate != null,
             } else null,
             .last_completed = if (state.last_completed) |completed| completed.result else null,
+            .last_completed_write = if (state.last_completed) |completed| completed.write else null,
         };
     }
 
