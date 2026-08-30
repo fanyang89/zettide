@@ -39,8 +39,8 @@ jobs:
           sudo apt-get install -y \
             acl attr autoconf automake bc build-essential dbench dump e2fsprogs \
             fio fuse3 gawk git indent libacl1-dev libaio-dev libattr1-dev \
-            libcap-dev libgdbm-compat-dev libgdbm-dev libtest-harness-perl \
-            libtool libtool-bin liburing-dev linux-headers-$(uname -r) lvm2 \
+            libcap-dev libfuse3-dev libgdbm-compat-dev libgdbm-dev libtest-harness-perl \
+            libtool libtool-bin liburing-dev "linux-headers-$(uname -r)" lvm2 \
             openssl perl psmisc quota sqlite3 uuid-dev uuid-runtime xfsprogs \
             xfslibs-dev
           sudo modprobe fuse
