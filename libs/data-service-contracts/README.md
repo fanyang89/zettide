@@ -21,7 +21,9 @@ restart without reviving an expired lease. Certified replay carries its original
 authority into the fencing gate. File-backed participants persist an immutable
 Replica/canonical-Member genesis binding before the first PREPARE. Their atomic
 snapshot remains a development baseline, not the final streaming journal or
-network transport.
+network transport. Data-node composition requires an explicitly configured
+participant binding before PREPARE/COMMIT; controller reconciliation derives the
+same bytewise-canonical three-Member set from active placement/allocation state.
 Consumers generate protobuf bindings with their own grpc/protobuf toolchain.
 
 ```sh

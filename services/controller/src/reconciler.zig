@@ -17,6 +17,10 @@ pub const RecoveryRequest = protocol.RecoveryRequest;
 pub const RecoveryResult = protocol.RecoveryResult;
 pub const MarkReadyRequest = protocol.MarkReadyRequest;
 pub const PrimaryLeaseStatus = protocol.PrimaryLeaseStatus;
+pub const WriteParticipantConfiguration = struct {
+    binding: protocol.write_service.ParticipantBinding,
+    backend_digest: Digest,
+};
 
 pub const DataServiceClient = struct {
     context: *anyopaque,
@@ -25,6 +29,7 @@ pub const DataServiceClient = struct {
     pub const VTable = struct {
         ensure: *const fn (*anyopaque, []const u8, data_service.Request) anyerror!data_service.Response,
         delete: *const fn (*anyopaque, []const u8, data_service.Request) anyerror!data_service.Response,
+        configure_write_participant: *const fn (*anyopaque, []const u8, WriteParticipantConfiguration) anyerror!void,
         identify_holder: *const fn (*anyopaque, []const u8) anyerror!Id,
         stage_primary: *const fn (*anyopaque, []const u8, StageRequest) anyerror!StageAck,
         fence_replica: *const fn (*anyopaque, []const u8, replica_fence.Binding) anyerror!replica_fence.Result,
@@ -41,6 +46,10 @@ pub const DataServiceClient = struct {
 
     fn delete(self: DataServiceClient, endpoint: []const u8, request: data_service.Request) !data_service.Response {
         return self.vtable.delete(self.context, endpoint, request);
+    }
+
+    fn configureWriteParticipant(self: DataServiceClient, endpoint: []const u8, configuration: WriteParticipantConfiguration) !void {
+        return self.vtable.configure_write_participant(self.context, endpoint, configuration);
     }
 
     fn identifyHolder(self: DataServiceClient, endpoint: []const u8) !Id {
@@ -376,7 +385,9 @@ pub const Reconciler = struct {
     }
 
     fn planProposeAuthority(self: *Reconciler, volume: state_machine.PoolStateMachine.ReconcileVolume) !*Action {
-        if (volume.placements.len != state_machine.volume_target_replica_count) return error.InconsistentSnapshot;
+        if (volume.placements.len != state_machine.volume_target_replica_count or
+            volume.allocations.len != state_machine.volume_target_replica_count)
+            return error.InconsistentSnapshot;
         const primary = volume.placements[0];
         if (primary.replica_index != 0 or primary.state != .REPLICA_PLACEMENT_STATE_ACTIVE) return error.InconsistentSnapshot;
         const node = nodeById(volume.nodes, primary.node_id) orelse return error.InconsistentSnapshot;
@@ -384,6 +395,7 @@ pub const Reconciler = struct {
         errdefer action.deinit();
         const allocator = action.arena.allocator();
         action.kind = .{ .propose_authority = .{
+            .participants = try participantConfigurations(allocator, volume),
             .endpoint = try allocator.dupe(u8, node.control_endpoint),
             .volume_id_text = try allocator.dupe(u8, volume.volume.id),
             .primary_placement_id_text = try allocator.dupe(u8, primary.id),
@@ -447,6 +459,7 @@ pub const Reconciler = struct {
         }
         const primary_node = nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot;
         action.kind = .{ .ready_authority = .{
+            .participants = try participantConfigurations(allocator, volume),
             .primary_endpoint = try allocator.dupe(u8, primary_node.control_endpoint),
             .volume_id_text = try allocator.dupe(u8, authority.volume_id),
             .placement_id_texts = try dupePlacementIds(allocator, volume.placements),
@@ -497,6 +510,7 @@ pub const Reconciler = struct {
         });
         const failover_id = randomId(self.io);
         action.kind = .{ .inspect_renewal = .{
+            .participants = try participantConfigurations(allocator, volume),
             .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
             .request = .{ .binding = try authorityBinding(authority) },
             .command = command,
@@ -567,6 +581,7 @@ pub const Reconciler = struct {
             };
         }
         action.kind = .{ .failover_ready = .{
+            .participants = try participantConfigurations(allocator, volume),
             .primary_endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, candidate.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
             .volume_id_text = try allocator.dupe(u8, candidate.volume_id),
             .placement_id_texts = try dupePlacementIds(allocator, volume.placements),
@@ -658,7 +673,13 @@ pub const Action = struct {
         command: []const u8,
     };
 
+    const WriteParticipant = struct {
+        endpoint: []const u8,
+        configuration: WriteParticipantConfiguration,
+    };
+
     const ProposeAuthority = struct {
+        participants: []const WriteParticipant,
         endpoint: []const u8,
         volume_id_text: []const u8,
         primary_placement_id_text: []const u8,
@@ -688,6 +709,7 @@ pub const Action = struct {
     };
 
     const ReadyAuthority = struct {
+        participants: []const WriteParticipant,
         primary_endpoint: []const u8,
         volume_id_text: []const u8,
         placement_id_texts: []const []const u8,
@@ -700,6 +722,7 @@ pub const Action = struct {
     };
 
     const InspectRenewal = struct {
+        participants: []const WriteParticipant,
         endpoint: []const u8,
         request: MarkReadyRequest,
         command: []const u8,
@@ -725,6 +748,7 @@ pub const Action = struct {
     };
 
     const FailoverReady = struct {
+        participants: []const WriteParticipant,
         primary_endpoint: []const u8,
         volume_id_text: []const u8,
         placement_id_texts: []const []const u8,
@@ -805,6 +829,8 @@ pub const Action = struct {
                 try submitAndValidate(self.parent_allocator, submitter, delete.command, .finalize);
             },
             .propose_authority => |propose| {
+                for (propose.participants) |participant|
+                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
                 const holder_boot_id = try data_client.identifyHolder(propose.endpoint);
                 if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
                 const binding: AuthorityBinding = .{
@@ -865,6 +891,8 @@ pub const Action = struct {
                 try submitAndValidate(self.parent_allocator, submitter, command, .activate_authority);
             },
             .ready_authority => |ready| {
+                for (ready.participants) |participant|
+                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
                 const status = try data_client.inspectPrimary(ready.primary_endpoint, ready.request);
                 try validatePrimaryLeaseStatus(status, ready.request);
                 if (!status.candidate_fresh) {
@@ -913,6 +941,8 @@ pub const Action = struct {
                 }
             },
             .inspect_renewal => |inspect| {
+                for (inspect.participants) |participant|
+                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
                 const status = try data_client.inspectPrimary(inspect.endpoint, inspect.request);
                 try validatePrimaryLeaseStatus(status, inspect.request);
                 if (status.candidate_fresh) {
@@ -977,6 +1007,8 @@ pub const Action = struct {
                 try submitAndValidate(self.parent_allocator, submitter, command, .propose_authority);
             },
             .failover_ready => |ready| {
+                for (ready.participants) |participant|
+                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
                 const status = try data_client.inspectPrimary(ready.primary_endpoint, ready.request);
                 try validatePrimaryLeaseStatus(status, ready.request);
                 if (!status.candidate_fresh) {
@@ -1267,6 +1299,60 @@ fn hashU64(hasher: *std.crypto.hash.sha2.Sha256, value: u64) void {
     hashField(hasher, &bytes);
 }
 
+fn participantConfigurations(
+    allocator: std.mem.Allocator,
+    volume: state_machine.PoolStateMachine.ReconcileVolume,
+) ![]const Action.WriteParticipant {
+    if (volume.placements.len != state_machine.volume_target_replica_count or
+        volume.allocations.len != state_machine.volume_target_replica_count)
+        return error.InconsistentSnapshot;
+
+    var members: [state_machine.volume_target_replica_count]Id = undefined;
+    for (volume.placements, 0..) |placement, index| {
+        const allocation = allocationForPlacement(volume.allocations, placement.id) orelse return error.InconsistentSnapshot;
+        if (placement.state != .REPLICA_PLACEMENT_STATE_ACTIVE or
+            allocation.state != .REPLICA_ALLOCATION_STATE_ACTIVE or
+            placement.generation == 0 or placement.generation != allocation.generation or
+            allocation.member_id.len != 16 or placement.backend_digest.len != 32 or
+            isZero(placement.backend_digest))
+            return error.InconsistentSnapshot;
+        members[index] = allocation.member_id[0..16].*;
+        if (isZero(&members[index])) return error.InconsistentSnapshot;
+    }
+    std.mem.sort(Id, &members, {}, struct {
+        fn lessThan(_: void, lhs: Id, rhs: Id) bool {
+            return std.mem.order(u8, &lhs, &rhs) == .lt;
+        }
+    }.lessThan);
+    for (members[1..], members[0 .. members.len - 1]) |member, previous|
+        if (std.mem.eql(u8, &member, &previous)) return error.InconsistentSnapshot;
+
+    const participants = try allocator.alloc(Action.WriteParticipant, volume.placements.len);
+    for (volume.placements, participants) |placement, *participant| {
+        const allocation = allocationForPlacement(volume.allocations, placement.id) orelse return error.InconsistentSnapshot;
+        const node = nodeById(volume.nodes, placement.node_id) orelse return error.InconsistentSnapshot;
+        participant.* = .{
+            .endpoint = try allocator.dupe(u8, node.control_endpoint),
+            .configuration = .{
+                .binding = .{
+                    .replica = .{
+                        .volume_id = try parseId(volume.volume.id),
+                        .placement_id = try parseId(placement.id),
+                        .allocation_id = try parseId(allocation.id),
+                        .generation = placement.generation,
+                        .member_id = allocation.member_id[0..16].*,
+                        .offset_bytes = allocation.offset_bytes,
+                        .length_bytes = allocation.length_bytes,
+                    },
+                    .replica_members = members,
+                },
+                .backend_digest = placement.backend_digest[0..32].*,
+            },
+        };
+    }
+    return participants;
+}
+
 fn dupePlacementIds(allocator: std.mem.Allocator, placements: []const pb.ReplicaPlacement) ![]const []const u8 {
     const ids = try allocator.alloc([]const u8, placements.len);
     for (placements, ids) |placement, *id| id.* = try allocator.dupe(u8, placement.id);
@@ -1478,6 +1564,9 @@ const TestDataClient = struct {
     service: *data_service.Service,
     machine: *state_machine.PoolStateMachine,
     holder: *primary_lease.Runtime,
+    participants: [state_machine.volume_target_replica_count]?WriteParticipantConfiguration = @splat(null),
+    participant_configurations: usize = 0,
+    lose_configuration_response: bool = false,
     lose_ensure_response: bool = false,
     stale_attestation: bool = false,
     lose_stage_response: bool = false,
@@ -1515,6 +1604,26 @@ const TestDataClient = struct {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
         if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
         return self.service.deleteReplica(request);
+    }
+
+    fn configureWriteParticipantOpaque(context: *anyopaque, endpoint: []const u8, configuration: WriteParticipantConfiguration) !void {
+        const self: *TestDataClient = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        for (&self.participants) |*existing| {
+            if (existing.*) |value| {
+                if (!std.meta.eql(value.binding.replica.placement_id, configuration.binding.replica.placement_id)) continue;
+                if (!std.meta.eql(value, configuration)) return error.ParticipantConflict;
+                return;
+            }
+            existing.* = configuration;
+            self.participant_configurations += 1;
+            if (self.lose_configuration_response) {
+                self.lose_configuration_response = false;
+                return error.TransportUnknown;
+            }
+            return;
+        }
+        return error.TooManyParticipants;
     }
 
     fn identifyHolderOpaque(context: *anyopaque, endpoint: []const u8) !Id {
@@ -1640,6 +1749,7 @@ const TestDataClient = struct {
     const vtable: DataServiceClient.VTable = .{
         .ensure = ensureOpaque,
         .delete = deleteOpaque,
+        .configure_write_participant = configureWriteParticipantOpaque,
         .identify_holder = identifyHolderOpaque,
         .stage_primary = stagePrimaryOpaque,
         .fence_replica = fenceReplicaOpaque,
@@ -1699,8 +1809,17 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_PROVISIONING, fenced.lifecycle_state);
     try std.testing.expectEqual(pb.VolumeOperationPhase.VOLUME_OPERATION_PHASE_FENCING, fenced.operation_phase);
 
+    data_client.lose_configuration_response = true;
+    try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
+    try std.testing.expectEqual(@as(usize, 1), data_client.participant_configurations);
+    try std.testing.expectEqual(@as(usize, 4), submitter.submissions);
     try rebuilt.runOnce();
+    try std.testing.expectEqual(@as(usize, 3), data_client.participant_configurations);
     try std.testing.expectEqual(@as(usize, 5), submitter.submissions);
+    for (data_client.participants) |participant| {
+        const configured = participant orelse return error.MissingParticipantConfiguration;
+        try std.testing.expectEqual(test_member_ids, configured.binding.replica_members);
+    }
     data_client.lose_stage_response = true;
     try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
     try std.testing.expectEqual(@as(usize, 1), data_client.stage_grants);

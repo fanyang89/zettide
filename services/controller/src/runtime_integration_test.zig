@@ -83,6 +83,8 @@ const ReconcileDataClient = struct {
         return self.service.deleteReplica(request);
     }
 
+    fn configureWriteParticipant(_: *anyopaque, _: []const u8, _: reconciler.WriteParticipantConfiguration) !void {}
+
     fn identifyHolder(_: *anyopaque, _: []const u8) !reconciler.Id {
         return reconcile_holder_boot_id;
     }
@@ -179,6 +181,7 @@ const ReconcileDataClient = struct {
     const vtable: reconciler.DataServiceClient.VTable = .{
         .ensure = ensure,
         .delete = delete,
+        .configure_write_participant = configureWriteParticipant,
         .identify_holder = identifyHolder,
         .stage_primary = stagePrimary,
         .fence_replica = fenceReplica,
@@ -219,6 +222,10 @@ const BlockingDataClient = struct {
         return ensure(context, endpoint, request);
     }
 
+    fn configureWriteParticipant(_: *anyopaque, _: []const u8, _: reconciler.WriteParticipantConfiguration) !void {
+        return error.Unsupported;
+    }
+
     fn identifyHolder(_: *anyopaque, _: []const u8) !reconciler.Id {
         return error.Unsupported;
     }
@@ -255,6 +262,7 @@ const BlockingDataClient = struct {
     const vtable: reconciler.DataServiceClient.VTable = .{
         .ensure = ensure,
         .delete = delete,
+        .configure_write_participant = configureWriteParticipant,
         .identify_holder = identifyHolder,
         .stage_primary = stagePrimary,
         .fence_replica = fenceReplica,

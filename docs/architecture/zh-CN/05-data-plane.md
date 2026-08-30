@@ -104,9 +104,14 @@ replay；replay 携带旧 authority，可被不同或更高 durable fence 拒绝
 不会继续伪装成 empty-frontier recovery evidence。
 
 当前 file snapshot 每次原子替换完整的单未决状态，只用于 crash-ordering 和协议测试，
-不是最终流式 journal。controller 尚未配置 canonical Member set，participant mutation
-也未暴露到 management listener；certificate attestation 尚无网络认证、remote target
-handler 或 primary coordinator。因此这些本地组合测试不等于三节点 quorum success。
+不是最终流式 journal。controller reconciliation 现已从三个 active placement/allocation
+推导 bytewise-canonical Member set，并通过内部 `ConfigureWriteParticipant` control RPC 在
+初始 authority proposal、readiness 和稳定 authority inspection 前，将同一 immutable set
+持久配置到三个 data node。配置必须匹配完整 active Replica 与 backend digest；catalog
+先于 participant file binding 持久，启动可补完该 crash window，PREPARE/COMMIT 也不能
+惰性创建未配置 participant。payload mutation 仍未暴露到 management listener；
+certificate attestation 尚无网络认证、remote target handler 或 primary coordinator。
+因此这些控制面与本地组合测试仍不等于三节点 quorum success。
 
 目标 vendor-specific command 至少携带：
 

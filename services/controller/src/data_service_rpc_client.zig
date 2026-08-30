@@ -79,6 +79,24 @@ pub const RpcClient = struct {
         return wire.dataResponse(response);
     }
 
+    fn configureWriteParticipant(
+        context: *anyopaque,
+        endpoint: []const u8,
+        configuration: reconciler.WriteParticipantConfiguration,
+    ) !void {
+        const self: *RpcClient = @ptrCast(@alignCast(context));
+        var member_views: [3][]const u8 = undefined;
+        var response = try self.unary(
+            endpoint,
+            "ConfigureWriteParticipant",
+            wire.configureWriteParticipantRequest(&configuration, &member_views),
+            pb.ConfigureWriteParticipantResponse,
+        );
+        defer response.deinit(self.allocator);
+        if (!std.meta.eql(configuration, try wire.parseWriteParticipantResponse(response)))
+            return error.ResponseBindingMismatch;
+    }
+
     fn identifyHolder(context: *anyopaque, endpoint: []const u8) !reconciler.Id {
         const self: *RpcClient = @ptrCast(@alignCast(context));
         var response = try self.unary(endpoint, "IdentifyHolder", pb.IdentifyHolderRequest{}, pb.IdentifyHolderResponse);
@@ -186,6 +204,7 @@ pub const RpcClient = struct {
     const vtable: reconciler.DataServiceClient.VTable = .{
         .ensure = ensure,
         .delete = delete,
+        .configure_write_participant = configureWriteParticipant,
         .identify_holder = identifyHolder,
         .stage_primary = stagePrimary,
         .fence_replica = fenceReplica,
@@ -242,6 +261,56 @@ fn testStageRequest() reconciler.StageRequest {
         },
         .lease_duration_ms = 30_000,
     };
+}
+
+test "RPC client configures canonical write participant binding" {
+    const Handler = struct {
+        fn configure(
+            _: *@This(),
+            allocator: std.mem.Allocator,
+            _: *grpc.ServerContext,
+            request_bytes: []const u8,
+        ) !grpc.UnaryResponse {
+            var reader: std.Io.Reader = .fixed(request_bytes);
+            var request = try pb.ConfigureWriteParticipantRequest.decode(&reader, allocator);
+            defer request.deinit(allocator);
+            var response: pb.ConfigureWriteParticipantResponse = .{ .binding = request.binding };
+            var writer: std.Io.Writer.Allocating = .init(allocator);
+            defer writer.deinit();
+            try response.encode(&writer.writer, allocator);
+            return grpc.UnaryResponse.ok(allocator, writer.written());
+        }
+    };
+
+    const configuration: reconciler.WriteParticipantConfiguration = .{
+        .binding = .{
+            .replica = .{
+                .volume_id = id_a,
+                .placement_id = id_b,
+                .allocation_id = id_c,
+                .generation = 3,
+                .member_id = id_d,
+                .offset_bytes = 4096,
+                .length_bytes = 8192,
+            },
+            .replica_members = .{ id_d, id_e, id_f },
+        },
+        .backend_digest = digest,
+    };
+    var handler: Handler = .{};
+    var server = try grpc.Server.init(std.testing.allocator, .{});
+    defer server.deinit();
+    try server.registerUnary(
+        wire.methodPath("ConfigureWriteParticipant"),
+        grpc.UnaryHandler.bind(Handler, &handler, Handler.configure),
+    );
+    try server.start();
+
+    var endpoint_buffer: [32]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "127.0.0.1:{d}", .{try server.port()});
+    var client = try RpcClient.init(std.testing.allocator, std.testing.io, .{});
+    defer client.deinit();
+    try RpcClient.configureWriteParticipant(&client, endpoint, configuration);
 }
 
 test "RPC client reaches canonical StagePrimary endpoint" {

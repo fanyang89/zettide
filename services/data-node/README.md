@@ -70,10 +70,15 @@ same participant/control barrier through the durable fence append; undecided or
 poisoned state blocks deletion/fencing, and deletion durably retires the catalog
 entry before allowing generation rollover.
 
-The manager is intentionally not exposed on the current management listener and
-the controller does not yet provision canonical write sets. Therefore a
-three-node Volume intent can reach `ACTIVE`, but user writes are still not
-replicated or published to hosts. Authenticated cross-node Replica transport,
-primary coordination, 2/3 success, recovery/repair, and authority-gated
-Publication remain subsequent steps. See `tests/e2e/README.md` for the Docker
-Compose profile.
+The internal `ConfigureWriteParticipant` control RPC now durably installs the
+same controller-derived, bytewise-canonical three-Member set on every active
+Replica before initial authority proposal, authority readiness, or stable
+authority inspection. Configuration validates the exact active Replica and its
+backend digest, is immutable and idempotent, and is cataloged before the
+participant state file is bound so startup can finish that crash window without
+hiding history. PREPARE/COMMIT remain unavailable on the management listener and
+cannot lazily create an unconfigured participant. Therefore a three-node Volume
+intent can reach `ACTIVE`, but user writes are still not replicated or published
+to hosts. Authenticated cross-node Replica transport, primary coordination, 2/3
+success, recovery/repair, and authority-gated Publication remain subsequent
+steps. See `tests/e2e/README.md` for the Docker Compose profile.

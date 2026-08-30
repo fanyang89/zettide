@@ -48,7 +48,7 @@ fencing、failover、repair 和 republish。
 | Catalog | 部分 | multi-Volume catalog、extent mapping、writable backend 和 endpoint registry 已存在；在线扩容/保护迁移未接线 |
 | SPDK | 部分 | managed runtime、provider bdev、Catalog NVMf TCP/RDMA export、vhost-user-blk 与 initiator wrapper 有 focused tests |
 | `zettide-controller` | 基础 | Pool/Node/Member/Volume metadata、heartbeat、Raft/WAL/snapshot/ReadIndex、placement、authority/lease state machine 与 leader reconciliation 已接线；公开 Lease/Publication API 仍不存在 |
-| Tier 3 Replica protocol | 基础 | 三节点 file Replica fencing/authority 生命周期与 restart failover 已验证；daemon 已组合持久 participant catalog、immutable Replica/set binding、active-Replica file apply 与共享 fence/replay gate；尚无 canonical set 控制面配置、vendor-specific NVMf commands、跨节点 coordinator、认证 attestation、quorum recovery/repair 或 publication |
+| Tier 3 Replica protocol | 基础 | 三节点 file Replica fencing/authority 生命周期与 restart failover 已验证；controller 已从 active placements/allocations 配置 canonical three-Member set，daemon 已组合持久 participant catalog、immutable Replica/set binding、active-Replica file apply 与共享 fence/replay gate；尚无 vendor-specific NVMf commands、跨节点 coordinator、认证 attestation、quorum recovery/repair 或 publication |
 | TxFS shared qcow2 | 部分 | transaction、SCSI CAW/data transport、voting 和 allocator 基础存在；POSIX/FUSE 与 qtr 未接线 |
 
 ## 两种 Pool
@@ -63,7 +63,7 @@ fencing、failover、repair 和 republish。
 ## 两种 NVMf
 
 - **标准 host-facing NVMf publication**：Catalog Volume 到虚拟化 host 的标准 NVMe block interface，支持 TCP/RDMA；当前已有部分实现。
-- **内部 Replica NVMf transport**：Tier 3 primary 到 Replica 的 vendor-specific 协议，需要携带 Zettide epoch、sequence 和 commit evidence；当前 daemon 只有未联网、未由 controller 配置 canonical set 的 node-local participant manager 与 gated file apply，NVMf transport 尚未实现。
+- **内部 Replica NVMf transport**：Tier 3 primary 到 Replica 的 vendor-specific 协议，需要携带 Zettide epoch、sequence 和 commit evidence；当前 controller 已配置 canonical set，daemon 已有未联网的 node-local participant manager 与 gated file apply，但 NVMf transport 尚未实现。
 
 标准 NVMf export 的存在不证明 Tier 3 Replica protocol 已实现；反过来，Tier 3 设计也不能把标准 host-facing NVMf 写成仅供内部使用。
 

@@ -41,7 +41,7 @@ fn create(io: std.Io, parent: std.Io.Dir, basename: []const u8) ![generation_siz
     defer atomic_file.deinit(io);
     try atomic_file.file.writeStreamingAll(io, &bytes);
     try atomic_file.file.sync(io);
-    try atomic_file.replace(io);
+    try atomic_file.link(io);
     const parent_file = try parent.openFile(io, ".", .{ .mode = .read_only });
     defer parent_file.close(io);
     try parent_file.sync(io);

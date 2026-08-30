@@ -10,10 +10,12 @@ domain, capabilities, and protocol version. Member registration binds a native
 media identity and local set to a controller-managed Pool and Node, with immutable slot and
 allocation geometry. Leader-local heartbeats currently observe Node
 incarnation/sequence, Member presence, and optional extent capacity. Volume
-creation currently commits a `PROVISIONING` metadata intent with fixed 3/2/1
-replication parameters; it does not select placement, reserve extents, publish a
-device, or wait for data-plane readiness. Replica placement, extent allocation,
-attachments, and DataService reconciliation remain separate layers.
+creation first commits a `PROVISIONING` metadata intent with fixed 3/2/1
+replication parameters. Leader reconciliation then reserves three placements and
+extents, ensures file-backed Replicas, configures the same immutable canonical
+three-Member write-participant set on all of them, and drives the current
+fence/recovery/authority lifecycle to `ACTIVE`. Publication, cross-node payload
+transport, quorum commit, repair, and attachments remain separate layers.
 
 Pool, Volume, Node, and Member mutations are committed and applied through Raft
 before an RPC reports success. Reads use Raft ReadIndex rather than serving

@@ -17,8 +17,9 @@ This Docker Compose environment starts:
 
 The local profile uses TGT as a lightweight iSCSI transport harness. It tests
 service composition, three-node Node/Member registration, fresh capacity
-heartbeats, Replica/fence/recovery/ready reconciliation, discovery, login-free
-SCSI commands, and reads without requiring SPDK, host
+heartbeats, Replica ensure plus canonical write-participant configuration,
+fence/recovery/ready reconciliation, discovery, login-free SCSI commands, and
+reads without requiring SPDK, host
 iSCSI kernel modules, or privileged containers. The TGT LUN and registered file
 Member intentionally use separate backing files, so the SCSI checks are an
 orthogonal transport smoke—not managed Volume or Replica data-path coverage.

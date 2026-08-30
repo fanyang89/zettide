@@ -109,6 +109,22 @@ pub const WriteParticipantManager = struct {
         self.* = undefined;
     }
 
+    /// Durably provisions the immutable participant identity before any write
+    /// transport is allowed to use it. Identical retries are idempotent.
+    pub fn configure(
+        self: *WriteParticipantManager,
+        binding: write_service.ParticipantBinding,
+        backend_digest: protocol.Digest,
+    ) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        const attestation = try self.replicas.validateActive(binding.replica);
+        if (!std.mem.eql(u8, &attestation.backend_digest, &backend_digest))
+            return error.MemberBackendIdentityMismatch;
+        _ = try self.openLocked(binding);
+    }
+
     pub fn prepare(
         self: *WriteParticipantManager,
         binding: write_service.ParticipantBinding,
@@ -117,7 +133,7 @@ pub const WriteParticipantManager = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
-        const entry = try self.openLocked(binding);
+        const entry = try self.configuredLocked(binding);
         _ = try self.replicas.validateActive(binding.replica);
         return entry.participant.prepare(request);
     }
@@ -131,7 +147,7 @@ pub const WriteParticipantManager = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
-        const entry = try self.openLocked(binding);
+        const entry = try self.configuredLocked(binding);
         _ = try self.replicas.validateActive(binding.replica);
         return entry.participant.commit(transaction_id, commit_certificate);
     }
@@ -143,7 +159,7 @@ pub const WriteParticipantManager = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
-        const entry = try self.openLocked(binding);
+        const entry = try self.configuredLocked(binding);
         return entry.participant.inspect();
     }
 
@@ -190,28 +206,36 @@ pub const WriteParticipantManager = struct {
         return .{ .manager = self, .entry = entry };
     }
 
+    fn configuredLocked(self: *WriteParticipantManager, binding: write_service.ParticipantBinding) !*Entry {
+        const entry = self.entries.get(keyOf(binding.replica)) orelse return error.ParticipantNotConfigured;
+        if (!std.meta.eql(entry.binding, binding)) return error.ReplicaStateMismatch;
+        if (entry.retired) return error.ReplicaRetired;
+        return entry;
+    }
+
     fn openLocked(self: *WriteParticipantManager, binding: write_service.ParticipantBinding) !*Entry {
+        try write_service.validateParticipantBinding(binding);
         if (self.entries.get(keyOf(binding.replica))) |existing| {
             if (!std.meta.eql(existing.binding, binding)) return error.ReplicaStateMismatch;
             if (existing.retired) return error.ReplicaRetired;
             return existing;
         }
         _ = try self.replicas.validateActive(binding.replica);
-        const name = try stateName(self.allocator, binding.replica);
-        var name_owned = true;
-        errdefer if (name_owned) self.allocator.free(name);
-        const store = try write_service.FileStore.init(self.allocator, self.io, self.parent, name);
-        var store_owned = true;
-        errdefer if (store_owned) store.deinit();
-        const entry = try self.createEntry(name, binding, false, store);
-        name_owned = false;
-        store_owned = false;
-        errdefer {
-            _ = self.entries.remove(keyOf(binding.replica));
-            self.destroyEntry(entry);
+        for (self.catalog) |record| {
+            if (!std.meta.eql(keyOf(record.binding.replica), keyOf(binding.replica))) continue;
+            if (!std.meta.eql(record.binding, binding)) return error.ReplicaStateMismatch;
+            if (record.retired) return error.ReplicaRetired;
+            try self.loadExistingEntry(record);
+            return self.entries.get(keyOf(binding.replica)) orelse return error.StoreCorrupt;
         }
-        try self.appendCatalog(.{ .binding = binding });
-        return entry;
+
+        // Install discoverability before creating/binding the participant file.
+        // A crash can therefore leave a cataloged unbound file, which startup
+        // safely finishes, but can never leave hidden write history.
+        const record: CatalogRecord = .{ .binding = binding };
+        try self.appendCatalog(record);
+        try self.loadExistingEntry(record);
+        return self.entries.get(keyOf(binding.replica)) orelse return error.StoreCorrupt;
     }
 
     fn recoverCatalogReplicaOperations(self: *WriteParticipantManager) !void {
@@ -249,8 +273,10 @@ pub const WriteParticipantManager = struct {
         const store = try write_service.FileStore.init(self.allocator, self.io, self.parent, name);
         var store_owned = true;
         errdefer if (store_owned) store.deinit();
-        const durable_binding = (try store.binding()) orelse return error.UnboundParticipantState;
-        if (!std.meta.eql(binding, durable_binding)) return error.ReplicaStateMismatch;
+        const durable_binding = try store.binding();
+        if (durable_binding) |existing| {
+            if (!std.meta.eql(binding, existing)) return error.ReplicaStateMismatch;
+        } else if (record.retired) return error.UnboundParticipantState;
         const entry = try self.createEntry(name, binding, record.retired, store);
         name_owned = false;
         store_owned = false;
@@ -278,6 +304,7 @@ pub const WriteParticipantManager = struct {
         ) catch |err| switch (err) {
             error.FileNotFound => {
                 if (marker_exists) return error.CatalogMissing;
+                try self.validateCatalogCoverage(&.{});
                 const empty = try encodeCatalog(self.allocator, &.{});
                 defer self.allocator.free(empty);
                 try self.replaceCatalogBytes(empty);
@@ -290,8 +317,37 @@ pub const WriteParticipantManager = struct {
         defer self.allocator.free(bytes);
         const catalog = try decodeCatalog(self.allocator, bytes);
         errdefer if (catalog.len != 0) self.allocator.free(catalog);
+        try self.validateCatalogRecords(catalog);
+        try self.validateCatalogCoverage(catalog);
         if (!marker_exists) try self.writeCatalogMarker();
         return catalog;
+    }
+
+    fn validateCatalogRecords(self: *WriteParticipantManager, catalog: []const CatalogRecord) !void {
+        var seen: std.AutoHashMapUnmanaged(Key, void) = .empty;
+        defer seen.deinit(self.allocator);
+        try seen.ensureTotalCapacity(self.allocator, @intCast(catalog.len));
+        for (catalog) |record| {
+            write_service.validateParticipantBinding(record.binding) catch return error.StoreCorrupt;
+            const result = seen.getOrPutAssumeCapacity(keyOf(record.binding.replica));
+            if (result.found_existing) return error.StoreCorrupt;
+        }
+    }
+
+    fn validateCatalogCoverage(self: *WriteParticipantManager, catalog: []const CatalogRecord) !void {
+        const directory = try self.parent.openDir(self.io, ".", .{ .iterate = true });
+        defer directory.close(self.io);
+        var iterator = directory.iterate();
+        while (try iterator.next(self.io)) |entry| {
+            const discovered = try parseStateKey(entry.name) orelse continue;
+            var found = false;
+            for (catalog) |record| {
+                if (!std.meta.eql(discovered, keyOf(record.binding.replica))) continue;
+                found = true;
+                break;
+            }
+            if (!found) return error.OrphanParticipantState;
+        }
     }
 
     fn catalogMarkerExists(self: *WriteParticipantManager) !bool {
@@ -555,6 +611,38 @@ fn stateName(allocator: std.mem.Allocator, replica: protocol.ReplicaBinding) ![]
     return name;
 }
 
+fn parseStateKey(name: []const u8) !?WriteParticipantManager.Key {
+    if (std.mem.eql(u8, name, catalog_basename) or std.mem.eql(u8, name, catalog_marker_basename)) return null;
+    if (!std.mem.startsWith(u8, name, state_prefix)) return null;
+    if (std.mem.endsWith(u8, name, state_suffix ++ ".lock")) {
+        if (name.len != state_name_len + ".lock".len) return error.StoreCorrupt;
+        _ = try parseStateKey(name[0..state_name_len]) orelse return error.StoreCorrupt;
+        return null;
+    }
+    if (!std.mem.endsWith(u8, name, state_suffix) or name.len != state_name_len)
+        return error.StoreCorrupt;
+    var offset: usize = state_prefix.len;
+    const placement_id = try parseHex(16, name[offset..][0..32]);
+    offset += 32;
+    if (name[offset] != '-') return error.StoreCorrupt;
+    offset += 1;
+    const generation_bytes = try parseHex(8, name[offset..][0..16]);
+    const generation = std.mem.readInt(u64, &generation_bytes, .little);
+    if (generation == 0) return error.StoreCorrupt;
+    return key(placement_id, generation);
+}
+
+fn parseHex(comptime size: usize, encoded: []const u8) ![size]u8 {
+    if (encoded.len != size * 2) return error.StoreCorrupt;
+    var result: [size]u8 = undefined;
+    for (&result, 0..) |*byte, index| {
+        const high = std.fmt.charToDigit(encoded[index * 2], 16) catch return error.StoreCorrupt;
+        const low = std.fmt.charToDigit(encoded[index * 2 + 1], 16) catch return error.StoreCorrupt;
+        byte.* = @as(u8, @intCast(high << 4 | low));
+    }
+    return result;
+}
+
 fn putHex(output: []u8, input: []const u8) void {
     const alphabet = "0123456789abcdef";
     std.debug.assert(output.len == input.len * 2);
@@ -588,6 +676,7 @@ const FakeBackend = struct {
 const FakeReplicaBackend = struct {
     digest: protocol.Digest = @splat(0x33),
     fail_delete_once: bool = false,
+    deletes: usize = 0,
 
     fn backend(self: *FakeReplicaBackend) protocol.replica_service.Backend {
         return .{ .context = self, .vtable = &vtable };
@@ -599,6 +688,7 @@ const FakeReplicaBackend = struct {
 
     fn deleteOpaque(context: *anyopaque, _: protocol.ReplicaBinding) !void {
         const self: *FakeReplicaBackend = @ptrCast(@alignCast(context));
+        self.deletes += 1;
         if (self.fail_delete_once) {
             self.fail_delete_once = false;
             return error.InjectedDeleteFailure;
@@ -732,6 +822,167 @@ fn certificate(local: write_service.PrepareAttestation, binding: write_service.P
         .{ .attestations = .{ remote, local } };
 }
 
+test "manager durably configures an immutable participant before writes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var replicas = try protocol.replica_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
+    defer replicas.deinit();
+    var replica_backend: FakeReplicaBackend = .{};
+    var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
+    const ensured = try replica_engine.ensureReplica(replicaRequest("0198f54d-5c2a-7000-8000-000000000004"));
+    const binding: write_service.ParticipantBinding = .{
+        .replica = ensured.replica.attestation.binding,
+        .replica_members = canonicalMembers(ensured.replica.attestation.binding.member_id),
+    };
+    var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
+    defer fences.deinit();
+    var backend: FakeBackend = .{};
+    var validator: FakeAuthorityValidator = .{ .expected = testAuthority(binding.replica.volume_id) };
+    {
+        var manager = try WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        );
+        defer manager.deinit();
+        var invalid_binding = binding;
+        invalid_binding.replica_members = .{ @splat(0), binding.replica.member_id, testId(14) };
+        try std.testing.expectError(
+            error.InvalidReplicaSet,
+            manager.configure(invalid_binding, ensured.replica.attestation.backend_digest),
+        );
+        try std.testing.expectEqual(@as(usize, 0), manager.catalog.len);
+        try manager.configure(binding, ensured.replica.attestation.backend_digest);
+        try manager.configure(binding, ensured.replica.attestation.backend_digest);
+        const inspection = try manager.inspect(binding);
+        try std.testing.expectEqual(@as(u64, 0), inspection.frontier.sequence);
+        try std.testing.expect(inspection.pending == null);
+        var changed_digest = ensured.replica.attestation.backend_digest;
+        changed_digest[0] ^= 1;
+        try std.testing.expectError(error.MemberBackendIdentityMismatch, manager.configure(binding, changed_digest));
+    }
+    {
+        var reopened = try WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        );
+        defer reopened.deinit();
+        try reopened.configure(binding, ensured.replica.attestation.backend_digest);
+        try std.testing.expectEqual(@as(u64, 0), (try reopened.inspect(binding)).frontier.sequence);
+    }
+}
+
+test "manager completes a cataloged unbound participant on startup" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var replicas = try protocol.replica_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
+    defer replicas.deinit();
+    var replica_backend: FakeReplicaBackend = .{};
+    var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
+    const ensured = try replica_engine.ensureReplica(replicaRequest("0198f54d-5c2a-7000-8000-000000000004"));
+    const binding: write_service.ParticipantBinding = .{
+        .replica = ensured.replica.attestation.binding,
+        .replica_members = canonicalMembers(ensured.replica.attestation.binding.member_id),
+    };
+    var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
+    defer fences.deinit();
+    var backend: FakeBackend = .{};
+    var validator: FakeAuthorityValidator = .{ .expected = testAuthority(binding.replica.volume_id) };
+    {
+        var manager = try WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        );
+        defer manager.deinit();
+        try manager.appendCatalog(.{ .binding = binding });
+    }
+    {
+        var reopened = try WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        );
+        defer reopened.deinit();
+        try std.testing.expectEqual(@as(u64, 0), (try reopened.inspect(binding)).frontier.sequence);
+    }
+}
+
+test "startup rejects a malformed catalog before Replica recovery" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var replicas = try protocol.replica_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
+    defer replicas.deinit();
+    var replica_backend: FakeReplicaBackend = .{};
+    var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
+    const ensured = try replica_engine.ensureReplica(replicaRequest("0198f54d-5c2a-7000-8000-000000000004"));
+    const binding: write_service.ParticipantBinding = .{
+        .replica = ensured.replica.attestation.binding,
+        .replica_members = canonicalMembers(ensured.replica.attestation.binding.member_id),
+    };
+    var invalid_binding = binding;
+    invalid_binding.replica_members = .{ @splat(0), binding.replica.member_id, testId(14) };
+    var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
+    defer fences.deinit();
+    var backend: FakeBackend = .{};
+    var validator: FakeAuthorityValidator = .{ .expected = testAuthority(binding.replica.volume_id) };
+    {
+        var manager = try WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        );
+        defer manager.deinit();
+        try manager.appendCatalog(.{ .binding = invalid_binding });
+    }
+    replica_backend.fail_delete_once = true;
+    try std.testing.expectError(
+        error.InjectedDeleteFailure,
+        replica_engine.deleteReplica(replicaRequest("0198f54d-5c2a-7000-8000-000000000005")),
+    );
+    try std.testing.expectEqual(@as(usize, 1), replica_backend.deletes);
+    try std.testing.expectError(
+        error.StoreCorrupt,
+        WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), replica_backend.deletes);
+}
+
 test "manager discovers and replays a durable COMMIT before returning" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -770,6 +1021,7 @@ test "manager discovers and replays a durable COMMIT before returning" {
             validator.validator(),
         );
         defer manager.deinit();
+        try manager.configure(binding, ensured.replica.attestation.backend_digest);
         const prepared = try manager.prepare(binding, request);
         try std.testing.expectError(
             error.InjectedApplyFailure,
@@ -848,9 +1100,63 @@ test "manager discovers and replays a durable COMMIT before returning" {
         );
         defer reopened.deinit();
         try std.testing.expect(try reopened.hasWriteHistory(binding.replica.volume_id));
+        try std.testing.expectError(error.ParticipantNotConfigured, reopened.inspect(next_binding));
+        try reopened.configure(next_binding, replica_backend.digest);
         const next_inspection = try reopened.inspect(next_binding);
         try std.testing.expectEqual(@as(u64, 0), next_inspection.frontier.sequence);
     }
+}
+
+test "manager rejects an uncataloged participant state file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var replicas = try protocol.replica_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
+    defer replicas.deinit();
+    var replica_backend: FakeReplicaBackend = .{};
+    var replica_engine = protocol.replica_service.Service.init(replicas.store(), replica_backend.backend());
+    var fences = try protocol.fence_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "fences.state");
+    defer fences.deinit();
+    var backend: FakeBackend = .{};
+    var validator: FakeAuthorityValidator = .{ .expected = testAuthority(testId(1)) };
+    {
+        var manager = try WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        );
+        manager.deinit();
+    }
+    const orphan_replica: protocol.ReplicaBinding = .{
+        .volume_id = testId(1),
+        .placement_id = testId(2),
+        .allocation_id = testId(3),
+        .generation = 1,
+        .member_id = test_member_id,
+        .offset_bytes = 4096,
+        .length_bytes = 4096,
+    };
+    const orphan_name = try stateName(std.testing.allocator, orphan_replica);
+    defer std.testing.allocator.free(orphan_name);
+    const orphan = try tmp.dir.createFile(std.testing.io, orphan_name, .{});
+    orphan.close(std.testing.io);
+    try std.testing.expectError(
+        error.OrphanParticipantState,
+        WriteParticipantManager.init(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            &replicas,
+            &replica_engine,
+            &fences,
+            backend.backend(),
+            validator.validator(),
+        ),
+    );
 }
 
 test "manager rejects a missing catalog after durable initialization" {

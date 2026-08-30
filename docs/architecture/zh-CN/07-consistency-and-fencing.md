@@ -89,7 +89,7 @@ flowchart LR
     R --> A[Validate local lease window<br/>and commit ready authority]
 ```
 
-内部 Replica NVMf 使用 vendor-specific commands，把 Volume/Replica generation、epoch、sequence 与 checksum 交给 target state machine。Target-owned metadata 不可由普通 namespace write 修改。当前 daemon 已组合 backend-neutral node-local participant：immutable Replica/set genesis、单未决 PREPARE payload、canonical two-witness certificate、COMMIT-before-apply、完整 active Replica file apply、startup replay，以及 normal admission/replay/Replica mutation/durable fence append 共用 gate 均有 focused test。Replay 携带其原 authority 且不恢复 lease，不同或更高 durable fence 会拒绝 replay。尚未实现 controller canonical-set 配置、transport session/auth、认证 attestation、跨节点 coordinator 与 recovery quorum。它与当前标准 host-facing NVMf export 无关。
+内部 Replica NVMf 使用 vendor-specific commands，把 Volume/Replica generation、epoch、sequence 与 checksum 交给 target state machine。Target-owned metadata 不可由普通 namespace write 修改。当前 daemon 已组合 backend-neutral node-local participant：immutable Replica/set genesis、单未决 PREPARE payload、canonical two-witness certificate、COMMIT-before-apply、完整 active Replica file apply、startup replay，以及 normal admission/replay/Replica mutation/durable fence append 共用 gate 均有 focused test。Replay 携带其原 authority 且不恢复 lease，不同或更高 durable fence 会拒绝 replay。Controller 现已从 active placements/allocations 推导并持久配置同一 bytewise-canonical three-Member set；未配置 participant 不能进入 PREPARE/COMMIT。尚未实现 transport session/auth、认证 attestation、跨节点 coordinator 与 recovery quorum。它与当前标准 host-facing NVMf export 无关。
 
 ## Tier 3 Commit Evidence
 
@@ -133,4 +133,4 @@ Repairing/Stale Replica 不参与 quorum。进入内存、NVMf queue 或 volatil
 
 ## 当前差距
 
-当前没有外部虚拟化 managed attachment、consumer-bound NVMf/iSCSI generation、统一 filesystem access authority 或完整 Tier 3 数据面。Volume lease/write epoch、Replica persistent fencing 与 daemon-owned node-local participant/fence gate 已有基础，但尚无 controller canonical-set 配置、网络 participant、认证/quorum coordinator、certified recovery 或 managed Publication fencing。现有 iSCSI target/export primitive 不执行 Publication generation fencing。
+当前没有外部虚拟化 managed attachment、consumer-bound NVMf/iSCSI generation、统一 filesystem access authority 或完整 Tier 3 数据面。Volume lease/write epoch、Replica persistent fencing、controller canonical-set 配置与 daemon-owned node-local participant/fence gate 已有基础，但尚无网络 participant、认证/quorum coordinator、certified recovery 或 managed Publication fencing。现有 iSCSI target/export primitive 不执行 Publication generation fencing。

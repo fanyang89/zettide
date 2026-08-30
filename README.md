@@ -29,7 +29,7 @@ The table below is only a concise entry point.
 | Catalog block path | Partial | Multi-Volume Catalog, extent mappings, SPDK-backed NVMf/iSCSI exports, endpoint registry, and focused lifecycle tests |
 | Controller | Foundation | Raft-replicated metadata, leader-local heartbeats, placement/authority state machines, and a production-wired leader reconciler for the partial DataService lifecycle |
 | CSI | Partial | CSI Node service for the current FUSE path; dynamic provisioning and a CSI Controller service are not implemented |
-| Distributed data plane | Foundation | Three-node file-backed control lifecycle reaches `ACTIVE` and restart failover advances the write epoch; the daemon now safely composes a cataloged node-local participant with active-Replica writes and shared fence/replay gates, while canonical-set provisioning, cross-node transport, quorum success, repair, and managed publication remain future work |
+| Distributed data plane | Foundation | Three-node file-backed control lifecycle reaches `ACTIVE` and restart failover advances the write epoch; reconciliation now provisions the same immutable canonical three-Member participant set on every active Replica, while cross-node transport, quorum success, repair, and managed publication remain future work |
 
 “Current” means implementation and validation entry points exist, not that the
 feature is production-ready. “Partial” means the full lifecycle is incomplete.

@@ -83,6 +83,7 @@ pub const DataNodeServer = struct {
         try server.registerUnary(methodPath("EnsureReplica"), grpc.UnaryHandler.bind(State, state, State.ensureReplica));
         try server.registerUnary(methodPath("InspectReplica"), grpc.UnaryHandler.bind(State, state, State.inspectReplica));
         try server.registerUnary(methodPath("DeleteReplica"), grpc.UnaryHandler.bind(State, state, State.deleteReplica));
+        try server.registerUnary(methodPath("ConfigureWriteParticipant"), grpc.UnaryHandler.bind(State, state, State.configureWriteParticipant));
         try server.registerUnary(methodPath("IdentifyHolder"), grpc.UnaryHandler.bind(State, state, State.identifyHolder));
         try server.registerUnary(methodPath("StagePrimary"), grpc.UnaryHandler.bind(State, state, State.stagePrimary));
         try server.registerUnary(methodPath("FenceReplica"), grpc.UnaryHandler.bind(State, state, State.fenceReplica));
@@ -209,6 +210,26 @@ const State = struct {
             return fail(allocator, .invalid_argument, "invalid DeleteReplica request");
         defer request.deinit(allocator);
         return self.handleReplicaMutation(allocator, pb.DeleteReplicaResponse, replicaRequest(request), .delete);
+    }
+
+    fn configureWriteParticipant(
+        self: *State,
+        allocator: std.mem.Allocator,
+        _: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.ConfigureWriteParticipantRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid ConfigureWriteParticipant request");
+        defer request.deinit(allocator);
+        const configuration = parseWriteParticipantConfiguration(request.binding) catch
+            return fail(allocator, .invalid_argument, "invalid write participant binding");
+        self.replica_mutex.lockUncancelable(self.io);
+        defer self.replica_mutex.unlock(self.io);
+        const writes = if (self.writes) |*value| value else return fail(allocator, .failed_precondition, "write participant manager is not configured");
+        writes.configure(configuration.binding, configuration.backend_digest) catch |err|
+            return writeConfigurationFailure(allocator, err);
+        return encodeResponse(allocator, pb.ConfigureWriteParticipantResponse{ .binding = request.binding });
     }
 
     const ReplicaMethod = enum { ensure, inspect, delete };
@@ -625,6 +646,21 @@ fn fenceFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse
     };
 }
 
+fn writeConfigurationFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
+    return switch (err) {
+        error.ReplicaNotFound => fail(allocator, .not_found, "participant Replica not found"),
+        error.InvalidReplicaSet,
+        error.MemberNotInReplicaSet,
+        error.ReplicaStateMismatch,
+        error.ReplicaRetired,
+        error.ReplicaNotActive,
+        error.MemberBackendIdentityMismatch,
+        => fail(allocator, .failed_precondition, "write participant configuration rejected"),
+        error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "participant state exhausted"),
+        else => fail(allocator, .internal, "write participant configuration failed"),
+    };
+}
+
 fn writeControlFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
     return switch (err) {
         error.WriteInProgress,
@@ -673,6 +709,47 @@ fn uuidText(id: protocol.Id) [36]u8 {
         target_index += 2;
     }
     return text;
+}
+
+const WriteParticipantConfiguration = struct {
+    binding: write_service.ParticipantBinding,
+    backend_digest: protocol.Digest,
+};
+
+fn parseWriteParticipantConfiguration(value: ?pb.DataWriteParticipantBinding) !WriteParticipantConfiguration {
+    const binding = value orelse return error.MissingBinding;
+    if (binding.generation == 0 or binding.length_bytes == 0 or
+        binding.replica_member_ids.items.len != 3)
+        return error.InvalidReplicaSet;
+    _ = std.math.add(u64, binding.offset_bytes, binding.length_bytes) catch return error.InvalidReplicaSet;
+    const parsed: protocol.ReplicaBinding = .{
+        .volume_id = try uuid(binding.volume_id),
+        .placement_id = try uuid(binding.placement_id),
+        .allocation_id = try uuid(binding.allocation_id),
+        .generation = binding.generation,
+        .member_id = try fixedId(binding.member_id),
+        .offset_bytes = binding.offset_bytes,
+        .length_bytes = binding.length_bytes,
+    };
+    const members: [3]protocol.Id = .{
+        try fixedId(binding.replica_member_ids.items[0]),
+        try fixedId(binding.replica_member_ids.items[1]),
+        try fixedId(binding.replica_member_ids.items[2]),
+    };
+    if (isZero(&members[0]) or isZero(&members[1]) or isZero(&members[2]) or
+        std.mem.order(u8, &members[0], &members[1]) != .lt or
+        std.mem.order(u8, &members[1], &members[2]) != .lt)
+        return error.InvalidReplicaSet;
+    var contains_local = false;
+    for (members) |member| if (std.mem.eql(u8, &member, &parsed.member_id)) {
+        contains_local = true;
+        break;
+    };
+    if (!contains_local) return error.MemberNotInReplicaSet;
+    return .{
+        .binding = .{ .replica = parsed, .replica_members = members },
+        .backend_digest = try digest(binding.backend_digest),
+    };
 }
 
 fn parseFenceBinding(binding: ?pb.DataReplicaFenceBinding) !fence_service.Binding {
@@ -770,6 +847,11 @@ fn recoveryDigest(binding: protocol.AuthorityBinding) protocol.Digest {
 fn isZero(bytes: []const u8) bool {
     for (bytes) |byte| if (byte != 0) return false;
     return true;
+}
+
+fn fixedId(bytes: []const u8) !protocol.Id {
+    if (bytes.len != 16) return error.InvalidFixedId;
+    return bytes[0..16].*;
 }
 
 fn uuid(bytes: []const u8) !protocol.Id {
@@ -907,6 +989,38 @@ test "data-node service persists Replica lifecycle through gRPC" {
     try std.testing.expectEqualStrings(ensure_request.operation_id, ensured.operation_id);
     try std.testing.expectEqual(pb.DataReplicaState.DATA_REPLICA_STATE_ACTIVE, ensured.replica.?.state);
     try std.testing.expectEqual(@as(usize, 32), ensured.replica.?.attestation.?.backend_digest.len);
+
+    const replica_binding = try replica_service.parseBinding(replicaRequest(ensure_request));
+    var participant_members: [3]protocol.Id = .{ member, member, member };
+    participant_members[1][15] = 10;
+    participant_members[2][15] = 11;
+    var participant_member_views: [3][]const u8 = .{
+        &participant_members[0],
+        &participant_members[1],
+        &participant_members[2],
+    };
+    var configure_request: pb.ConfigureWriteParticipantRequest = .{ .binding = .{
+        .volume_id = &replica_binding.volume_id,
+        .placement_id = &replica_binding.placement_id,
+        .allocation_id = &replica_binding.allocation_id,
+        .generation = replica_binding.generation,
+        .member_id = &replica_binding.member_id,
+        .offset_bytes = replica_binding.offset_bytes,
+        .length_bytes = replica_binding.length_bytes,
+        .backend_digest = ensured.replica.?.attestation.?.backend_digest,
+        .replica_member_ids = .{ .items = &participant_member_views, .capacity = participant_member_views.len },
+    } };
+    var configure_result = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
+    defer configure_result.deinit();
+    try std.testing.expect(configure_result.status.isOk());
+    var configure_retry = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
+    defer configure_retry.deinit();
+    try std.testing.expect(configure_retry.status.isOk());
+    participant_member_views[1] = &participant_members[0];
+    var invalid_configuration = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
+    defer invalid_configuration.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, invalid_configuration.status.code);
+    participant_member_views[1] = &participant_members[1];
 
     var inspect_request: pb.InspectReplicaRequest = .{
         .operation_id = "0198f54d-5c2a-7000-8000-000000000025",

@@ -67,6 +67,11 @@ pub const ParticipantBinding = struct {
     replica_members: [3]Id,
 };
 
+pub fn validateParticipantBinding(binding: ParticipantBinding) !void {
+    try validateReplica(binding.replica);
+    try validateReplicaSet(binding.replica_members, binding.replica.member_id);
+}
+
 const State = struct {
     binding: ?ParticipantBinding = null,
     frontier: Frontier = .{},
