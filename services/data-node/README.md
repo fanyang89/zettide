@@ -73,17 +73,19 @@ same participant/control barrier through the durable fence append; undecided or
 poisoned state blocks deletion/fencing, and deletion durably retires the catalog
 entry before allowing generation rollover.
 
-The existing `ConfigureWriteParticipant` protobuf carries only Member IDs, not
-the three controller-pinned witness identities now required by the participant.
-M11a therefore rejects that legacy keyless configuration rather than creating
-unsigned history. M11b must append and provision identities before initial authority proposal,
-readiness, or stable authority inspection. The internal value-level configuration
-still validates the exact active Replica/backend digest, is immutable and
-idempotent, and is cataloged before the participant state file is bound. PREPARE/COMMIT remain unavailable on the management listener and
-cannot lazily create an unconfigured participant.
+`ConfigureWriteParticipant` now carries both the legacy canonical Member list
+and exactly three controller-derived Member/Node/key identities. The management
+boundary strictly validates their ordering, equality, key IDs, Ed25519 points,
+and distinct signer Nodes/keys before cataloging the immutable binding. Legacy
+keyless configuration remains fail closed. The controller can pin and provision
+these identities, but the production daemon does not load or register its
+private signing seed until M11c, so keyless deployed Nodes cannot progress to
+participant readiness. PREPARE/COMMIT remain unavailable on the management
+listener and cannot lazily create an unconfigured participant.
 
 The optional, separately bound legacy `ReplicaTransport` remains HMAC
-authenticated, but its unsigned COMMIT protobuf now fails closed. M11c must carry
+authenticated. Its binding metadata now carries the pinned trust set, but its
+unsigned COMMIT certificate and unsigned responses still fail closed. M11c must carry
 the original two signed PREPARE records and signed responses before payload
 mutation is re-enabled. Metadata listener separation and authentication remain.
 Requests are HMAC-SHA-256
@@ -94,8 +96,8 @@ message, and payload, so stale or success-to-failure substitutions fail closed.
 After M11c, captured mutation requests may still be replayed only with the same
 bytes and will rely on signed participant durable idempotency plus current
 physical-backend validation. Tests verify that this service and `DataService` are not
-registered on each other's listeners; M11a specifically verifies unauthenticated
-rejection and signed-evidence-required failure.
+registered on each other's listeners and that keyless, reordered, mismatched,
+wrong-key-ID, and duplicate-Node configurations fail closed.
 
 The daemon can enable this listener only when the file-member composition and
 all four explicit development options are present:

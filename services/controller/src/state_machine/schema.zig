@@ -1,6 +1,9 @@
 const std = @import("std");
 const uuid = @import("uuid");
 
+// Append-only optional Node signing_public_key fields fit the existing bounds
+// and decode empty in legacy v8 commands/v11 snapshots, so no format bump is
+// required. Their semantic fingerprint is likewise conditional when absent.
 pub const command_format_version: u32 = 8;
 pub const snapshot_format_version: u32 = 11;
 pub const max_name_bytes: usize = 127;

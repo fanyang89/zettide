@@ -1052,12 +1052,21 @@ fn expectDeletesEqual(expected: DeletedVolume, actual: DeletedVolume) !void {
     try std.testing.expectEqualSlices(u8, expected_bytes, actual_bytes);
 }
 
+fn nodeSigningPublicKey(node_id: []const u8) [32]u8 {
+    var seed: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(node_id, &seed, .{});
+    var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed) catch unreachable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    return key_pair.public_key.toBytes();
+}
+
 fn registerNode(
     runtime: *runtime_mod.Runtime,
     config: *const config_mod.Config,
     request_id: []const u8,
     node_id: []const u8,
 ) !RegisteredNode {
+    const signing_public_key = nodeSigningPublicKey(node_id);
     const request = try encodeMessage(pb.RegisterNodeRequest{
         .request_id = request_id,
         .node_id = node_id,
@@ -1065,6 +1074,7 @@ fn registerNode(
         .control_endpoint = node_control_endpoint,
         .nvmf_endpoint = node_nvmf_endpoint,
         .replica_endpoint = node_replica_endpoint,
+        .signing_public_key = &signing_public_key,
         .failure_domain = node_failure_domain,
         .capability_bits = node_capability_bits,
         .protocol_version = data_node_protocol_version,
@@ -1128,6 +1138,7 @@ fn registerReconcileNode(
 ) !RegisteredNode {
     const request_id = try std.fmt.allocPrint(runtime_allocator, "reconcile-node-{}", .{index});
     defer runtime_allocator.free(request_id);
+    const signing_public_key = nodeSigningPublicKey(node_id);
     const request = try encodeMessage(pb.RegisterNodeRequest{
         .request_id = request_id,
         .node_id = node_id,
@@ -1135,6 +1146,7 @@ fn registerReconcileNode(
         .control_endpoint = node_control_endpoint,
         .nvmf_endpoint = node_nvmf_endpoint,
         .replica_endpoint = node_replica_endpoint,
+        .signing_public_key = &signing_public_key,
         .failure_domain = failure_domain,
         .capability_bits = node_capability_bits,
         .protocol_version = data_node_protocol_version,

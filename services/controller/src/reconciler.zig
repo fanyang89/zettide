@@ -3,6 +3,7 @@ const std = @import("std");
 const data_service = @import("zettide_data_service_contracts").replica_service;
 const pb = @import("controller_proto");
 const primary_lease = @import("primary_lease.zig");
+const raft = @import("raftz");
 const protocol = @import("zettide_data_service_contracts");
 const replica_fence = @import("replica_fence.zig");
 const state_machine = @import("state_machine.zig");
@@ -620,6 +621,7 @@ pub const Reconciler = struct {
             .expected_current_resource_version = current.resource_version,
         });
         action.kind = .{ .renewal_ready = .{
+            .participants = try participantConfigurations(allocator, volume),
             .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, candidate.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
             .request = .{ .binding = binding },
             .ready_command = command,
@@ -763,6 +765,7 @@ pub const Action = struct {
     };
 
     const RenewalReady = struct {
+        participants: []const WriteParticipant,
         endpoint: []const u8,
         request: MarkReadyRequest,
         ready_command: []const u8,
@@ -960,6 +963,8 @@ pub const Action = struct {
                 }
             },
             .renewal_ready => |renewal| {
+                for (renewal.participants) |participant|
+                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
                 const status = try data_client.inspectPrimary(renewal.endpoint, renewal.request);
                 try validatePrimaryLeaseStatus(status, renewal.request);
                 if (!status.candidate_fresh) {
@@ -1307,25 +1312,36 @@ fn participantConfigurations(
         volume.allocations.len != state_machine.volume_target_replica_count)
         return error.InconsistentSnapshot;
 
-    var members: [state_machine.volume_target_replica_count]Id = undefined;
+    var identities: [state_machine.volume_target_replica_count]protocol.write_service.WitnessIdentity = undefined;
     for (volume.placements, 0..) |placement, index| {
         const allocation = allocationForPlacement(volume.allocations, placement.id) orelse return error.InconsistentSnapshot;
+        const member = memberById(volume.members, allocation.member_id) orelse return error.InconsistentSnapshot;
+        const node = nodeById(volume.nodes, placement.node_id) orelse return error.InconsistentSnapshot;
         if (placement.state != .REPLICA_PLACEMENT_STATE_ACTIVE or
             allocation.state != .REPLICA_ALLOCATION_STATE_ACTIVE or
             placement.generation == 0 or placement.generation != allocation.generation or
             allocation.member_id.len != 16 or placement.backend_digest.len != 32 or
-            isZero(placement.backend_digest))
+            isZero(placement.backend_digest) or
+            !std.mem.eql(u8, member.node_id, placement.node_id) or
+            !std.mem.eql(u8, node.id, placement.node_id) or
+            node.signing_public_key.len != @sizeOf(protocol.write_evidence_contract.PublicKey))
             return error.InconsistentSnapshot;
-        members[index] = allocation.member_id[0..16].*;
-        if (isZero(&members[index])) return error.InconsistentSnapshot;
+        var public_key: protocol.write_evidence_contract.PublicKey = undefined;
+        @memcpy(&public_key, node.signing_public_key);
+        identities[index] = .{
+            .member_id = allocation.member_id[0..16].*,
+            .node_id = parseId(node.id) catch return error.InconsistentSnapshot,
+            .key_id = protocol.write_evidence_contract.keyId(public_key),
+            .public_key = public_key,
+        };
     }
-    std.mem.sort(Id, &members, {}, struct {
-        fn lessThan(_: void, lhs: Id, rhs: Id) bool {
-            return std.mem.order(u8, &lhs, &rhs) == .lt;
+    std.mem.sort(protocol.write_service.WitnessIdentity, &identities, {}, struct {
+        fn lessThan(_: void, lhs: protocol.write_service.WitnessIdentity, rhs: protocol.write_service.WitnessIdentity) bool {
+            return std.mem.order(u8, &lhs.member_id, &rhs.member_id) == .lt;
         }
     }.lessThan);
-    for (members[1..], members[0 .. members.len - 1]) |member, previous|
-        if (std.mem.eql(u8, &member, &previous)) return error.InconsistentSnapshot;
+    protocol.write_evidence_contract.validateIdentities(identities) catch return error.InconsistentSnapshot;
+    const members = protocol.write_evidence_contract.members(identities);
 
     const participants = try allocator.alloc(Action.WriteParticipant, volume.placements.len);
     for (volume.placements, participants) |placement, *participant| {
@@ -1345,6 +1361,7 @@ fn participantConfigurations(
                         .length_bytes = allocation.length_bytes,
                     },
                     .replica_members = members,
+                    .witness_identities = identities,
                 },
                 .backend_digest = placement.backend_digest[0..32].*,
             },
@@ -1445,6 +1462,14 @@ const test_member_ids = [3][16]u8{
     .{ 0x13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3 },
 };
 
+fn testSigningPublicKey(index: usize) [32]u8 {
+    var seed: [32]u8 = @splat(0);
+    seed[31] = @intCast(index + 1);
+    var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(seed) catch unreachable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    return key_pair.public_key.toBytes();
+}
+
 fn applySetup(machine: *state_machine.PoolStateMachine, index: u64, encoded: []const u8) !void {
     var result = try machine.stateMachine().apply(.{ .index = index, .term = 1, .data = encoded });
     result.deinit(std.testing.allocator);
@@ -1463,6 +1488,7 @@ fn setupMachine(machine: *state_machine.PoolStateMachine, domains: [3][]const u8
     for (test_node_ids, domains, 0..) |node_id, domain, index| {
         const request_id = try std.fmt.allocPrint(allocator, "reconciler-node-{d}", .{index});
         defer allocator.free(request_id);
+        const signing_public_key = testSigningPublicKey(index);
         const encoded = try state_machine.encodeRegisterNodeCommand(allocator, .{
             .request_id = request_id,
             .node_id = node_id,
@@ -1470,6 +1496,7 @@ fn setupMachine(machine: *state_machine.PoolStateMachine, domains: [3][]const u8
             .control_endpoint = "data:9000",
             .nvmf_endpoint = "data:4420",
             .replica_endpoint = "data:7443",
+            .signing_public_key = &signing_public_key,
             .failure_domain = domain,
             .capability_bits = 1,
             .protocol_version = 1,
@@ -1567,6 +1594,7 @@ const TestDataClient = struct {
     holder: *primary_lease.Runtime,
     participants: [state_machine.volume_target_replica_count]?WriteParticipantConfiguration = @splat(null),
     participant_configurations: usize = 0,
+    participant_configuration_calls: usize = 0,
     lose_configuration_response: bool = false,
     lose_ensure_response: bool = false,
     stale_attestation: bool = false,
@@ -1580,6 +1608,7 @@ const TestDataClient = struct {
     fence_drains: usize = 0,
     recoveries: usize = 0,
     mark_ready_calls: usize = 0,
+    inspection_calls: usize = 0,
     stage_now_ms: u64 = 1_000,
     now_ms: u64 = 2_000,
     mismatch_inspect_binding: bool = false,
@@ -1610,6 +1639,7 @@ const TestDataClient = struct {
     fn configureWriteParticipantOpaque(context: *anyopaque, endpoint: []const u8, configuration: WriteParticipantConfiguration) !void {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
         if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        self.participant_configuration_calls += 1;
         for (&self.participants) |*existing| {
             if (existing.*) |value| {
                 if (!std.meta.eql(value.binding.replica.placement_id, configuration.binding.replica.placement_id)) continue;
@@ -1728,6 +1758,7 @@ const TestDataClient = struct {
     fn inspectPrimaryOpaque(context: *anyopaque, endpoint: []const u8, request: MarkReadyRequest) !PrimaryLeaseStatus {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
         if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        self.inspection_calls += 1;
         const token: primary_lease.Token = .{
             .lease_id = request.binding.lease_id,
             .holder_boot_id = request.binding.holder_boot_id,
@@ -1817,9 +1848,16 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     try rebuilt.runOnce();
     try std.testing.expectEqual(@as(usize, 3), data_client.participant_configurations);
     try std.testing.expectEqual(@as(usize, 5), submitter.submissions);
+    var canonical_identities: ?[3]protocol.write_service.WitnessIdentity = null;
     for (data_client.participants) |participant| {
         const configured = participant orelse return error.MissingParticipantConfiguration;
         try std.testing.expectEqual(test_member_ids, configured.binding.replica_members);
+        try protocol.write_evidence_contract.validateIdentities(configured.binding.witness_identities);
+        try std.testing.expectEqual(test_member_ids, protocol.write_evidence_contract.members(configured.binding.witness_identities));
+        if (canonical_identities) |expected|
+            try std.testing.expectEqual(expected, configured.binding.witness_identities)
+        else
+            canonical_identities = configured.binding.witness_identities;
     }
     data_client.lose_stage_response = true;
     try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
@@ -1890,8 +1928,10 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     var recovery_candidate = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
     defer recovery_candidate.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 3), recovery_candidate.authority_generation);
+    const renewal_configuration_calls = data_client.participant_configuration_calls;
     try rebuilt.runOnce();
     try rebuilt.runOnce();
+    try std.testing.expectEqual(renewal_configuration_calls + 3, data_client.participant_configuration_calls);
     try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
     var renewed = (try machine.getPrimaryAuthority(allocator, test_volume_id)).?;
     defer renewed.deinit(allocator);
@@ -2163,4 +2203,214 @@ test "stable authority maintenance rotates across volumes" {
     try std.testing.expectEqual(@as(?usize, 0), nextMaintenanceIndex(&volumes, 0));
     try std.testing.expectEqual(@as(?usize, 1), nextMaintenanceIndex(&volumes, 1));
     try std.testing.expectEqual(@as(?usize, 0), nextMaintenanceIndex(&volumes, 2));
+}
+
+test "participant trust derivation is order independent and rejects unpinned topology" {
+    const allocator = std.testing.allocator;
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try setupMachine(&machine, .{ "rack-a", "rack-b", "rack-c" });
+    var submitter = TestSubmitter{ .machine = &machine };
+    var store = data_service.MemoryStore.init(allocator);
+    defer store.deinit();
+    var backend: TestBackend = .{};
+    var service = data_service.Service.init(store.store(), backend.interface());
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder };
+    var owner = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
+    defer owner.deinit();
+    while (backend.ensures != 3) try owner.runOnce();
+
+    var volumes = try machine.listReconcileVolumes(allocator);
+    defer {
+        for (volumes) |*volume| volume.deinit(allocator);
+        allocator.free(volumes);
+    }
+    var volume = &volumes[0];
+    std.mem.swap(pb.Node, &volume.nodes[0], &volume.nodes[2]);
+    std.mem.swap(pb.Member, &volume.members[0], &volume.members[1]);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const participants = try participantConfigurations(arena.allocator(), volume.*);
+    try std.testing.expectEqual(@as(usize, 3), participants.len);
+    for (participants) |participant|
+        try std.testing.expectEqual(test_member_ids, participant.configuration.binding.replica_members);
+
+    const saved_key = volume.nodes[0].signing_public_key;
+    volume.nodes[0].signing_public_key = "";
+    try std.testing.expectError(error.InconsistentSnapshot, participantConfigurations(arena.allocator(), volume.*));
+    volume.nodes[0].signing_public_key = saved_key;
+
+    const second_key = volume.nodes[1].signing_public_key;
+    volume.nodes[1].signing_public_key = volume.nodes[0].signing_public_key;
+    try std.testing.expectError(error.InconsistentSnapshot, participantConfigurations(arena.allocator(), volume.*));
+    volume.nodes[1].signing_public_key = second_key;
+
+    const saved_member_node = volume.members[0].node_id;
+    volume.members[0].node_id = if (std.mem.eql(u8, saved_member_node, volume.nodes[0].id))
+        volume.nodes[1].id
+    else
+        volume.nodes[0].id;
+    const mismatch_result = participantConfigurations(arena.allocator(), volume.*);
+    volume.members[0].node_id = saved_member_node;
+    try std.testing.expectError(error.InconsistentSnapshot, mismatch_result);
+}
+
+const ReconcilerTestSnapshotReader = struct {
+    data: []const u8,
+    offset: usize = 0,
+
+    fn reader(self: *ReconcilerTestSnapshotReader) raft.SnapshotReader {
+        return .{ .ctx = self, .vtable = &vtable };
+    }
+
+    fn read(ctx: *anyopaque, output: []u8) raft.Error!usize {
+        const self: *ReconcilerTestSnapshotReader = @ptrCast(@alignCast(ctx));
+        if (self.offset == self.data.len) return 0;
+        const count = @min(output.len, self.data.len - self.offset);
+        @memcpy(output[0..count], self.data[self.offset..][0..count]);
+        self.offset += count;
+        return count;
+    }
+
+    const vtable: raft.SnapshotReader.VTable = .{ .read = read };
+};
+
+fn encodeReconcilerTestMessage(allocator: std.mem.Allocator, message: anytype) ![]u8 {
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    defer writer.deinit();
+    try message.encode(&writer.writer, allocator);
+    return writer.toOwnedSlice();
+}
+
+fn legacyNodeFingerprintForTest(command: pb.RegisterNodeCommand) [32]u8 {
+    const Helper = struct {
+        fn field(hasher: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
+            var length: [8]u8 = undefined;
+            std.mem.writeInt(u64, &length, value.len, .little);
+            hasher.update(&length);
+            hasher.update(value);
+        }
+        fn integer(hasher: *std.crypto.hash.sha2.Sha256, comptime T: type, value: T) void {
+            var encoded: [@sizeOf(T)]u8 = undefined;
+            std.mem.writeInt(T, &encoded, value, .little);
+            field(hasher, &encoded);
+        }
+    };
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    Helper.field(&hasher, command.node_id);
+    Helper.field(&hasher, command.cluster_id);
+    Helper.field(&hasher, command.control_endpoint);
+    Helper.field(&hasher, command.nvmf_endpoint);
+    if (command.replica_endpoint.len != 0) Helper.field(&hasher, command.replica_endpoint);
+    Helper.field(&hasher, command.failure_domain);
+    Helper.integer(&hasher, u64, command.capability_bits);
+    Helper.integer(&hasher, u32, command.protocol_version);
+    var result: [32]u8 = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+fn keylessLegacySnapshot(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    var reader: std.Io.Reader = .fixed(data);
+    const snapshot = try pb.StateSnapshot.decode(&reader, arena.allocator());
+    for (snapshot.nodes.items) |*node| node.signing_public_key = "";
+    for (snapshot.requests.items) |*request| {
+        var command_reader: std.Io.Reader = .fixed(request.encoded_command);
+        const envelope = try pb.CommandEnvelope.decode(&command_reader, arena.allocator());
+        const command_value = envelope.command orelse return error.InvalidTestSnapshot;
+        const command = switch (command_value) {
+            .register_node => |value| value,
+            else => continue,
+        };
+        if (command.signing_public_key.len == 0) continue;
+        var legacy_command = command;
+        legacy_command.signing_public_key = "";
+        const command_wire = try encodeReconcilerTestMessage(allocator, pb.CommandEnvelope{
+            .format_version = envelope.format_version,
+            .command = .{ .register_node = legacy_command },
+        });
+        defer allocator.free(command_wire);
+        request.encoded_command = try arena.allocator().dupe(u8, command_wire);
+        const fingerprint = legacyNodeFingerprintForTest(legacy_command);
+        request.request_fingerprint = try arena.allocator().dupe(u8, &fingerprint);
+
+        var response_reader: std.Io.Reader = .fixed(request.encoded_response);
+        var response = try pb.RegisterNodeApplyResponse.decode(&response_reader, arena.allocator());
+        if (response.code != .REGISTER_NODE_APPLY_CODE_REGISTERED) return error.InvalidTestSnapshot;
+        const node = &(response.node orelse return error.InvalidTestSnapshot);
+        node.signing_public_key = "";
+        const response_wire = try encodeReconcilerTestMessage(allocator, response);
+        defer allocator.free(response_wire);
+        request.encoded_response = try arena.allocator().dupe(u8, response_wire);
+    }
+    return encodeReconcilerTestMessage(allocator, snapshot);
+}
+
+test "activated renewal after restart provisions canonical participants and rejects keyless topology" {
+    const allocator = std.testing.allocator;
+    var machine = state_machine.PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try setupMachine(&machine, .{ "rack-a", "rack-b", "rack-c" });
+    var submitter = TestSubmitter{ .machine = &machine };
+    var store = data_service.MemoryStore.init(allocator);
+    defer store.deinit();
+    var backend: TestBackend = .{};
+    var service = data_service.Service.init(store.store(), backend.interface());
+    var holder = try primary_lease.Runtime.init(test_holder_boot_id);
+    var data_client = TestDataClient{ .service = &service, .machine = &machine, .holder = &holder };
+    var owner = Reconciler.init(allocator, std.testing.io, &machine, data_client.interface(), submitter.interface());
+    defer owner.deinit();
+    for (0..16) |_| {
+        try owner.runOnce();
+        var volume = (try machine.getVolumeById(allocator, test_volume_id)).?;
+        defer volume.deinit(allocator);
+        if (volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE) break;
+    }
+    data_client.stage_now_ms = 11_000;
+    data_client.now_ms = 11_000;
+    try owner.runOnce(); // Propose the renewal candidate.
+    try owner.runOnce(); // Stage and durably activate it.
+    var activated = (try machine.getPrimaryAuthorityCandidate(allocator, test_volume_id)).?;
+    defer activated.deinit(allocator);
+    try std.testing.expectEqual(pb.PrimaryAuthorityState.PRIMARY_AUTHORITY_STATE_ACTIVATED, activated.state);
+
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, submitter.next_index - 1, 1, .{});
+    defer snapshot.deinit(allocator);
+
+    // A valid restarted candidate must configure the exact canonical trust set
+    // before inspection and readiness completion.
+    var restarted = state_machine.PoolStateMachine.init(allocator);
+    defer restarted.deinit();
+    var snapshot_reader = ReconcilerTestSnapshotReader{ .data = snapshot.data };
+    try restarted.stateMachine().restoreSnapshot(snapshot.metadata, snapshot_reader.reader());
+    var restarted_submitter = TestSubmitter{ .machine = &restarted, .next_index = submitter.next_index };
+    var restarted_client = TestDataClient{ .service = &service, .machine = &restarted, .holder = &holder, .now_ms = 11_000 };
+    var restarted_owner = Reconciler.init(allocator, std.testing.io, &restarted, restarted_client.interface(), restarted_submitter.interface());
+    defer restarted_owner.deinit();
+    try restarted_owner.runOnce();
+    try std.testing.expectEqual(@as(usize, 3), restarted_client.participant_configuration_calls);
+    for (restarted_client.participants) |participant| {
+        const configured = participant orelse return error.MissingParticipantConfiguration;
+        try protocol.write_service.validateParticipantBinding(configured.binding);
+    }
+
+    // Rewrite only Node registration genesis to the structurally valid legacy
+    // keyless form. The same persisted activated candidate must fail planning
+    // before inspect/readiness after restart.
+    const keyless_snapshot = try keylessLegacySnapshot(allocator, snapshot.data);
+    defer allocator.free(keyless_snapshot);
+    var keyless = state_machine.PoolStateMachine.init(allocator);
+    defer keyless.deinit();
+    var keyless_reader = ReconcilerTestSnapshotReader{ .data = keyless_snapshot };
+    try keyless.stateMachine().restoreSnapshot(snapshot.metadata, keyless_reader.reader());
+    var keyless_submitter = TestSubmitter{ .machine = &keyless, .next_index = submitter.next_index };
+    var keyless_client = TestDataClient{ .service = &service, .machine = &keyless, .holder = &holder, .now_ms = 11_000 };
+    var keyless_owner = Reconciler.init(allocator, std.testing.io, &keyless, keyless_client.interface(), keyless_submitter.interface());
+    defer keyless_owner.deinit();
+    try std.testing.expectError(error.InconsistentSnapshot, keyless_owner.runOnce());
+    try std.testing.expectEqual(@as(usize, 0), keyless_client.participant_configuration_calls);
+    try std.testing.expectEqual(@as(usize, 0), keyless_client.inspection_calls);
 }

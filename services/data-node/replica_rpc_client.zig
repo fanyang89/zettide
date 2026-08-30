@@ -63,13 +63,13 @@ pub const Client = struct {
         binding: Binding,
         request: write_service.PrepareRequest,
     ) !write_service.PrepareAttestation {
-        var binding_member_views: [3][]const u8 = undefined;
+        var binding_views: BindingProtoViews = undefined;
         var write_member_views: [3][]const u8 = undefined;
         var response = try self.unary(
             endpoint,
             "Prepare",
             pb.ReplicaPrepareRequest{
-                .binding = bindingProto(&binding, &binding_member_views),
+                .binding = bindingProto(&binding, &binding_views),
                 .write = writeProto(&request.write, &write_member_views),
                 .data = request.data,
             },
@@ -93,7 +93,7 @@ pub const Client = struct {
         certificate: write_service.CommitCertificate,
     ) !write_service.CommitResult {
         if (expected_sequence == 0) return error.InvalidArgument;
-        var binding_member_views: [3][]const u8 = undefined;
+        var binding_views: BindingProtoViews = undefined;
         var stable_certificate = certificate;
         var attestations: [write_service.certificate_witness_count]pb.DataPrepareAttestation = undefined;
         for (&attestations, &stable_certificate.attestations) |*target, *value|
@@ -102,7 +102,7 @@ pub const Client = struct {
             endpoint,
             "Commit",
             pb.ReplicaCommitRequest{
-                .binding = bindingProto(&binding, &binding_member_views),
+                .binding = bindingProto(&binding, &binding_views),
                 .authority = authorityProto(&authority),
                 .transaction_id = &transaction_id,
                 .attestations = .{ .items = &attestations, .capacity = attestations.len },
@@ -124,12 +124,12 @@ pub const Client = struct {
         binding: Binding,
         authority: protocol.AuthorityBinding,
     ) !RemoteInspection {
-        var binding_member_views: [3][]const u8 = undefined;
+        var binding_views: BindingProtoViews = undefined;
         var response = try self.unary(
             endpoint,
             "Inspect",
             pb.ReplicaWriteInspectRequest{
-                .binding = bindingProto(&binding, &binding_member_views),
+                .binding = bindingProto(&binding, &binding_views),
                 .authority = authorityProto(&authority),
             },
             pb.ReplicaWriteInspectResponse,
@@ -207,8 +207,19 @@ pub const Client = struct {
     }
 };
 
-fn bindingProto(binding: *const Binding, member_views: *[3][]const u8) pb.DataWriteParticipantBinding {
-    for (&binding.participant.replica_members, 0..) |*member_id, index| member_views[index] = member_id;
+const BindingProtoViews = struct {
+    members: [3][]const u8,
+    identities: [3]pb.DataWitnessIdentity,
+};
+
+fn bindingProto(binding: *const Binding, views: *BindingProtoViews) pb.DataWriteParticipantBinding {
+    for (&binding.participant.replica_members, &views.members) |*member_id, *view| view.* = member_id;
+    for (&binding.participant.witness_identities, &views.identities) |*identity, *view| view.* = .{
+        .member_id = &identity.member_id,
+        .node_id = &identity.node_id,
+        .key_id = &identity.key_id,
+        .public_key = &identity.public_key,
+    };
     const replica = &binding.participant.replica;
     return .{
         .volume_id = &replica.volume_id,
@@ -219,7 +230,8 @@ fn bindingProto(binding: *const Binding, member_views: *[3][]const u8) pb.DataWr
         .offset_bytes = replica.offset_bytes,
         .length_bytes = replica.length_bytes,
         .backend_digest = &binding.backend_digest,
-        .replica_member_ids = .{ .items = member_views, .capacity = member_views.len },
+        .replica_member_ids = .{ .items = &views.members, .capacity = views.members.len },
+        .witness_identities = .{ .items = &views.identities, .capacity = views.identities.len },
     };
 }
 

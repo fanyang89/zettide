@@ -65,9 +65,16 @@ pub fn dataResponse(response: anytype) !data_service.Response {
 pub fn configureWriteParticipantRequest(
     configuration: *const reconciler.WriteParticipantConfiguration,
     member_views: *[3][]const u8,
+    identity_views: *[3]pb.DataWitnessIdentity,
 ) pb.ConfigureWriteParticipantRequest {
     const replica = &configuration.binding.replica;
     for (&configuration.binding.replica_members, member_views) |*member, *view| view.* = member;
+    for (&configuration.binding.witness_identities, identity_views) |*identity, *view| view.* = .{
+        .member_id = &identity.member_id,
+        .node_id = &identity.node_id,
+        .key_id = &identity.key_id,
+        .public_key = &identity.public_key,
+    };
     return .{ .binding = .{
         .volume_id = &replica.volume_id,
         .placement_id = &replica.placement_id,
@@ -78,12 +85,14 @@ pub fn configureWriteParticipantRequest(
         .length_bytes = replica.length_bytes,
         .backend_digest = &configuration.backend_digest,
         .replica_member_ids = .{ .items = member_views, .capacity = member_views.len },
+        .witness_identities = .{ .items = identity_views, .capacity = identity_views.len },
     } };
 }
 
 pub fn parseWriteParticipantResponse(response: pb.ConfigureWriteParticipantResponse) !reconciler.WriteParticipantConfiguration {
     const binding = response.binding orelse return error.MissingParticipantBinding;
-    if (binding.generation == 0 or binding.length_bytes == 0 or binding.replica_member_ids.items.len != 3)
+    if (binding.generation == 0 or binding.length_bytes == 0 or
+        binding.replica_member_ids.items.len != 3 or binding.witness_identities.items.len != 3)
         return error.InvalidParticipantBinding;
     _ = std.math.add(u64, binding.offset_bytes, binding.length_bytes) catch
         return error.InvalidParticipantBinding;
@@ -92,29 +101,31 @@ pub fn parseWriteParticipantResponse(response: pb.ConfigureWriteParticipantRespo
         try nonzeroBytes(16, binding.replica_member_ids.items[1]),
         try nonzeroBytes(16, binding.replica_member_ids.items[2]),
     };
-    if (std.mem.order(u8, &members[0], &members[1]) != .lt or
-        std.mem.order(u8, &members[1], &members[2]) != .lt)
-        return error.InvalidParticipantBinding;
-    const local_member = try nonzeroBytes(16, binding.member_id);
-    var contains_local = false;
-    for (members) |member| if (std.mem.eql(u8, &member, &local_member)) {
-        contains_local = true;
-        break;
+    var identities: [3]@import("zettide_data_service_contracts").write_service.WitnessIdentity = undefined;
+    for (binding.witness_identities.items, &identities) |source, *identity| identity.* = .{
+        .member_id = try nonzeroBytes(16, source.member_id),
+        .node_id = try nonzeroBytes(16, source.node_id),
+        .key_id = try nonzeroBytes(32, source.key_id),
+        .public_key = try nonzeroBytes(32, source.public_key),
     };
-    if (!contains_local) return error.InvalidParticipantBinding;
-    return .{
-        .binding = .{
-            .replica = .{
-                .volume_id = try uuidBytes(binding.volume_id),
-                .placement_id = try uuidBytes(binding.placement_id),
-                .allocation_id = try uuidBytes(binding.allocation_id),
-                .generation = binding.generation,
-                .member_id = local_member,
-                .offset_bytes = binding.offset_bytes,
-                .length_bytes = binding.length_bytes,
-            },
-            .replica_members = members,
+    const local_member = try nonzeroBytes(16, binding.member_id);
+    const participant_binding: @import("zettide_data_service_contracts").write_service.ParticipantBinding = .{
+        .replica = .{
+            .volume_id = try uuidBytes(binding.volume_id),
+            .placement_id = try uuidBytes(binding.placement_id),
+            .allocation_id = try uuidBytes(binding.allocation_id),
+            .generation = binding.generation,
+            .member_id = local_member,
+            .offset_bytes = binding.offset_bytes,
+            .length_bytes = binding.length_bytes,
         },
+        .replica_members = members,
+        .witness_identities = identities,
+    };
+    @import("zettide_data_service_contracts").write_service.validateParticipantBinding(participant_binding) catch
+        return error.InvalidParticipantBinding;
+    return .{
+        .binding = participant_binding,
         .backend_digest = try nonzeroBytes(32, binding.backend_digest),
     };
 }
@@ -286,6 +297,18 @@ test "Replica UUID text parses to canonical wire bytes" {
     try std.testing.expectError(error.InvalidUuid, parseUuidText("0198f54d-5c2a-7000-0000-000000000001"));
 }
 
+fn testIdentity(member_id: [16]u8, node_id: [16]u8, seed: u8) @import("zettide_data_service_contracts").write_service.WitnessIdentity {
+    var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(seed)) catch unreachable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    const public_key = key_pair.public_key.toBytes();
+    return .{
+        .member_id = member_id,
+        .node_id = node_id,
+        .key_id = @import("zettide_data_service_contracts").write_evidence_contract.keyId(public_key),
+        .public_key = public_key,
+    };
+}
+
 fn testAuthority() reconciler.AuthorityBinding {
     return .{
         .volume_id = id_a,
@@ -314,16 +337,28 @@ test "write participant wire model preserves immutable canonical binding" {
                 .length_bytes = 8192,
             },
             .replica_members = .{ id_d, id_e, id_f },
+            .witness_identities = .{
+                testIdentity(id_d, id_a, 1),
+                testIdentity(id_e, id_b, 2),
+                testIdentity(id_f, id_c, 3),
+            },
         },
         .backend_digest = digest,
     };
     var member_views: [3][]const u8 = undefined;
-    const request = configureWriteParticipantRequest(&configuration, &member_views);
+    var identity_views: [3]pb.DataWitnessIdentity = undefined;
+    const request = configureWriteParticipantRequest(&configuration, &member_views, &identity_views);
     try std.testing.expectEqual(@intFromPtr(&configuration.binding.replica.volume_id), @intFromPtr(request.binding.?.volume_id.ptr));
     try std.testing.expectEqual(@intFromPtr(&configuration.binding.replica.placement_id), @intFromPtr(request.binding.?.placement_id.ptr));
     try std.testing.expectEqual(@intFromPtr(&configuration.binding.replica.allocation_id), @intFromPtr(request.binding.?.allocation_id.ptr));
     try std.testing.expectEqual(@intFromPtr(&configuration.binding.replica.member_id), @intFromPtr(request.binding.?.member_id.ptr));
     try std.testing.expectEqual(@intFromPtr(&configuration.backend_digest), @intFromPtr(request.binding.?.backend_digest.ptr));
+    for (&configuration.binding.witness_identities, request.binding.?.witness_identities.items) |*identity, view| {
+        try std.testing.expectEqual(@intFromPtr(&identity.member_id), @intFromPtr(view.member_id.ptr));
+        try std.testing.expectEqual(@intFromPtr(&identity.node_id), @intFromPtr(view.node_id.ptr));
+        try std.testing.expectEqual(@intFromPtr(&identity.key_id), @intFromPtr(view.key_id.ptr));
+        try std.testing.expectEqual(@intFromPtr(&identity.public_key), @intFromPtr(view.public_key.ptr));
+    }
     const parsed = try parseWriteParticipantResponse(.{ .binding = request.binding });
     try std.testing.expectEqual(configuration, parsed);
 

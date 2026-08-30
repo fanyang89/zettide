@@ -8,6 +8,7 @@ const heartbeat = @import("heartbeat.zig");
 const state_machine = @import("state_machine.zig");
 const rpc_response = @import("service/rpc_response.zig");
 const request_validation = @import("service/request_validation.zig");
+const evidence_contract = @import("zettide_data_service_contracts").write_evidence_contract;
 
 pub const default_page_size: usize = 100;
 pub const max_page_size: usize = 1000;
@@ -426,6 +427,18 @@ pub const PoolService = struct {
             return;
         };
         defer request.deinit(arena.allocator());
+        if (request.signing_public_key.len != 0) {
+            if (request.signing_public_key.len != @sizeOf(evidence_contract.PublicKey)) {
+                completion.invoke(invalidArgument("invalid signing_public_key"));
+                return;
+            }
+            var public_key: evidence_contract.PublicKey = undefined;
+            @memcpy(&public_key, request.signing_public_key);
+            evidence_contract.validatePublicKey(public_key) catch {
+                completion.invoke(invalidArgument("invalid signing_public_key"));
+                return;
+            };
+        }
         if (!self.isLeader()) {
             completion.invoke(notLeader());
             return;
@@ -446,6 +459,7 @@ pub const PoolService = struct {
             .control_endpoint = request.control_endpoint,
             .nvmf_endpoint = request.nvmf_endpoint,
             .replica_endpoint = request.replica_endpoint,
+            .signing_public_key = request.signing_public_key,
             .failure_domain = request.failure_domain,
             .capability_bits = request.capability_bits,
             .protocol_version = request.protocol_version,
@@ -1212,6 +1226,7 @@ const RegisterNodePending = struct {
         switch (response.code) {
             .REGISTER_NODE_APPLY_CODE_REGISTERED,
             .REGISTER_NODE_APPLY_CODE_REPLICA_ENDPOINT_FILLED,
+            .REGISTER_NODE_APPLY_CODE_SIGNING_IDENTITY_FILLED,
             => {
                 const node = response.node orelse {
                     self.completion.invoke(internalError());

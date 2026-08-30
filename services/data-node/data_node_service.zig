@@ -978,8 +978,8 @@ const WriteParticipantConfiguration = struct {
 fn parseWriteParticipantConfiguration(value: ?pb.DataWriteParticipantBinding) !WriteParticipantConfiguration {
     const binding = value orelse return error.MissingBinding;
     if (binding.generation == 0 or binding.length_bytes == 0 or
-        binding.replica_member_ids.items.len != 3)
-        return error.InvalidReplicaSet;
+        binding.replica_member_ids.items.len != 3 or binding.witness_identities.items.len != 3)
+        return error.SignedIdentityRequired;
     _ = std.math.add(u64, binding.offset_bytes, binding.length_bytes) catch return error.InvalidReplicaSet;
     const parsed: protocol.ReplicaBinding = .{
         .volume_id = try uuid(binding.volume_id),
@@ -995,21 +995,23 @@ fn parseWriteParticipantConfiguration(value: ?pb.DataWriteParticipantBinding) !W
         try fixedId(binding.replica_member_ids.items[1]),
         try fixedId(binding.replica_member_ids.items[2]),
     };
-    if (isZero(&members[0]) or isZero(&members[1]) or isZero(&members[2]) or
-        std.mem.order(u8, &members[0], &members[1]) != .lt or
-        std.mem.order(u8, &members[1], &members[2]) != .lt)
-        return error.InvalidReplicaSet;
-    var contains_local = false;
-    for (members) |member| if (std.mem.eql(u8, &member, &parsed.member_id)) {
-        contains_local = true;
-        break;
+    var identities: [3]write_service.WitnessIdentity = undefined;
+    for (binding.witness_identities.items, &identities) |source, *identity| identity.* = .{
+        .member_id = try fixedId(source.member_id),
+        .node_id = try fixedId(source.node_id),
+        .key_id = try fixedDigest(source.key_id),
+        .public_key = try fixedDigest(source.public_key),
     };
-    if (!contains_local) return error.MemberNotInReplicaSet;
-    // The legacy protobuf has no controller-pinned witness identities. M11b
-    // appends them; accepting this keyless binding would re-enable unsigned
-    // participant history.
-    _ = try digest(binding.backend_digest);
-    return error.SignedIdentityRequired;
+    const participant_binding: write_service.ParticipantBinding = .{
+        .replica = parsed,
+        .replica_members = members,
+        .witness_identities = identities,
+    };
+    write_service.validateParticipantBinding(participant_binding) catch return error.InvalidWitnessIdentity;
+    return .{
+        .binding = participant_binding,
+        .backend_digest = try digest(binding.backend_digest),
+    };
 }
 
 fn parseWriteRequest(value: ?pb.DataWriteRequest) !write_service.WriteRequest {
@@ -1219,6 +1221,18 @@ fn digest(bytes: []const u8) !protocol.Digest {
     return error.InvalidDigest;
 }
 
+fn testWitnessIdentity(member_id: protocol.Id, node_id: protocol.Id, seed: u8) write_service.WitnessIdentity {
+    var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(seed)) catch unreachable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    const public_key = key_pair.public_key.toBytes();
+    return .{
+        .member_id = member_id,
+        .node_id = node_id,
+        .key_id = protocol.write_evidence_contract.keyId(public_key),
+        .public_key = public_key,
+    };
+}
+
 fn encodeResponse(allocator: std.mem.Allocator, response_value: anytype) !grpc.UnaryResponse {
     var response = response_value;
     var writer: std.Io.Writer.Allocating = .init(allocator);
@@ -1369,6 +1383,20 @@ test "data-node service persists Replica lifecycle through gRPC" {
         &participant_members[1],
         &participant_members[2],
     };
+    var third_node = local_node;
+    third_node[15] = 0x42;
+    const participant_identities: [3]write_service.WitnessIdentity = .{
+        testWitnessIdentity(participant_members[0], local_node, 1),
+        testWitnessIdentity(participant_members[1], coordinator_node, 2),
+        testWitnessIdentity(participant_members[2], third_node, 3),
+    };
+    var participant_identity_views: [3]pb.DataWitnessIdentity = undefined;
+    for (&participant_identities, &participant_identity_views) |*identity, *view| view.* = .{
+        .member_id = &identity.member_id,
+        .node_id = &identity.node_id,
+        .key_id = &identity.key_id,
+        .public_key = &identity.public_key,
+    };
     var configure_request: pb.ConfigureWriteParticipantRequest = .{ .binding = .{
         .volume_id = &replica_binding.volume_id,
         .placement_id = &replica_binding.placement_id,
@@ -1379,20 +1407,46 @@ test "data-node service persists Replica lifecycle through gRPC" {
         .length_bytes = replica_binding.length_bytes,
         .backend_digest = ensured.replica.?.attestation.?.backend_digest,
         .replica_member_ids = .{ .items = &participant_member_views, .capacity = participant_member_views.len },
+        .witness_identities = .{ .items = &participant_identity_views, .capacity = participant_identity_views.len },
     } };
     var configure_result = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
     defer configure_result.deinit();
-    // M11a deliberately rejects the legacy keyless configuration wire until
-    // M11b propagates controller-pinned witness identities.
-    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, configure_result.status.code);
+    try std.testing.expect(configure_result.status.isOk());
     var configure_retry = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
     defer configure_retry.deinit();
-    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, configure_retry.status.code);
+    try std.testing.expect(configure_retry.status.isOk());
+
+    var keyless_request = configure_request;
+    keyless_request.binding.?.witness_identities = .{ .items = participant_identity_views[0..0], .capacity = 0 };
+    var keyless_configuration = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &keyless_request);
+    defer keyless_configuration.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, keyless_configuration.status.code);
+
     participant_member_views[1] = &participant_members[0];
     var invalid_configuration = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
     defer invalid_configuration.deinit();
     try std.testing.expectEqual(grpc.StatusCode.invalid_argument, invalid_configuration.status.code);
     participant_member_views[1] = &participant_members[1];
+    std.mem.swap(pb.DataWitnessIdentity, &participant_identity_views[0], &participant_identity_views[1]);
+    var unordered_configuration = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
+    defer unordered_configuration.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, unordered_configuration.status.code);
+    std.mem.swap(pb.DataWitnessIdentity, &participant_identity_views[0], &participant_identity_views[1]);
+
+    const original_key_id = participant_identity_views[0].key_id;
+    const wrong_key_id: [32]u8 = @splat(0x99);
+    participant_identity_views[0].key_id = &wrong_key_id;
+    var wrong_key_configuration = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
+    defer wrong_key_configuration.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, wrong_key_configuration.status.code);
+    participant_identity_views[0].key_id = original_key_id;
+
+    const original_node_id = participant_identity_views[1].node_id;
+    participant_identity_views[1].node_id = participant_identity_views[0].node_id;
+    var duplicate_node_configuration = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
+    defer duplicate_node_configuration.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.invalid_argument, duplicate_node_configuration.status.code);
+    participant_identity_views[1].node_id = original_node_id;
 
     var replica_endpoint_buffer: [32]u8 = undefined;
     const replica_address = try server.replicaLocalAddress();
@@ -1430,33 +1484,8 @@ test "data-node service persists Replica lifecycle through gRPC" {
     var unsigned_inspect = try testCallUnary(&replica_channel, replicaMethodPath("Inspect"), &replica_inspect_request);
     defer unsigned_inspect.deinit();
     try std.testing.expectEqual(grpc.StatusCode.unauthenticated, unsigned_inspect.status.code);
-    // A correctly authenticated request still receives an authenticated,
-    // fail-closed keyless-binding status; the client verifies its response MAC.
-    var fail_closed_client = try replica_rpc_client.Client.init(
-        std.testing.allocator,
-        std.testing.io,
-        coordinator_node,
-        local_node,
-        coordinator_key,
-        .{},
-    );
-    defer fail_closed_client.deinit();
-    try std.testing.expectError(
-        error.InvalidArgument,
-        fail_closed_client.inspect(
-            replica_endpoint,
-            .{
-                .participant = .{
-                    .replica = replica_binding,
-                    .replica_members = participant_members,
-                },
-                .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
-            },
-            try parseAuthorityBinding(replica_inspect_request.authority),
-        ),
-    );
-    // Signed participant configuration and payload RPC resume in M11b/M11c.
-    if (configure_result.status.code == .invalid_argument) return;
+    // Correctly authenticated payload RPC now carries the pinned binding, but
+    // signed PREPARE/COMMIT response payloads remain M11c scope.
     var authenticated_inspect = try testCallUnaryAuthenticated(
         &replica_channel,
         replicaMethodPath("Inspect"),
@@ -1482,6 +1511,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
             .participant = .{
                 .replica = replica_binding,
                 .replica_members = participant_members,
+                .witness_identities = participant_identities,
             },
             .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
         },
@@ -1499,6 +1529,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
                 .participant = .{
                     .replica = replica_binding,
                     .replica_members = participant_members,
+                    .witness_identities = participant_identities,
                 },
                 .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
             },
@@ -1509,6 +1540,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
         .participant = .{
             .replica = replica_binding,
             .replica_members = participant_members,
+            .witness_identities = participant_identities,
         },
         .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
     };
@@ -1532,6 +1564,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
                 .participant = .{
                     .replica = replica_binding,
                     .replica_members = participant_members,
+                    .witness_identities = participant_identities,
                 },
                 .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
             },
@@ -1641,6 +1674,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
         .participant = .{
             .replica = replica_binding,
             .replica_members = participant_members,
+            .witness_identities = participant_identities,
         },
         .backend_digest = ensured.replica.?.attestation.?.backend_digest[0..32].*,
     };
@@ -1702,18 +1736,11 @@ test "data-node service persists Replica lifecycle through gRPC" {
     const restored_before_commit = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
     try restored_before_commit.setLength(std.testing.io, 64 * 1024);
     restored_before_commit.close(std.testing.io);
-    const committed = try replica_client.commit(
-        replica_endpoint,
-        participant_binding,
-        write_request.authority,
-        transaction_id,
-        write_request.sequence,
-        .{ .attestations = .{ local_attestation, remote_attestation } },
-    );
-    try std.testing.expectEqual(@as(u64, 1), committed.sequence);
-    try std.testing.expectEqual(
-        committed,
-        try replica_client.commit(
+    // The participant now rejects unsigned certificates. M11c extends the
+    // ReplicaTransport payload with signed evidence and resumes commit E2E.
+    try std.testing.expectError(
+        error.FailedPrecondition,
+        replica_client.commit(
             replica_endpoint,
             participant_binding,
             write_request.authority,
@@ -1722,43 +1749,6 @@ test "data-node service persists Replica lifecycle through gRPC" {
             .{ .attestations = .{ local_attestation, remote_attestation } },
         ),
     );
-    const committed_inspection = try replica_client.inspect(
-        replica_endpoint,
-        participant_binding,
-        write_request.authority,
-    );
-    try std.testing.expectEqual(@as(u64, 1), committed_inspection.frontier.sequence);
-    try std.testing.expectEqual(committed, committed_inspection.last_completed.?);
-
-    var delete_request: pb.DeleteReplicaRequest = .{
-        .operation_id = "0198f54d-5c2a-7000-8000-000000000026",
-        .volume_id = ensure_request.volume_id,
-        .placement_id = ensure_request.placement_id,
-        .allocation_id = ensure_request.allocation_id,
-        .generation = ensure_request.generation,
-        .member_id = ensure_request.member_id,
-        .offset_bytes = ensure_request.offset_bytes,
-        .length_bytes = ensure_request.length_bytes,
-    };
-    const drifted_file = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
-    try drifted_file.setLength(std.testing.io, 32 * 1024);
-    drifted_file.close(std.testing.io);
-    var rejected_delete = delete_request;
-    rejected_delete.operation_id = "0198f54d-5c2a-7000-8000-000000000028";
-    var rejected_delete_result = try testCallUnary(&channel, methodPath("DeleteReplica"), &rejected_delete);
-    defer rejected_delete_result.deinit();
-    try std.testing.expectEqual(grpc.StatusCode.failed_precondition, rejected_delete_result.status.code);
-
-    const restored_file = try tmp.dir.openFile(std.testing.io, "member.img", .{ .mode = .read_write });
-    try restored_file.setLength(std.testing.io, 64 * 1024);
-    restored_file.close(std.testing.io);
-    var delete_result = try testCallUnary(&channel, methodPath("DeleteReplica"), &delete_request);
-    defer delete_result.deinit();
-    try std.testing.expect(delete_result.status.isOk());
-    var delete_reader: std.Io.Reader = .fixed(delete_result.payload);
-    var deleted = try pb.DeleteReplicaResponse.decode(&delete_reader, std.testing.allocator);
-    defer deleted.deinit(std.testing.allocator);
-    try std.testing.expectEqual(pb.DataReplicaState.DATA_REPLICA_STATE_TOMBSTONED, deleted.replica.?.state);
 }
 
 fn testCallUnary(channel: *grpc.Channel, path: []const u8, request: anytype) !grpc.CallResult {

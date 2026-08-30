@@ -39,6 +39,8 @@ const Config = struct {
     cluster_id: [16]u8,
     iscsi_endpoint: []const u8,
     failure_domain: []const u8,
+    // M11c supplies this from an owner-only signing seed file.
+    signing_public_key: []const u8 = "",
     replica: ?ReplicaConfig,
     replica_rpc: ?ReplicaRpcConfig,
 };
@@ -455,7 +457,8 @@ fn registerNode(allocator: std.mem.Allocator, config: Config) !void {
     const current = current_response.node orelse return error.MissingRegisteredNode;
     try validateRegisteredNode(config, current);
     const desired_replica_endpoint = if (config.replica_rpc) |value| value.advertise_endpoint else "";
-    if (!std.mem.eql(u8, current.replica_endpoint, desired_replica_endpoint))
+    if (!std.mem.eql(u8, current.replica_endpoint, desired_replica_endpoint) or
+        !std.mem.eql(u8, current.signing_public_key, config.signing_public_key))
         return error.RegisteredNodeMismatch;
 }
 
@@ -469,10 +472,11 @@ fn submitNodeRegistration(allocator: std.mem.Allocator, config: Config) !void {
         // The current controller schema has one data-plane endpoint field. The
         // local E2E profile publishes its iSCSI URL through that field.
         .nvmf_endpoint = config.iscsi_endpoint,
-        // Keep the original registration request byte-for-byte compatible with
-        // nodes created before replica_endpoint existed. A second, derived
-        // request durably fills the endpoint when needed.
-        .replica_endpoint = "",
+        // Preserve the legacy request only while no signing identity is
+        // supplied. M11c enrollment repeats the exact desired endpoint so an
+        // existing endpoint and empty key can be safely identity-matched.
+        .replica_endpoint = if (config.signing_public_key.len == 0) "" else desired_replica_endpoint,
+        .signing_public_key = config.signing_public_key,
         .failure_domain = config.failure_domain,
         .capability_bits = 1,
         .protocol_version = 1,
@@ -496,7 +500,8 @@ fn submitNodeRegistration(allocator: std.mem.Allocator, config: Config) !void {
     defer updated_response.deinit(allocator);
     const updated = updated_response.node orelse return error.MissingRegisteredNode;
     try validateRegisteredNode(config, updated);
-    if (!std.mem.eql(u8, updated.replica_endpoint, desired_replica_endpoint))
+    if (!std.mem.eql(u8, updated.replica_endpoint, desired_replica_endpoint) or
+        !std.mem.eql(u8, updated.signing_public_key, config.signing_public_key))
         return error.RegisteredNodeMismatch;
 }
 

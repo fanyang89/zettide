@@ -56,11 +56,13 @@ quarantined as `UnsignedCoordinatorState` rather than fabricating signatures.
 
 The coordinator is intentionally not wired into the data-node daemon or Replica
 RPC client and does not establish cross-node quorum durability. Participant
-contracts can now independently validate a signed certificate, but the current
-controller binding protobuf and Replica RPC protobuf still carry no signing
-identities/signatures. Those legacy production seams fail closed until the next
-rollout. Controller-proven key provenance, durable distribution,
-rotation/revocation, outbound topology/credentials, production fanout,
+contracts can now independently validate a signed certificate. Controller Node
+metadata pins an immutable generation-1 Ed25519 public key and participant
+configuration carries the canonical three Member/Node/key identities; key IDs
+are derived rather than caller supplied. Replica binding metadata carries that
+trust set too, but signed PREPARE/COMMIT RPC payloads and daemon private-key
+loading remain M11c and unsigned COMMIT fails closed. Rotation/revocation,
+outbound topology/credentials, production fanout,
 client-facing payload write RPC, replacement-coordinator recovery,
 confidentiality, and certified quorum repair remain future work.
 

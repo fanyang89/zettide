@@ -86,10 +86,11 @@ pub const RpcClient = struct {
     ) !void {
         const self: *RpcClient = @ptrCast(@alignCast(context));
         var member_views: [3][]const u8 = undefined;
+        var identity_views: [3]pb.DataWitnessIdentity = undefined;
         var response = try self.unary(
             endpoint,
             "ConfigureWriteParticipant",
-            wire.configureWriteParticipantRequest(&configuration, &member_views),
+            wire.configureWriteParticipantRequest(&configuration, &member_views, &identity_views),
             pb.ConfigureWriteParticipantResponse,
         );
         defer response.deinit(self.allocator);
@@ -245,6 +246,18 @@ const id_e: [16]u8 = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0x00, 0x80, 0x
 const id_f: [16]u8 = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0x00, 0x80, 0x00, 0, 0, 0, 0, 0, 6 };
 const digest: [32]u8 = @splat(0x55);
 
+fn testIdentity(member_id: [16]u8, node_id: [16]u8, seed: u8) @import("zettide_data_service_contracts").write_service.WitnessIdentity {
+    var key_pair = std.crypto.sign.Ed25519.KeyPair.generateDeterministic(@splat(seed)) catch unreachable;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    const public_key = key_pair.public_key.toBytes();
+    return .{
+        .member_id = member_id,
+        .node_id = node_id,
+        .key_id = @import("zettide_data_service_contracts").write_evidence_contract.keyId(public_key),
+        .public_key = public_key,
+    };
+}
+
 fn testStageRequest() reconciler.StageRequest {
     return .{
         .binding = .{
@@ -294,6 +307,11 @@ test "RPC client configures canonical write participant binding" {
                 .length_bytes = 8192,
             },
             .replica_members = .{ id_d, id_e, id_f },
+            .witness_identities = .{
+                testIdentity(id_d, id_a, 1),
+                testIdentity(id_e, id_b, 2),
+                testIdentity(id_f, id_c, 3),
+            },
         },
         .backend_digest = digest,
     };

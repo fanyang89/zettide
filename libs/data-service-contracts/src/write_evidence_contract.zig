@@ -77,15 +77,20 @@ pub fn keyId(public_key: PublicKey) KeyId {
     return result;
 }
 
+pub fn validatePublicKey(public_key: PublicKey) !void {
+    if (isZero(&public_key)) return error.InvalidWitnessPublicKey;
+    _ = Ed25519.PublicKey.fromBytes(public_key) catch return error.InvalidWitnessPublicKey;
+    const point = Ed25519.Curve.fromBytes(public_key) catch return error.InvalidWitnessPublicKey;
+    point.rejectIdentity() catch return error.InvalidWitnessPublicKey;
+    point.rejectUnexpectedSubgroup() catch return error.InvalidWitnessPublicKey;
+}
+
 pub fn validateIdentity(identity: WitnessIdentity) !void {
     if (isZero(&identity.member_id) or isZero(&identity.node_id) or
-        isZero(&identity.key_id) or isZero(&identity.public_key) or
+        isZero(&identity.key_id) or
         !std.mem.eql(u8, &identity.key_id, &keyId(identity.public_key)))
         return error.InvalidWitnessIdentity;
-    _ = Ed25519.PublicKey.fromBytes(identity.public_key) catch return error.InvalidWitnessIdentity;
-    const point = Ed25519.Curve.fromBytes(identity.public_key) catch return error.InvalidWitnessIdentity;
-    point.rejectIdentity() catch return error.InvalidWitnessIdentity;
-    point.rejectUnexpectedSubgroup() catch return error.InvalidWitnessIdentity;
+    validatePublicKey(identity.public_key) catch return error.InvalidWitnessIdentity;
 }
 
 pub fn validateIdentities(identities: [3]WitnessIdentity) !void {
@@ -340,4 +345,18 @@ fn hashU64(hasher: anytype, value: u64) void {
 fn isZero(bytes: []const u8) bool {
     for (bytes) |byte| if (byte != 0) return false;
     return true;
+}
+
+test "controller signing public keys reject identity and unexpected subgroup" {
+    var identity_encoding: PublicKey = @splat(0);
+    identity_encoding[0] = 1;
+    try std.testing.expectError(error.InvalidWitnessPublicKey, validatePublicKey(identity_encoding));
+
+    var unexpected_subgroup: PublicKey = undefined;
+    _ = try std.fmt.hexToBytes(&unexpected_subgroup, "4dc95e3c28d78c48a60531525e6327e259b7ba0d2f5c81b694052c766a14b625");
+    try std.testing.expectError(error.InvalidWitnessPublicKey, validatePublicKey(unexpected_subgroup));
+
+    var key_pair = try Ed25519.KeyPair.generateDeterministic(@splat(0x5a));
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    try validatePublicKey(key_pair.public_key.toBytes());
 }

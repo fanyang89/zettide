@@ -6,19 +6,24 @@ The service manages virtual Pools, durable Volume metadata, durable Data Node
 registrations, and durable local Member bindings. A Pool is a global namespace
 for Volumes. Node
 registration records stable identity, cluster binding, management/NVMf/internal
-Replica endpoints, failure domain, capabilities, and protocol version. The
-optional Replica endpoint is snapshot- and restart-stable while remaining empty
-for nodes that do not enable the internal listener. Legacy empty endpoints have
-one narrow Raft-applied migration: a new request may fill the endpoint only when
-all immutable registration fields match; replacement remains rejected. Member registration binds a native
+Replica endpoints, failure domain, capabilities, protocol version, and an
+optional generation-1 Ed25519 signing public key. Replica endpoints and signing
+keys are snapshot- and restart-stable. Either legacy empty value may be filled
+once by a new identity-matched Raft request, including a joint fill; nonempty key
+replacement is rejected. The controller derives key IDs from strict canonical,
+non-identity, expected-subgroup public keys and does not accept caller-selected
+key IDs. Rotation and revocation are not implemented. Member registration binds a native
 media identity and local set to a controller-managed Pool and Node, with immutable slot and
 allocation geometry. Leader-local heartbeats currently observe Node
 incarnation/sequence, Member presence, and optional extent capacity. Volume
 creation first commits a `PROVISIONING` metadata intent with fixed 3/2/1
 replication parameters. Leader reconciliation then reserves three placements and
 extents, ensures file-backed Replicas, configures the same immutable canonical
-three-Member write-participant set on all of them, and drives the current
-fence/recovery/authority lifecycle to `ACTIVE`. Publication, cross-node payload
+three-Member write-participant set on all of them, including the canonical
+Member-to-Node-to-key trust set derived from active topology, and drives the
+current fence/recovery/authority lifecycle to `ACTIVE`. Keyless or inconsistent
+topology fails closed before participant readiness. The daemon key loader and
+signed Replica payloads remain M11c work. Publication, cross-node payload
 transport, quorum commit, repair, and attachments remain separate layers.
 
 Pool, Volume, Node, and Member mutations are committed and applied through Raft

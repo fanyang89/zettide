@@ -95,6 +95,14 @@ message DeleteReplicaResponse {
   DataReplica replica = 2;
 }
 
+// Controller-pinned generation-1 Ed25519 witness identity.
+message DataWitnessIdentity {
+  bytes member_id = 1;
+  bytes node_id = 2;
+  bytes key_id = 3;
+  bytes public_key = 4;
+}
+
 // Controller-provisioned immutable node-local participant identity. The
 // repeated Member list contains exactly three distinct IDs in bytewise order.
 message DataWriteParticipantBinding {
@@ -107,6 +115,7 @@ message DataWriteParticipantBinding {
   uint64 length_bytes = 7;
   bytes backend_digest = 8;
   repeated bytes replica_member_ids = 9;
+  repeated DataWitnessIdentity witness_identities = 10;
 }
 
 message ConfigureWriteParticipantRequest {
