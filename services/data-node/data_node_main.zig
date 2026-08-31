@@ -7,6 +7,7 @@ const grpc = @import("grpc_lite");
 const incarnation_store = @import("incarnation_store.zig");
 const member_generation_store = @import("member_generation_store.zig");
 const replica_rpc_key_file = @import("replica_rpc_key_file.zig");
+const replica_outbound_key_file = @import("replica_outbound_key_file.zig");
 const replica_signing_seed_file = @import("replica_signing_seed_file.zig");
 
 const registration_attempts = 60;
@@ -27,6 +28,7 @@ const ReplicaRpcConfig = struct {
     listen_port: u16,
     advertise_endpoint: []const u8,
     key_file: []const u8,
+    outbound_key_file: []const u8,
     signing_seed_file: []const u8,
 };
 
@@ -101,6 +103,8 @@ pub fn main(init: std.process.Init) !void {
     var write_backend: ?data_node.FileWriteBackend = null;
     var replica_peer_keys: ?replica_rpc_key_file.PeerKeys = null;
     defer if (replica_peer_keys) |*keys| keys.deinit();
+    var replica_outbound_keys: ?replica_outbound_key_file.TargetKeys = null;
+    defer if (replica_outbound_keys) |*keys| keys.deinit();
     var replica_signer: ?*data_node.WriteEvidenceSigner = null;
     defer if (replica_signer) |signer| signer.deinit();
     var signing_public_key: [32]u8 = undefined;
@@ -182,12 +186,19 @@ pub fn main(init: std.process.Init) !void {
             std.Io.Dir.cwd(),
             replica_rpc.key_file,
         );
+        replica_outbound_keys = try replica_outbound_key_file.load(
+            allocator,
+            init.io,
+            std.Io.Dir.cwd(),
+            replica_rpc.outbound_key_file,
+        );
         server_options.replica_transport = .{
             .host = replica_rpc.listen_host,
             .port = replica_rpc.listen_port,
             .local_node_id = config.node_id_bytes,
             .signer = replica_signer.?,
             .peer_keys = replica_peer_keys.?.values,
+            .outbound_peer_keys = replica_outbound_keys.?.values,
         };
         std.log.warn(
             "Replica RPC plaintext development transport enabled at {s}; payload confidentiality is disabled",
@@ -205,6 +216,10 @@ pub fn main(init: std.process.Init) !void {
     if (replica_peer_keys) |*keys| {
         keys.deinit();
         replica_peer_keys = null;
+    }
+    if (replica_outbound_keys) |*keys| {
+        keys.deinit();
+        replica_outbound_keys = null;
     }
     try server.start();
 
@@ -276,6 +291,7 @@ fn parseArgs(args: []const []const u8) !Config {
     var replica_listen: ?[]const u8 = null;
     var replica_advertise: ?[]const u8 = null;
     var replica_key_file: ?[]const u8 = null;
+    var replica_outbound_key_file_path: ?[]const u8 = null;
     var replica_signing_seed_file_path: ?[]const u8 = null;
     var replica_allow_plaintext = false;
 
@@ -326,6 +342,8 @@ fn parseArgs(args: []const []const u8) !Config {
             replica_advertise = value;
         } else if (std.mem.eql(u8, name, "--replica-key-file")) {
             replica_key_file = value;
+        } else if (std.mem.eql(u8, name, "--replica-outbound-key-file")) {
+            replica_outbound_key_file_path = value;
         } else if (std.mem.eql(u8, name, "--replica-signing-seed-file")) {
             replica_signing_seed_file_path = value;
         } else if (std.mem.eql(u8, name, "--replica-allow-plaintext")) {
@@ -365,15 +383,17 @@ fn parseArgs(args: []const []const u8) !Config {
     const replica_rpc_field_count: u8 = @as(u8, @intFromBool(replica_listen != null)) +
         @as(u8, @intFromBool(replica_advertise != null)) +
         @as(u8, @intFromBool(replica_key_file != null)) +
+        @as(u8, @intFromBool(replica_outbound_key_file_path != null)) +
         @as(u8, @intFromBool(replica_signing_seed_file_path != null)) +
         @as(u8, @intFromBool(replica_allow_plaintext));
-    if (replica_rpc_field_count != 0 and replica_rpc_field_count != 5)
+    if (replica_rpc_field_count != 0 and replica_rpc_field_count != 6)
         return error.IncompleteReplicaRpcConfiguration;
-    if (replica_rpc_field_count == 5 and replica_field_count != 7)
+    if (replica_rpc_field_count == 6 and replica_field_count != 7)
         return error.ReplicaRpcRequiresReplicaConfiguration;
     const parsed_replica_listen = if (replica_listen) |value| try parseEndpoint(value) else null;
     if (replica_advertise) |value| _ = try parseEndpoint(value);
     if (replica_key_file) |value| if (value.len == 0) return error.InvalidArguments;
+    if (replica_outbound_key_file_path) |value| if (value.len == 0) return error.InvalidArguments;
     if (replica_signing_seed_file_path) |value| if (value.len == 0) return error.InvalidArguments;
 
     return .{
@@ -396,11 +416,12 @@ fn parseArgs(args: []const []const u8) !Config {
             .capacity_bytes = member_capacity.?,
             .extent_size_bytes = extent_size.?,
         } else null,
-        .replica_rpc = if (replica_rpc_field_count == 5) .{
+        .replica_rpc = if (replica_rpc_field_count == 6) .{
             .listen_host = parsed_replica_listen.?.host,
             .listen_port = parsed_replica_listen.?.port,
             .advertise_endpoint = replica_advertise.?,
             .key_file = replica_key_file.?,
+            .outbound_key_file = replica_outbound_key_file_path.?,
             .signing_seed_file = replica_signing_seed_file_path.?,
         } else null,
     };
@@ -719,6 +740,8 @@ test "replica file backend arguments are all-or-none" {
         "data-node:7443",
         "--replica-key-file",
         "/run/secrets/replica.keys",
+        "--replica-outbound-key-file",
+        "/run/secrets/replica-outbound.keys",
         "--replica-signing-seed-file",
         "/run/secrets/replica.seed",
         "--replica-allow-plaintext",
@@ -740,6 +763,8 @@ test "replica file backend arguments are all-or-none" {
         "data-node:7443",
         "--replica-key-file",
         "/run/secrets/replica.keys",
+        "--replica-outbound-key-file",
+        "/run/secrets/replica-outbound.keys",
         "--replica-signing-seed-file",
         "/run/secrets/replica.seed",
         "--replica-allow-plaintext",
@@ -785,7 +810,7 @@ fn writeUsage() void {
         \\  [--state-dir PATH --member-file PATH --member-id UUIDv7 --pool-id UUIDv7
         \\   --member-metadata-capacity BYTES --member-capacity BYTES --extent-size BYTES]
         \\  [--replica-listen HOST:PORT --replica-advertise HOST:PORT
-        \\   --replica-key-file PATH --replica-signing-seed-file PATH
+        \\   --replica-key-file PATH --replica-outbound-key-file PATH --replica-signing-seed-file PATH
         \\   --replica-allow-plaintext true]
         \\
     , .{});
@@ -795,4 +820,5 @@ test {
     _ = controller_agent;
     _ = incarnation_store;
     _ = replica_signing_seed_file;
+    _ = replica_outbound_key_file;
 }

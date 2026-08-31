@@ -283,18 +283,27 @@ pub const WriteParticipantManager = struct {
         return entry.participant.inspect();
     }
 
-    pub fn hasWriteHistory(self: *WriteParticipantManager, volume_id: protocol.Id) !bool {
+    pub fn frontierForVolume(self: *WriteParticipantManager, volume_id: protocol.Id) !?write_service.Frontier {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
+        var result: ?write_service.Frontier = null;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry_ptr| {
             const entry = entry_ptr.*;
             if (!std.mem.eql(u8, &entry.binding.replica.volume_id, &volume_id)) continue;
             const inspection = try entry.participant.inspect();
-            if (inspection.frontier.sequence != 0 or inspection.pending != null) return true;
+            if (inspection.pending != null) return error.WriteInProgress;
+            if (inspection.frontier.sequence == 0) continue;
+            if (result) |existing| {
+                if (!std.meta.eql(existing, inspection.frontier)) return error.ParticipantHistoryConflict;
+            } else result = inspection.frontier;
         }
-        return false;
+        return result;
+    }
+
+    pub fn hasWriteHistory(self: *WriteParticipantManager, volume_id: protocol.Id) !bool {
+        return (try self.frontierForVolume(volume_id)) != null;
     }
 
     /// Serializes a complete Replica mutation or fence against participant

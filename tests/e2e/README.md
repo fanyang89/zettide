@@ -7,8 +7,8 @@ This Docker Compose environment starts:
   through a shared volume;
 - three `zettide-data-node` instances in distinct failure domains; each registers
   its Node/file Member plus a distinct internal Replica endpoint and pinned
-  generation-1 signing key, loads receiver-scoped development keys and an
-  owner-only deterministic development signing seed, advances durable heartbeat incarnation, and
+  generation-1 signing key, loads distinct receiver-scoped inbound and
+  target-scoped outbound development key registries plus an owner-only deterministic signing seed, advances durable heartbeat incarnation, and
   reports capacity;
 - one file-backed iSCSI LUN in each data-node container;
 - an optional smoke container that creates a Volume, verifies real DataService
@@ -21,8 +21,8 @@ This Docker Compose environment starts:
 The local profile uses TGT as a lightweight iSCSI transport harness. It tests
 service composition, three-node Node/Member/Replica-endpoint/signing-key registration,
 unauthenticated Replica PREPARE/COMMIT/INSPECT rejection, fresh capacity
-heartbeats, Replica ensure plus canonical write-participant configuration,
-fence/recovery/ready
+heartbeats, Replica ensure plus canonical write-participant and unarmed
+coordinator-route configuration, fence/recovery/ready
 reconciliation, discovery, login-free SCSI commands, and
 reads without requiring SPDK, host
 iSCSI kernel modules, or privileged containers. The TGT LUN and registered file

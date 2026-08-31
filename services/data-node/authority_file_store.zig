@@ -16,6 +16,31 @@ pub const Record = struct {
     empty_frontier: bool = false,
 };
 
+fn openStateLock(io: std.Io, parent: std.Io.Dir, basename: []const u8) !std.Io.File {
+    while (true) {
+        const file = parent.openFile(io, basename, .{
+            .mode = .read_write,
+            .allow_directory = false,
+            .follow_symlinks = false,
+        }) catch |open_error| switch (open_error) {
+            error.FileNotFound => parent.createFile(io, basename, .{
+                .read = true,
+                .truncate = false,
+                .exclusive = true,
+                .permissions = @enumFromInt(0o600),
+            }) catch |create_error| switch (create_error) {
+                error.PathAlreadyExists => continue,
+                else => return create_error,
+            },
+            else => return open_error,
+        };
+        errdefer file.close(io);
+        if ((try file.stat(io)).kind != .file) return error.InvalidAuthorityLockFile;
+        if (!try file.tryLock(io, .exclusive)) return error.StateFileLocked;
+        return file;
+    }
+}
+
 /// Append-only authority acceptance ledger. Lease deadlines remain process-local
 /// and fail closed after restart, while the maximum accepted epoch/generation
 /// survives restart and prevents stale authority from being staged.
@@ -24,6 +49,7 @@ pub const FileStore = struct {
     io: std.Io,
     parent: std.Io.Dir,
     basename: []const u8,
+    lock_file: std.Io.File,
     records: []Record,
     poisoned: bool = false,
     faults: ?*Faults = null,
@@ -45,12 +71,17 @@ pub const FileStore = struct {
         parent: std.Io.Dir,
         basename: []const u8,
     ) !FileStore {
+        const lock_name = try std.fmt.allocPrint(allocator, "{s}.lock", .{basename});
+        defer allocator.free(lock_name);
+        const lock_file = try openStateLock(io, parent, lock_name);
+        errdefer lock_file.close(io);
         const bytes = parent.readFileAlloc(io, basename, allocator, .limited(max_file_size + 1)) catch |err| switch (err) {
             error.FileNotFound => return .{
                 .allocator = allocator,
                 .io = io,
                 .parent = parent,
                 .basename = basename,
+                .lock_file = lock_file,
                 .records = &.{},
             },
             else => return err,
@@ -61,12 +92,14 @@ pub const FileStore = struct {
             .io = io,
             .parent = parent,
             .basename = basename,
+            .lock_file = lock_file,
             .records = try decode(allocator, bytes),
         };
     }
 
     pub fn deinit(self: *FileStore) void {
         if (self.records.len != 0) self.allocator.free(self.records);
+        self.lock_file.close(self.io);
         self.* = undefined;
     }
 
@@ -178,6 +211,7 @@ pub const FileStore = struct {
                 .io = undefined,
                 .parent = undefined,
                 .basename = "",
+                .lock_file = undefined,
                 .records = records[0..index],
             };
             if (try prior.validate(record.binding, record.phase)) |existing| {
@@ -319,6 +353,28 @@ test "authority ledger persists monotonic epoch and recovery evidence" {
         try std.testing.expectError(error.StaleAuthority, store.validate(testBinding(3, 6), .staged));
         try std.testing.expectEqual(@as(u64, 2), store.latest(testId(1)).?.binding.authority_generation);
     }
+}
+
+test "authority ledger has exclusive lifetime ownership" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var first = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "authority.state");
+    defer first.deinit();
+    try std.testing.expectError(
+        error.StateFileLocked,
+        FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "authority.state"),
+    );
+}
+
+test "authority ledger rejects symlink lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "target", .data = "" });
+    try tmp.dir.symLink(std.testing.io, "target", "authority.state.lock", .{});
+    try std.testing.expectError(
+        error.SymLinkLoop,
+        FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "authority.state"),
+    );
 }
 
 test "authority ledger poisons uncertain directory sync until reopen" {

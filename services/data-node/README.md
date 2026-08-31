@@ -100,12 +100,13 @@ registered on each other's listeners and that keyless, reordered, mismatched,
 wrong-key-ID, and duplicate-Node configurations fail closed.
 
 The daemon can enable this listener only when the file-member composition and
-all five explicit development options are present:
+all six explicit development options are present:
 
 ```text
 --replica-listen HOST:PORT
 --replica-advertise HOST:PORT
 --replica-key-file PATH
+--replica-outbound-key-file PATH
 --replica-signing-seed-file PATH
 --replica-allow-plaintext true
 ```
@@ -126,8 +127,10 @@ peer. It must be a regular file owned by the daemon user with no group/world
 permission bits and is opened without following symlinks. It is bounded, parsed
 strictly, copied into the authenticator, and scrubbed on release. Keys are
 receiver-scoped: the same source uses a different key for each target. This
-option currently configures inbound receiver verification only; outbound target
-credentials belong to the future coordinator rollout. Keys are startup-loaded
+inbound file configures receiver verification only. The distinct outbound file
+contains `TARGET_NODE_UUIDV7 TARGET_RECEIVER_KEY` entries; it is validated and
+scrubbed under the same owner-only/non-symlink policy, copied into the coordinator
+manager, and never aliased to inbound credentials. Keys are startup-loaded
 configuration, not a versioned or rollback-protected durable key
 ledger; replacement currently requires a daemon restart. The advertised endpoint
 is persisted in controller Node metadata and survives snapshot/restart. Upgrade
@@ -139,9 +142,13 @@ duplicate, local-peer, malformed, or insecure-file configuration fails closed.
 provides request/response authenticity but not payload confidentiality. This
 mode is for the Docker/file-backend development profile, not production.
 PREPARE and COMMIT results are independently signed and the participant verifies
-the controller-pinned two-witness decision, but there is still no production
-outbound route, primary coordinator client fanout, or cross-node 2/3 success
-path. Therefore a three-node Volume intent can reach `ACTIVE`, but user writes
+the controller-pinned two-witness decision. M12a also persists controller-derived
+canonical Replica routes in a separate coordinator catalog and loads outbound
+credentials, but each topology is initially **unarmed** and there is still no
+primary coordinator client fanout or cross-node 2/3 success path. A future write
+path must durably arm all three nodes before its first intent; once armed, a node
+without a same-directory signed coordinator completion cannot certify an empty
+recovery frontier. Therefore a three-node Volume intent can reach `ACTIVE`, but user writes
 are still not replicated or published to hosts. Confidential transport, key
 rotation/revocation, replacement-coordinator recovery/repair, NVMf user-data
 replication, and authority-gated Publication remain

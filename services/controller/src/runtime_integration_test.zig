@@ -85,6 +85,7 @@ const ReconcileDataClient = struct {
     }
 
     fn configureWriteParticipant(_: *anyopaque, _: []const u8, _: reconciler.WriteParticipantConfiguration) !void {}
+    fn configureWriteCoordinator(_: *anyopaque, _: []const u8, _: reconciler.WriteCoordinatorConfiguration) !void {}
 
     fn identifyHolder(_: *anyopaque, _: []const u8) !reconciler.Id {
         return reconcile_holder_boot_id;
@@ -183,6 +184,7 @@ const ReconcileDataClient = struct {
         .ensure = ensure,
         .delete = delete,
         .configure_write_participant = configureWriteParticipant,
+        .configure_write_coordinator = configureWriteCoordinator,
         .identify_holder = identifyHolder,
         .stage_primary = stagePrimary,
         .fence_replica = fenceReplica,
@@ -226,6 +228,9 @@ const BlockingDataClient = struct {
     fn configureWriteParticipant(_: *anyopaque, _: []const u8, _: reconciler.WriteParticipantConfiguration) !void {
         return error.Unsupported;
     }
+    fn configureWriteCoordinator(_: *anyopaque, _: []const u8, _: reconciler.WriteCoordinatorConfiguration) !void {
+        return error.Unsupported;
+    }
 
     fn identifyHolder(_: *anyopaque, _: []const u8) !reconciler.Id {
         return error.Unsupported;
@@ -264,6 +269,7 @@ const BlockingDataClient = struct {
         .ensure = ensure,
         .delete = delete,
         .configure_write_participant = configureWriteParticipant,
+        .configure_write_coordinator = configureWriteCoordinator,
         .identify_holder = identifyHolder,
         .stage_primary = stagePrimary,
         .fence_replica = fenceReplica,
@@ -1146,13 +1152,15 @@ fn registerReconcileNode(
     const request_id = try std.fmt.allocPrint(runtime_allocator, "reconcile-node-{}", .{index});
     defer runtime_allocator.free(request_id);
     const signing_public_key = nodeSigningPublicKey(node_id);
+    const replica_endpoint = try std.fmt.allocPrint(runtime_allocator, "127.0.0.1:{}", .{7443 + index});
+    defer runtime_allocator.free(replica_endpoint);
     const request = try encodeMessage(pb.RegisterNodeRequest{
         .request_id = request_id,
         .node_id = node_id,
         .cluster_id = &config.cluster_id,
         .control_endpoint = node_control_endpoint,
         .nvmf_endpoint = node_nvmf_endpoint,
-        .replica_endpoint = node_replica_endpoint,
+        .replica_endpoint = replica_endpoint,
         .signing_public_key = &signing_public_key,
         .failure_domain = failure_domain,
         .capability_bits = node_capability_bits,

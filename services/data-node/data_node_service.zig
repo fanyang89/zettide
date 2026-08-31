@@ -14,6 +14,7 @@ const replica_io_gate = @import("replica_io_gate.zig");
 const replica_rpc_auth = @import("replica_rpc_auth.zig");
 const replica_rpc_client = @import("replica_rpc_client.zig");
 const write_participant_manager = @import("write_participant_manager.zig");
+const write_coordinator_manager = @import("write_coordinator_manager.zig");
 
 pub const ReplicaFileStore = replica_service.FileStore;
 pub const ReplicaCapacitySnapshot = replica_service.CapacitySnapshot;
@@ -23,6 +24,8 @@ pub const FileMemberBackend = file_member_backend.FileMemberBackend;
 pub const FileFenceBackend = file_member_backend.FileFenceBackend;
 pub const FileWriteBackend = file_member_backend.FileWriteBackend;
 pub const WriteParticipantManager = write_participant_manager.WriteParticipantManager;
+pub const WriteCoordinatorManager = write_coordinator_manager.WriteCoordinatorManager;
+pub const OutboundReplicaPeerKey = write_coordinator_manager.OutboundTargetKey;
 pub const ReplicaRpcPeerKey = replica_rpc_auth.PeerKey;
 pub const ReplicaRpcKey = replica_rpc_auth.Key;
 pub const WriteEvidenceSigner = write_evidence.Signer;
@@ -35,6 +38,8 @@ pub const ReplicaTransportOptions = struct {
     signer: *const write_evidence.Signer,
     // Receiver-scoped pairwise keys indexed by authenticated source node.
     peer_keys: []const ReplicaRpcPeerKey,
+    // Separate target-receiver keys retained for future outbound fanout.
+    outbound_peer_keys: []const OutboundReplicaPeerKey = &.{},
 };
 
 pub const Options = struct {
@@ -108,6 +113,7 @@ pub const DataNodeServer = struct {
         try server.registerUnary(methodPath("InspectReplica"), grpc.UnaryHandler.bind(State, state, State.inspectReplica));
         try server.registerUnary(methodPath("DeleteReplica"), grpc.UnaryHandler.bind(State, state, State.deleteReplica));
         try server.registerUnary(methodPath("ConfigureWriteParticipant"), grpc.UnaryHandler.bind(State, state, State.configureWriteParticipant));
+        try server.registerUnary(methodPath("ConfigureWriteCoordinator"), grpc.UnaryHandler.bind(State, state, State.configureWriteCoordinator));
         try server.registerUnary(methodPath("IdentifyHolder"), grpc.UnaryHandler.bind(State, state, State.identifyHolder));
         try server.registerUnary(methodPath("StagePrimary"), grpc.UnaryHandler.bind(State, state, State.stagePrimary));
         try server.registerUnary(methodPath("FenceReplica"), grpc.UnaryHandler.bind(State, state, State.fenceReplica));
@@ -180,6 +186,7 @@ const State = struct {
     authority_store: ?*authority_file_store.FileStore,
     authorities: std.AutoHashMapUnmanaged(protocol.Id, Authority) = .empty,
     writes: ?write_participant_manager.WriteParticipantManager = null,
+    coordinators: ?write_coordinator_manager.WriteCoordinatorManager = null,
     replica_authenticator: ?replica_rpc_auth.Authenticator = null,
     replica_signer: ?*const write_evidence.Signer = null,
 
@@ -212,6 +219,15 @@ const State = struct {
     }
 
     fn initWrites(self: *State, options: Options) !void {
+        const transport = options.replica_transport;
+        const coordinator_composed = self.replica_signer != null and transport != null and
+            transport.?.outbound_peer_keys.len != 0;
+        if (!coordinator_composed and try write_coordinator_manager.durableStatePresent(
+            self.allocator,
+            self.io,
+            options.write_parent.?,
+        )) return error.CoordinatorTransportRequired;
+
         self.writes = try write_participant_manager.WriteParticipantManager.init(
             self.allocator,
             self.io,
@@ -222,10 +238,22 @@ const State = struct {
             options.write_backend.?,
             self.authorityValidator(),
         );
-        if (self.replica_signer) |signer| try self.writes.?.validateLocalIdentity(signer.identity());
+        if (coordinator_composed) {
+            const signer = self.replica_signer.?;
+            try self.writes.?.validateLocalIdentity(signer.identity());
+            self.coordinators = try write_coordinator_manager.WriteCoordinatorManager.init(
+                self.allocator,
+                self.io,
+                options.write_parent.?,
+                &self.writes.?,
+                signer.identity(),
+                options.replica_transport.?.outbound_peer_keys,
+            );
+        }
     }
 
     fn deinit(self: *State) void {
+        if (self.coordinators) |*coordinators| coordinators.deinit();
         if (self.writes) |*writes| writes.deinit();
         if (self.replica_authenticator) |*authenticator| authenticator.deinit();
         self.authorities.deinit(self.allocator);
@@ -293,6 +321,26 @@ const State = struct {
         return encodeResponse(allocator, pb.ConfigureWriteParticipantResponse{ .binding = request.binding });
     }
 
+    fn configureWriteCoordinator(
+        self: *State,
+        allocator: std.mem.Allocator,
+        _: *grpc.ServerContext,
+        request_bytes: []const u8,
+    ) !grpc.UnaryResponse {
+        var reader: std.Io.Reader = .fixed(request_bytes);
+        var request = pb.ConfigureWriteCoordinatorRequest.decode(&reader, allocator) catch
+            return fail(allocator, .invalid_argument, "invalid ConfigureWriteCoordinator request");
+        defer request.deinit(allocator);
+        const topology = parseWriteCoordinatorTopology(request.topology) catch
+            return fail(allocator, .invalid_argument, "invalid write coordinator topology");
+        self.replica_mutex.lockUncancelable(self.io);
+        defer self.replica_mutex.unlock(self.io);
+        const coordinators = if (self.coordinators) |*value| value else return fail(allocator, .failed_precondition, "write coordinator manager is not configured");
+        coordinators.configure(topology) catch |err|
+            return writeCoordinatorFailure(allocator, err);
+        return encodeResponse(allocator, pb.ConfigureWriteCoordinatorResponse{ .topology = request.topology });
+    }
+
     const ReplicaMethod = enum { ensure, inspect, delete };
 
     fn handleReplicaMutation(
@@ -307,6 +355,15 @@ const State = struct {
             return fail(allocator, .invalid_argument, "invalid Replica binding");
         self.replica_mutex.lockUncancelable(self.io);
         defer self.replica_mutex.unlock(self.io);
+        var coordinator_guard: ?write_coordinator_manager.ControlGuard = if (method != .inspect)
+            if (self.coordinators) |*coordinators|
+                coordinators.beginControl(binding.placement_id, binding.generation) catch |err|
+                    return writeControlFailure(allocator, err)
+            else
+                null
+        else
+            null;
+        defer if (coordinator_guard) |*guard| guard.end();
         var control_guard: ?write_participant_manager.WriteParticipantManager.ControlGuard = if (method != .inspect)
             if (self.writes) |*writes|
                 writes.beginControl(binding.placement_id, binding.generation, method == .delete) catch |err|
@@ -545,6 +602,14 @@ const State = struct {
         if (!std.mem.eql(u8, &binding.holder_boot_id, &self.boot_id))
             return fail(allocator, .failed_precondition, "holder boot identity mismatch");
 
+        self.replica_mutex.lockUncancelable(self.io);
+        defer self.replica_mutex.unlock(self.io);
+        var coordinator_guard: ?write_coordinator_manager.ControlGuard = if (self.coordinators) |*coordinators|
+            coordinators.beginControlPlacement(binding.primary_placement_id) catch |err|
+                return writeControlFailure(allocator, err)
+        else
+            null;
+        defer if (coordinator_guard) |*guard| guard.end();
         self.stage(binding) catch |err| return switch (err) {
             error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "authority state exhausted"),
             error.AuthorityConflict,
@@ -574,6 +639,12 @@ const State = struct {
             return fail(allocator, .invalid_argument, "invalid fence binding");
         self.replica_mutex.lockUncancelable(self.io);
         defer self.replica_mutex.unlock(self.io);
+        var coordinator_guard: ?write_coordinator_manager.ControlGuard = if (self.coordinators) |*coordinators|
+            coordinators.beginControl(binding.placement_id, binding.replica_generation) catch |err|
+                return writeControlFailure(allocator, err)
+        else
+            null;
+        defer if (coordinator_guard) |*guard| guard.end();
         var control_guard: ?write_participant_manager.WriteParticipantManager.ControlGuard = if (self.writes) |*writes|
             writes.beginControl(binding.placement_id, binding.replica_generation, false) catch |err|
                 return writeControlFailure(allocator, err)
@@ -598,6 +669,8 @@ const State = struct {
         var request = pb.RecoverPrimaryRequest.decode(&reader, allocator) catch
             return fail(allocator, .invalid_argument, "invalid RecoverPrimary request");
         defer request.deinit(allocator);
+        self.replica_mutex.lockUncancelable(self.io);
+        defer self.replica_mutex.unlock(self.io);
         const binding = parseAuthorityBinding(request.binding) catch
             return fail(allocator, .invalid_argument, "invalid authority binding");
         if (self.authority_store == null)
@@ -623,6 +696,8 @@ const State = struct {
         var request = pb.MarkPrimaryReadyRequest.decode(&reader, allocator) catch
             return fail(allocator, .invalid_argument, "invalid MarkPrimaryReady request");
         defer request.deinit(allocator);
+        self.replica_mutex.lockUncancelable(self.io);
+        defer self.replica_mutex.unlock(self.io);
         const binding = parseAuthorityBinding(request.binding) catch
             return fail(allocator, .invalid_argument, "invalid authority binding");
         if (self.authority_store == null)
@@ -701,10 +776,26 @@ const State = struct {
         }
     }
 
+    fn recoveryFrontier(self: *State, volume_id: protocol.Id) !?write_service.Frontier {
+        // Coordinator inspection precedes participant inspection. For armed
+        // topology the manager validates the exact active local binding and
+        // backend under coordinator -> participant lock order and returns only
+        // their common signed frontier.
+        const coordinator_frontier = if (self.coordinators) |*coordinators|
+            try coordinators.certifiedFrontier(volume_id)
+        else
+            null;
+        if (coordinator_frontier) |certified| return certified;
+
+        // No coordinator frontier means every matching configured topology is
+        // still unarmed (or absent), so preserve the pre-M12a local recovery
+        // behavior. `certifiedFrontier` itself fails closed for armed empty
+        // state before control reaches this branch.
+        return if (self.writes) |*writes| try writes.frontierForVolume(volume_id) else null;
+    }
+
     fn recover(self: *State, binding: protocol.AuthorityBinding) !authority_file_store.Record {
-        if (self.writes) |*writes|
-            if (try writes.hasWriteHistory(binding.volume_id))
-                return error.RecoveryQuorumRequired;
+        const certified_frontier = try self.recoveryFrontier(binding.volume_id);
         const now_ms = try nowAwakeMs(self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -721,19 +812,17 @@ const State = struct {
         const record: authority_file_store.Record = .{
             .binding = binding,
             .phase = .recovered,
-            .certified_sequence = 0,
-            .history_digest = recoveryDigest(binding),
-            .empty_frontier = true,
+            .certified_sequence = if (certified_frontier) |frontier| frontier.sequence else 0,
+            .history_digest = if (certified_frontier) |frontier| frontier.history_digest else recoveryDigest(binding),
+            .empty_frontier = certified_frontier == null,
         };
         if (self.authority_store) |store| try store.append(record);
         return record;
     }
 
     fn markReady(self: *State, binding: protocol.AuthorityBinding) !void {
+        const certified_frontier = try self.recoveryFrontier(binding.volume_id);
         if (try self.currentlyAdmitting(binding)) return;
-        if (self.writes) |*writes|
-            if (try writes.hasWriteHistory(binding.volume_id))
-                return error.RecoveryQuorumRequired;
         const token = authorityToken(binding);
         const now_ms = try nowAwakeMs(self.io);
         self.mutex.lockUncancelable(self.io);
@@ -744,13 +833,21 @@ const State = struct {
         if (!authority.runtime.canMarkReadyToken(token, now_ms)) return error.CandidateNotFresh;
         if (self.authority_store) |store| {
             if (try store.validate(binding, .ready) == null) {
-                const existing = store.latest(binding.volume_id);
+                const existing = store.latest(binding.volume_id) orelse return error.RecoveryEvidenceUnavailable;
+                if (!std.meta.eql(existing.binding, binding) or existing.phase != .recovered)
+                    return error.RecoveryEvidenceUnavailable;
+                if (certified_frontier) |frontier| {
+                    if (existing.empty_frontier or existing.certified_sequence != frontier.sequence or
+                        !std.mem.eql(u8, &existing.history_digest, &frontier.history_digest))
+                        return error.RecoveryEvidenceUnavailable;
+                } else if (!existing.empty_frontier or existing.certified_sequence != 0)
+                    return error.RecoveryEvidenceUnavailable;
                 try store.append(.{
                     .binding = binding,
                     .phase = .ready,
-                    .certified_sequence = if (existing) |value| value.certified_sequence else 0,
-                    .history_digest = if (existing) |value| value.history_digest else @splat(0),
-                    .empty_frontier = if (existing) |value| value.empty_frontier else false,
+                    .certified_sequence = existing.certified_sequence,
+                    .history_digest = existing.history_digest,
+                    .empty_frontier = existing.empty_frontier,
                 });
             }
         }
@@ -963,6 +1060,8 @@ fn replicaWriteFailure(
 fn writeControlFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
     return switch (err) {
         error.WriteInProgress,
+        error.CoordinatorWriteInProgress,
+        error.CoordinatorDrainRequired,
         error.ReplicaRetired,
         error.AuthorityFenced,
         error.FenceRequired,
@@ -974,6 +1073,30 @@ fn writeControlFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryR
     };
 }
 
+fn writeCoordinatorFailure(allocator: std.mem.Allocator, err: anyerror) !grpc.UnaryResponse {
+    return switch (err) {
+        error.CoordinatorTopologyConflict,
+        error.CoordinatorGenerationRolloverUnsupported,
+        error.InvalidCoordinatorTopology,
+        error.InvalidReplicaEndpoint,
+        error.InvalidReplicaSet,
+        error.MemberNotInReplicaSet,
+        error.InvalidWitnessIdentity,
+        error.LocalCoordinatorRouteMissing,
+        error.OutboundReplicaCredentialMissing,
+        error.ReplicaSignerIdentityMismatch,
+        error.MemberBackendIdentityMismatch,
+        error.ReplicaNotFound,
+        error.ReplicaNotActive,
+        error.ReplicaRetired,
+        error.ReplicaStateMismatch,
+        error.ParticipantNotConfigured,
+        => fail(allocator, .failed_precondition, "write coordinator topology rejected"),
+        error.OutOfMemory, error.StoreFull => fail(allocator, .resource_exhausted, "coordinator state exhausted"),
+        else => fail(allocator, .internal, "write coordinator configuration failed"),
+    };
+}
+
 fn authorityFailure(allocator: std.mem.Allocator, err: anyerror, message: []const u8) !grpc.UnaryResponse {
     return switch (err) {
         error.AuthorityConflict,
@@ -982,6 +1105,15 @@ fn authorityFailure(allocator: std.mem.Allocator, err: anyerror, message: []cons
         error.CandidateNotFresh,
         error.RecoveryEvidenceUnavailable,
         error.RecoveryQuorumRequired,
+        error.CoordinatorWriteInProgress,
+        error.CoordinatorDrainRequired,
+        error.CoordinatorHistoryConflict,
+        error.CoordinatorStateNotArmed,
+        error.ParticipantNotConfigured,
+        error.ReplicaNotActive,
+        error.ReplicaRetired,
+        error.ReplicaStateMismatch,
+        error.MemberBackendIdentityMismatch,
         error.LeaseConflict,
         error.LeaseMismatch,
         error.NoCandidate,
@@ -1051,6 +1183,25 @@ fn parseWriteParticipantConfiguration(value: ?pb.DataWriteParticipantBinding) !W
     return .{
         .binding = participant_binding,
         .backend_digest = try digest(binding.backend_digest),
+    };
+}
+
+fn parseWriteCoordinatorTopology(value: ?pb.DataWriteCoordinatorTopology) !write_coordinator_manager.CoordinatorTopology {
+    const topology = value orelse return error.MissingCoordinatorTopology;
+    if (topology.routes.items.len != 3) return error.InvalidCoordinatorTopology;
+    var routes: [3]write_coordinator_manager.ReplicaRoute = undefined;
+    for (topology.routes.items, &routes) |source, *route| {
+        const configuration = try parseWriteParticipantConfiguration(source.binding);
+        route.* = try write_coordinator_manager.ReplicaRoute.init(
+            configuration.binding,
+            configuration.backend_digest,
+            try fixedId(source.node_id),
+            source.replica_endpoint,
+        );
+    }
+    return .{
+        .local_member_id = try fixedId(topology.local_member_id),
+        .routes = routes,
     };
 }
 
@@ -1308,6 +1459,13 @@ fn digest(bytes: []const u8) !protocol.Digest {
     const value = try fixedDigest(bytes);
     for (value) |byte| if (byte != 0) return value;
     return error.InvalidDigest;
+}
+
+fn serviceTestId(value: u8) protocol.Id {
+    var result: protocol.Id = @splat(value);
+    result[6] = 0x70 | (value & 0x0f);
+    result[8] = 0x80 | (value & 0x3f);
+    return result;
 }
 
 fn testWitnessIdentity(member_id: protocol.Id, node_id: protocol.Id, seed: u8) write_service.WitnessIdentity {
@@ -2017,4 +2175,213 @@ test "data-node service recovers and marks a staged primary ready" {
 
 test {
     _ = file_member_backend;
+}
+
+const DeleteReadyRace = struct {
+    state: *State,
+    local: write_coordinator_manager.ReplicaRoute,
+    authority: protocol.AuthorityBinding,
+    delete_error: ?anyerror = null,
+    ready_error: ?anyerror = null,
+};
+
+fn runDeleteRace(context: *DeleteReadyRace) void {
+    const state = context.state;
+    state.replica_mutex.lockUncancelable(state.io);
+    defer state.replica_mutex.unlock(state.io);
+    var coordinator_guard = state.coordinators.?.beginControl(
+        context.local.binding.replica.placement_id,
+        context.local.binding.replica.generation,
+    ) catch |err| {
+        context.delete_error = err;
+        return;
+    };
+    defer coordinator_guard.end();
+    var participant_guard = state.writes.?.beginControl(
+        context.local.binding.replica.placement_id,
+        context.local.binding.replica.generation,
+        true,
+    ) catch |err| {
+        context.delete_error = err;
+        return;
+    };
+    defer participant_guard.end();
+    participant_guard.retire() catch |err| {
+        context.delete_error = err;
+    };
+}
+
+fn runReadyRace(context: *DeleteReadyRace) void {
+    const state = context.state;
+    state.replica_mutex.lockUncancelable(state.io);
+    defer state.replica_mutex.unlock(state.io);
+    state.markReady(context.authority) catch |err| {
+        context.ready_error = err;
+        return;
+    };
+}
+
+test "data-node serializes delete-vs-ready and rejects transport downgrade after armed state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const member_file = try tmp.dir.createFile(std.testing.io, "downgrade-member.img", .{ .read = true });
+    try member_file.setLength(std.testing.io, 64 * 1024);
+    member_file.close(std.testing.io);
+
+    const local_member: protocol.Id = .{ 0x01, 0x98, 0xf5, 0x4d, 0x5c, 0x2a, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 9 };
+    var replicas = try ReplicaFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "downgrade-replicas.state");
+    defer replicas.deinit();
+    var backend = try FileMemberBackend.init(
+        std.testing.io,
+        tmp.dir,
+        "downgrade-member.img",
+        "/test/downgrade-member.img",
+        local_member,
+        @splat(0x6b),
+        64 * 1024,
+        4096,
+    );
+    defer backend.deinit();
+    var replica_control = replica_service.Service.init(replicas.store(), backend.backend());
+    const ensured = try replica_control.ensureReplica(.{
+        .operation_id = "0198f54d-5c2a-7000-8000-000000000010",
+        .volume_id = "0198f54d-5c2a-7000-8000-000000000001",
+        .placement_id = "0198f54d-5c2a-7000-8000-000000000002",
+        .allocation_id = "0198f54d-5c2a-7000-8000-000000000003",
+        .generation = 1,
+        .member_id = &local_member,
+        .offset_bytes = 4096,
+        .length_bytes = 8192,
+    });
+    var fences = try FenceFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "downgrade-fences.state");
+    defer fences.deinit();
+    var authority = try AuthorityFileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "downgrade-authority.state");
+    defer authority.deinit();
+    var fence_backend = FileFenceBackend.init(&backend, &replicas);
+    var write_backend = FileWriteBackend.init(&backend, &replicas);
+
+    var local_node = local_member;
+    local_node[15] = 0x31;
+    const signer = try write_evidence.Signer.init(
+        std.testing.allocator,
+        local_member,
+        local_node,
+        &@as(write_evidence.Seed, @splat(0x71)),
+    );
+    defer signer.deinit();
+    var members = [3]protocol.Id{ local_member, serviceTestId(92), serviceTestId(93) };
+    std.mem.sort(protocol.Id, &members, {}, struct {
+        fn lessThan(_: void, lhs: protocol.Id, rhs: protocol.Id) bool {
+            return std.mem.order(u8, &lhs, &rhs) == .lt;
+        }
+    }.lessThan);
+    var identities: [3]write_service.WitnessIdentity = undefined;
+    for (&identities, 0..) |*identity, index| {
+        if (std.mem.eql(u8, &members[index], &local_member)) {
+            identity.* = signer.identity();
+        } else {
+            identity.* = testWitnessIdentity(members[index], serviceTestId(@intCast(101 + index)), @intCast(81 + index));
+        }
+    }
+    var routes: [3]write_coordinator_manager.ReplicaRoute = undefined;
+    for (&routes, 0..) |*route, index| {
+        var replica = ensured.replica.attestation.binding;
+        replica.member_id = members[index];
+        if (!std.mem.eql(u8, &members[index], &local_member)) {
+            replica.placement_id = serviceTestId(@intCast(111 + index));
+            replica.allocation_id = serviceTestId(@intCast(121 + index));
+            replica.offset_bytes = @as(u64, index + 4) * 4096;
+        }
+        route.* = try .init(.{
+            .replica = replica,
+            .replica_members = members,
+            .witness_identities = identities,
+        }, ensured.replica.attestation.backend_digest, identities[index].node_id, switch (index) {
+            0 => "downgrade-a:7443",
+            1 => "downgrade-b:7443",
+            else => "downgrade-c:7443",
+        });
+    }
+    const topology: write_coordinator_manager.CoordinatorTopology = .{
+        .local_member_id = local_member,
+        .routes = routes,
+    };
+    var outbound: [2]OutboundReplicaPeerKey = undefined;
+    var next: usize = 0;
+    for (routes) |route| {
+        if (std.mem.eql(u8, &route.binding.replica.member_id, &local_member)) continue;
+        outbound[next] = .{ .node_id = route.node_id, .key = @splat(@as(u8, @intCast(next + 1))) };
+        next += 1;
+    }
+    const inbound = [_]ReplicaRpcPeerKey{.{ .node_id = outbound[0].node_id, .key = @splat(0x55) }};
+    {
+        var server = try DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
+            .replica_store = replicas.store(),
+            .replica_backend = backend.backend(),
+            .fence_store = fences.store(),
+            .fence_backend = fence_backend.backend(),
+            .authority_store = &authority,
+            .write_parent = tmp.dir,
+            .write_replica_store = &replicas,
+            .write_fence_store = &fences,
+            .write_backend = write_backend.backend(),
+            .replica_transport = .{
+                .host = "127.0.0.1",
+                .port = 0,
+                .local_node_id = local_node,
+                .signer = signer,
+                .peer_keys = &inbound,
+                .outbound_peer_keys = &outbound,
+            },
+        });
+        const local = blk: {
+            for (routes) |route| if (std.mem.eql(u8, &route.binding.replica.member_id, &local_member)) break :blk route;
+            unreachable;
+        };
+        try server.state.writes.?.configure(local.binding, local.backend_digest);
+        try server.state.coordinators.?.configure(topology);
+        try server.state.coordinators.?.arm(
+            local.binding.replica.placement_id,
+            local.binding.replica.generation,
+        );
+        const ready_authority: protocol.AuthorityBinding = .{
+            .volume_id = local.binding.replica.volume_id,
+            .primary_placement_id = local.binding.replica.placement_id,
+            .primary_node_id = local_node,
+            .lease_id = serviceTestId(131),
+            .holder_boot_id = server.state.boot_id,
+            .authority_generation = 1,
+            .write_epoch = 1,
+            .placement_revision = 1,
+            .activation_nonce = serviceTestId(132),
+            .authority_digest = @splat(0x72),
+        };
+        try server.state.stage(ready_authority);
+        var race: DeleteReadyRace = .{
+            .state = server.state,
+            .local = local,
+            .authority = ready_authority,
+        };
+        const delete_thread = try std.Thread.spawn(.{}, runDeleteRace, .{&race});
+        const ready_thread = try std.Thread.spawn(.{}, runReadyRace, .{&race});
+        delete_thread.join();
+        ready_thread.join();
+        try std.testing.expectEqual(@as(?anyerror, null), race.delete_error);
+        try std.testing.expect(race.ready_error != null);
+        server.deinit();
+    }
+    try std.testing.expectError(
+        error.CoordinatorTransportRequired,
+        DataNodeServer.initWithOptions(std.testing.allocator, std.testing.io, "127.0.0.1", 0, .{
+            .replica_store = replicas.store(),
+            .replica_backend = backend.backend(),
+            .fence_store = fences.store(),
+            .fence_backend = fence_backend.backend(),
+            .authority_store = &authority,
+            .write_parent = tmp.dir,
+            .write_replica_store = &replicas,
+            .write_fence_store = &fences,
+            .write_backend = write_backend.backend(),
+        }),
+    );
 }

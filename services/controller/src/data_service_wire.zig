@@ -89,6 +89,55 @@ pub fn configureWriteParticipantRequest(
     } };
 }
 
+pub const CoordinatorWireViews = struct {
+    member_views: [3][3][]const u8 = undefined,
+    identity_views: [3][3]pb.DataWitnessIdentity = undefined,
+    binding_views: [3]pb.DataWriteParticipantBinding = undefined,
+    route_views: [3]pb.DataWriteCoordinatorRoute = undefined,
+};
+
+pub fn configureWriteCoordinatorRequest(
+    configuration: *const reconciler.WriteCoordinatorConfiguration,
+    views: *CoordinatorWireViews,
+) pb.ConfigureWriteCoordinatorRequest {
+    for (&configuration.routes, 0..) |*route, index| {
+        const participant = configureWriteParticipantRequest(
+            &route.configuration,
+            &views.member_views[index],
+            &views.identity_views[index],
+        );
+        views.binding_views[index] = participant.binding.?;
+        views.route_views[index] = .{
+            .binding = views.binding_views[index],
+            .node_id = &route.node_id,
+            .replica_endpoint = route.replica_endpoint,
+        };
+    }
+    return .{ .topology = .{
+        .local_member_id = &configuration.local_member_id,
+        .routes = .{ .items = &views.route_views, .capacity = views.route_views.len },
+    } };
+}
+
+pub fn parseWriteCoordinatorResponse(response: pb.ConfigureWriteCoordinatorResponse) !reconciler.WriteCoordinatorConfiguration {
+    const topology = response.topology orelse return error.MissingCoordinatorTopology;
+    if (topology.routes.items.len != 3) return error.InvalidCoordinatorTopology;
+    var routes: [3]reconciler.WriteCoordinatorRoute = undefined;
+    for (topology.routes.items, &routes) |route, *result| {
+        if (route.binding == null or route.replica_endpoint.len == 0 or route.replica_endpoint.len > 255)
+            return error.InvalidCoordinatorTopology;
+        result.* = .{
+            .configuration = try parseWriteParticipantResponse(.{ .binding = route.binding }),
+            .node_id = try nonzeroBytes(16, route.node_id),
+            .replica_endpoint = route.replica_endpoint,
+        };
+    }
+    return .{
+        .local_member_id = try nonzeroBytes(16, topology.local_member_id),
+        .routes = routes,
+    };
+}
+
 pub fn parseWriteParticipantResponse(response: pb.ConfigureWriteParticipantResponse) !reconciler.WriteParticipantConfiguration {
     const binding = response.binding orelse return error.MissingParticipantBinding;
     if (binding.generation == 0 or binding.length_bytes == 0 or
@@ -367,6 +416,51 @@ test "write participant wire model preserves immutable canonical binding" {
     try std.testing.expectError(error.InvalidParticipantBinding, parseWriteParticipantResponse(.{ .binding = malformed }));
 }
 
+test "coordinator route wire preserves borrowed canonical topology" {
+    const identities: [3]@import("zettide_data_service_contracts").write_service.WitnessIdentity = .{
+        testIdentity(id_d, id_a, 1), testIdentity(id_e, id_b, 2), testIdentity(id_f, id_c, 3),
+    };
+    var routes: [3]reconciler.WriteCoordinatorRoute = undefined;
+    const endpoints = [_][]const u8{ "node-a:7443", "node-b:7443", "node-c:7443" };
+    const members = [_][16]u8{ id_d, id_e, id_f };
+    const nodes = [_][16]u8{ id_a, id_b, id_c };
+    for (&routes, 0..) |*route, index| route.* = .{
+        .configuration = .{
+            .binding = .{
+                .replica = .{
+                    .volume_id = id_a,
+                    .placement_id = nodes[index],
+                    .allocation_id = members[index],
+                    .generation = 3,
+                    .member_id = members[index],
+                    .offset_bytes = @as(u64, index) * 8192,
+                    .length_bytes = 8192,
+                },
+                .replica_members = members,
+                .witness_identities = identities,
+            },
+            .backend_digest = digest,
+        },
+        .node_id = nodes[index],
+        .replica_endpoint = endpoints[index],
+    };
+    const configuration: reconciler.WriteCoordinatorConfiguration = .{ .local_member_id = id_d, .routes = routes };
+    var views: CoordinatorWireViews = .{};
+    const request = configureWriteCoordinatorRequest(&configuration, &views);
+    try std.testing.expectEqual(@intFromPtr(&configuration.local_member_id), @intFromPtr(request.topology.?.local_member_id.ptr));
+    for (&configuration.routes, request.topology.?.routes.items) |*expected, actual| {
+        try std.testing.expectEqual(@intFromPtr(&expected.node_id), @intFromPtr(actual.node_id.ptr));
+        try std.testing.expectEqual(@intFromPtr(expected.replica_endpoint.ptr), @intFromPtr(actual.replica_endpoint.ptr));
+    }
+    const parsed = try parseWriteCoordinatorResponse(.{ .topology = request.topology });
+    try std.testing.expectEqual(configuration.local_member_id, parsed.local_member_id);
+    for (configuration.routes, parsed.routes) |expected, actual| {
+        try std.testing.expectEqual(expected.configuration, actual.configuration);
+        try std.testing.expectEqual(expected.node_id, actual.node_id);
+        try std.testing.expectEqualStrings(expected.replica_endpoint, actual.replica_endpoint);
+    }
+}
+
 test "authority lifecycle wire models preserve complete bindings" {
     const authority = testAuthority();
     try std.testing.expectEqual(authority, try parseAuthorityBinding(authorityBinding(&authority)));
@@ -420,6 +514,7 @@ test "fence wire model rejects malformed fixed-width evidence" {
 
 test "DataService authority method paths are stable" {
     try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/ConfigureWriteParticipant", methodPath("ConfigureWriteParticipant"));
+    try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/ConfigureWriteCoordinator", methodPath("ConfigureWriteCoordinator"));
     try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/IdentifyHolder", methodPath("IdentifyHolder"));
     try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/StagePrimary", methodPath("StagePrimary"));
     try std.testing.expectEqualStrings("/zettide.controller.v1.DataService/FenceReplica", methodPath("FenceReplica"));

@@ -13,6 +13,7 @@ service DataService {
   rpc RecoverPrimary(RecoverPrimaryRequest) returns (RecoverPrimaryResponse);
   rpc MarkPrimaryReady(MarkPrimaryReadyRequest) returns (MarkPrimaryReadyResponse);
   rpc InspectPrimary(InspectPrimaryRequest) returns (InspectPrimaryResponse);
+  rpc ConfigureWriteCoordinator(ConfigureWriteCoordinatorRequest) returns (ConfigureWriteCoordinatorResponse);
 }
 
 // Internal payload-bearing Replica protocol. Implementations must expose this
@@ -279,4 +280,25 @@ message InspectPrimaryResponse {
   bool current_admitting = 3;
   bool candidate_fresh = 4;
   bool should_renew = 5;
+}
+
+// Metadata-only routing configuration. Endpoints are operational routing data
+// and are intentionally excluded from the cryptographic participant binding.
+message DataWriteCoordinatorRoute {
+  DataWriteParticipantBinding binding = 1;
+  bytes node_id = 2;
+  string replica_endpoint = 3;
+}
+
+message DataWriteCoordinatorTopology {
+  bytes local_member_id = 1;
+  repeated DataWriteCoordinatorRoute routes = 2;
+}
+
+message ConfigureWriteCoordinatorRequest {
+  DataWriteCoordinatorTopology topology = 1;
+}
+
+message ConfigureWriteCoordinatorResponse {
+  DataWriteCoordinatorTopology topology = 1;
 }

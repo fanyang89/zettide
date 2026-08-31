@@ -23,6 +23,17 @@ pub const WriteParticipantConfiguration = struct {
     backend_digest: Digest,
 };
 
+pub const WriteCoordinatorRoute = struct {
+    configuration: WriteParticipantConfiguration,
+    node_id: Id,
+    replica_endpoint: []const u8,
+};
+
+pub const WriteCoordinatorConfiguration = struct {
+    local_member_id: Id,
+    routes: [state_machine.volume_target_replica_count]WriteCoordinatorRoute,
+};
+
 pub const DataServiceClient = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -31,6 +42,7 @@ pub const DataServiceClient = struct {
         ensure: *const fn (*anyopaque, []const u8, data_service.Request) anyerror!data_service.Response,
         delete: *const fn (*anyopaque, []const u8, data_service.Request) anyerror!data_service.Response,
         configure_write_participant: *const fn (*anyopaque, []const u8, WriteParticipantConfiguration) anyerror!void,
+        configure_write_coordinator: *const fn (*anyopaque, []const u8, WriteCoordinatorConfiguration) anyerror!void,
         identify_holder: *const fn (*anyopaque, []const u8) anyerror!Id,
         stage_primary: *const fn (*anyopaque, []const u8, StageRequest) anyerror!StageAck,
         fence_replica: *const fn (*anyopaque, []const u8, replica_fence.Binding) anyerror!replica_fence.Result,
@@ -51,6 +63,10 @@ pub const DataServiceClient = struct {
 
     fn configureWriteParticipant(self: DataServiceClient, endpoint: []const u8, configuration: WriteParticipantConfiguration) !void {
         return self.vtable.configure_write_participant(self.context, endpoint, configuration);
+    }
+
+    fn configureWriteCoordinator(self: DataServiceClient, endpoint: []const u8, configuration: WriteCoordinatorConfiguration) !void {
+        return self.vtable.configure_write_coordinator(self.context, endpoint, configuration);
     }
 
     fn identifyHolder(self: DataServiceClient, endpoint: []const u8) !Id {
@@ -678,6 +694,7 @@ pub const Action = struct {
     const WriteParticipant = struct {
         endpoint: []const u8,
         configuration: WriteParticipantConfiguration,
+        coordinator: WriteCoordinatorConfiguration,
     };
 
     const ProposeAuthority = struct {
@@ -833,7 +850,7 @@ pub const Action = struct {
             },
             .propose_authority => |propose| {
                 for (propose.participants) |participant|
-                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
+                    try configureWriteTopology(data_client, participant);
                 const holder_boot_id = try data_client.identifyHolder(propose.endpoint);
                 if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
                 const binding: AuthorityBinding = .{
@@ -895,7 +912,7 @@ pub const Action = struct {
             },
             .ready_authority => |ready| {
                 for (ready.participants) |participant|
-                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
+                    try configureWriteTopology(data_client, participant);
                 const status = try data_client.inspectPrimary(ready.primary_endpoint, ready.request);
                 try validatePrimaryLeaseStatus(status, ready.request);
                 if (!status.candidate_fresh) {
@@ -945,7 +962,7 @@ pub const Action = struct {
             },
             .inspect_renewal => |inspect| {
                 for (inspect.participants) |participant|
-                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
+                    try configureWriteTopology(data_client, participant);
                 const status = try data_client.inspectPrimary(inspect.endpoint, inspect.request);
                 try validatePrimaryLeaseStatus(status, inspect.request);
                 if (status.candidate_fresh) {
@@ -964,7 +981,7 @@ pub const Action = struct {
             },
             .renewal_ready => |renewal| {
                 for (renewal.participants) |participant|
-                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
+                    try configureWriteTopology(data_client, participant);
                 const status = try data_client.inspectPrimary(renewal.endpoint, renewal.request);
                 try validatePrimaryLeaseStatus(status, renewal.request);
                 if (!status.candidate_fresh) {
@@ -1013,7 +1030,7 @@ pub const Action = struct {
             },
             .failover_ready => |ready| {
                 for (ready.participants) |participant|
-                    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
+                    try configureWriteTopology(data_client, participant);
                 const status = try data_client.inspectPrimary(ready.primary_endpoint, ready.request);
                 try validatePrimaryLeaseStatus(status, ready.request);
                 if (!status.candidate_fresh) {
@@ -1304,6 +1321,13 @@ fn hashU64(hasher: *std.crypto.hash.sha2.Sha256, value: u64) void {
     hashField(hasher, &bytes);
 }
 
+fn configureWriteTopology(data_client: DataServiceClient, participant: Action.WriteParticipant) !void {
+    // Participant catalog durability precedes coordinator catalog
+    // discoverability on every authority/readiness path.
+    try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
+    try data_client.configureWriteCoordinator(participant.endpoint, participant.coordinator);
+}
+
 fn participantConfigurations(
     allocator: std.mem.Allocator,
     volume: state_machine.PoolStateMachine.ReconcileVolume,
@@ -1343,12 +1367,12 @@ fn participantConfigurations(
     protocol.write_evidence_contract.validateIdentities(identities) catch return error.InconsistentSnapshot;
     const members = protocol.write_evidence_contract.members(identities);
 
-    const participants = try allocator.alloc(Action.WriteParticipant, volume.placements.len);
-    for (volume.placements, participants) |placement, *participant| {
+    var routes: [state_machine.volume_target_replica_count]WriteCoordinatorRoute = undefined;
+    for (volume.placements, 0..) |placement, index| {
         const allocation = allocationForPlacement(volume.allocations, placement.id) orelse return error.InconsistentSnapshot;
         const node = nodeById(volume.nodes, placement.node_id) orelse return error.InconsistentSnapshot;
-        participant.* = .{
-            .endpoint = try allocator.dupe(u8, node.control_endpoint),
+        if (node.replica_endpoint.len == 0 or node.replica_endpoint.len > 255) return error.InconsistentSnapshot;
+        routes[index] = .{
             .configuration = .{
                 .binding = .{
                     .replica = .{
@@ -1364,6 +1388,38 @@ fn participantConfigurations(
                     .witness_identities = identities,
                 },
                 .backend_digest = placement.backend_digest[0..32].*,
+            },
+            .node_id = try parseId(node.id),
+            .replica_endpoint = try allocator.dupe(u8, node.replica_endpoint),
+        };
+    }
+    std.mem.sort(WriteCoordinatorRoute, &routes, {}, struct {
+        fn lessThan(_: void, lhs: WriteCoordinatorRoute, rhs: WriteCoordinatorRoute) bool {
+            return std.mem.order(u8, &lhs.configuration.binding.replica.member_id, &rhs.configuration.binding.replica.member_id) == .lt;
+        }
+    }.lessThan);
+    for (routes, 0..) |route, index| {
+        for (routes[0..index]) |prior| if (std.mem.eql(u8, &prior.node_id, &route.node_id) or
+            std.mem.eql(u8, prior.replica_endpoint, route.replica_endpoint))
+            return error.InconsistentSnapshot;
+    }
+
+    const participants = try allocator.alloc(Action.WriteParticipant, volume.placements.len);
+    for (volume.placements, participants) |placement, *participant| {
+        const allocation = allocationForPlacement(volume.allocations, placement.id) orelse return error.InconsistentSnapshot;
+        const node = nodeById(volume.nodes, placement.node_id) orelse return error.InconsistentSnapshot;
+        const placement_id = try parseId(placement.id);
+        var configuration: ?WriteParticipantConfiguration = null;
+        for (routes) |route| if (std.mem.eql(u8, &route.configuration.binding.replica.placement_id, &placement_id)) {
+            configuration = route.configuration;
+            break;
+        };
+        participant.* = .{
+            .endpoint = try allocator.dupe(u8, node.control_endpoint),
+            .configuration = configuration orelse return error.InconsistentSnapshot,
+            .coordinator = .{
+                .local_member_id = allocation.member_id[0..16].*,
+                .routes = routes,
             },
         };
     }
@@ -1475,6 +1531,8 @@ fn applySetup(machine: *state_machine.PoolStateMachine, index: u64, encoded: []c
     result.deinit(std.testing.allocator);
 }
 
+const test_replica_endpoints = [_][]const u8{ "data:7443", "data:7444", "data:7445" };
+
 fn setupMachine(machine: *state_machine.PoolStateMachine, domains: [3][]const u8) !void {
     const allocator = std.testing.allocator;
     const pool = try state_machine.encodeCreatePoolCommand(allocator, .{
@@ -1495,7 +1553,7 @@ fn setupMachine(machine: *state_machine.PoolStateMachine, domains: [3][]const u8
             .cluster_id = &test_cluster_id,
             .control_endpoint = "data:9000",
             .nvmf_endpoint = "data:4420",
-            .replica_endpoint = "data:7443",
+            .replica_endpoint = test_replica_endpoints[index],
             .signing_public_key = &signing_public_key,
             .failure_domain = domain,
             .capability_bits = 1,
@@ -1595,6 +1653,7 @@ const TestDataClient = struct {
     participants: [state_machine.volume_target_replica_count]?WriteParticipantConfiguration = @splat(null),
     participant_configurations: usize = 0,
     participant_configuration_calls: usize = 0,
+    coordinator_configuration_calls: usize = 0,
     lose_configuration_response: bool = false,
     lose_ensure_response: bool = false,
     stale_attestation: bool = false,
@@ -1655,6 +1714,17 @@ const TestDataClient = struct {
             return;
         }
         return error.TooManyParticipants;
+    }
+
+    fn configureWriteCoordinatorOpaque(context: *anyopaque, endpoint: []const u8, configuration: WriteCoordinatorConfiguration) !void {
+        const self: *TestDataClient = @ptrCast(@alignCast(context));
+        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        self.coordinator_configuration_calls += 1;
+        if (configuration.routes.len != 3) return error.InvalidCoordinatorTopology;
+        for (configuration.routes, 0..) |route, index| {
+            if (index != 0 and std.mem.order(u8, &configuration.routes[index - 1].configuration.binding.replica.member_id, &route.configuration.binding.replica.member_id) != .lt)
+                return error.InvalidCoordinatorTopology;
+        }
     }
 
     fn identifyHolderOpaque(context: *anyopaque, endpoint: []const u8) !Id {
@@ -1782,6 +1852,7 @@ const TestDataClient = struct {
         .ensure = ensureOpaque,
         .delete = deleteOpaque,
         .configure_write_participant = configureWriteParticipantOpaque,
+        .configure_write_coordinator = configureWriteCoordinatorOpaque,
         .identify_holder = identifyHolderOpaque,
         .stage_primary = stagePrimaryOpaque,
         .fence_replica = fenceReplicaOpaque,
@@ -2427,7 +2498,7 @@ test "activated renewal after restart provisions canonical participants and reje
             .cluster_id = &test_cluster_id,
             .control_endpoint = "data:9000",
             .nvmf_endpoint = "data:4420",
-            .replica_endpoint = "data:7443",
+            .replica_endpoint = test_replica_endpoints[index],
             .signing_public_key = &signing_public_key,
             .failure_domain = domain,
             .capability_bits = 1,

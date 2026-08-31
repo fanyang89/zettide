@@ -29,6 +29,7 @@ const (
 	DataService_RecoverPrimary_FullMethodName            = "/zettide.controller.v1.DataService/RecoverPrimary"
 	DataService_MarkPrimaryReady_FullMethodName          = "/zettide.controller.v1.DataService/MarkPrimaryReady"
 	DataService_InspectPrimary_FullMethodName            = "/zettide.controller.v1.DataService/InspectPrimary"
+	DataService_ConfigureWriteCoordinator_FullMethodName = "/zettide.controller.v1.DataService/ConfigureWriteCoordinator"
 )
 
 // DataServiceClient is the client API for DataService service.
@@ -45,6 +46,7 @@ type DataServiceClient interface {
 	RecoverPrimary(ctx context.Context, in *RecoverPrimaryRequest, opts ...grpc.CallOption) (*RecoverPrimaryResponse, error)
 	MarkPrimaryReady(ctx context.Context, in *MarkPrimaryReadyRequest, opts ...grpc.CallOption) (*MarkPrimaryReadyResponse, error)
 	InspectPrimary(ctx context.Context, in *InspectPrimaryRequest, opts ...grpc.CallOption) (*InspectPrimaryResponse, error)
+	ConfigureWriteCoordinator(ctx context.Context, in *ConfigureWriteCoordinatorRequest, opts ...grpc.CallOption) (*ConfigureWriteCoordinatorResponse, error)
 }
 
 type dataServiceClient struct {
@@ -155,6 +157,16 @@ func (c *dataServiceClient) InspectPrimary(ctx context.Context, in *InspectPrima
 	return out, nil
 }
 
+func (c *dataServiceClient) ConfigureWriteCoordinator(ctx context.Context, in *ConfigureWriteCoordinatorRequest, opts ...grpc.CallOption) (*ConfigureWriteCoordinatorResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfigureWriteCoordinatorResponse)
+	err := c.cc.Invoke(ctx, DataService_ConfigureWriteCoordinator_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DataServiceServer is the server API for DataService service.
 // All implementations must embed UnimplementedDataServiceServer
 // for forward compatibility.
@@ -169,6 +181,7 @@ type DataServiceServer interface {
 	RecoverPrimary(context.Context, *RecoverPrimaryRequest) (*RecoverPrimaryResponse, error)
 	MarkPrimaryReady(context.Context, *MarkPrimaryReadyRequest) (*MarkPrimaryReadyResponse, error)
 	InspectPrimary(context.Context, *InspectPrimaryRequest) (*InspectPrimaryResponse, error)
+	ConfigureWriteCoordinator(context.Context, *ConfigureWriteCoordinatorRequest) (*ConfigureWriteCoordinatorResponse, error)
 	mustEmbedUnimplementedDataServiceServer()
 }
 
@@ -208,6 +221,9 @@ func (UnimplementedDataServiceServer) MarkPrimaryReady(context.Context, *MarkPri
 }
 func (UnimplementedDataServiceServer) InspectPrimary(context.Context, *InspectPrimaryRequest) (*InspectPrimaryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InspectPrimary not implemented")
+}
+func (UnimplementedDataServiceServer) ConfigureWriteCoordinator(context.Context, *ConfigureWriteCoordinatorRequest) (*ConfigureWriteCoordinatorResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConfigureWriteCoordinator not implemented")
 }
 func (UnimplementedDataServiceServer) mustEmbedUnimplementedDataServiceServer() {}
 func (UnimplementedDataServiceServer) testEmbeddedByValue()                     {}
@@ -410,6 +426,24 @@ func _DataService_InspectPrimary_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _DataService_ConfigureWriteCoordinator_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfigureWriteCoordinatorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DataServiceServer).ConfigureWriteCoordinator(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: DataService_ConfigureWriteCoordinator_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DataServiceServer).ConfigureWriteCoordinator(ctx, req.(*ConfigureWriteCoordinatorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // DataService_ServiceDesc is the grpc.ServiceDesc for DataService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -456,6 +490,10 @@ var DataService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InspectPrimary",
 			Handler:    _DataService_InspectPrimary_Handler,
+		},
+		{
+			MethodName: "ConfigureWriteCoordinator",
+			Handler:    _DataService_ConfigureWriteCoordinator_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

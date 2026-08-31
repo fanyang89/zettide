@@ -254,23 +254,45 @@ const ParticipantCore = struct {
         self.lock();
         defer self.transaction_lock.unlock();
         try self.store.checkHealthy();
-        try self.admission.begin(request.write.authority);
-        defer self.admission.end();
         try validatePrepareRequest(self.binding.replica, self.binding.replica_members, request);
 
         const state = self.store.current();
         try validateParticipantState(self.binding, state);
+        // Recover only an exact durable response through the fencing replay
+        // guard. This never creates participant state and does not revive the
+        // expired lease or holder boot identity.
         if (state.last_completed) |completed| {
-            if (std.mem.eql(u8, &completed.write.transaction_id, &request.write.transaction_id)) {
-                if (!sameWrite(completed.write, request.write)) return error.OperationConflict;
+            if (std.mem.eql(u8, &completed.write.transaction_id, &request.write.transaction_id) and
+                sameWrite(completed.write, request.write))
+            {
+                try self.admission.beginReplay(request.write.authority);
+                defer self.admission.end();
                 return completed.attestation;
             }
         }
         if (state.pending) |pending| {
+            if (std.mem.eql(u8, &pending.write.transaction_id, &request.write.transaction_id) and
+                sameWrite(pending.write, request.write))
+            {
+                try self.admission.beginReplay(request.write.authority);
+                defer self.admission.end();
+                return pending.attestation;
+            }
+        }
+
+        // Any non-exact retry follows normal live admission. In particular, a
+        // missing old-authority request cannot use the replay seam to create a
+        // new PREPARE after restart.
+        try self.admission.begin(request.write.authority);
+        defer self.admission.end();
+        if (state.last_completed) |completed| {
+            if (std.mem.eql(u8, &completed.write.transaction_id, &request.write.transaction_id))
+                return error.OperationConflict;
+        }
+        if (state.pending) |pending| {
             if (!std.mem.eql(u8, &pending.write.transaction_id, &request.write.transaction_id))
                 return error.WriteInProgress;
-            if (!sameWrite(pending.write, request.write)) return error.OperationConflict;
-            return pending.attestation;
+            return error.OperationConflict;
         }
         try validateNextWrite(state.frontier, request.write);
 
@@ -1923,6 +1945,32 @@ test "first signed decision drains after lease expiry and forged witness fails" 
     const result = try participant.commit(request.write.transaction_id, valid);
     try std.testing.expectEqual(@as(u64, 1), result.sequence);
     try std.testing.expectEqualStrings("expired", backend.bytes[8..15]);
+}
+
+test "exact durable PREPARE response replays after lease expiry without creating state" {
+    var store = MemoryStore.init(std.testing.allocator);
+    defer store.deinit();
+    var backend: FakeBackend = .{};
+    var admission: FakeAdmission = .{ .expected = testAuthority() };
+    var participant = try testParticipant(1, &store, &backend, &admission);
+    const request = testPrepare(testAuthority(), "lost-response");
+    const first = try participant.prepare(request);
+    admission.active = false;
+    try std.testing.expectEqual(first, try participant.prepare(request));
+
+    var mutated = request;
+    mutated.write.offset_bytes += 1;
+    try std.testing.expectError(error.LeaseNotAdmitting, participant.prepare(mutated));
+    var unknown = request;
+    unknown.write.transaction_id = testId(31);
+    try std.testing.expectError(error.LeaseNotAdmitting, participant.prepare(unknown));
+
+    var higher = testAuthority();
+    higher.write_epoch += 1;
+    admission.expected = higher;
+    try std.testing.expectError(error.AuthorityRejected, participant.prepare(request));
+    const inspection = try participant.inspect();
+    try std.testing.expectEqual(first, inspection.pending.?.attestation);
 }
 
 test "v2 reopen rejects mutated persisted signed certificate" {

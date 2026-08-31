@@ -98,6 +98,25 @@ pub const RpcClient = struct {
             return error.ResponseBindingMismatch;
     }
 
+    fn configureWriteCoordinator(
+        context: *anyopaque,
+        endpoint: []const u8,
+        configuration: reconciler.WriteCoordinatorConfiguration,
+    ) !void {
+        const self: *RpcClient = @ptrCast(@alignCast(context));
+        var views: wire.CoordinatorWireViews = .{};
+        var response = try self.unary(
+            endpoint,
+            "ConfigureWriteCoordinator",
+            wire.configureWriteCoordinatorRequest(&configuration, &views),
+            pb.ConfigureWriteCoordinatorResponse,
+        );
+        defer response.deinit(self.allocator);
+        const parsed = try wire.parseWriteCoordinatorResponse(response);
+        if (!coordinatorConfigurationEqual(configuration, parsed))
+            return error.ResponseBindingMismatch;
+    }
+
     fn identifyHolder(context: *anyopaque, endpoint: []const u8) !reconciler.Id {
         const self: *RpcClient = @ptrCast(@alignCast(context));
         var response = try self.unary(endpoint, "IdentifyHolder", pb.IdentifyHolderRequest{}, pb.IdentifyHolderResponse);
@@ -206,6 +225,7 @@ pub const RpcClient = struct {
         .ensure = ensure,
         .delete = delete,
         .configure_write_participant = configureWriteParticipant,
+        .configure_write_coordinator = configureWriteCoordinator,
         .identify_holder = identifyHolder,
         .stage_primary = stagePrimary,
         .fence_replica = fenceReplica,
@@ -215,6 +235,19 @@ pub const RpcClient = struct {
         .cancel = cancelOpaque,
     };
 };
+
+fn coordinatorConfigurationEqual(
+    lhs: reconciler.WriteCoordinatorConfiguration,
+    rhs: reconciler.WriteCoordinatorConfiguration,
+) bool {
+    if (!std.mem.eql(u8, &lhs.local_member_id, &rhs.local_member_id)) return false;
+    for (lhs.routes, rhs.routes) |left, right| {
+        if (!std.meta.eql(left.configuration, right.configuration) or
+            !std.mem.eql(u8, &left.node_id, &right.node_id) or
+            !std.mem.eql(u8, left.replica_endpoint, right.replica_endpoint)) return false;
+    }
+    return true;
+}
 
 fn requireOk(code: grpc.StatusCode) !void {
     return switch (code) {

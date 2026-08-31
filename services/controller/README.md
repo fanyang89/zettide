@@ -20,12 +20,16 @@ creation first commits a `PROVISIONING` metadata intent with fixed 3/2/1
 replication parameters. Leader reconciliation then reserves three placements and
 extents, ensures file-backed Replicas, configures the same immutable canonical
 three-Member write-participant set on all of them, including the canonical
-Member-to-Node-to-key trust set derived from active topology, and drives the
-current fence/recovery/authority lifecycle to `ACTIVE`. Keyless or inconsistent
+Member-to-Node-to-key trust set derived from active topology. Before every
+authority/readiness path it also provisions identical canonical three-route
+coordinator metadata, including each pinned Replica endpoint; endpoints remain
+routing metadata outside signed participant identity. It then drives the current
+fence/recovery/authority lifecycle to `ACTIVE`. Keyless or inconsistent
 topology fails closed before participant readiness. The daemon enrolls its
 owner-only generation-1 signing seed and ReplicaTransport exchanges signed
-evidence verified against these pinned identities. Publication, cross-node payload
-transport, quorum commit, repair, and attachments remain separate layers.
+evidence verified against these pinned identities. Coordinator topology is
+unarmed safety plumbing only; publication, production fanout, quorum commit,
+repair, and attachments remain separate layers.
 
 `zig build test-controller` includes the controller-state mixed-rollout gate: it
 restores persisted keyless Node records with an activated selected topology,

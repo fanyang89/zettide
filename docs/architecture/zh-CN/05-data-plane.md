@@ -147,13 +147,17 @@ digest/payload、canonical three-witness identity set 和固定两个 witness；
 genesis 在 exact Member set 下迁移；任何 unsigned pending/decided/history 都以
 `UnsignedCoordinatorState` fail closed。Atomic full-snapshot 仍只是开发基线。
 
-该 journal 尚未接入 daemon production coordinator，也没有 client-facing payload write
-RPC。participant contract 现在能独立验证 signed certificate；controller Node metadata 已
+该 journal 现已通过独立 durable catalog 组合进 daemon 的 M12a safety plumbing，但
+controller 下发的 canonical 三 route topology 默认 unarmed，尚无 fanout operation 或
+client-facing payload write RPC。participant contract 现在能独立验证 signed certificate；controller Node metadata 已
 以 fill-once 方式固定 generation-1 Ed25519 public key，并从 active Member/placement topology
 向三个 participant 配置同一 canonical Member/Node/key set。key ID 由 public key 派生，keyless、
 重复或 topology mismatch 均 fail closed。Replica binding metadata 携带该 trust set；daemon 从 owner-only seed file 加载签名能力、
 注册 generation-1 public key，并验证 local catalog identity。Replica RPC 传输 signed
-PREPARE/COMMIT payload，但尚无 rotation 或 revocation。因此 replacement
+PREPARE/COMMIT payload；独立 owner-only outbound key file 按 target receiver 保存 directional
+credential，不能与 inbound key registry 混用。topology 在未来首笔 intent 前必须先在三节点
+持久 arm；armed candidate 没有同 state directory signed completion 时不得认证 empty frontier。
+当前尚无 rotation 或 revocation。因此 replacement
 coordinator 仍不能安全接管，development transport 也没有 confidentiality。当前仍没有
 production primary coordinator、真实 remote fanout 或 2/3 client success，这些控制面、本地
 participant、journal 和 authenticated seam 仍不等于三节点 quorum 数据路径。
