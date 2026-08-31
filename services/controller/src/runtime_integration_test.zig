@@ -788,7 +788,10 @@ test "runtime reconciler recovers unknown ensure and completes create" {
     const readiness = try ReconcileDataClient.inspectPrimary(
         &data_client,
         "",
-        .{ .binding = data_client.staged.?.binding },
+        .{
+            .binding = data_client.staged.?.binding,
+            .target_boot_id = reconcile_holder_boot_id,
+        },
     );
     try std.testing.expect(readiness.current_active);
     try std.testing.expect(readiness.current_admitting);

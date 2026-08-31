@@ -142,14 +142,21 @@ duplicate, local-peer, malformed, or insecure-file configuration fails closed.
 provides request/response authenticity but not payload confidentiality. This
 mode is for the Docker/file-backend development profile, not production.
 PREPARE and COMMIT results are independently signed and the participant verifies
-the controller-pinned two-witness decision. M12a also persists controller-derived
-canonical Replica routes in a separate coordinator catalog and loads outbound
-credentials, but each topology is initially **unarmed** and there is still no
-primary coordinator client fanout or cross-node 2/3 success path. A future write
-path must durably arm all three nodes before its first intent; once armed, a node
-without a same-directory signed coordinator completion cannot certify an empty
-recovery frontier. Therefore a three-node Volume intent can reach `ACTIVE`, but user writes
-are still not replicated or published to hosts. Confidential transport, key
-rotation/revocation, replacement-coordinator recovery/repair, NVMf user-data
-replication, and authority-gated Publication remain
-subsequent steps. See `tests/e2e/README.md` for the Docker Compose profile.
+the controller-pinned two-witness decision. The internal coordinator loads the
+separate outbound target-key registry, obtains authenticated durable arm acks
+from all three routes before its first intent, and then performs local plus the
+first canonical remote PREPARE/COMMIT. Success is returned only after both
+participants and the coordinator completion are durable. Remote witness admission
+uses the unchanged canonical primary authority transcript with a process-local,
+ephemeral lease window. Runtime tracks the exact current READY binding separately
+from a staged renewal candidate, so witness-first renewal does not replace a still-live
+current authority; READY atomically promotes the candidate. Restart drops both windows
+and requires controller restage.
+The API rejects requests larger than 1 MiB, unaligned ranges, overflow, and ranges not fitting every
+route's common logical length before creating an intent. It is process-local and is not registered on
+`DataService` or `ReplicaTransport`; there is no client-facing write API or host publication. The excluded third Replica remains
+behind, a fixed witness can leave an operation UNKNOWN, and only same-directory
+coordinator recovery is supported. An armed node without matching signed local
+completion cannot certify an empty recovery frontier. Confidential transport,
+key rotation/revocation, replacement recovery, read/repair, NVMf user-data
+replication, and authority-gated Publication remain subsequent steps. See `tests/e2e/README.md` for the Docker Compose profile.

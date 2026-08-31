@@ -147,20 +147,25 @@ digest/payload、canonical three-witness identity set 和固定两个 witness；
 genesis 在 exact Member set 下迁移；任何 unsigned pending/decided/history 都以
 `UnsignedCoordinatorState` fail closed。Atomic full-snapshot 仍只是开发基线。
 
-该 journal 现已通过独立 durable catalog 组合进 daemon 的 M12a safety plumbing，但
-controller 下发的 canonical 三 route topology 默认 unarmed，尚无 fanout operation 或
-client-facing payload write RPC。participant contract 现在能独立验证 signed certificate；controller Node metadata 已
+该 journal 已通过独立 durable catalog 组合进 daemon。进程内 primary coordinator 在首笔
+intent 前通过 authenticated Replica RPC 持久 arm 三个 route，之后固定 local Member 与
+bytewise-canonical 第一个 remote Member，执行真实 signed PREPARE/COMMIT 2/3 durable fanout；
+只有两个 participant 与 coordinator completion 都持久后才返回成功。该 seam 不注册为
+management 或 client-facing payload RPC。participant contract 现在能独立验证 signed certificate；controller Node metadata 已
 以 fill-once 方式固定 generation-1 Ed25519 public key，并从 active Member/placement topology
 向三个 participant 配置同一 canonical Member/Node/key set。key ID 由 public key 派生，keyless、
 重复或 topology mismatch 均 fail closed。Replica binding metadata 携带该 trust set；daemon 从 owner-only seed file 加载签名能力、
 注册 generation-1 public key，并验证 local catalog identity。Replica RPC 传输 signed
 PREPARE/COMMIT payload；独立 owner-only outbound key file 按 target receiver 保存 directional
-credential，不能与 inbound key registry 混用。topology 在未来首笔 intent 前必须先在三节点
-持久 arm；armed candidate 没有同 state directory signed completion 时不得认证 empty frontier。
-当前尚无 rotation 或 revocation。因此 replacement
-coordinator 仍不能安全接管，development transport 也没有 confidentiality。当前仍没有
-production primary coordinator、真实 remote fanout 或 2/3 client success，这些控制面、本地
-participant、journal 和 authenticated seam 仍不等于三节点 quorum 数据路径。
+credential，不能与 inbound key registry 混用。Controller 将同一 canonical authority 在 primary
+与两个 witness 上 stage；每个 Stage/Ready request 另带 controller 刚通过该 target 的
+`IdentifyHolder` 取得的 boot ID，target 必须 exact echo，从而拒绝跨进程重放。remote witness 保留
+primary holder boot identity 于 authority transcript，同时只在自身进程内建立易失 lease window，
+重启后 fail closed 并等待 not-yet-ready candidate 的全节点 fresh stage；已经发布 READY 的旧 lease
+不得借 restage 延长。armed candidate 没有同 state
+directory signed completion 时不得认证 empty frontier。当前尚无 rotation、revocation、transport
+confidentiality、client-facing write success、read/repair 或 replacement coordinator recovery；第三个
+Replica 在每笔固定 two-witness write 后仍会落后，NVMf 用户数据路径也尚未接入。
 
 目标 vendor-specific command 至少携带：
 

@@ -156,7 +156,9 @@ pub const RpcClient = struct {
         const self: *RpcClient = @ptrCast(@alignCast(context));
         var response = try self.unary(endpoint, "InspectPrimary", wire.inspectPrimaryRequest(&request), pb.InspectPrimaryResponse);
         defer response.deinit(self.allocator);
-        return wire.parseInspectPrimaryResponse(response);
+        var status = try wire.parseInspectPrimaryResponse(response);
+        status.request.target_boot_id = request.target_boot_id;
+        return status;
     }
 
     fn cancelOpaque(context: *anyopaque) void {
@@ -292,7 +294,7 @@ fn testIdentity(member_id: [16]u8, node_id: [16]u8, seed: u8) @import("zettide_d
 }
 
 fn testStageRequest() reconciler.StageRequest {
-    return .{
+    var request: reconciler.StageRequest = .{
         .binding = .{
             .volume_id = id_a,
             .primary_placement_id = id_b,
@@ -303,10 +305,13 @@ fn testStageRequest() reconciler.StageRequest {
             .write_epoch = 5,
             .placement_revision = 7,
             .activation_nonce = id_f,
-            .authority_digest = digest,
+            .authority_digest = undefined,
         },
         .lease_duration_ms = 30_000,
+        .target_boot_id = id_f,
     };
+    request.binding.authority_digest = @import("zettide_data_service_contracts").authority_contract.digest(request.binding);
+    return request;
 }
 
 test "RPC client configures canonical write participant binding" {
@@ -378,6 +383,7 @@ test "RPC client reaches canonical StagePrimary endpoint" {
             var response: pb.StagePrimaryResponse = .{
                 .binding = request.binding,
                 .lease_duration_ms = request.lease_duration_ms,
+                .target_boot_id = request.target_boot_id,
             };
             var writer: std.Io.Writer.Allocating = .init(allocator);
             defer writer.deinit();

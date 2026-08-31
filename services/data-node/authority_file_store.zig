@@ -135,6 +135,37 @@ pub const FileStore = struct {
         return null;
     }
 
+    /// Returns an exact durable READY binding for normal admission. A historical
+    /// READY binding remains eligible only while the ledger tail is one strict
+    /// same-primary renewal candidate that has not reached READY. Process-local
+    /// runtime admission is still required by the caller.
+    pub fn validateAdmission(self: *const FileStore, binding: protocol.AuthorityBinding) !Record {
+        if (self.poisoned) return error.StorePoisoned;
+        try validateBinding(binding);
+        var ready_index: ?usize = null;
+        for (self.records, 0..) |record, index| {
+            if (std.meta.eql(record.binding, binding) and record.phase == .ready)
+                ready_index = index;
+        }
+        const index = ready_index orelse return error.AuthorityNotReady;
+        const ready = self.records[index];
+        const latest_record = self.latest(binding.volume_id) orelse return error.StoreCorrupt;
+        if (std.meta.eql(latest_record.binding, binding)) {
+            if (latest_record.phase != .ready) return error.StoreCorrupt;
+            return ready;
+        }
+        if (latest_record.phase == .ready or !isStrictRenewal(binding, latest_record.binding))
+            return error.AuthorityNotReady;
+        // No unrelated or superseded candidate may be hidden between the old
+        // READY record and the current tail.
+        for (self.records[index + 1 ..]) |record| {
+            if (!std.mem.eql(u8, &record.binding.volume_id, &binding.volume_id)) continue;
+            if (!std.meta.eql(record.binding, latest_record.binding) or record.phase == .ready)
+                return error.StoreCorrupt;
+        }
+        return ready;
+    }
+
     pub fn append(self: *FileStore, record: Record) !void {
         if (try self.validate(record.binding, record.phase)) |existing| {
             if (!sameEvidence(existing, record)) return error.AuthorityConflict;
@@ -286,8 +317,19 @@ fn validateBinding(binding: protocol.AuthorityBinding) !void {
     if (!validUuid(binding.volume_id) or !validUuid(binding.primary_placement_id) or
         !validUuid(binding.primary_node_id) or !validUuid(binding.lease_id) or
         !validUuid(binding.holder_boot_id) or !validUuid(binding.activation_nonce) or
-        binding.authority_generation == 0 or binding.write_epoch == 0 or binding.placement_revision == 0 or
-        allZero(&binding.authority_digest)) return error.InvalidBinding;
+        binding.authority_generation == 0 or binding.write_epoch == 0 or binding.placement_revision == 0)
+        return error.InvalidBinding;
+    protocol.authority_contract.validate(binding) catch return error.InvalidAuthorityDigest;
+}
+
+fn isStrictRenewal(current: protocol.AuthorityBinding, candidate: protocol.AuthorityBinding) bool {
+    return candidate.authority_generation > current.authority_generation and
+        candidate.write_epoch == current.write_epoch and
+        candidate.placement_revision == current.placement_revision and
+        std.mem.eql(u8, &candidate.volume_id, &current.volume_id) and
+        std.mem.eql(u8, &candidate.primary_placement_id, &current.primary_placement_id) and
+        std.mem.eql(u8, &candidate.primary_node_id, &current.primary_node_id) and
+        std.mem.eql(u8, &candidate.holder_boot_id, &current.holder_boot_id);
 }
 
 fn sameEvidence(a: Record, b: Record) bool {
@@ -314,7 +356,7 @@ fn testId(byte: u8) protocol.Id {
 }
 
 fn testBinding(generation: u64, epoch: u64) protocol.AuthorityBinding {
-    return .{
+    var binding: protocol.AuthorityBinding = .{
         .volume_id = testId(1),
         .primary_placement_id = testId(2),
         .primary_node_id = testId(3),
@@ -324,8 +366,10 @@ fn testBinding(generation: u64, epoch: u64) protocol.AuthorityBinding {
         .write_epoch = epoch,
         .placement_revision = 1,
         .activation_nonce = testId(@intCast(6 + generation)),
-        .authority_digest = @splat(@as(u8, @intCast(generation))),
+        .authority_digest = undefined,
     };
+    binding.authority_digest = protocol.authority_contract.digest(binding);
+    return binding;
 }
 
 test "authority ledger persists monotonic epoch and recovery evidence" {
@@ -353,6 +397,118 @@ test "authority ledger persists monotonic epoch and recovery evidence" {
         try std.testing.expectError(error.StaleAuthority, store.validate(testBinding(3, 6), .staged));
         try std.testing.expectEqual(@as(u64, 2), store.latest(testId(1)).?.binding.authority_generation);
     }
+}
+
+fn appendTestReady(store: *FileStore, binding: protocol.AuthorityBinding, fill: u8) !void {
+    const history: protocol.Digest = @splat(fill);
+    try store.append(.{ .binding = binding, .phase = .staged });
+    try store.append(.{
+        .binding = binding,
+        .phase = .recovered,
+        .history_digest = history,
+        .empty_frontier = true,
+    });
+    try store.append(.{
+        .binding = binding,
+        .phase = .ready,
+        .history_digest = history,
+        .empty_frontier = true,
+    });
+}
+
+test "authority admission permits only one strict in-flight renewal overlap" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const current = testBinding(1, 7);
+
+    {
+        var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "allowed.state");
+        defer store.deinit();
+        try appendTestReady(&store, current, 0x41);
+        const renewal = testBinding(2, 7);
+        try store.append(.{ .binding = renewal, .phase = .staged });
+        try std.testing.expectEqual(current, (try store.validateAdmission(current)).binding);
+        try store.append(.{
+            .binding = renewal,
+            .phase = .recovered,
+            .history_digest = @splat(0x42),
+            .empty_frontier = true,
+        });
+        try std.testing.expectEqual(current, (try store.validateAdmission(current)).binding);
+        try store.append(.{
+            .binding = renewal,
+            .phase = .ready,
+            .history_digest = @splat(0x42),
+            .empty_frontier = true,
+        });
+        try std.testing.expectError(error.AuthorityNotReady, store.validateAdmission(current));
+        try std.testing.expectEqual(renewal, (try store.validateAdmission(renewal)).binding);
+    }
+
+    {
+        var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "higher-epoch.state");
+        defer store.deinit();
+        try appendTestReady(&store, current, 0x43);
+        const higher = testBinding(2, 8);
+        try store.append(.{ .binding = higher, .phase = .staged });
+        try std.testing.expectError(error.AuthorityNotReady, store.validateAdmission(current));
+    }
+
+    {
+        var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "different-primary.state");
+        defer store.deinit();
+        try appendTestReady(&store, current, 0x44);
+        var failover = testBinding(2, 7);
+        failover.primary_node_id = testId(90);
+        failover.authority_digest = protocol.authority_contract.digest(failover);
+        try store.append(.{ .binding = failover, .phase = .staged });
+        try std.testing.expectError(error.AuthorityNotReady, store.validateAdmission(current));
+    }
+
+    {
+        var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "geometry.state");
+        defer store.deinit();
+        try appendTestReady(&store, current, 0x45);
+        var changed = testBinding(2, 7);
+        changed.placement_revision += 1;
+        changed.authority_digest = protocol.authority_contract.digest(changed);
+        try store.append(.{ .binding = changed, .phase = .staged });
+        try std.testing.expectError(error.AuthorityNotReady, store.validateAdmission(current));
+    }
+
+    {
+        var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "different-placement.state");
+        defer store.deinit();
+        try appendTestReady(&store, current, 0x47);
+        var changed = testBinding(2, 7);
+        changed.primary_placement_id = testId(91);
+        changed.authority_digest = protocol.authority_contract.digest(changed);
+        try store.append(.{ .binding = changed, .phase = .staged });
+        try std.testing.expectError(error.AuthorityNotReady, store.validateAdmission(current));
+    }
+
+    {
+        var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "superseded.state");
+        defer store.deinit();
+        try appendTestReady(&store, current, 0x46);
+        try store.append(.{ .binding = testBinding(2, 7), .phase = .staged });
+        try store.append(.{ .binding = testBinding(3, 7), .phase = .staged });
+        try std.testing.expectError(error.StoreCorrupt, store.validateAdmission(current));
+    }
+}
+
+test "authority ledger rejects noncanonical digest before append" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "authority.state");
+    defer store.deinit();
+    var malformed = testBinding(1, 7);
+    malformed.authority_digest[0] ^= 1;
+    try std.testing.expectError(
+        error.InvalidAuthorityDigest,
+        store.append(.{ .binding = malformed, .phase = .staged }),
+    );
+    try std.testing.expect(store.latest(malformed.volume_id) == null);
 }
 
 test "authority ledger has exclusive lifetime ownership" {

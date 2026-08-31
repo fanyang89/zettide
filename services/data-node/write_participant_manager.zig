@@ -233,6 +233,14 @@ pub const WriteParticipantManager = struct {
         return .{ .write = prepared_write, .certificate = canonical, .result = result };
     }
 
+    pub fn validateAuthority(
+        self: *WriteParticipantManager,
+        authority: protocol.AuthorityBinding,
+    ) !void {
+        if (self.poisoned) return error.StorePoisoned;
+        try self.authority_validator.validate(authority);
+    }
+
     pub fn inspectConfigured(
         self: *WriteParticipantManager,
         binding: write_service.ParticipantBinding,

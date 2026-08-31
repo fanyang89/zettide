@@ -2,6 +2,7 @@ const std = @import("std");
 
 const protocol = @import("zettide_data_service_contracts");
 const write_participant_manager = @import("write_participant_manager.zig");
+const replica_rpc_client = @import("replica_rpc_client.zig");
 const replica_io_gate = @import("replica_io_gate.zig");
 
 const coordinator = protocol.write_coordinator;
@@ -65,6 +66,13 @@ pub const CoordinatorTopology = struct {
     routes: [3]ReplicaRoute,
 };
 
+pub const CoordinateRequest = struct {
+    authority: protocol.AuthorityBinding,
+    transaction_id: protocol.Id,
+    offset_bytes: u64,
+    data: []const u8,
+};
+
 const Key = struct {
     placement_id: protocol.Id,
     generation: u64,
@@ -95,22 +103,24 @@ pub const ControlGuard = struct {
     }
 };
 
-/// Durable coordinator topology/catalog safety plumbing. M12a deliberately
-/// exposes no payload or fanout operation. `arm` is an internal prerequisite
-/// for a future write path and permanently disables empty-frontier recovery
-/// unless this same state directory carries signed coordinator completion.
+/// Durable internal write coordinator. Payload execution is exposed only as a
+/// process-local API; the management listener remains metadata-only.
 pub const WriteCoordinatorManager = struct {
     pub const Faults = struct {
         fail_catalog_file_sync_once: bool = false,
         fail_catalog_rename_once: bool = false,
         fail_directory_sync_once: bool = false,
         fail_journal_creation_once: bool = false,
+        fail_remote_prepare_before_request_once: bool = false,
+        lose_remote_prepare_response_once: bool = false,
+        lose_remote_commit_response_once: bool = false,
     };
 
     allocator: std.mem.Allocator,
     io: std.Io,
     parent: std.Io.Dir,
     participants: *write_participant_manager.WriteParticipantManager,
+    local_signer: ?*const protocol.write_evidence.Signer,
     local_identity: write_service.WitnessIdentity,
     outbound_keys: []OutboundTargetKey,
     lock_file: std.Io.File,
@@ -125,6 +135,29 @@ pub const WriteCoordinatorManager = struct {
         io: std.Io,
         parent: std.Io.Dir,
         participants: *write_participant_manager.WriteParticipantManager,
+        local_identity: write_service.WitnessIdentity,
+        outbound_keys: []const OutboundTargetKey,
+    ) !WriteCoordinatorManager {
+        return initInternal(allocator, io, parent, participants, null, local_identity, outbound_keys);
+    }
+
+    pub fn initWithSigner(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        parent: std.Io.Dir,
+        participants: *write_participant_manager.WriteParticipantManager,
+        local_signer: *const protocol.write_evidence.Signer,
+        outbound_keys: []const OutboundTargetKey,
+    ) !WriteCoordinatorManager {
+        return initInternal(allocator, io, parent, participants, local_signer, local_signer.identity(), outbound_keys);
+    }
+
+    fn initInternal(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        parent: std.Io.Dir,
+        participants: *write_participant_manager.WriteParticipantManager,
+        local_signer: ?*const protocol.write_evidence.Signer,
         local_identity: write_service.WitnessIdentity,
         outbound_keys: []const OutboundTargetKey,
     ) !WriteCoordinatorManager {
@@ -150,6 +183,7 @@ pub const WriteCoordinatorManager = struct {
             .io = io,
             .parent = parent,
             .participants = participants,
+            .local_signer = local_signer,
             .local_identity = local_identity,
             .outbound_keys = owned_keys,
             .lock_file = lock_file,
@@ -235,18 +269,125 @@ pub const WriteCoordinatorManager = struct {
         defer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
         const entry = self.entries.get(key(placement_id, generation)) orelse return error.CoordinatorNotConfigured;
-        if (self.records[entry.record_index].armed) return;
-        const next = try self.allocator.dupe(CatalogRecord, self.records);
-        errdefer self.allocator.free(next);
-        next[entry.record_index].armed = true;
-        try self.replaceCatalog(next);
-        self.syncParent() catch |err| {
-            self.poisoned = true;
-            return err;
+        try self.armEntryLocked(entry);
+    }
+
+    /// Authenticated remote arm. The source must be one of the other pinned
+    /// topology nodes; the target route is the exact local configured route.
+    pub fn armFromPeer(
+        self: *WriteCoordinatorManager,
+        source_node_id: protocol.Id,
+        placement_id: protocol.Id,
+        generation: u64,
+        authority: protocol.AuthorityBinding,
+    ) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        const entry = self.entries.get(key(placement_id, generation)) orelse return error.CoordinatorNotConfigured;
+        const topology = self.records[entry.record_index].topology;
+        var source_found = false;
+        for (topology.routes) |route| {
+            if (std.mem.eql(u8, &route.node_id, &source_node_id)) source_found = true;
+        }
+        if (!source_found or std.mem.eql(u8, &source_node_id, &self.local_identity.node_id) or
+            !std.mem.eql(u8, &source_node_id, &authority.primary_node_id))
+            return error.CoordinatorSourceNotPinned;
+        const primary_route = routeForNode(topology, authority.primary_node_id) orelse
+            return error.CoordinatorSourceNotPinned;
+        if (!std.mem.eql(u8, &primary_route.binding.replica.volume_id, &authority.volume_id) or
+            !std.mem.eql(u8, &primary_route.binding.replica.placement_id, &authority.primary_placement_id))
+            return error.CoordinatorSourceNotPinned;
+        // An arm acknowledgement proves this witness's canonical local runtime
+        // window is still admitting, not merely that routing metadata exists.
+        try self.participants.validateAuthority(authority);
+        try self.armEntryLocked(entry);
+    }
+
+    /// Process-local write path. No payload-bearing gRPC method exposes this
+    /// seam. The returned success means both selected participants and the
+    /// coordinator completion are durable.
+    pub fn coordinate(self: *WriteCoordinatorManager, request: CoordinateRequest) !write_service.CommitResult {
+        self.mutex.lockUncancelable(self.io);
+        var locked = true;
+        defer if (locked) self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        if (request.data.len == 0 or isZero(&request.transaction_id)) return error.InvalidWriteRequest;
+        var entry = try self.entryForAuthorityLocked(request.authority);
+        try validateCoordinateRequest(self.records[entry.record_index].topology, request);
+        try self.validateCoordinateRetryLocked(entry, request);
+
+        var inspection = try entry.instance.inspect();
+        if (inspection.last_completed) |completed| {
+            if (requestMatches(completed.write, request, null)) return completed.result;
+        }
+        if (inspection.pending != null)
+            return self.drainEntryLocked(entry) catch return error.WriteOutcomeUnknown;
+
+        // Admission is checked before arming and before the durable intent. Arm
+        // RPCs execute without this manager lock so two candidates cannot form
+        // a cross-node callback cycle. The exact immutable topology is checked
+        // again after reacquiring the lock.
+        try self.participants.validateAuthority(request.authority);
+        const topology = self.records[entry.record_index].topology;
+        self.mutex.unlock(self.io);
+        locked = false;
+        self.armRemoteRoutes(topology, request.authority) catch return error.WriteNotStarted;
+        self.mutex.lockUncancelable(self.io);
+        locked = true;
+
+        if (self.poisoned) return error.StorePoisoned;
+        entry = try self.entryForAuthorityLocked(request.authority);
+        if (!std.meta.eql(self.records[entry.record_index].topology, topology))
+            return error.CoordinatorTopologyConflict;
+        try self.validateCoordinateRetryLocked(entry, request);
+        inspection = try entry.instance.inspect();
+        if (inspection.pending != null)
+            return self.drainEntryLocked(entry) catch return error.WriteOutcomeUnknown;
+        if (inspection.last_completed) |completed| {
+            if (requestMatches(completed.write, request, null)) return completed.result;
+        }
+        try self.participants.validateAuthority(request.authority);
+        try self.armEntryLocked(entry);
+
+        const local = localRoute(topology) orelse return error.StoreCorrupt;
+        const witnesses = selectedWitnesses(topology) orelse return error.InvalidCoordinatorTopology;
+        const sequence = std.math.add(u64, inspection.frontier.sequence, 1) catch return error.SequenceOverflow;
+        const write: write_service.WriteRequest = .{
+            .authority = request.authority,
+            .replica_members = local.binding.replica_members,
+            .sequence = sequence,
+            .transaction_id = request.transaction_id,
+            .previous_history_digest = inspection.frontier.history_digest,
+            .offset_bytes = request.offset_bytes,
+            .length_bytes = @intCast(request.data.len),
+            .data_digest = write_service.digestData(request.data),
         };
-        const previous = self.records;
-        self.records = next;
-        if (previous.len != 0) self.allocator.free(previous);
+        _ = entry.instance.begin(.{
+            .write = write,
+            .data = request.data,
+            .witnesses = witnesses,
+        }) catch return error.WriteOutcomeUnknown;
+        return self.drainEntryLocked(entry) catch return error.WriteOutcomeUnknown;
+    }
+
+    /// Best-effort same-directory recovery. A failure leaves durable state
+    /// untouched and blocked; callers may retry after peers or leases recover.
+    pub fn recoverPending(self: *WriteCoordinatorManager) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.poisoned) return error.StorePoisoned;
+        var first_error: ?anyerror = null;
+        var iterator = self.entries.valueIterator();
+        while (iterator.next()) |entry_ptr| {
+            const inspection = try entry_ptr.*.instance.inspect();
+            if (inspection.pending == null) continue;
+            _ = self.drainEntryLocked(entry_ptr.*) catch |err| {
+                if (first_error == null) first_error = err;
+                continue;
+            };
+        }
+        if (first_error) |err| return err;
     }
 
     pub fn beginControl(self: *WriteCoordinatorManager, placement_id: protocol.Id, generation: u64) !ControlGuard {
@@ -254,6 +395,8 @@ pub const WriteCoordinatorManager = struct {
         errdefer self.mutex.unlock(self.io);
         if (self.poisoned) return error.StorePoisoned;
         if (self.entries.get(key(placement_id, generation))) |entry| {
+            const before = try entry.instance.inspect();
+            if (before.pending != null) _ = self.drainEntryLocked(entry) catch {};
             const inspection = try entry.instance.inspect();
             if (inspection.pending) |pending| {
                 if (pending.signed_certificate != null) return error.CoordinatorDrainRequired;
@@ -275,6 +418,8 @@ pub const WriteCoordinatorManager = struct {
             found = item.value_ptr.*;
         }
         if (found) |entry| {
+            const before = try entry.instance.inspect();
+            if (before.pending != null) _ = self.drainEntryLocked(entry) catch {};
             const inspection = try entry.instance.inspect();
             if (inspection.pending) |pending| {
                 if (pending.signed_certificate != null) return error.CoordinatorDrainRequired;
@@ -333,6 +478,207 @@ pub const WriteCoordinatorManager = struct {
         }
         if (armed and result == null) return error.RecoveryQuorumRequired;
         return result;
+    }
+
+    fn armEntryLocked(self: *WriteCoordinatorManager, entry: *Entry) !void {
+        if (self.records[entry.record_index].armed) return;
+        const next = try self.allocator.dupe(CatalogRecord, self.records);
+        errdefer self.allocator.free(next);
+        next[entry.record_index].armed = true;
+        try self.replaceCatalog(next);
+        self.syncParent() catch |err| {
+            self.poisoned = true;
+            return err;
+        };
+        const previous = self.records;
+        self.records = next;
+        if (previous.len != 0) self.allocator.free(previous);
+    }
+
+    fn entryForAuthorityLocked(self: *WriteCoordinatorManager, authority: protocol.AuthorityBinding) !*Entry {
+        if (!std.mem.eql(u8, &authority.primary_node_id, &self.local_identity.node_id))
+            return error.NotLocalPrimary;
+        var found: ?*Entry = null;
+        var iterator = self.entries.valueIterator();
+        while (iterator.next()) |entry_ptr| {
+            const entry = entry_ptr.*;
+            const local = localRoute(self.records[entry.record_index].topology) orelse return error.StoreCorrupt;
+            if (!std.mem.eql(u8, &local.binding.replica.volume_id, &authority.volume_id) or
+                !std.mem.eql(u8, &local.binding.replica.placement_id, &authority.primary_placement_id)) continue;
+            if (found != null) return error.CoordinatorTopologyConflict;
+            found = entry;
+        }
+        return found orelse error.CoordinatorNotConfigured;
+    }
+
+    fn validateCoordinateRetryLocked(
+        self: *WriteCoordinatorManager,
+        entry: *Entry,
+        request: CoordinateRequest,
+    ) !void {
+        _ = self;
+        const inspection = try entry.instance.inspect();
+        if (inspection.pending) |pending| {
+            if (!requestMatches(pending.write, request, pending.data)) return error.WriteRetryConflict;
+            return;
+        }
+        if (inspection.last_completed) |completed| {
+            if (std.mem.eql(u8, &completed.write.transaction_id, &request.transaction_id) and
+                !requestMatches(completed.write, request, null))
+                return error.WriteRetryConflict;
+        }
+    }
+
+    fn armRemoteRoutes(
+        self: *WriteCoordinatorManager,
+        topology: CoordinatorTopology,
+        authority: protocol.AuthorityBinding,
+    ) !void {
+        for (topology.routes) |route| {
+            if (std.mem.eql(u8, &route.binding.replica.member_id, &topology.local_member_id)) continue;
+            var client = try self.clientForRoute(route);
+            defer client.deinit();
+            try client.armCoordinator(
+                route.endpoint(),
+                route.binding.replica.placement_id,
+                route.binding.replica.generation,
+                authority,
+            );
+        }
+    }
+
+    fn drainEntryLocked(self: *WriteCoordinatorManager, entry: *Entry) !write_service.CommitResult {
+        const topology = self.records[entry.record_index].topology;
+        const signer = self.local_signer orelse return error.CoordinatorSignerUnavailable;
+        const initial = try entry.instance.inspect();
+        const pending_initial = initial.pending orelse {
+            if (initial.last_completed) |completed| return completed.result;
+            return error.NoWriteInProgress;
+        };
+        const data = try self.allocator.dupe(u8, pending_initial.data);
+        defer self.allocator.free(data);
+        const write = pending_initial.write;
+        const witnesses = pending_initial.witnesses;
+
+        // A missing PREPARE is a new payload admission, not decision replay.
+        // Revalidate the exact local primary READY/live authority immediately
+        // before any such local or remote mutation. Once both PREPARE evidence
+        // records are durable, certificate/COMMIT convergence remains
+        // lease-independent and is guarded by the durable fence at participants.
+        var missing_prepare = false;
+        for (pending_initial.prepare_evidence) |evidence| {
+            if (evidence == null) {
+                missing_prepare = true;
+                break;
+            }
+        }
+        if (missing_prepare) try self.participants.validateAuthority(write.authority);
+
+        // Reinspect after every durable mutation. Inspection payload storage is
+        // borrowed and therefore never retained across coordinator saves.
+        for (witnesses) |witness| {
+            const current = (try entry.instance.inspect()).pending orelse break;
+            const witness_index = memberIndex(current.witnesses, witness) orelse return error.StoreCorrupt;
+            if (current.prepare_evidence[witness_index] != null) continue;
+            const route = routeForMember(topology, witness) orelse return error.StoreCorrupt;
+            const evidence: write_service.SignedPrepareEvidence = if (std.mem.eql(u8, &witness, &topology.local_member_id)) blk: {
+                const attestation = try self.participants.prepareConfigured(
+                    route.binding,
+                    route.backend_digest,
+                    .{ .write = write, .data = data },
+                );
+                break :blk try signer.signPrepare(write, attestation);
+            } else blk: {
+                if (self.faults) |faults| if (faults.fail_remote_prepare_before_request_once) {
+                    faults.fail_remote_prepare_before_request_once = false;
+                    return error.InjectedRemotePrepareBeforeRequestFailure;
+                };
+                var client = try self.clientForRoute(route);
+                defer client.deinit();
+                break :blk try client.prepare(
+                    route.endpoint(),
+                    .{ .participant = route.binding, .backend_digest = route.backend_digest },
+                    .{ .write = write, .data = data },
+                );
+            };
+            if (!std.mem.eql(u8, &witness, &topology.local_member_id)) if (self.faults) |faults|
+                if (faults.lose_remote_prepare_response_once) {
+                    faults.lose_remote_prepare_response_once = false;
+                    return error.InjectedRemotePrepareResponseLoss;
+                };
+            try entry.instance.recordPrepared(evidence);
+        }
+
+        const after_prepare = try entry.instance.inspect();
+        const pending_after_prepare = after_prepare.pending orelse {
+            if (after_prepare.last_completed) |completed| return completed.result;
+            return error.StoreCorrupt;
+        };
+        const certificate = pending_after_prepare.signed_certificate orelse try entry.instance.decide();
+
+        for (witnesses) |witness| {
+            const current_inspection = try entry.instance.inspect();
+            const current = current_inspection.pending orelse {
+                if (current_inspection.last_completed) |completed| return completed.result;
+                return error.StoreCorrupt;
+            };
+            const witness_index = memberIndex(current.witnesses, witness) orelse return error.StoreCorrupt;
+            if (current.commit_evidence[witness_index] != null) continue;
+            const route = routeForMember(topology, witness) orelse return error.StoreCorrupt;
+            const evidence: write_service.SignedCommitEvidence = if (std.mem.eql(u8, &witness, &topology.local_member_id)) blk: {
+                const committed = try self.participants.commitConfigured(
+                    route.binding,
+                    route.backend_digest,
+                    write.authority,
+                    write.transaction_id,
+                    write.sequence,
+                    certificate,
+                );
+                const projection = try protocol.write_evidence_contract.certificateProjection(certificate);
+                break :blk try signer.signCommit(committed.write, projection, committed.result);
+            } else blk: {
+                var client = try self.clientForRoute(route);
+                defer client.deinit();
+                break :blk try client.commit(
+                    route.endpoint(),
+                    .{ .participant = route.binding, .backend_digest = route.backend_digest },
+                    write,
+                    certificate,
+                );
+            };
+            if (!std.mem.eql(u8, &witness, &topology.local_member_id)) if (self.faults) |faults|
+                if (faults.lose_remote_commit_response_once) {
+                    faults.lose_remote_commit_response_once = false;
+                    return error.InjectedRemoteCommitResponseLoss;
+                };
+            _ = try entry.instance.recordCommitted(evidence);
+        }
+        const completed = (try entry.instance.inspect()).last_completed orelse return error.CoordinatorCompletionMissing;
+        return completed.result;
+    }
+
+    fn clientForRoute(self: *WriteCoordinatorManager, route: ReplicaRoute) !replica_rpc_client.Client {
+        const identity = protocol.write_evidence_contract.identityForMember(
+            route.binding.witness_identities,
+            route.binding.replica.member_id,
+        ) orelse return error.InvalidCoordinatorTopology;
+        if (!std.meta.eql(identity.node_id, route.node_id)) return error.InvalidCoordinatorTopology;
+        var target_key = self.targetKey(route.node_id) orelse return error.OutboundReplicaCredentialMissing;
+        defer std.crypto.secureZero(u8, &target_key);
+        return replica_rpc_client.Client.init(
+            self.allocator,
+            self.io,
+            self.local_identity.node_id,
+            identity,
+            target_key,
+            .{},
+        );
+    }
+
+    fn targetKey(self: *const WriteCoordinatorManager, node_id: protocol.Id) ?[32]u8 {
+        for (self.outbound_keys) |target|
+            if (std.mem.eql(u8, &target.node_id, &node_id)) return target.key;
+        return null;
     }
 
     fn validateTopology(self: *WriteCoordinatorManager, topology: CoordinatorTopology) !void {
@@ -668,6 +1014,67 @@ fn localRoute(topology: CoordinatorTopology) ?ReplicaRoute {
     return null;
 }
 
+fn routeForNode(topology: CoordinatorTopology, node_id: protocol.Id) ?ReplicaRoute {
+    for (topology.routes) |route|
+        if (std.mem.eql(u8, &route.node_id, &node_id)) return route;
+    return null;
+}
+
+fn routeForMember(topology: CoordinatorTopology, member_id: protocol.Id) ?ReplicaRoute {
+    for (topology.routes) |route|
+        if (std.mem.eql(u8, &route.binding.replica.member_id, &member_id)) return route;
+    return null;
+}
+
+fn selectedWitnesses(topology: CoordinatorTopology) ?[write_service.certificate_witness_count]protocol.Id {
+    var remote: ?protocol.Id = null;
+    for (topology.routes) |route| {
+        const member = route.binding.replica.member_id;
+        if (std.mem.eql(u8, &member, &topology.local_member_id)) continue;
+        if (remote == null or std.mem.order(u8, &member, &remote.?) == .lt) remote = member;
+    }
+    const selected_remote = remote orelse return null;
+    return if (std.mem.order(u8, &topology.local_member_id, &selected_remote) == .lt)
+        .{ topology.local_member_id, selected_remote }
+    else
+        .{ selected_remote, topology.local_member_id };
+}
+
+fn memberIndex(members: [write_service.certificate_witness_count]protocol.Id, member_id: protocol.Id) ?usize {
+    for (members, 0..) |candidate, index|
+        if (std.mem.eql(u8, &candidate, &member_id)) return index;
+    return null;
+}
+
+fn validateCoordinateRequest(topology: CoordinatorTopology, request: CoordinateRequest) !void {
+    if (request.data.len == 0 or request.data.len > write_service.max_payload_size or
+        isZero(&request.transaction_id) or request.offset_bytes % 4096 != 0 or
+        request.data.len % 4096 != 0)
+        return error.InvalidWriteRequest;
+    const length: u64 = @intCast(request.data.len);
+    const end = std.math.add(u64, request.offset_bytes, length) catch
+        return error.InvalidWriteRequest;
+    for (topology.routes) |route| {
+        if (!std.mem.eql(u8, &request.authority.volume_id, &route.binding.replica.volume_id) or
+            end > route.binding.replica.length_bytes)
+            return error.InvalidWriteRequest;
+    }
+}
+
+fn requestMatches(
+    write: write_service.WriteRequest,
+    request: CoordinateRequest,
+    payload: ?[]const u8,
+) bool {
+    const data_digest = write_service.digestData(request.data);
+    if (!std.meta.eql(write.authority, request.authority) or
+        !std.mem.eql(u8, &write.transaction_id, &request.transaction_id) or
+        write.offset_bytes != request.offset_bytes or
+        write.length_bytes != @as(u64, @intCast(request.data.len)) or
+        !std.mem.eql(u8, &write.data_digest, &data_digest)) return false;
+    return if (payload) |data| std.mem.eql(u8, data, request.data) else true;
+}
+
 fn hasTargetKey(keys: []const OutboundTargetKey, node_id: protocol.Id) bool {
     for (keys) |target| if (std.mem.eql(u8, &target.node_id, &node_id)) return true;
     return false;
@@ -711,7 +1118,10 @@ fn validateTopologyStructure(topology: CoordinatorTopology) !void {
             isZero(&route.backend_digest) or isZero(&route.node_id) or
             (index != 0 and std.mem.order(u8, &topology.routes[index - 1].binding.replica.member_id, &route.binding.replica.member_id) != .lt) or
             !std.meta.eql(route.binding.witness_identities, topology.routes[0].binding.witness_identities) or
-            !std.meta.eql(route.binding.replica_members, topology.routes[0].binding.replica_members))
+            !std.meta.eql(route.binding.replica_members, topology.routes[0].binding.replica_members) or
+            !std.mem.eql(u8, &route.binding.replica.volume_id, &topology.routes[0].binding.replica.volume_id) or
+            route.binding.replica.length_bytes != topology.routes[0].binding.replica.length_bytes or
+            route.binding.replica.offset_bytes % 4096 != 0 or route.binding.replica.length_bytes % 4096 != 0)
             return error.InvalidCoordinatorTopology;
         const identity = protocol.write_evidence_contract.identityForMember(
             route.binding.witness_identities,
@@ -1355,6 +1765,126 @@ fn managerTestCompleteSignedWrite(
         .sequence = local_tuple.result.sequence,
         .history_digest = local_tuple.result.history_digest,
     };
+}
+
+test "topology rejects cross-volume and unequal logical geometry" {
+    const replica: protocol.ReplicaBinding = .{
+        .volume_id = testId(1),
+        .placement_id = testId(2),
+        .allocation_id = testId(3),
+        .generation = 1,
+        .member_id = testId(4),
+        .offset_bytes = 4096,
+        .length_bytes = 8192,
+    };
+    const topology = managerTestTopology(replica, @splat(0x55));
+    try validateTopologyStructure(topology);
+
+    var cross_volume = topology;
+    cross_volume.routes[1].binding.replica.volume_id = testId(99);
+    try std.testing.expectError(error.InvalidCoordinatorTopology, validateTopologyStructure(cross_volume));
+
+    var unequal = topology;
+    unequal.routes[2].binding.replica.length_bytes = 4096;
+    try std.testing.expectError(error.InvalidCoordinatorTopology, validateTopologyStructure(unequal));
+}
+
+test "invalid coordinate request creates no durable intent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var environment: ManagerTestEnvironment = undefined;
+    try environment.init(tmp.dir);
+    defer environment.deinit();
+    const identity = managerTestIdentity(environment.topology);
+    var manager = try WriteCoordinatorManager.init(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        &environment.participants,
+        identity,
+        &environment.keys,
+    );
+    defer manager.deinit();
+    try manager.configure(environment.topology);
+    const local = localRoute(environment.topology).?;
+    const payload = [_]u8{0x44} ** 4096;
+    var authority = managerTestAuthority(local.binding.replica.volume_id);
+    authority.primary_placement_id = local.binding.replica.placement_id;
+    authority.primary_node_id = identity.node_id;
+    try std.testing.expectError(error.InvalidWriteRequest, manager.coordinate(.{
+        .authority = authority,
+        .transaction_id = testId(80),
+        .offset_bytes = 8192,
+        .data = &payload,
+    }));
+    try std.testing.expectError(error.InvalidWriteRequest, manager.coordinate(.{
+        .authority = authority,
+        .transaction_id = testId(81),
+        .offset_bytes = 1,
+        .data = &payload,
+    }));
+    const oversized = try std.testing.allocator.alloc(u8, write_service.max_payload_size + 4096);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 0x55);
+    try std.testing.expectError(error.InvalidWriteRequest, manager.coordinate(.{
+        .authority = authority,
+        .transaction_id = testId(82),
+        .offset_bytes = 0,
+        .data = oversized,
+    }));
+    const entry = manager.entries.get(key(
+        local.binding.replica.placement_id,
+        local.binding.replica.generation,
+    )).?;
+    try std.testing.expect((try entry.instance.inspect()).pending == null);
+}
+
+test "pending missing prepare revalidates exact primary admission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var environment: ManagerTestEnvironment = undefined;
+    try environment.init(tmp.dir);
+    defer environment.deinit();
+    const identity = managerTestIdentity(environment.topology);
+    const signer_index = for (environment.topology.routes, 0..) |route, index| {
+        if (std.mem.eql(u8, &route.binding.replica.member_id, &identity.member_id)) break index;
+    } else unreachable;
+    const signer = try managerTestSigner(identity, signer_index);
+    defer signer.deinit();
+    var manager = try WriteCoordinatorManager.initWithSigner(
+        std.testing.allocator,
+        std.testing.io,
+        tmp.dir,
+        &environment.participants,
+        signer,
+        &environment.keys,
+    );
+    defer manager.deinit();
+    try manager.configure(environment.topology);
+    const local = localRoute(environment.topology).?;
+    const payload = [_]u8{0x33} ** 4096;
+    const authority = environment.validator.expected;
+    const entry = manager.entries.get(key(
+        local.binding.replica.placement_id,
+        local.binding.replica.generation,
+    )).?;
+    _ = try entry.instance.begin(.{
+        .write = .{
+            .authority = authority,
+            .replica_members = local.binding.replica_members,
+            .sequence = 1,
+            .transaction_id = testId(82),
+            .previous_history_digest = @splat(0),
+            .offset_bytes = 0,
+            .length_bytes = payload.len,
+            .data_digest = write_service.digestData(&payload),
+        },
+        .data = &payload,
+        .witnesses = selectedWitnesses(environment.topology).?,
+    });
+    environment.validator.expected.lease_id = testId(90);
+    try std.testing.expectError(error.AuthorityRejected, manager.recoverPending());
+    try std.testing.expect((try entry.instance.inspect()).pending != null);
 }
 
 test "coordinator configure is exact and reopens durable unarmed topology" {

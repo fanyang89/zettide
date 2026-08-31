@@ -434,8 +434,13 @@ pub const Reconciler = struct {
         errdefer action.deinit();
         const allocator = action.arena.allocator();
         action.kind = .{ .activate_authority = .{
+            .participants = try participantConfigurations(allocator, volume),
             .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
-            .request = .{ .binding = try authorityBinding(authority), .lease_duration_ms = authority.lease_duration_ms },
+            .request = .{
+                .binding = try authorityBinding(authority),
+                .lease_duration_ms = authority.lease_duration_ms,
+                .target_boot_id = @splat(0),
+            },
             .volume_id_text = try allocator.dupe(u8, authority.volume_id),
             .expected_volume_resource_version = volume.volume.resource_version,
             .expected_authority_resource_version = authority.resource_version,
@@ -481,7 +486,7 @@ pub const Reconciler = struct {
             .volume_id_text = try allocator.dupe(u8, authority.volume_id),
             .placement_id_texts = try dupePlacementIds(allocator, volume.placements),
             .binding = binding,
-            .request = .{ .binding = binding },
+            .request = .{ .binding = binding, .target_boot_id = @splat(0) },
             .replicas = replicas,
             .expected_volume_resource_version = volume.volume.resource_version,
             .expected_authority_resource_version = authority.resource_version,
@@ -529,7 +534,7 @@ pub const Reconciler = struct {
         action.kind = .{ .inspect_renewal = .{
             .participants = try participantConfigurations(allocator, volume),
             .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, authority.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
-            .request = .{ .binding = try authorityBinding(authority) },
+            .request = .{ .binding = try authorityBinding(authority), .target_boot_id = @splat(0) },
             .command = command,
             .begin_failover_command = try state_machine.encodeBeginPrimaryFailoverCommand(allocator, .{
                 .volume_id = authority.volume_id,
@@ -602,7 +607,7 @@ pub const Reconciler = struct {
             .primary_endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, candidate.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
             .volume_id_text = try allocator.dupe(u8, candidate.volume_id),
             .placement_id_texts = try dupePlacementIds(allocator, volume.placements),
-            .request = .{ .binding = binding },
+            .request = .{ .binding = binding, .target_boot_id = @splat(0) },
             .replicas = replicas,
             .failover_id = failover.failover_id[0..16].*,
             .expected_volume_resource_version = volume.volume.resource_version,
@@ -639,7 +644,7 @@ pub const Reconciler = struct {
         action.kind = .{ .renewal_ready = .{
             .participants = try participantConfigurations(allocator, volume),
             .endpoint = try allocator.dupe(u8, (nodeById(volume.nodes, candidate.primary_node_id) orelse return error.InconsistentSnapshot).control_endpoint),
-            .request = .{ .binding = binding },
+            .request = .{ .binding = binding, .target_boot_id = @splat(0) },
             .ready_command = command,
             .abort_command = try state_machine.encodeAbortPrimaryAuthorityCandidateCommand(allocator, .{
                 .volume_id = candidate.volume_id,
@@ -714,6 +719,7 @@ pub const Action = struct {
     };
 
     const ActivateAuthority = struct {
+        participants: []const WriteParticipant,
         endpoint: []const u8,
         request: StageRequest,
         volume_id_text: []const u8,
@@ -888,14 +894,15 @@ pub const Action = struct {
                 try submitAndValidate(self.parent_allocator, submitter, command, .propose_authority);
             },
             .activate_authority => |activate| {
+                for (activate.participants) |participant|
+                    try configureWriteTopology(data_client, participant);
                 const holder_boot_id = try data_client.identifyHolder(activate.endpoint);
                 if (!validUuidV7Bytes(holder_boot_id)) return error.InvalidHolderIdentity;
                 if (!std.mem.eql(u8, &holder_boot_id, &activate.request.binding.holder_boot_id)) {
                     try submitAndValidate(self.parent_allocator, submitter, activate.abort_command, .abort_authority);
                     return;
                 }
-                const ack = try data_client.stagePrimary(activate.endpoint, activate.request);
-                if (!std.meta.eql(ack.request, activate.request)) return error.InvalidStageAck;
+                _ = try stageParticipants(data_client, activate.participants, activate.request);
                 const binding = activate.request.binding;
                 const command = try state_machine.encodeActivatePrimaryAuthorityCommand(self.parent_allocator, .{
                     .volume_id = activate.volume_id_text,
@@ -913,6 +920,11 @@ pub const Action = struct {
             .ready_authority => |ready| {
                 for (ready.participants) |participant|
                     try configureWriteTopology(data_client, participant);
+                const target_boot_ids = try stageParticipants(data_client, ready.participants, .{
+                    .binding = ready.binding,
+                    .lease_duration_ms = primary_lease.duration_ms,
+                    .target_boot_id = @splat(0),
+                });
                 const status = try data_client.inspectPrimary(ready.primary_endpoint, ready.request);
                 try validatePrimaryLeaseStatus(status, ready.request);
                 if (!status.candidate_fresh) {
@@ -937,6 +949,10 @@ pub const Action = struct {
                 const recovery = try data_client.recoverPrimary(ready.primary_endpoint, recovery_request);
                 if (!std.meta.eql(recovery.request, recovery_request) or isZero(&recovery.history_digest) or
                     (recovery.certified_sequence == 0) != recovery.empty_frontier) return error.InvalidRecoveryProof;
+                // Witness-local lease windows must all be ready before the
+                // controller publishes primary readiness. They retain the
+                // exact canonical AuthorityBinding transcript.
+                try markWitnessesReady(data_client, ready.participants, target_boot_ids, ready.request);
                 const command = try state_machine.encodeCommitPrimaryAuthorityReadyCommand(self.parent_allocator, .{
                     .volume_id = ready.volume_id_text,
                     .lease_id = &ready.binding.lease_id,
@@ -956,9 +972,8 @@ pub const Action = struct {
                     },
                 });
                 defer self.parent_allocator.free(command);
-                if (try submitReadyAndValidate(self.parent_allocator, submitter, command, ready.binding)) {
-                    try data_client.markPrimaryReady(ready.primary_endpoint, .{ .binding = ready.binding });
-                }
+                if (try submitReadyAndValidate(self.parent_allocator, submitter, command, ready.binding))
+                    try markPrimaryReady(data_client, ready.participants, target_boot_ids, ready.request);
             },
             .inspect_renewal => |inspect| {
                 for (inspect.participants) |participant|
@@ -966,7 +981,12 @@ pub const Action = struct {
                 const status = try data_client.inspectPrimary(inspect.endpoint, inspect.request);
                 try validatePrimaryLeaseStatus(status, inspect.request);
                 if (status.candidate_fresh) {
-                    try data_client.markPrimaryReady(inspect.endpoint, inspect.request);
+                    // The controller already published this authority. Never
+                    // stage it again here: a stage after restart would revive
+                    // an old ready lease. Stale target boots make ready fail.
+                    const target_boot_ids = try identifyParticipantBoots(data_client, inspect.participants);
+                    try markWitnessesReady(data_client, inspect.participants, target_boot_ids, inspect.request);
+                    try markPrimaryReady(data_client, inspect.participants, target_boot_ids, inspect.request);
                 } else if (status.current_admitting) {
                     if (status.should_renew) try submitAndValidate(self.parent_allocator, submitter, inspect.command, .propose_authority);
                 } else {
@@ -982,12 +1002,24 @@ pub const Action = struct {
             .renewal_ready => |renewal| {
                 for (renewal.participants) |participant|
                     try configureWriteTopology(data_client, participant);
+                const target_boot_ids = try stageParticipants(data_client, renewal.participants, .{
+                    .binding = renewal.request.binding,
+                    .lease_duration_ms = primary_lease.duration_ms,
+                    .target_boot_id = @splat(0),
+                });
                 const status = try data_client.inspectPrimary(renewal.endpoint, renewal.request);
                 try validatePrimaryLeaseStatus(status, renewal.request);
                 if (!status.candidate_fresh) {
                     try submitAndValidate(self.parent_allocator, submitter, renewal.abort_command, .abort_authority);
-                } else if (try submitReadyAndValidate(self.parent_allocator, submitter, renewal.ready_command, renewal.request.binding)) {
-                    try data_client.markPrimaryReady(renewal.endpoint, renewal.request);
+                } else {
+                    const recovery_request: RecoveryRequest = .{ .binding = renewal.request.binding };
+                    const recovery = try data_client.recoverPrimary(renewal.endpoint, recovery_request);
+                    if (!std.meta.eql(recovery.request, recovery_request) or isZero(&recovery.history_digest) or
+                        (recovery.certified_sequence == 0) != recovery.empty_frontier)
+                        return error.InvalidRecoveryProof;
+                    try markWitnessesReady(data_client, renewal.participants, target_boot_ids, renewal.request);
+                    if (try submitReadyAndValidate(self.parent_allocator, submitter, renewal.ready_command, renewal.request.binding))
+                        try markPrimaryReady(data_client, renewal.participants, target_boot_ids, renewal.request);
                 }
             },
             .propose_failover => |propose| {
@@ -1031,6 +1063,11 @@ pub const Action = struct {
             .failover_ready => |ready| {
                 for (ready.participants) |participant|
                     try configureWriteTopology(data_client, participant);
+                const target_boot_ids = try stageParticipants(data_client, ready.participants, .{
+                    .binding = ready.request.binding,
+                    .lease_duration_ms = primary_lease.duration_ms,
+                    .target_boot_id = @splat(0),
+                });
                 const status = try data_client.inspectPrimary(ready.primary_endpoint, ready.request);
                 try validatePrimaryLeaseStatus(status, ready.request);
                 if (!status.candidate_fresh) {
@@ -1056,6 +1093,7 @@ pub const Action = struct {
                 if (!std.meta.eql(recovery.request, recovery_request) or isZero(&recovery.history_digest) or
                     (recovery.certified_sequence == 0) != recovery.empty_frontier) return error.InvalidRecoveryProof;
                 const binding = ready.request.binding;
+                try markWitnessesReady(data_client, ready.participants, target_boot_ids, ready.request);
                 const command = try state_machine.encodeCommitPrimaryAuthorityFailoverReadyCommand(self.parent_allocator, .{
                     .volume_id = ready.volume_id_text,
                     .failover_id = &ready.failover_id,
@@ -1079,7 +1117,7 @@ pub const Action = struct {
                 });
                 defer self.parent_allocator.free(command);
                 if (try submitReadyAndValidate(self.parent_allocator, submitter, command, binding))
-                    try data_client.markPrimaryReady(ready.primary_endpoint, ready.request);
+                    try markPrimaryReady(data_client, ready.participants, target_boot_ids, ready.request);
             },
             .complete_failover_wait => |command| try submitAndValidate(self.parent_allocator, submitter, command, .complete_failover_wait),
         }
@@ -1239,7 +1277,7 @@ fn nodeById(nodes: []const pb.Node, id: []const u8) ?pb.Node {
 fn authorityBinding(authority: pb.PrimaryAuthority) !AuthorityBinding {
     if (authority.lease_id.len != 16 or authority.holder_boot_id.len != 16 or authority.activation_nonce.len != 16 or authority.authority_digest.len != 32)
         return error.InconsistentSnapshot;
-    return .{
+    const result: AuthorityBinding = .{
         .volume_id = try parseId(authority.volume_id),
         .primary_placement_id = try parseId(authority.primary_placement_id),
         .primary_node_id = try parseId(authority.primary_node_id),
@@ -1251,6 +1289,8 @@ fn authorityBinding(authority: pb.PrimaryAuthority) !AuthorityBinding {
         .activation_nonce = authority.activation_nonce[0..16].*,
         .authority_digest = authority.authority_digest[0..32].*,
     };
+    protocol.authority_contract.validate(result) catch return error.InconsistentSnapshot;
+    return result;
 }
 
 fn parseId(value: []const u8) !Id {
@@ -1272,21 +1312,7 @@ fn validUuidV7Bytes(value: Id) bool {
 }
 
 fn authorityDigest(binding: AuthorityBinding) Digest {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hashField(&hasher, "zettide.primary-authority.v1");
-    hashField(&hasher, &binding.volume_id);
-    hashField(&hasher, &binding.primary_placement_id);
-    hashField(&hasher, &binding.primary_node_id);
-    hashField(&hasher, &binding.lease_id);
-    hashField(&hasher, &binding.holder_boot_id);
-    hashU64(&hasher, binding.authority_generation);
-    hashU64(&hasher, binding.write_epoch);
-    hashU64(&hasher, binding.placement_revision);
-    hashField(&hasher, &binding.activation_nonce);
-    hashU64(&hasher, primary_lease.duration_ms);
-    var digest: Digest = undefined;
-    hasher.final(&digest);
-    return digest;
+    return protocol.authority_contract.digest(binding);
 }
 
 fn stableFenceOperationId(binding: AuthorityBinding, placement_id: Id, replica_generation: u64) Id {
@@ -1326,6 +1352,103 @@ fn configureWriteTopology(data_client: DataServiceClient, participant: Action.Wr
     // discoverability on every authority/readiness path.
     try data_client.configureWriteParticipant(participant.endpoint, participant.configuration);
     try data_client.configureWriteCoordinator(participant.endpoint, participant.coordinator);
+}
+
+fn identifyParticipantBoots(
+    data_client: DataServiceClient,
+    participants: []const Action.WriteParticipant,
+) ![state_machine.volume_target_replica_count]Id {
+    if (participants.len != state_machine.volume_target_replica_count)
+        return error.InconsistentSnapshot;
+    var boots: [state_machine.volume_target_replica_count]Id = undefined;
+    for (participants, &boots) |participant, *boot| {
+        boot.* = try data_client.identifyHolder(participant.endpoint);
+        if (!validUuidV7Bytes(boot.*)) return error.InvalidHolderIdentity;
+    }
+    return boots;
+}
+
+fn stageParticipants(
+    data_client: DataServiceClient,
+    participants: []const Action.WriteParticipant,
+    template: StageRequest,
+) ![state_machine.volume_target_replica_count]Id {
+    const boots = try identifyParticipantBoots(data_client, participants);
+    var primary_index: ?usize = null;
+
+    // Witnesses are established first. The primary is last, so a partial
+    // attempt cannot leave the primary admitting without both witness windows.
+    for (participants, boots, 0..) |participant, boot, index| {
+        if (std.mem.eql(
+            u8,
+            &participant.configuration.binding.replica.placement_id,
+            &template.binding.primary_placement_id,
+        )) {
+            if (primary_index != null) return error.InconsistentSnapshot;
+            primary_index = index;
+            continue;
+        }
+        var request = template;
+        request.target_boot_id = boot;
+        const ack = try data_client.stagePrimary(participant.endpoint, request);
+        if (!std.meta.eql(ack.request, request)) return error.InvalidStageAck;
+    }
+
+    const index = primary_index orelse return error.InconsistentSnapshot;
+    if (!std.mem.eql(u8, &boots[index], &template.binding.holder_boot_id))
+        return error.InvalidHolderIdentity;
+    var request = template;
+    request.target_boot_id = boots[index];
+    const ack = try data_client.stagePrimary(participants[index].endpoint, request);
+    if (!std.meta.eql(ack.request, request)) return error.InvalidStageAck;
+    return boots;
+}
+
+fn markWitnessesReady(
+    data_client: DataServiceClient,
+    participants: []const Action.WriteParticipant,
+    boots: [state_machine.volume_target_replica_count]Id,
+    template: MarkReadyRequest,
+) !void {
+    if (participants.len != boots.len) return error.InconsistentSnapshot;
+    var primary_count: usize = 0;
+    for (participants, boots) |participant, boot| {
+        if (std.mem.eql(
+            u8,
+            &participant.configuration.binding.replica.placement_id,
+            &template.binding.primary_placement_id,
+        )) {
+            primary_count += 1;
+            continue;
+        }
+        var request = template;
+        request.target_boot_id = boot;
+        try data_client.markPrimaryReady(participant.endpoint, request);
+    }
+    if (primary_count != 1) return error.InconsistentSnapshot;
+}
+
+fn markPrimaryReady(
+    data_client: DataServiceClient,
+    participants: []const Action.WriteParticipant,
+    boots: [state_machine.volume_target_replica_count]Id,
+    template: MarkReadyRequest,
+) !void {
+    if (participants.len != boots.len) return error.InconsistentSnapshot;
+    var primary_index: ?usize = null;
+    for (participants, 0..) |participant, index| {
+        if (!std.mem.eql(
+            u8,
+            &participant.configuration.binding.replica.placement_id,
+            &template.binding.primary_placement_id,
+        )) continue;
+        if (primary_index != null) return error.InconsistentSnapshot;
+        primary_index = index;
+    }
+    const index = primary_index orelse return error.InconsistentSnapshot;
+    var request = template;
+    request.target_boot_id = boots[index];
+    try data_client.markPrimaryReady(participants[index].endpoint, request);
 }
 
 fn participantConfigurations(
@@ -1531,7 +1654,14 @@ fn applySetup(machine: *state_machine.PoolStateMachine, index: u64, encoded: []c
     result.deinit(std.testing.allocator);
 }
 
+const test_control_endpoints = [_][]const u8{ "data:9000", "data:9001", "data:9002" };
 const test_replica_endpoints = [_][]const u8{ "data:7443", "data:7444", "data:7445" };
+
+fn isTestControlEndpoint(endpoint: []const u8) bool {
+    for (test_control_endpoints) |candidate|
+        if (std.mem.eql(u8, endpoint, candidate)) return true;
+    return false;
+}
 
 fn setupMachine(machine: *state_machine.PoolStateMachine, domains: [3][]const u8) !void {
     const allocator = std.testing.allocator;
@@ -1551,7 +1681,7 @@ fn setupMachine(machine: *state_machine.PoolStateMachine, domains: [3][]const u8
             .request_id = request_id,
             .node_id = node_id,
             .cluster_id = &test_cluster_id,
-            .control_endpoint = "data:9000",
+            .control_endpoint = test_control_endpoints[index],
             .nvmf_endpoint = "data:4420",
             .replica_endpoint = test_replica_endpoints[index],
             .signing_public_key = &signing_public_key,
@@ -1664,10 +1794,13 @@ const TestDataClient = struct {
     staged: ?StageRequest = null,
     fences: [state_machine.volume_target_replica_count * 3]?replica_fence.Result = @splat(null),
     stage_grants: usize = 0,
+    stage_calls: usize = 0,
+    stage_endpoint_order: [64]u8 = @splat(0),
     fence_drains: usize = 0,
     recoveries: usize = 0,
     mark_ready_calls: usize = 0,
     inspection_calls: usize = 0,
+    identify_calls: usize = 0,
     stage_now_ms: u64 = 1_000,
     now_ms: u64 = 2_000,
     mismatch_inspect_binding: bool = false,
@@ -1679,7 +1812,7 @@ const TestDataClient = struct {
 
     fn ensureOpaque(context: *anyopaque, endpoint: []const u8, request: data_service.Request) !data_service.Response {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
         var response = try self.service.ensureReplica(request);
         if (self.lose_ensure_response) {
             self.lose_ensure_response = false;
@@ -1691,13 +1824,13 @@ const TestDataClient = struct {
 
     fn deleteOpaque(context: *anyopaque, endpoint: []const u8, request: data_service.Request) !data_service.Response {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
         return self.service.deleteReplica(request);
     }
 
     fn configureWriteParticipantOpaque(context: *anyopaque, endpoint: []const u8, configuration: WriteParticipantConfiguration) !void {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
         self.participant_configuration_calls += 1;
         for (&self.participants) |*existing| {
             if (existing.*) |value| {
@@ -1718,7 +1851,7 @@ const TestDataClient = struct {
 
     fn configureWriteCoordinatorOpaque(context: *anyopaque, endpoint: []const u8, configuration: WriteCoordinatorConfiguration) !void {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
         self.coordinator_configuration_calls += 1;
         if (configuration.routes.len != 3) return error.InvalidCoordinatorTopology;
         for (configuration.routes, 0..) |route, index| {
@@ -1729,14 +1862,19 @@ const TestDataClient = struct {
 
     fn identifyHolderOpaque(context: *anyopaque, endpoint: []const u8) !Id {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
+        self.identify_calls += 1;
         return self.holder_identity;
     }
 
     fn stagePrimaryOpaque(context: *anyopaque, endpoint: []const u8, request: StageRequest) !StageAck {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
         if (!std.mem.eql(u8, &request.binding.authority_digest, &authorityDigest(request.binding))) return error.InvalidAuthorityDigest;
+        if (!std.mem.eql(u8, &request.target_boot_id, &self.holder_identity)) return error.InvalidTargetBoot;
+        if (self.stage_calls == self.stage_endpoint_order.len) return error.TooManyStageCalls;
+        self.stage_endpoint_order[self.stage_calls] = endpoint[endpoint.len - 1];
+        self.stage_calls += 1;
         if (self.staged) |staged| {
             if (std.meta.eql(staged, request)) return .{ .request = request };
             if (request.binding.authority_generation < staged.binding.authority_generation) return error.StageConflict;
@@ -1767,7 +1905,7 @@ const TestDataClient = struct {
 
     fn fenceReplicaOpaque(context: *anyopaque, endpoint: []const u8, binding: replica_fence.Binding) !replica_fence.Result {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
         var slot: ?usize = null;
         for (&self.fences, 0..) |*existing, index| {
             if (existing.*) |result| {
@@ -1796,7 +1934,7 @@ const TestDataClient = struct {
 
     fn recoverPrimaryOpaque(context: *anyopaque, endpoint: []const u8, request: RecoveryRequest) !RecoveryResult {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
         self.recoveries += 1;
         var result: RecoveryResult = .{
             .request = request,
@@ -1810,10 +1948,12 @@ const TestDataClient = struct {
 
     fn markPrimaryReadyOpaque(context: *anyopaque, endpoint: []const u8, request: MarkReadyRequest) !void {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
-        var authority = (try self.machine.getPrimaryAuthority(std.testing.allocator, test_volume_id)) orelse return error.AuthorityNotCommitted;
-        defer authority.deinit(std.testing.allocator);
-        if (authority.state != .PRIMARY_AUTHORITY_STATE_READY or !std.mem.eql(u8, authority.lease_id, &request.binding.lease_id)) return error.AuthorityNotReady;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
+        if (!std.mem.eql(u8, &request.target_boot_id, &self.holder_identity)) return error.InvalidTargetBoot;
+        const staged = self.staged orelse return error.AuthorityNotStaged;
+        if (!std.meta.eql(staged.binding, request.binding) or
+            !std.mem.eql(u8, &staged.target_boot_id, &request.target_boot_id))
+            return error.AuthorityNotReady;
         self.mark_ready_calls += 1;
         const token: primary_lease.Token = .{
             .lease_id = request.binding.lease_id,
@@ -1827,7 +1967,7 @@ const TestDataClient = struct {
 
     fn inspectPrimaryOpaque(context: *anyopaque, endpoint: []const u8, request: MarkReadyRequest) !PrimaryLeaseStatus {
         const self: *TestDataClient = @ptrCast(@alignCast(context));
-        if (!std.mem.eql(u8, endpoint, "data:9000")) return error.InvalidEndpoint;
+        if (!isTestControlEndpoint(endpoint)) return error.InvalidEndpoint;
         self.inspection_calls += 1;
         const token: primary_lease.Token = .{
             .lease_id = request.binding.lease_id,
@@ -1930,11 +2070,17 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
         else
             canonical_identities = configured.binding.witness_identities;
     }
+    const identify_before_stage = data_client.identify_calls;
     data_client.lose_stage_response = true;
     try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
     try std.testing.expectEqual(@as(usize, 1), data_client.stage_grants);
     try rebuilt.runOnce();
     try std.testing.expectEqual(@as(usize, 1), data_client.stage_grants);
+    try std.testing.expectEqual(@as(usize, 4), data_client.stage_calls);
+    // First attempt loses witness-1's response. Retry remains witness-first and
+    // stages the primary endpoint only after both distinct witnesses.
+    try std.testing.expectEqualSlices(u8, "1120", data_client.stage_endpoint_order[0..4]);
+    try std.testing.expectEqual(identify_before_stage + 8, data_client.identify_calls);
     try std.testing.expectEqual(@as(usize, 6), submitter.submissions);
     data_client.lose_fence_response = true;
     try std.testing.expectError(error.TransportUnknown, rebuilt.runOnce());
@@ -1942,7 +2088,7 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     try rebuilt.runOnce();
     try std.testing.expectEqual(@as(usize, 3), data_client.fence_drains);
     try std.testing.expectEqual(@as(usize, 7), submitter.submissions);
-    try std.testing.expectEqual(@as(usize, 1), data_client.mark_ready_calls);
+    try std.testing.expectEqual(@as(usize, 3), data_client.mark_ready_calls);
     var active = (try machine.getVolumeById(allocator, test_volume_id)).?;
     defer active.deinit(allocator);
     try std.testing.expectEqual(pb.VolumeLifecycleState.VOLUME_LIFECYCLE_STATE_ACTIVE, active.lifecycle_state);
@@ -1955,7 +2101,7 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     try std.testing.expect(validUuidV7Bytes(authority.holder_boot_id[0..16].*));
     try std.testing.expect(validUuidV7Bytes(authority.activation_nonce[0..16].*));
     try rebuilt.runOnce();
-    try std.testing.expectEqual(@as(usize, 1), data_client.mark_ready_calls);
+    try std.testing.expectEqual(@as(usize, 3), data_client.mark_ready_calls);
     try std.testing.expectEqual(@as(usize, 7), submitter.submissions);
 
     data_client.mismatch_inspect_binding = true;
@@ -2002,14 +2148,17 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     const renewal_configuration_calls = data_client.participant_configuration_calls;
     try rebuilt.runOnce();
     try rebuilt.runOnce();
-    try std.testing.expectEqual(renewal_configuration_calls + 3, data_client.participant_configuration_calls);
+    // Witness staging and witness readiness each revalidate all three
+    // participant/coordinator bindings before mutating authority state.
+    try std.testing.expectEqual(renewal_configuration_calls + 6, data_client.participant_configuration_calls);
     try std.testing.expectEqual(@as(usize, 0), machine.primaryAuthorityCandidateCount());
     var renewed = (try machine.getPrimaryAuthority(allocator, test_volume_id)).?;
     defer renewed.deinit(allocator);
     try std.testing.expectEqual(@as(u64, 3), renewed.authority_generation);
     try std.testing.expect(!std.mem.eql(u8, &old_lease, renewed.lease_id));
     try std.testing.expectEqual(@as(usize, 3), data_client.fence_drains);
-    try std.testing.expectEqual(@as(usize, 1), data_client.recoveries);
+    // Recovery is exact/idempotent and is repeated after the injected unknown.
+    try std.testing.expectEqual(@as(usize, 3), data_client.recoveries);
     var renewed_volume = (try machine.getVolumeById(allocator, test_volume_id)).?;
     defer renewed_volume.deinit(allocator);
 
@@ -2034,7 +2183,9 @@ test "reconciler completes lifecycle and resumes lost ensure after reconstructio
     deletion_reconciler.awake_now_ms_override = 2_000 + primary_lease.duration_ms;
     try deletion_reconciler.runOnce();
     try std.testing.expectEqual(@as(usize, 3), backend.deletes);
-    try std.testing.expectEqual(@as(usize, 2), data_client.mark_ready_calls);
+    // Initial readiness contributes three calls; renewal contributes two
+    // witness retries around the unknown response plus one primary call.
+    try std.testing.expectEqual(@as(usize, 8), data_client.mark_ready_calls);
     try std.testing.expectEqual(@as(usize, 1), machine.volumeTombstoneCount());
     try std.testing.expect((try machine.getVolumeById(allocator, test_volume_id)) == null);
 }
@@ -2208,7 +2359,9 @@ test "boot mismatch waits a full observation window and completes higher epoch f
     try std.testing.expectEqual(@as(usize, 0), machine.primaryFailoverCount());
     try std.testing.expectEqual(@as(usize, 7), data_client.fence_drains);
     try std.testing.expectEqual(@as(usize, 2), data_client.recoveries);
-    try std.testing.expectEqual(@as(usize, 2), data_client.mark_ready_calls);
+    // This synthetic client co-locates all three windows in one Runtime: the
+    // two witness ready calls make its primary view admitting before replay.
+    try std.testing.expectEqual(@as(usize, 5), data_client.mark_ready_calls);
     try std.testing.expect(!old_holder.canAdmit(old_token, 31_000));
 }
 
@@ -2496,7 +2649,7 @@ test "activated renewal after restart provisions canonical participants and reje
             .request_id = request_id,
             .node_id = node_id,
             .cluster_id = &test_cluster_id,
-            .control_endpoint = "data:9000",
+            .control_endpoint = test_control_endpoints[index],
             .nvmf_endpoint = "data:4420",
             .replica_endpoint = test_replica_endpoints[index],
             .signing_public_key = &signing_public_key,

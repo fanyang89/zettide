@@ -1973,6 +1973,63 @@ test "exact durable PREPARE response replays after lease expiry without creating
     try std.testing.expectEqual(first, inspection.pending.?.attestation);
 }
 
+test "participant v2 binary golden hashes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var backend: FakeBackend = .{};
+    var admission: FakeAdmission = .{ .expected = testAuthority() };
+    const request = testPrepare(testAuthority(), "binary-golden-v2");
+    const store = try FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "golden.state");
+    defer store.deinit();
+    const participant = try Participant.initFile(
+        std.testing.allocator,
+        testBinding(1),
+        store,
+        backend.backend(),
+        admission.admission(),
+    );
+    defer participant.deinit();
+
+    const prepared = try participant.prepare(request);
+    const pending_bytes = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "golden.state",
+        std.testing.allocator,
+        .limited(FileStoreInner.max_file_size),
+    );
+    defer std.testing.allocator.free(pending_bytes);
+    try std.testing.expectEqual(FileStoreInner.metadata_size + request.data.len + FileStoreInner.checksum_size, pending_bytes.len);
+    try std.testing.expectEqual(FileStoreInner.version, std.mem.readInt(u16, pending_bytes[8..10], .little));
+    var pending_hash: Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(pending_bytes, &pending_hash, .{});
+    const pending_hex = std.fmt.bytesToHex(pending_hash, .lower);
+    try std.testing.expectEqualStrings(
+        "5c9e166d09a3f6ca31d3c5e8d6f304e80e717ac5c030b599e5959ded7374b33c",
+        &pending_hex,
+    );
+
+    _ = try participant.commit(
+        request.write.transaction_id,
+        structuralCertificate(request.write, prepared),
+    );
+    const completed_bytes = try tmp.dir.readFileAlloc(
+        std.testing.io,
+        "golden.state",
+        std.testing.allocator,
+        .limited(FileStoreInner.max_file_size),
+    );
+    defer std.testing.allocator.free(completed_bytes);
+    try std.testing.expectEqual(FileStoreInner.metadata_size + FileStoreInner.checksum_size, completed_bytes.len);
+    try std.testing.expectEqual(FileStoreInner.version, std.mem.readInt(u16, completed_bytes[8..10], .little));
+    var completed_hash: Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(completed_bytes, &completed_hash, .{});
+    const completed_hex = std.fmt.bytesToHex(completed_hash, .lower);
+    try std.testing.expectEqualStrings(
+        "537f36352416984dc3e2468820cb64277f7aa0e1088e2bf46f838b51bd9173b5",
+        &completed_hex,
+    );
+}
+
 test "v2 reopen rejects mutated persisted signed certificate" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Id = @import("root.zig").Id;
+const Id = @import("model.zig").Id;
 
 pub const duration_ms: u64 = 30_000;
 pub const renew_after_ms: u64 = 10_000;
@@ -62,6 +62,18 @@ pub const Runtime = struct {
 
     pub fn stage(self: *Runtime, token: Token, now_ms: u64) !Window {
         if (!std.mem.eql(u8, &token.holder_boot_id, &self.boot_id)) return error.BootMismatch;
+        return self.stageInternal(token, now_ms);
+    }
+
+    /// Stages the canonical primary token on a remote witness while deriving a
+    /// fresh process-local lease window. The primary holder boot identity stays
+    /// in the signed transcript; it is deliberately not replaced by this
+    /// witness's boot identity.
+    pub fn stageWitness(self: *Runtime, token: Token, now_ms: u64) !Window {
+        return self.stageInternal(token, now_ms);
+    }
+
+    fn stageInternal(self: *Runtime, token: Token, now_ms: u64) !Window {
         if (self.current) |current| {
             if (token.write_epoch < current.token.write_epoch or token.authority_generation < current.token.authority_generation)
                 return error.StaleAuthority;
@@ -178,6 +190,20 @@ test "pause and boot changes fail closed" {
     var restarted = try Runtime.init(boot_b);
     try std.testing.expectError(error.BootMismatch, restarted.stage(authority, 40_000));
     try std.testing.expect(!restarted.canComplete(authority, 40_000));
+}
+
+test "witness stages canonical primary token in a local fail-closed window" {
+    var witness = try Runtime.init(boot_b);
+    const authority = testToken(lease_a, 7);
+    _ = try witness.stageWitness(authority, 1_000);
+    try witness.markReady(lease_a, 2_000);
+    try std.testing.expect(witness.canAdmit(authority, 25_999));
+    try std.testing.expect(!witness.canAdmit(authority, 26_000));
+
+    var restarted = try Runtime.init(boot_b);
+    try std.testing.expect(!restarted.canAdmit(authority, 2_000));
+    _ = try restarted.stageWitness(authority, 3_000);
+    try std.testing.expect(!restarted.canAdmit(authority, 3_000));
 }
 
 test "ready requires a fresh committed candidate" {

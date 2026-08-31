@@ -58,21 +58,22 @@ full-snapshot baseline, not a streaming coordinator log. FileStore v2 migrates
 only pristine unsigned v1 genesis; any unsigned pending/decided/history state is
 quarantined as `UnsignedCoordinatorState` rather than fabricating signatures.
 
-The coordinator journal is composed into the data-node only through an unarmed,
-controller-provisioned durable topology catalog; no production fanout operation
-is enabled and it does not establish cross-node quorum durability. Its signed decision type is the
-exact Replica RPC client COMMIT input and is covered by a direct integration test. Participant
+The coordinator journal is composed into the data-node through a controller-provisioned
+durable topology catalog. The process-local coordinator arms all three routes before
+its first intent and performs a real local-plus-one-remote 2/3 durable signed commit.
+Its signed decision type is the exact Replica RPC client COMMIT input; no payload
+operation is exposed by the management API. Participant
 contracts can now independently validate a signed certificate. Controller Node
 metadata pins an immutable generation-1 Ed25519 public key and participant
 configuration carries the canonical three Member/Node/key identities; key IDs
 are derived rather than caller supplied. Replica binding metadata carries that
 trust set, and ReplicaTransport exchanges strict signed PREPARE certificates and
 signed COMMIT results while continuing to reject unsigned payloads. The daemon
-enrolls an owner-only generation-1 signing seed. M12a provisions canonical
-routing metadata and a separate target-scoped outbound key registry, but leaves
-topologies unarmed. Rotation/revocation, production fanout, client-facing
-payload write RPC, replacement-coordinator recovery,
-confidentiality, and certified quorum repair remain future work.
+enrolls an owner-only generation-1 signing seed. Canonical routing uses a separate
+target-scoped outbound key registry, and remote witnesses enforce local runtime
+windows for the unchanged canonical primary authority transcript. Rotation/revocation,
+client-facing payload APIs, replacement-coordinator recovery, confidentiality,
+read/repair, and managed publication remain future work.
 
 ```sh
 zig build test

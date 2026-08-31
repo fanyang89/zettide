@@ -24,6 +24,7 @@ service ReplicaTransport {
   rpc Prepare(ReplicaPrepareRequest) returns (ReplicaPrepareResponse);
   rpc Commit(ReplicaCommitRequest) returns (ReplicaCommitResponse);
   rpc Inspect(ReplicaWriteInspectRequest) returns (ReplicaWriteInspectResponse);
+  rpc ArmCoordinator(ReplicaArmCoordinatorRequest) returns (ReplicaArmCoordinatorResponse);
 }
 
 enum DataReplicaState {
@@ -239,11 +240,13 @@ message IdentifyHolderResponse { bytes holder_boot_id = 1; }
 message StagePrimaryRequest {
   DataAuthorityBinding binding = 1;
   uint32 lease_duration_ms = 2;
+  bytes target_boot_id = 3;
 }
 
 message StagePrimaryResponse {
   DataAuthorityBinding binding = 1;
   uint32 lease_duration_ms = 2;
+  bytes target_boot_id = 3;
 }
 
 message DataReplicaFenceBinding {
@@ -271,8 +274,14 @@ message RecoverPrimaryResponse {
   bool empty_frontier = 4;
 }
 
-message MarkPrimaryReadyRequest { DataAuthorityBinding binding = 1; }
-message MarkPrimaryReadyResponse { DataAuthorityBinding binding = 1; }
+message MarkPrimaryReadyRequest {
+  DataAuthorityBinding binding = 1;
+  bytes target_boot_id = 2;
+}
+message MarkPrimaryReadyResponse {
+  DataAuthorityBinding binding = 1;
+  bytes target_boot_id = 2;
+}
 message InspectPrimaryRequest { DataAuthorityBinding binding = 1; }
 message InspectPrimaryResponse {
   DataAuthorityBinding binding = 1;
@@ -301,4 +310,17 @@ message ConfigureWriteCoordinatorRequest {
 
 message ConfigureWriteCoordinatorResponse {
   DataWriteCoordinatorTopology topology = 1;
+}
+
+// Metadata-only, authenticated arm barrier. Every topology member must durably
+// acknowledge this exact coordinator generation before any write intent exists.
+message ReplicaArmCoordinatorRequest {
+  bytes placement_id = 1;
+  uint64 generation = 2;
+  DataAuthorityBinding authority = 3;
+}
+
+message ReplicaArmCoordinatorResponse {
+  bytes placement_id = 1;
+  uint64 generation = 2;
 }

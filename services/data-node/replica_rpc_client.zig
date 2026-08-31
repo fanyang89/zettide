@@ -59,6 +59,30 @@ pub const Client = struct {
         self.* = undefined;
     }
 
+    pub fn armCoordinator(
+        self: *Client,
+        endpoint: []const u8,
+        placement_id: protocol.Id,
+        generation: u64,
+        authority: protocol.AuthorityBinding,
+    ) !void {
+        if (isZero(&placement_id) or generation == 0) return error.InvalidArgument;
+        var response = try self.unary(
+            endpoint,
+            "ArmCoordinator",
+            pb.ReplicaArmCoordinatorRequest{
+                .placement_id = &placement_id,
+                .generation = generation,
+                .authority = authorityProto(&authority),
+            },
+            pb.ReplicaArmCoordinatorResponse,
+        );
+        defer response.deinit(self.allocator);
+        if (!std.mem.eql(u8, response.placement_id, &placement_id) or
+            response.generation != generation)
+            return error.ResponseBindingMismatch;
+    }
+
     pub fn prepare(
         self: *Client,
         endpoint: []const u8,

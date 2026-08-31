@@ -1,6 +1,7 @@
 const std = @import("std");
 
-const data_service = @import("zettide_data_service_contracts").replica_service;
+const protocol = @import("zettide_data_service_contracts");
+const data_service = protocol.replica_service;
 const pb = @import("data_node_proto");
 const reconciler = @import("reconciler.zig");
 const replica_fence = @import("replica_fence.zig");
@@ -198,7 +199,7 @@ pub fn parseAuthorityBinding(binding: ?pb.DataAuthorityBinding) !reconciler.Auth
     const value = binding orelse return error.MissingAuthorityBinding;
     if (value.authority_generation == 0 or value.write_epoch == 0 or value.placement_revision == 0)
         return error.InvalidAuthorityBinding;
-    return .{
+    const result: reconciler.AuthorityBinding = .{
         .volume_id = try uuidBytes(value.volume_id),
         .primary_placement_id = try uuidBytes(value.primary_placement_id),
         .primary_node_id = try uuidBytes(value.primary_node_id),
@@ -210,10 +211,16 @@ pub fn parseAuthorityBinding(binding: ?pb.DataAuthorityBinding) !reconciler.Auth
         .activation_nonce = try uuidBytes(value.activation_nonce),
         .authority_digest = try nonzeroBytes(32, value.authority_digest),
     };
+    try protocol.authority_contract.validate(result);
+    return result;
 }
 
 pub fn stageRequest(request: *const reconciler.StageRequest) pb.StagePrimaryRequest {
-    return .{ .binding = authorityBinding(&request.binding), .lease_duration_ms = request.lease_duration_ms };
+    return .{
+        .binding = authorityBinding(&request.binding),
+        .lease_duration_ms = request.lease_duration_ms,
+        .target_boot_id = &request.target_boot_id,
+    };
 }
 
 pub fn parseStageResponse(response: pb.StagePrimaryResponse) !reconciler.StageAck {
@@ -221,6 +228,7 @@ pub fn parseStageResponse(response: pb.StagePrimaryResponse) !reconciler.StageAc
     return .{ .request = .{
         .binding = try parseAuthorityBinding(response.binding),
         .lease_duration_ms = response.lease_duration_ms,
+        .target_boot_id = try uuidBytes(response.target_boot_id),
     } };
 }
 
@@ -270,11 +278,14 @@ pub fn parseRecoveryResponse(response: pb.RecoverPrimaryResponse) !reconciler.Re
 }
 
 pub fn markReadyRequest(request: *const reconciler.MarkReadyRequest) pb.MarkPrimaryReadyRequest {
-    return .{ .binding = authorityBinding(&request.binding) };
+    return .{ .binding = authorityBinding(&request.binding), .target_boot_id = &request.target_boot_id };
 }
 
 pub fn parseMarkReadyResponse(response: pb.MarkPrimaryReadyResponse) !reconciler.MarkReadyRequest {
-    return .{ .binding = try parseAuthorityBinding(response.binding) };
+    return .{
+        .binding = try parseAuthorityBinding(response.binding),
+        .target_boot_id = try uuidBytes(response.target_boot_id),
+    };
 }
 
 pub fn inspectPrimaryRequest(request: *const reconciler.MarkReadyRequest) pb.InspectPrimaryRequest {
@@ -284,7 +295,10 @@ pub fn inspectPrimaryRequest(request: *const reconciler.MarkReadyRequest) pb.Ins
 pub fn parseInspectPrimaryResponse(response: pb.InspectPrimaryResponse) !reconciler.PrimaryLeaseStatus {
     if (response.current_admitting and !response.current_active) return error.InvalidLeaseStatus;
     return .{
-        .request = .{ .binding = try parseAuthorityBinding(response.binding) },
+        .request = .{
+            .binding = try parseAuthorityBinding(response.binding),
+            .target_boot_id = @splat(0),
+        },
         .current_active = response.current_active,
         .current_admitting = response.current_admitting,
         .candidate_fresh = response.candidate_fresh,
@@ -359,7 +373,7 @@ fn testIdentity(member_id: [16]u8, node_id: [16]u8, seed: u8) @import("zettide_d
 }
 
 fn testAuthority() reconciler.AuthorityBinding {
-    return .{
+    var binding: reconciler.AuthorityBinding = .{
         .volume_id = id_a,
         .primary_placement_id = id_b,
         .primary_node_id = id_c,
@@ -369,8 +383,10 @@ fn testAuthority() reconciler.AuthorityBinding {
         .write_epoch = 9,
         .placement_revision = 11,
         .activation_nonce = id_f,
-        .authority_digest = digest,
+        .authority_digest = undefined,
     };
+    binding.authority_digest = protocol.authority_contract.digest(binding);
+    return binding;
 }
 
 test "write participant wire model preserves immutable canonical binding" {
@@ -465,9 +481,14 @@ test "authority lifecycle wire models preserve complete bindings" {
     const authority = testAuthority();
     try std.testing.expectEqual(authority, try parseAuthorityBinding(authorityBinding(&authority)));
 
-    const stage = try parseStageResponse(.{ .binding = authorityBinding(&authority), .lease_duration_ms = 30_000 });
+    const stage = try parseStageResponse(.{
+        .binding = authorityBinding(&authority),
+        .lease_duration_ms = 30_000,
+        .target_boot_id = &id_f,
+    });
     try std.testing.expectEqual(authority, stage.request.binding);
     try std.testing.expectEqual(@as(u32, 30_000), stage.request.lease_duration_ms);
+    try std.testing.expectEqual(id_f, stage.request.target_boot_id);
 
     const recovery = try parseRecoveryResponse(.{
         .binding = authorityBinding(&authority),

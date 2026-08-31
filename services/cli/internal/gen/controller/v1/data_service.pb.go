@@ -2018,6 +2018,7 @@ type StagePrimaryRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Binding         *DataAuthorityBinding  `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
 	LeaseDurationMs uint32                 `protobuf:"varint,2,opt,name=lease_duration_ms,json=leaseDurationMs,proto3" json:"lease_duration_ms,omitempty"`
+	TargetBootId    []byte                 `protobuf:"bytes,3,opt,name=target_boot_id,json=targetBootId,proto3" json:"target_boot_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -2066,10 +2067,18 @@ func (x *StagePrimaryRequest) GetLeaseDurationMs() uint32 {
 	return 0
 }
 
+func (x *StagePrimaryRequest) GetTargetBootId() []byte {
+	if x != nil {
+		return x.TargetBootId
+	}
+	return nil
+}
+
 type StagePrimaryResponse struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Binding         *DataAuthorityBinding  `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
 	LeaseDurationMs uint32                 `protobuf:"varint,2,opt,name=lease_duration_ms,json=leaseDurationMs,proto3" json:"lease_duration_ms,omitempty"`
+	TargetBootId    []byte                 `protobuf:"bytes,3,opt,name=target_boot_id,json=targetBootId,proto3" json:"target_boot_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -2116,6 +2125,13 @@ func (x *StagePrimaryResponse) GetLeaseDurationMs() uint32 {
 		return x.LeaseDurationMs
 	}
 	return 0
+}
+
+func (x *StagePrimaryResponse) GetTargetBootId() []byte {
+	if x != nil {
+		return x.TargetBootId
+	}
+	return nil
 }
 
 type DataReplicaFenceBinding struct {
@@ -2429,6 +2445,7 @@ func (x *RecoverPrimaryResponse) GetEmptyFrontier() bool {
 type MarkPrimaryReadyRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Binding       *DataAuthorityBinding  `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
+	TargetBootId  []byte                 `protobuf:"bytes,2,opt,name=target_boot_id,json=targetBootId,proto3" json:"target_boot_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2470,9 +2487,17 @@ func (x *MarkPrimaryReadyRequest) GetBinding() *DataAuthorityBinding {
 	return nil
 }
 
+func (x *MarkPrimaryReadyRequest) GetTargetBootId() []byte {
+	if x != nil {
+		return x.TargetBootId
+	}
+	return nil
+}
+
 type MarkPrimaryReadyResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Binding       *DataAuthorityBinding  `protobuf:"bytes,1,opt,name=binding,proto3" json:"binding,omitempty"`
+	TargetBootId  []byte                 `protobuf:"bytes,2,opt,name=target_boot_id,json=targetBootId,proto3" json:"target_boot_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2510,6 +2535,13 @@ func (*MarkPrimaryReadyResponse) Descriptor() ([]byte, []int) {
 func (x *MarkPrimaryReadyResponse) GetBinding() *DataAuthorityBinding {
 	if x != nil {
 		return x.Binding
+	}
+	return nil
+}
+
+func (x *MarkPrimaryReadyResponse) GetTargetBootId() []byte {
+	if x != nil {
+		return x.TargetBootId
 	}
 	return nil
 }
@@ -2836,6 +2868,120 @@ func (x *ConfigureWriteCoordinatorResponse) GetTopology() *DataWriteCoordinatorT
 	return nil
 }
 
+// Metadata-only, authenticated arm barrier. Every topology member must durably
+// acknowledge this exact coordinator generation before any write intent exists.
+type ReplicaArmCoordinatorRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PlacementId   []byte                 `protobuf:"bytes,1,opt,name=placement_id,json=placementId,proto3" json:"placement_id,omitempty"`
+	Generation    uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	Authority     *DataAuthorityBinding  `protobuf:"bytes,3,opt,name=authority,proto3" json:"authority,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicaArmCoordinatorRequest) Reset() {
+	*x = ReplicaArmCoordinatorRequest{}
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicaArmCoordinatorRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicaArmCoordinatorRequest) ProtoMessage() {}
+
+func (x *ReplicaArmCoordinatorRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicaArmCoordinatorRequest.ProtoReflect.Descriptor instead.
+func (*ReplicaArmCoordinatorRequest) Descriptor() ([]byte, []int) {
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *ReplicaArmCoordinatorRequest) GetPlacementId() []byte {
+	if x != nil {
+		return x.PlacementId
+	}
+	return nil
+}
+
+func (x *ReplicaArmCoordinatorRequest) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *ReplicaArmCoordinatorRequest) GetAuthority() *DataAuthorityBinding {
+	if x != nil {
+		return x.Authority
+	}
+	return nil
+}
+
+type ReplicaArmCoordinatorResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PlacementId   []byte                 `protobuf:"bytes,1,opt,name=placement_id,json=placementId,proto3" json:"placement_id,omitempty"`
+	Generation    uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReplicaArmCoordinatorResponse) Reset() {
+	*x = ReplicaArmCoordinatorResponse{}
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReplicaArmCoordinatorResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReplicaArmCoordinatorResponse) ProtoMessage() {}
+
+func (x *ReplicaArmCoordinatorResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReplicaArmCoordinatorResponse.ProtoReflect.Descriptor instead.
+func (*ReplicaArmCoordinatorResponse) Descriptor() ([]byte, []int) {
+	return file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *ReplicaArmCoordinatorResponse) GetPlacementId() []byte {
+	if x != nil {
+		return x.PlacementId
+	}
+	return nil
+}
+
+func (x *ReplicaArmCoordinatorResponse) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
 var File_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto protoreflect.FileDescriptor
 
 const file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDesc = "" +
@@ -2999,13 +3145,15 @@ const file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_
 	" \x01(\fR\x0fauthorityDigest\"\x17\n" +
 	"\x15IdentifyHolderRequest\">\n" +
 	"\x16IdentifyHolderResponse\x12$\n" +
-	"\x0eholder_boot_id\x18\x01 \x01(\fR\fholderBootId\"\x88\x01\n" +
+	"\x0eholder_boot_id\x18\x01 \x01(\fR\fholderBootId\"\xae\x01\n" +
 	"\x13StagePrimaryRequest\x12E\n" +
 	"\abinding\x18\x01 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\abinding\x12*\n" +
-	"\x11lease_duration_ms\x18\x02 \x01(\rR\x0fleaseDurationMs\"\x89\x01\n" +
+	"\x11lease_duration_ms\x18\x02 \x01(\rR\x0fleaseDurationMs\x12$\n" +
+	"\x0etarget_boot_id\x18\x03 \x01(\fR\ftargetBootId\"\xaf\x01\n" +
 	"\x14StagePrimaryResponse\x12E\n" +
 	"\abinding\x18\x01 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\abinding\x12*\n" +
-	"\x11lease_duration_ms\x18\x02 \x01(\rR\x0fleaseDurationMs\"\xba\x02\n" +
+	"\x11lease_duration_ms\x18\x02 \x01(\rR\x0fleaseDurationMs\x12$\n" +
+	"\x0etarget_boot_id\x18\x03 \x01(\fR\ftargetBootId\"\xba\x02\n" +
 	"\x17DataReplicaFenceBinding\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\fR\voperationId\x12\x1b\n" +
 	"\tvolume_id\x18\x02 \x01(\fR\bvolumeId\x12!\n" +
@@ -3027,11 +3175,13 @@ const file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_
 	"\abinding\x18\x01 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\abinding\x12-\n" +
 	"\x12certified_sequence\x18\x02 \x01(\x04R\x11certifiedSequence\x12%\n" +
 	"\x0ehistory_digest\x18\x03 \x01(\fR\rhistoryDigest\x12%\n" +
-	"\x0eempty_frontier\x18\x04 \x01(\bR\remptyFrontier\"`\n" +
+	"\x0eempty_frontier\x18\x04 \x01(\bR\remptyFrontier\"\x86\x01\n" +
 	"\x17MarkPrimaryReadyRequest\x12E\n" +
-	"\abinding\x18\x01 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\abinding\"a\n" +
+	"\abinding\x18\x01 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\abinding\x12$\n" +
+	"\x0etarget_boot_id\x18\x02 \x01(\fR\ftargetBootId\"\x87\x01\n" +
 	"\x18MarkPrimaryReadyResponse\x12E\n" +
-	"\abinding\x18\x01 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\abinding\"^\n" +
+	"\abinding\x18\x01 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\abinding\x12$\n" +
+	"\x0etarget_boot_id\x18\x02 \x01(\fR\ftargetBootId\"^\n" +
 	"\x15InspectPrimaryRequest\x12E\n" +
 	"\abinding\x18\x01 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\abinding\"\xff\x01\n" +
 	"\x16InspectPrimaryResponse\x12E\n" +
@@ -3050,7 +3200,18 @@ const file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_
 	" ConfigureWriteCoordinatorRequest\x12O\n" +
 	"\btopology\x18\x01 \x01(\v23.zettide.controller.v1.DataWriteCoordinatorTopologyR\btopology\"t\n" +
 	"!ConfigureWriteCoordinatorResponse\x12O\n" +
-	"\btopology\x18\x01 \x01(\v23.zettide.controller.v1.DataWriteCoordinatorTopologyR\btopology*x\n" +
+	"\btopology\x18\x01 \x01(\v23.zettide.controller.v1.DataWriteCoordinatorTopologyR\btopology\"\xac\x01\n" +
+	"\x1cReplicaArmCoordinatorRequest\x12!\n" +
+	"\fplacement_id\x18\x01 \x01(\fR\vplacementId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation\x12I\n" +
+	"\tauthority\x18\x03 \x01(\v2+.zettide.controller.v1.DataAuthorityBindingR\tauthority\"b\n" +
+	"\x1dReplicaArmCoordinatorResponse\x12!\n" +
+	"\fplacement_id\x18\x01 \x01(\fR\vplacementId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation*x\n" +
 	"\x10DataReplicaState\x12\"\n" +
 	"\x1eDATA_REPLICA_STATE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19DATA_REPLICA_STATE_ACTIVE\x10\x01\x12!\n" +
@@ -3067,11 +3228,12 @@ const file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_
 	"\x0eRecoverPrimary\x12,.zettide.controller.v1.RecoverPrimaryRequest\x1a-.zettide.controller.v1.RecoverPrimaryResponse\x12s\n" +
 	"\x10MarkPrimaryReady\x12..zettide.controller.v1.MarkPrimaryReadyRequest\x1a/.zettide.controller.v1.MarkPrimaryReadyResponse\x12m\n" +
 	"\x0eInspectPrimary\x12,.zettide.controller.v1.InspectPrimaryRequest\x1a-.zettide.controller.v1.InspectPrimaryResponse\x12\x8e\x01\n" +
-	"\x19ConfigureWriteCoordinator\x127.zettide.controller.v1.ConfigureWriteCoordinatorRequest\x1a8.zettide.controller.v1.ConfigureWriteCoordinatorResponse2\xd1\x02\n" +
+	"\x19ConfigureWriteCoordinator\x127.zettide.controller.v1.ConfigureWriteCoordinatorRequest\x1a8.zettide.controller.v1.ConfigureWriteCoordinatorResponse2\xce\x03\n" +
 	"\x10ReplicaTransport\x12f\n" +
 	"\aPrepare\x12,.zettide.controller.v1.ReplicaPrepareRequest\x1a-.zettide.controller.v1.ReplicaPrepareResponse\x12c\n" +
 	"\x06Commit\x12+.zettide.controller.v1.ReplicaCommitRequest\x1a,.zettide.controller.v1.ReplicaCommitResponse\x12p\n" +
-	"\aInspect\x121.zettide.controller.v1.ReplicaWriteInspectRequest\x1a2.zettide.controller.v1.ReplicaWriteInspectResponseb\x06proto3"
+	"\aInspect\x121.zettide.controller.v1.ReplicaWriteInspectRequest\x1a2.zettide.controller.v1.ReplicaWriteInspectResponse\x12{\n" +
+	"\x0eArmCoordinator\x123.zettide.controller.v1.ReplicaArmCoordinatorRequest\x1a4.zettide.controller.v1.ReplicaArmCoordinatorResponseb\x06proto3"
 
 var (
 	file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDescOnce sync.Once
@@ -3086,7 +3248,7 @@ func file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_p
 }
 
 var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
+var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_goTypes = []any{
 	(DataReplicaState)(0),                     // 0: zettide.controller.v1.DataReplicaState
 	(*DataReplicaAttestation)(nil),            // 1: zettide.controller.v1.DataReplicaAttestation
@@ -3132,6 +3294,8 @@ var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_pr
 	(*DataWriteCoordinatorTopology)(nil),      // 41: zettide.controller.v1.DataWriteCoordinatorTopology
 	(*ConfigureWriteCoordinatorRequest)(nil),  // 42: zettide.controller.v1.ConfigureWriteCoordinatorRequest
 	(*ConfigureWriteCoordinatorResponse)(nil), // 43: zettide.controller.v1.ConfigureWriteCoordinatorResponse
+	(*ReplicaArmCoordinatorRequest)(nil),      // 44: zettide.controller.v1.ReplicaArmCoordinatorRequest
+	(*ReplicaArmCoordinatorResponse)(nil),     // 45: zettide.controller.v1.ReplicaArmCoordinatorResponse
 }
 var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_depIdxs = []int32{
 	0,  // 0: zettide.controller.v1.DataReplica.state:type_name -> zettide.controller.v1.DataReplicaState
@@ -3175,39 +3339,42 @@ var file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_pr
 	40, // 38: zettide.controller.v1.DataWriteCoordinatorTopology.routes:type_name -> zettide.controller.v1.DataWriteCoordinatorRoute
 	41, // 39: zettide.controller.v1.ConfigureWriteCoordinatorRequest.topology:type_name -> zettide.controller.v1.DataWriteCoordinatorTopology
 	41, // 40: zettide.controller.v1.ConfigureWriteCoordinatorResponse.topology:type_name -> zettide.controller.v1.DataWriteCoordinatorTopology
-	3,  // 41: zettide.controller.v1.DataService.EnsureReplica:input_type -> zettide.controller.v1.EnsureReplicaRequest
-	5,  // 42: zettide.controller.v1.DataService.InspectReplica:input_type -> zettide.controller.v1.InspectReplicaRequest
-	7,  // 43: zettide.controller.v1.DataService.DeleteReplica:input_type -> zettide.controller.v1.DeleteReplicaRequest
-	11, // 44: zettide.controller.v1.DataService.ConfigureWriteParticipant:input_type -> zettide.controller.v1.ConfigureWriteParticipantRequest
-	27, // 45: zettide.controller.v1.DataService.IdentifyHolder:input_type -> zettide.controller.v1.IdentifyHolderRequest
-	29, // 46: zettide.controller.v1.DataService.StagePrimary:input_type -> zettide.controller.v1.StagePrimaryRequest
-	32, // 47: zettide.controller.v1.DataService.FenceReplica:input_type -> zettide.controller.v1.FenceReplicaRequest
-	34, // 48: zettide.controller.v1.DataService.RecoverPrimary:input_type -> zettide.controller.v1.RecoverPrimaryRequest
-	36, // 49: zettide.controller.v1.DataService.MarkPrimaryReady:input_type -> zettide.controller.v1.MarkPrimaryReadyRequest
-	38, // 50: zettide.controller.v1.DataService.InspectPrimary:input_type -> zettide.controller.v1.InspectPrimaryRequest
-	42, // 51: zettide.controller.v1.DataService.ConfigureWriteCoordinator:input_type -> zettide.controller.v1.ConfigureWriteCoordinatorRequest
-	15, // 52: zettide.controller.v1.ReplicaTransport.Prepare:input_type -> zettide.controller.v1.ReplicaPrepareRequest
-	21, // 53: zettide.controller.v1.ReplicaTransport.Commit:input_type -> zettide.controller.v1.ReplicaCommitRequest
-	23, // 54: zettide.controller.v1.ReplicaTransport.Inspect:input_type -> zettide.controller.v1.ReplicaWriteInspectRequest
-	4,  // 55: zettide.controller.v1.DataService.EnsureReplica:output_type -> zettide.controller.v1.EnsureReplicaResponse
-	6,  // 56: zettide.controller.v1.DataService.InspectReplica:output_type -> zettide.controller.v1.InspectReplicaResponse
-	8,  // 57: zettide.controller.v1.DataService.DeleteReplica:output_type -> zettide.controller.v1.DeleteReplicaResponse
-	12, // 58: zettide.controller.v1.DataService.ConfigureWriteParticipant:output_type -> zettide.controller.v1.ConfigureWriteParticipantResponse
-	28, // 59: zettide.controller.v1.DataService.IdentifyHolder:output_type -> zettide.controller.v1.IdentifyHolderResponse
-	30, // 60: zettide.controller.v1.DataService.StagePrimary:output_type -> zettide.controller.v1.StagePrimaryResponse
-	33, // 61: zettide.controller.v1.DataService.FenceReplica:output_type -> zettide.controller.v1.FenceReplicaResponse
-	35, // 62: zettide.controller.v1.DataService.RecoverPrimary:output_type -> zettide.controller.v1.RecoverPrimaryResponse
-	37, // 63: zettide.controller.v1.DataService.MarkPrimaryReady:output_type -> zettide.controller.v1.MarkPrimaryReadyResponse
-	39, // 64: zettide.controller.v1.DataService.InspectPrimary:output_type -> zettide.controller.v1.InspectPrimaryResponse
-	43, // 65: zettide.controller.v1.DataService.ConfigureWriteCoordinator:output_type -> zettide.controller.v1.ConfigureWriteCoordinatorResponse
-	20, // 66: zettide.controller.v1.ReplicaTransport.Prepare:output_type -> zettide.controller.v1.ReplicaPrepareResponse
-	22, // 67: zettide.controller.v1.ReplicaTransport.Commit:output_type -> zettide.controller.v1.ReplicaCommitResponse
-	25, // 68: zettide.controller.v1.ReplicaTransport.Inspect:output_type -> zettide.controller.v1.ReplicaWriteInspectResponse
-	55, // [55:69] is the sub-list for method output_type
-	41, // [41:55] is the sub-list for method input_type
-	41, // [41:41] is the sub-list for extension type_name
-	41, // [41:41] is the sub-list for extension extendee
-	0,  // [0:41] is the sub-list for field type_name
+	26, // 41: zettide.controller.v1.ReplicaArmCoordinatorRequest.authority:type_name -> zettide.controller.v1.DataAuthorityBinding
+	3,  // 42: zettide.controller.v1.DataService.EnsureReplica:input_type -> zettide.controller.v1.EnsureReplicaRequest
+	5,  // 43: zettide.controller.v1.DataService.InspectReplica:input_type -> zettide.controller.v1.InspectReplicaRequest
+	7,  // 44: zettide.controller.v1.DataService.DeleteReplica:input_type -> zettide.controller.v1.DeleteReplicaRequest
+	11, // 45: zettide.controller.v1.DataService.ConfigureWriteParticipant:input_type -> zettide.controller.v1.ConfigureWriteParticipantRequest
+	27, // 46: zettide.controller.v1.DataService.IdentifyHolder:input_type -> zettide.controller.v1.IdentifyHolderRequest
+	29, // 47: zettide.controller.v1.DataService.StagePrimary:input_type -> zettide.controller.v1.StagePrimaryRequest
+	32, // 48: zettide.controller.v1.DataService.FenceReplica:input_type -> zettide.controller.v1.FenceReplicaRequest
+	34, // 49: zettide.controller.v1.DataService.RecoverPrimary:input_type -> zettide.controller.v1.RecoverPrimaryRequest
+	36, // 50: zettide.controller.v1.DataService.MarkPrimaryReady:input_type -> zettide.controller.v1.MarkPrimaryReadyRequest
+	38, // 51: zettide.controller.v1.DataService.InspectPrimary:input_type -> zettide.controller.v1.InspectPrimaryRequest
+	42, // 52: zettide.controller.v1.DataService.ConfigureWriteCoordinator:input_type -> zettide.controller.v1.ConfigureWriteCoordinatorRequest
+	15, // 53: zettide.controller.v1.ReplicaTransport.Prepare:input_type -> zettide.controller.v1.ReplicaPrepareRequest
+	21, // 54: zettide.controller.v1.ReplicaTransport.Commit:input_type -> zettide.controller.v1.ReplicaCommitRequest
+	23, // 55: zettide.controller.v1.ReplicaTransport.Inspect:input_type -> zettide.controller.v1.ReplicaWriteInspectRequest
+	44, // 56: zettide.controller.v1.ReplicaTransport.ArmCoordinator:input_type -> zettide.controller.v1.ReplicaArmCoordinatorRequest
+	4,  // 57: zettide.controller.v1.DataService.EnsureReplica:output_type -> zettide.controller.v1.EnsureReplicaResponse
+	6,  // 58: zettide.controller.v1.DataService.InspectReplica:output_type -> zettide.controller.v1.InspectReplicaResponse
+	8,  // 59: zettide.controller.v1.DataService.DeleteReplica:output_type -> zettide.controller.v1.DeleteReplicaResponse
+	12, // 60: zettide.controller.v1.DataService.ConfigureWriteParticipant:output_type -> zettide.controller.v1.ConfigureWriteParticipantResponse
+	28, // 61: zettide.controller.v1.DataService.IdentifyHolder:output_type -> zettide.controller.v1.IdentifyHolderResponse
+	30, // 62: zettide.controller.v1.DataService.StagePrimary:output_type -> zettide.controller.v1.StagePrimaryResponse
+	33, // 63: zettide.controller.v1.DataService.FenceReplica:output_type -> zettide.controller.v1.FenceReplicaResponse
+	35, // 64: zettide.controller.v1.DataService.RecoverPrimary:output_type -> zettide.controller.v1.RecoverPrimaryResponse
+	37, // 65: zettide.controller.v1.DataService.MarkPrimaryReady:output_type -> zettide.controller.v1.MarkPrimaryReadyResponse
+	39, // 66: zettide.controller.v1.DataService.InspectPrimary:output_type -> zettide.controller.v1.InspectPrimaryResponse
+	43, // 67: zettide.controller.v1.DataService.ConfigureWriteCoordinator:output_type -> zettide.controller.v1.ConfigureWriteCoordinatorResponse
+	20, // 68: zettide.controller.v1.ReplicaTransport.Prepare:output_type -> zettide.controller.v1.ReplicaPrepareResponse
+	22, // 69: zettide.controller.v1.ReplicaTransport.Commit:output_type -> zettide.controller.v1.ReplicaCommitResponse
+	25, // 70: zettide.controller.v1.ReplicaTransport.Inspect:output_type -> zettide.controller.v1.ReplicaWriteInspectResponse
+	45, // 71: zettide.controller.v1.ReplicaTransport.ArmCoordinator:output_type -> zettide.controller.v1.ReplicaArmCoordinatorResponse
+	57, // [57:72] is the sub-list for method output_type
+	42, // [42:57] is the sub-list for method input_type
+	42, // [42:42] is the sub-list for extension type_name
+	42, // [42:42] is the sub-list for extension extendee
+	0,  // [0:42] is the sub-list for field type_name
 }
 
 func init() { file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_init() }
@@ -3221,7 +3388,7 @@ func file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_p
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDesc), len(file_libs_data_service_contracts_proto_zettide_controller_v1_data_service_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   43,
+			NumMessages:   45,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

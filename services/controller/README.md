@@ -27,9 +27,16 @@ routing metadata outside signed participant identity. It then drives the current
 fence/recovery/authority lifecycle to `ACTIVE`. Keyless or inconsistent
 topology fails closed before participant readiness. The daemon enrolls its
 owner-only generation-1 signing seed and ReplicaTransport exchanges signed
-evidence verified against these pinned identities. Coordinator topology is
-unarmed safety plumbing only; publication, production fanout, quorum commit,
-repair, and attachments remain separate layers.
+evidence verified against these pinned identities. The controller stages the
+same canonical authority on both remote witnesses first and the primary last.
+Every target is freshly identified and must echo its exact process boot ID;
+witnesses retain the primary holder identity in signed transcripts while enforcing
+their own process-local fail-closed lease windows. A not-yet-ready candidate may
+be safely restaged after restart, but an already-ready lease is never extended this
+way. All witness ready acknowledgements are required before controller readiness is published. Internal coordinator
+fanout can consequently commit to local plus one remote, but publication,
+client-facing quorum success, replacement recovery, read/repair, and attachments
+remain separate layers.
 
 `zig build test-controller` includes the controller-state mixed-rollout gate: it
 restores persisted keyless Node records with an activated selected topology,

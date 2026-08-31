@@ -58,6 +58,7 @@ pub const AuthorityBinding = struct {
 pub const StageRequest = struct {
     binding: AuthorityBinding,
     lease_duration_ms: u32,
+    target_boot_id: Id,
 };
 
 pub const StageAck = struct {
@@ -77,6 +78,7 @@ pub const RecoveryResult = struct {
 
 pub const MarkReadyRequest = struct {
     binding: AuthorityBinding,
+    target_boot_id: Id,
 };
 
 pub const PrimaryLeaseStatus = struct {

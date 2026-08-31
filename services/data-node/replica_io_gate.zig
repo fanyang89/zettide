@@ -92,10 +92,12 @@ pub const ReplicaIoGate = struct {
         const fence = latest.binding;
         if (fence.replica_generation != self.replica.generation)
             return error.FenceGenerationMismatch;
+        // The durable fence is an epoch/primary barrier. Lease and authority
+        // digest rotate during same-primary renewal and must not strand an
+        // already-durable exact replay. Normal admission has already passed
+        // the exact READY AuthorityBinding validator above.
         if (fence.write_epoch != authority.write_epoch or
-            !std.mem.eql(u8, &fence.primary_node_id, &authority.primary_node_id) or
-            !std.mem.eql(u8, &fence.lease_id, &authority.lease_id) or
-            !std.mem.eql(u8, &fence.authority_digest, &authority.authority_digest))
+            !std.mem.eql(u8, &fence.primary_node_id, &authority.primary_node_id))
             return error.AuthorityFenced;
     }
 };
@@ -199,7 +201,7 @@ fn testFence(
     };
 }
 
-test "placement gate admits exact live authority and exact certified replay only" {
+test "placement gate admits renewal writes and old exact replay under epoch primary barrier" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var replicas = try protocol.replica_service.FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "replicas.state");
@@ -220,11 +222,18 @@ test "placement gate admits exact live authority and exact certified replay only
     try admission.begin_fn(admission.context, authority);
     admission.end_fn(admission.context);
 
-    validator.active = false;
+    var renewal = authority;
+    renewal.lease_id = testId(30);
+    renewal.authority_generation += 1;
+    renewal.authority_digest = @splat(0x9a);
+    validator.expected = renewal;
     try std.testing.expectError(
         error.AuthorityRejected,
         admission.begin_fn(admission.context, authority),
     );
+    try admission.begin_fn(admission.context, renewal);
+    admission.end_fn(admission.context);
+    // A payload durably prepared under the old lease may finish after renewal.
     try admission.begin_replay_fn(admission.context, authority);
     admission.end_fn(admission.context);
 

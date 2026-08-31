@@ -93,7 +93,9 @@ flowchart LR
 
 独立 `ReplicaTransport` gRPC seam 现以 receiver-scoped pairwise HMAC 认证 source/target Node、fresh challenge、method 和 exact request bytes；所有 post-auth response MAC 都绑定同一 challenge、status code/message 与 payload，旧 response 或 success/failure substitution 会 fail closed。target 在 participant mutation 的同一临界区重新校验 participant/current-physical-backend binding，COMMIT source 还必须匹配 durable PREPARE authority。原样 mutation request replay 由 durable idempotency 收敛。Daemon 通过完整 key file/listen/advertise 配置和显式 plaintext-development opt-in 才会启动该 listener，并将 endpoint 持久注册到 controller；部分配置、非法/重复/zero/local-peer key 均拒绝启动。
 
-Backend-neutral coordinator journal 进一步固定每笔 transaction 的两个 witness：intent 必须先于外部 PREPARE 持久，unknown result 后禁止换第三个 witness。Shared Ed25519 evidence 以 immutable Member/Node/key identity 和 domain-separated transcript 独立签名 exact PREPARE attestation 或 certificate/COMMIT result；journal strict-verify 后持久两份 PREPARE evidence，先写 certificate，再允许外部 COMMIT，并持久两份 COMMIT evidence。`last_completed` 保留最新 transaction 的四份签名，v2 reopen 会重新验证，但后续 completion 会覆盖它而不是累积永久 history；unsigned v1 只有 pristine genesis 可迁移，其他状态 fail closed。Participant contract 现在要求并能独立验证两份 signed PREPARE evidence，FileStore v2 也持久保存完整签名 certificate；首次决定和 replay 都通过 fence drain guard。Contracts 仍不执行网络 fanout；controller 已 fill-once 固定 generation-1 public key，并向 participant 传播 canonical Member/Node/key trust set，但 daemon private-key enrollment、rotation/revocation 与 Replica RPC signed payload 仍未实现，因此 production 配置与 unsigned COMMIT seam 保持 fail closed。当前仍没有 confidentiality、production 跨节点 primary coordinator 或 recovery quorum。它与当前标准 host-facing NVMf export 无关。
+Backend-neutral coordinator journal 固定每笔 transaction 的两个 witness：intent 必须先于 PREPARE 持久，unknown result 后禁止换第三个 witness。Shared Ed25519 evidence 以 immutable Member/Node/key identity 和 domain-separated transcript 独立签名 exact PREPARE attestation 或 certificate/COMMIT result；journal strict-verify 后持久两份 PREPARE evidence，先写 certificate，再允许 COMMIT，并持久两份 COMMIT evidence。`last_completed` 保留最新 transaction 的四份签名，v2 reopen 会重新验证，但后续 completion 会覆盖它而不是累积永久 history；unsigned v1 只有 pristine genesis 可迁移，其他状态 fail closed。Participant FileStore v2 持久并独立验证完整 signed certificate；首次决定和 replay 都通过 fence drain guard。
+
+Daemon 现已组合该 journal、owner-only signer、controller-pinned canonical route 和独立 outbound target key registry。进程内 primary API 在 intent 前向三个 route 发送绑定 exact authority 的 authenticated arm；每个 remote witness 只有在相同 authority 的本地易失 lease window 仍 admitting 时才持久 ack。Runtime 分别保存 current READY binding 与 candidate binding；同 epoch、同 primary、同 placement revision 的 strict higher-generation renewal 在 witness-first STAGED/RECOVERED 期间不会覆盖仍存活的 current。Durable ledger 只在该单一 renewal overlap 形状下允许 historical exact READY admission，candidate 到 READY 后立即关闭旧 binding；restart 不恢复任何 runtime admission。缺失 PREPARE 的 drain 在每次 payload mutation 前重新验证 local primary 的 exact READY/live authority；两份 PREPARE 已持久后，decision/COMMIT 则不依赖 lease。Durable Replica fence 覆盖 `(generation, placement, write_epoch, primary_node_id)` barrier，而不是同 primary/epoch renewal 会变化的 lease/digest：normal PREPARE 仍必须通过 exact READY binding，旧 lease 只允许 exact durable replay，higher epoch 或不同 primary 拒绝。之后 coordinator 固定 local 与第一个 canonical remote，执行真实跨节点 signed PREPARE/COMMIT，两个 participant 与 coordinator completion 均持久才返回 success。Response 丢失或进程崩溃通过同 state directory 精确重取 evidence；pre-decision unknown 不得换第三 witness 或 ABORT。当前仍没有 client-facing payload API、confidentiality、read/repair、replacement coordinator recovery 或 host-facing managed NVMf publication。
 
 ## Tier 3 Commit Evidence
 
@@ -105,10 +107,10 @@ Repairing/Stale Replica 不参与 quorum。进入内存、NVMf queue 或 volatil
 
 | 崩溃点 | 恢复结论 |
 | --- | --- |
-| 少于两个 durable prepares | 未提交，不能保留为 success |
-| 已有 prepare quorum、无 durable certificate | 未提交，按新 recovery frontier 丢弃 |
-| Recovery quorum 观察到一份 certificate candidate | 客户端结果可能 unknown；先 write-back 第二份再纳入 history |
-| Certificate 已在两个 payload holder 持久化 | 已达到 success 条件；响应丢失也必须保留 |
+| Durable intent 后少于两个 durable prepares | 结果 UNKNOWN；只允许对固定 witness exact retry，不得 ABORT、丢弃或换 witness |
+| 已有 prepare quorum、无 durable certificate | 结果 UNKNOWN；coordinator 必须先持久 certificate 才能进入 COMMIT |
+| Certificate 已持久但 COMMIT 不完整 | 结果 UNKNOWN；通过同一 certificate 向两个固定 payload holder write-back |
+| 两个 participant COMMIT 且 coordinator completion 已持久 | 内部 2/3 success；响应丢失后 exact retry 返回保存结果 |
 | Recovery quorum 完全看不到 certificate | 未达到 success；孤立旧 candidate 在新 frontier 后 stale |
 
 首版每个 Volume 同时最多一个 unresolved sequence。只有显式 commit frontier 和 quorum ABORT record 才允许进一步流水线化。恢复合并两个幸存 Replica 的 certified histories 并集并验证连续性，不能要求某一个 Replica 原先独占完整历史。
@@ -137,4 +139,4 @@ Repairing/Stale Replica 不参与 quorum。进入内存、NVMf queue 或 volatil
 
 ## 当前差距
 
-当前没有外部虚拟化 managed attachment、consumer-bound NVMf/iSCSI generation、统一 filesystem access authority 或完整 Tier 3 数据面。Volume lease/write epoch、Replica persistent fencing、controller canonical-set 配置与 daemon-owned node-local participant/fence gate 已有基础，但尚无网络 participant、认证/quorum coordinator、certified recovery 或 managed Publication fencing。现有 iSCSI target/export primitive 不执行 Publication generation fencing。
+当前没有外部虚拟化 managed attachment、consumer-bound NVMf/iSCSI generation、统一 filesystem access authority 或完整 Tier 3 数据面。已有独立认证的 ReplicaTransport participant、daemon-owned local-primary coordinator、固定两 witness 的 signed 2/3 durable commit 与 same-state-directory exact retry，但它们仍只由进程内 API 驱动；第三 Replica 不参与当前 payload fanout，也没有 client-facing publication、read/repair、replacement-coordinator recovery 或跨 coordinator 的 certified recovery quorum merge。现有 iSCSI target/export primitive 不执行 Publication generation fencing。

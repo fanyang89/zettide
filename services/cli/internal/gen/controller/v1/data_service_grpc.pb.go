@@ -501,9 +501,10 @@ var DataService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ReplicaTransport_Prepare_FullMethodName = "/zettide.controller.v1.ReplicaTransport/Prepare"
-	ReplicaTransport_Commit_FullMethodName  = "/zettide.controller.v1.ReplicaTransport/Commit"
-	ReplicaTransport_Inspect_FullMethodName = "/zettide.controller.v1.ReplicaTransport/Inspect"
+	ReplicaTransport_Prepare_FullMethodName        = "/zettide.controller.v1.ReplicaTransport/Prepare"
+	ReplicaTransport_Commit_FullMethodName         = "/zettide.controller.v1.ReplicaTransport/Commit"
+	ReplicaTransport_Inspect_FullMethodName        = "/zettide.controller.v1.ReplicaTransport/Inspect"
+	ReplicaTransport_ArmCoordinator_FullMethodName = "/zettide.controller.v1.ReplicaTransport/ArmCoordinator"
 )
 
 // ReplicaTransportClient is the client API for ReplicaTransport service.
@@ -518,6 +519,7 @@ type ReplicaTransportClient interface {
 	Prepare(ctx context.Context, in *ReplicaPrepareRequest, opts ...grpc.CallOption) (*ReplicaPrepareResponse, error)
 	Commit(ctx context.Context, in *ReplicaCommitRequest, opts ...grpc.CallOption) (*ReplicaCommitResponse, error)
 	Inspect(ctx context.Context, in *ReplicaWriteInspectRequest, opts ...grpc.CallOption) (*ReplicaWriteInspectResponse, error)
+	ArmCoordinator(ctx context.Context, in *ReplicaArmCoordinatorRequest, opts ...grpc.CallOption) (*ReplicaArmCoordinatorResponse, error)
 }
 
 type replicaTransportClient struct {
@@ -558,6 +560,16 @@ func (c *replicaTransportClient) Inspect(ctx context.Context, in *ReplicaWriteIn
 	return out, nil
 }
 
+func (c *replicaTransportClient) ArmCoordinator(ctx context.Context, in *ReplicaArmCoordinatorRequest, opts ...grpc.CallOption) (*ReplicaArmCoordinatorResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReplicaArmCoordinatorResponse)
+	err := c.cc.Invoke(ctx, ReplicaTransport_ArmCoordinator_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ReplicaTransportServer is the server API for ReplicaTransport service.
 // All implementations must embed UnimplementedReplicaTransportServer
 // for forward compatibility.
@@ -570,6 +582,7 @@ type ReplicaTransportServer interface {
 	Prepare(context.Context, *ReplicaPrepareRequest) (*ReplicaPrepareResponse, error)
 	Commit(context.Context, *ReplicaCommitRequest) (*ReplicaCommitResponse, error)
 	Inspect(context.Context, *ReplicaWriteInspectRequest) (*ReplicaWriteInspectResponse, error)
+	ArmCoordinator(context.Context, *ReplicaArmCoordinatorRequest) (*ReplicaArmCoordinatorResponse, error)
 	mustEmbedUnimplementedReplicaTransportServer()
 }
 
@@ -588,6 +601,9 @@ func (UnimplementedReplicaTransportServer) Commit(context.Context, *ReplicaCommi
 }
 func (UnimplementedReplicaTransportServer) Inspect(context.Context, *ReplicaWriteInspectRequest) (*ReplicaWriteInspectResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Inspect not implemented")
+}
+func (UnimplementedReplicaTransportServer) ArmCoordinator(context.Context, *ReplicaArmCoordinatorRequest) (*ReplicaArmCoordinatorResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ArmCoordinator not implemented")
 }
 func (UnimplementedReplicaTransportServer) mustEmbedUnimplementedReplicaTransportServer() {}
 func (UnimplementedReplicaTransportServer) testEmbeddedByValue()                          {}
@@ -664,6 +680,24 @@ func _ReplicaTransport_Inspect_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ReplicaTransport_ArmCoordinator_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReplicaArmCoordinatorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ReplicaTransportServer).ArmCoordinator(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ReplicaTransport_ArmCoordinator_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ReplicaTransportServer).ArmCoordinator(ctx, req.(*ReplicaArmCoordinatorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ReplicaTransport_ServiceDesc is the grpc.ServiceDesc for ReplicaTransport service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -682,6 +716,10 @@ var ReplicaTransport_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Inspect",
 			Handler:    _ReplicaTransport_Inspect_Handler,
+		},
+		{
+			MethodName: "ArmCoordinator",
+			Handler:    _ReplicaTransport_ArmCoordinator_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

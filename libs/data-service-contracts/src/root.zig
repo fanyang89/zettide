@@ -26,6 +26,7 @@ pub const write_evidence_contract = @import("write_evidence_contract.zig");
 pub const write_evidence = @import("write_evidence.zig");
 pub const write_coordinator = @import("write_coordinator.zig");
 pub const primary_lease = @import("primary_lease.zig");
+pub const authority_contract = @import("authority_contract.zig");
 
 test {
     _ = replica_service;
@@ -34,6 +35,7 @@ test {
     _ = write_evidence;
     _ = write_coordinator;
     _ = primary_lease;
+    _ = authority_contract;
 }
 
 fn evidenceTestId(value: u8) Id {
