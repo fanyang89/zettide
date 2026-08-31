@@ -197,6 +197,56 @@ pub const DataNodeServer = struct {
     }
 };
 
+const ReplicaResponseFaultMethod = enum { prepare, commit };
+
+/// Test-only server-boundary fault used by the real socket integration test.
+/// It is private, absent from production configuration, and consumed under a
+/// mutex and pinned to exact protobuf bytes so concurrent Replica handlers can
+/// suppress at most one intended response.
+const ReplicaResponseFaults = struct {
+    mutex: std.Io.Mutex = .init,
+    prepare: ?protocol.Digest = null,
+    commit: ?protocol.Digest = null,
+
+    fn arm(
+        self: *ReplicaResponseFaults,
+        io: std.Io,
+        method: ReplicaResponseFaultMethod,
+        request_digest: protocol.Digest,
+    ) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        switch (method) {
+            .prepare => self.prepare = request_digest,
+            .commit => self.commit = request_digest,
+        }
+    }
+
+    fn consume(
+        self: *ReplicaResponseFaults,
+        io: std.Io,
+        method: ReplicaResponseFaultMethod,
+        request_bytes: []const u8,
+        successful: bool,
+    ) bool {
+        if (!successful) return false;
+        var request_digest: protocol.Digest = undefined;
+        std.crypto.hash.sha2.Sha256.hash(request_bytes, &request_digest, .{});
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const armed = switch (method) {
+            .prepare => self.prepare,
+            .commit => self.commit,
+        } orelse return false;
+        if (!std.mem.eql(u8, &armed, &request_digest)) return false;
+        switch (method) {
+            .prepare => self.prepare = null,
+            .commit => self.commit = null,
+        }
+        return true;
+    }
+};
+
 const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -214,6 +264,8 @@ const State = struct {
     replica_authenticator: ?replica_rpc_auth.Authenticator = null,
     replica_signer: ?*const write_evidence.Signer = null,
     local_node_id: ?protocol.Id = null,
+    // Set only by tests in this file; no Options or public server API exposes it.
+    replica_response_faults: ?*ReplicaResponseFaults = null,
 
     const Authority = struct {
         current_binding: ?protocol.AuthorityBinding = null,
@@ -421,6 +473,13 @@ const State = struct {
             return fail(allocator, .unauthenticated, "Replica RPC authentication failed");
         var response = try self.handlePrepareReplicaWrite(allocator, verified.source_node_id, request_bytes);
         errdefer response.deinit();
+        // The durable participant mutation and evidence signing have completed.
+        // Abort the handler before response authentication so grpc-lite emits
+        // only an unsigned INTERNAL failure, which the client rejects as an
+        // absent authenticated response.
+        if (self.replica_response_faults) |faults|
+            if (faults.consume(self.io, .prepare, request_bytes, response.status.isOk()))
+                return error.InjectedPrepareResponseSuppression;
         try self.authenticateReplicaResponse(context, verified, method_path, request_bytes, &response);
         return response;
     }
@@ -467,6 +526,11 @@ const State = struct {
             return fail(allocator, .unauthenticated, "Replica RPC authentication failed");
         var response = try self.handleCommitReplicaWrite(allocator, verified.source_node_id, request_bytes);
         errdefer response.deinit();
+        // As with PREPARE, mutation is durable but no authenticated response is
+        // emitted for the armed one-shot server-boundary fault.
+        if (self.replica_response_faults) |faults|
+            if (faults.consume(self.io, .commit, request_bytes, response.status.isOk()))
+                return error.InjectedCommitResponseSuppression;
         try self.authenticateReplicaResponse(context, verified, method_path, request_bytes, &response);
         return response;
     }
@@ -2758,6 +2822,61 @@ fn coordinatorLinkKey(source: usize, target: usize) ReplicaRpcKey {
     return @splat(@as(u8, @intCast(1 + source * 3 + target)));
 }
 
+const ReplicaResponseFaultRace = struct {
+    faults: *ReplicaResponseFaults,
+    io: std.Io,
+    request_bytes: []const u8,
+    consumed: bool = false,
+};
+
+fn runReplicaResponseFaultRace(race: *ReplicaResponseFaultRace) void {
+    race.consumed = race.faults.consume(race.io, .prepare, race.request_bytes, true);
+}
+
+fn readOnlyCoordinatorJournal(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    parent: std.Io.Dir,
+) ![]u8 {
+    const directory = try parent.openDir(io, ".", .{ .iterate = true });
+    defer directory.close(io);
+    var iterator = directory.iterate();
+    while (try iterator.next(io)) |item| {
+        if (item.kind != .file or
+            !std.mem.startsWith(u8, item.name, "coordinator-") or
+            !std.mem.endsWith(u8, item.name, ".state") or
+            std.mem.eql(u8, item.name, "coordinator-catalog.state")) continue;
+        return parent.readFileAlloc(io, item.name, allocator, .limited(2 * 1024 * 1024));
+    }
+    return error.CoordinatorJournalNotFound;
+}
+
+test "Replica response suppression is exact successful and one shot" {
+    const exact = "exact protobuf request bytes";
+    const other = "different protobuf request bytes";
+    var exact_digest: protocol.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(exact, &exact_digest, .{});
+    var faults: ReplicaResponseFaults = .{};
+    faults.arm(std.testing.io, .prepare, exact_digest);
+
+    // A rejected exact request and a successful nonmatching request leave the
+    // raw-byte digest fault armed.
+    try std.testing.expect(!faults.consume(std.testing.io, .prepare, exact, false));
+    try std.testing.expect(!faults.consume(std.testing.io, .prepare, other, true));
+
+    // Concurrent exact/nonmatching successes race under the mutex. Only the
+    // intended immutable bytes consume the one-shot fault.
+    var exact_race: ReplicaResponseFaultRace = .{ .faults = &faults, .io = std.testing.io, .request_bytes = exact };
+    var other_race: ReplicaResponseFaultRace = .{ .faults = &faults, .io = std.testing.io, .request_bytes = other };
+    const exact_thread = try std.Thread.spawn(.{}, runReplicaResponseFaultRace, .{&exact_race});
+    const other_thread = try std.Thread.spawn(.{}, runReplicaResponseFaultRace, .{&other_race});
+    exact_thread.join();
+    other_thread.join();
+    try std.testing.expect(exact_race.consumed);
+    try std.testing.expect(!other_race.consumed);
+    try std.testing.expect(!faults.consume(std.testing.io, .prepare, exact, true));
+}
+
 test "internal coordinator performs real signed two-of-three Replica RPC commit" {
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -2912,10 +3031,40 @@ test "internal coordinator performs real signed two-of-three Replica RPC commit"
     try std.testing.expectEqual(@as(u64, 1), committed.sequence);
     try std.testing.expectEqual(committed, try nodes[0].server.coordinateWrite(request));
 
-    var faults: write_coordinator_manager.WriteCoordinatorManager.Faults = .{
-        .lose_remote_prepare_response_once = true,
+    var replica_response_faults: ReplicaResponseFaults = .{};
+    nodes[1].server.state.replica_response_faults = &replica_response_faults;
+    const selected_binding: replica_rpc_client.Binding = .{
+        .participant = bindings[1],
+        .backend_digest = nodes[1].backend_digest,
     };
-    nodes[0].server.state.coordinators.?.setFaults(&faults);
+    const prepare_loss_write: write_service.WriteRequest = .{
+        .authority = authority,
+        .replica_members = member_ids,
+        .sequence = 2,
+        .transaction_id = serviceTestId(241),
+        .previous_history_digest = committed.history_digest,
+        .offset_bytes = 0,
+        .length_bytes = payload.len,
+        .data_digest = write_service.digestData(&payload),
+    };
+    replica_response_faults.arm(
+        std.testing.io,
+        .prepare,
+        try replica_rpc_client.testPrepareRequestDigest(
+            std.testing.allocator,
+            selected_binding,
+            .{ .write = prepare_loss_write, .data = &payload },
+        ),
+    );
+    // Same transaction and authority, but an altered out-of-bounds full
+    // PREPARE request, is rejected and must not consume the exact-byte fault.
+    var altered_prepare = prepare_loss_write;
+    altered_prepare.offset_bytes = bindings[1].replica.length_bytes;
+    try std.testing.expectError(error.InvalidArgument, arm_client.prepare(
+        endpoints[1][0..endpoint_lengths[1]],
+        selected_binding,
+        .{ .write = altered_prepare, .data = &payload },
+    ));
     const prepare_loss_request: write_coordinator_manager.CoordinateRequest = .{
         .authority = authority,
         .transaction_id = serviceTestId(241),
@@ -2926,9 +3075,14 @@ test "internal coordinator performs real signed two-of-three Replica RPC commit"
         error.WriteOutcomeUnknown,
         nodes[0].server.coordinateWrite(prepare_loss_request),
     );
+    const remotely_prepared = try nodes[1].server.state.writes.?.inspectConfigured(bindings[1], nodes[1].backend_digest);
+    try std.testing.expectEqual(@as(u64, 1), remotely_prepared.frontier.sequence);
+    try std.testing.expectEqual(@as(u64, 2), remotely_prepared.pending.?.write.sequence);
 
-    // Same-directory restart reopens the fixed witness intent and obtains the
-    // exact durable PREPARE response; it never switches to the excluded third.
+    // The receiver durably processed PREPARE, then its handler aborted before
+    // response authentication. Same-directory restart reopens the fixed-witness
+    // intent and obtains the exact durable evidence; it never switches to the
+    // excluded third.
     nodes[0].server.state.coordinators.?.deinit();
     const primary_outbound = [2]OutboundReplicaPeerKey{
         .{ .node_id = node_ids[1], .key = coordinatorLinkKey(0, 1) },
@@ -2950,8 +3104,10 @@ test "internal coordinator performs real signed two-of-three Replica RPC commit"
 
     // Create a second intent whose remote PREPARE is definitely not issued.
     // This distinguishes renewal overlap from exact remote replay.
-    faults.fail_remote_prepare_before_request_once = true;
-    nodes[0].server.state.coordinators.?.setFaults(&faults);
+    var coordinator_faults: write_coordinator_manager.WriteCoordinatorManager.Faults = .{
+        .fail_remote_prepare_before_request_once = true,
+    };
+    nodes[0].server.state.coordinators.?.setFaults(&coordinator_faults);
     const delayed_prepare_request: write_coordinator_manager.CoordinateRequest = .{
         .authority = authority,
         .transaction_id = serviceTestId(246),
@@ -2979,10 +3135,8 @@ test "internal coordinator performs real signed two-of-three Replica RPC commit"
         nodes[1].server.state.authorityValidator().validate(renewal),
     );
     try nodes[0].server.recoverPendingWrites();
-    try std.testing.expectEqual(
-        @as(u64, 3),
-        (try nodes[0].server.coordinateWrite(delayed_prepare_request)).sequence,
-    );
+    const delayed_committed = try nodes[0].server.coordinateWrite(delayed_prepare_request);
+    try std.testing.expectEqual(@as(u64, 3), delayed_committed.sequence);
 
     // Primary is staged last only after the old pending write has drained.
     // Recovery and READY then promote candidate_binding atomically with the
@@ -3004,18 +3158,61 @@ test "internal coordinator performs real signed two-of-three Replica RPC commit"
         .data = &payload,
     }));
 
-    nodes[0].server.state.coordinators.?.setFaults(&faults);
-    faults.lose_remote_commit_response_once = true;
     const commit_loss_request: write_coordinator_manager.CoordinateRequest = .{
         .authority = renewal,
         .transaction_id = serviceTestId(242),
         .offset_bytes = 0,
         .data = &payload,
     };
+    const commit_loss_write: write_service.WriteRequest = .{
+        .authority = renewal,
+        .replica_members = member_ids,
+        .sequence = 4,
+        .transaction_id = commit_loss_request.transaction_id,
+        .previous_history_digest = delayed_committed.history_digest,
+        .offset_bytes = 0,
+        .length_bytes = payload.len,
+        .data_digest = write_service.digestData(&payload),
+    };
+    // Pause after the durable decision and local COMMIT but before the remote
+    // COMMIT request so the test can pin the exact certificate-bearing protobuf.
+    coordinator_faults.fail_remote_commit_before_request_once = true;
     try std.testing.expectError(
         error.WriteOutcomeUnknown,
         nodes[0].server.coordinateWrite(commit_loss_request),
     );
+    const local_attestation = try nodes[0].server.state.writes.?.prepareConfigured(
+        bindings[0],
+        nodes[0].backend_digest,
+        .{ .write = commit_loss_write, .data = &payload },
+    );
+    const remote_pending = (try nodes[1].server.state.writes.?.inspectConfigured(
+        bindings[1],
+        nodes[1].backend_digest,
+    )).pending.?;
+    try std.testing.expectEqual(commit_loss_write, remote_pending.write);
+    const local_prepare = try nodes[0].signer.signPrepare(commit_loss_write, local_attestation);
+    const remote_prepare = try nodes[1].signer.signPrepare(commit_loss_write, remote_pending.attestation);
+    const commit_certificate = try protocol.write_evidence_contract.normalizeSignedCertificate(.{
+        .prepare_evidence = .{ local_prepare, remote_prepare },
+    });
+    replica_response_faults.arm(
+        std.testing.io,
+        .commit,
+        try replica_rpc_client.testCommitRequestDigest(
+            std.testing.allocator,
+            selected_binding,
+            commit_loss_write,
+            commit_certificate,
+        ),
+    );
+    try std.testing.expectError(
+        error.WriteOutcomeUnknown,
+        nodes[0].server.coordinateWrite(commit_loss_request),
+    );
+    const remotely_committed = try nodes[1].server.state.writes.?.inspectConfigured(bindings[1], nodes[1].backend_digest);
+    try std.testing.expectEqual(@as(u64, 4), remotely_committed.frontier.sequence);
+    try std.testing.expect(remotely_committed.pending == null);
     try std.testing.expectEqual(
         @as(u64, 4),
         (try nodes[0].server.coordinateWrite(commit_loss_request)).sequence,
@@ -3047,4 +3244,136 @@ test "internal coordinator performs real signed two-of-three Replica RPC commit"
     );
     const after_unavailable = try nodes[0].server.state.coordinators.?.certifiedFrontier(authority.volume_id);
     try std.testing.expectEqual(@as(u64, 4), after_unavailable.?.sequence);
+}
+
+test "excluded third unavailable fails all-route arm before coordinator intent" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const member_ids = [3]protocol.Id{ serviceTestId(160), serviceTestId(161), serviceTestId(162) };
+    const node_ids = [3]protocol.Id{ serviceTestId(170), serviceTestId(171), serviceTestId(172) };
+    var nodes: [3]*CoordinatorIntegrationNode = undefined;
+    var node_count: usize = 0;
+    defer for (nodes[0..node_count]) |node| node.deinit();
+    for (0..3) |index| {
+        var inbound: [2]ReplicaRpcPeerKey = undefined;
+        var outbound: [2]OutboundReplicaPeerKey = undefined;
+        var next: usize = 0;
+        for (0..3) |peer| {
+            if (peer == index) continue;
+            inbound[next] = .{ .node_id = node_ids[peer], .key = coordinatorLinkKey(peer, index) };
+            outbound[next] = .{ .node_id = node_ids[peer], .key = coordinatorLinkKey(index, peer) };
+            next += 1;
+        }
+        var name_buffer: [16]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "excluded-{d}", .{index});
+        nodes[index] = try CoordinatorIntegrationNode.create(
+            std.testing.allocator,
+            std.testing.io,
+            tmp.dir,
+            name,
+            @intCast(index),
+            &inbound,
+            &outbound,
+        );
+        node_count += 1;
+    }
+
+    const identities = [3]write_service.WitnessIdentity{
+        nodes[0].signer.identity(),
+        nodes[1].signer.identity(),
+        nodes[2].signer.identity(),
+    };
+    var bindings: [3]write_service.ParticipantBinding = undefined;
+    var endpoints: [3][64]u8 = undefined;
+    var endpoint_lengths: [3]usize = undefined;
+    for (nodes, 0..) |node, index| {
+        bindings[index] = .{
+            .replica = node.binding,
+            .replica_members = member_ids,
+            .witness_identities = identities,
+        };
+        try node.server.state.writes.?.configure(bindings[index], node.backend_digest);
+        const address = try node.server.replicaLocalAddress();
+        const endpoint = try std.fmt.bufPrint(&endpoints[index], "{s}:{d}", .{ address.host, address.port });
+        endpoint_lengths[index] = endpoint.len;
+    }
+    var routes: [3]write_coordinator_manager.ReplicaRoute = undefined;
+    for (&routes, 0..) |*route, index| route.* = try .init(
+        bindings[index],
+        nodes[index].backend_digest,
+        node_ids[index],
+        endpoints[index][0..endpoint_lengths[index]],
+    );
+    for (nodes, 0..) |node, index| try node.server.state.coordinators.?.configure(.{
+        .local_member_id = member_ids[index],
+        .routes = routes,
+    });
+
+    var authority: protocol.AuthorityBinding = .{
+        .volume_id = nodes[0].binding.volume_id,
+        .primary_placement_id = nodes[0].binding.placement_id,
+        .primary_node_id = nodes[0].node_id,
+        .lease_id = serviceTestId(220),
+        .holder_boot_id = nodes[0].server.state.boot_id,
+        .authority_generation = 1,
+        .write_epoch = 1,
+        .placement_revision = 1,
+        .activation_nonce = serviceTestId(221),
+        .authority_digest = undefined,
+    };
+    authority.authority_digest = protocol.authority_contract.digest(authority);
+    for (nodes, 0..) |node, index| {
+        try node.server.state.stage(authority);
+        _ = try node.server.state.fences.?.accept(.{
+            .operation_id = serviceTestId(@intCast(230 + index)),
+            .volume_id = authority.volume_id,
+            .placement_id = node.binding.placement_id,
+            .replica_generation = node.binding.generation,
+            .write_epoch = authority.write_epoch,
+            .primary_node_id = authority.primary_node_id,
+            .lease_id = authority.lease_id,
+            .authority_digest = authority.authority_digest,
+        });
+        if (index == 0) _ = try node.server.state.recover(authority);
+        try node.server.state.markReady(authority);
+    }
+
+    const journal_before = try readOnlyCoordinatorJournal(std.testing.allocator, std.testing.io, nodes[0].dir);
+    defer std.testing.allocator.free(journal_before);
+    const local_before = try nodes[0].server.state.writes.?.inspectConfigured(bindings[0], nodes[0].backend_digest);
+    const selected_before = try nodes[1].server.state.writes.?.inspectConfigured(bindings[1], nodes[1].backend_digest);
+    try std.testing.expectEqual(@as(u64, 0), local_before.frontier.sequence);
+    try std.testing.expectEqual(@as(u64, 0), selected_before.frontier.sequence);
+    try std.testing.expect(local_before.pending == null);
+    try std.testing.expect(selected_before.pending == null);
+    try std.testing.expect((try nodes[0].server.state.coordinators.?.certifiedFrontier(authority.volume_id)) == null);
+
+    // Member 2 is excluded from payload fanout, but its authenticated arm is a
+    // mandatory pre-intent barrier. Taking only that listener away must still
+    // reject the request as NotStarted.
+    nodes[2].server.shutdownGracefully(0);
+    nodes[2].server.wait();
+    const payload = [_]u8{0x6b} ** 4096;
+    try std.testing.expectError(error.WriteNotStarted, nodes[0].server.coordinateWrite(.{
+        .authority = authority,
+        .transaction_id = serviceTestId(240),
+        .offset_bytes = 0,
+        .data = &payload,
+    }));
+
+    const journal_after = try readOnlyCoordinatorJournal(std.testing.allocator, std.testing.io, nodes[0].dir);
+    defer std.testing.allocator.free(journal_after);
+    try std.testing.expectEqualSlices(u8, journal_before, journal_after);
+    const local_after = try nodes[0].server.state.writes.?.inspectConfigured(bindings[0], nodes[0].backend_digest);
+    const selected_after = try nodes[1].server.state.writes.?.inspectConfigured(bindings[1], nodes[1].backend_digest);
+    try std.testing.expectEqual(local_before.frontier, local_after.frontier);
+    try std.testing.expectEqual(selected_before.frontier, selected_after.frontier);
+    try std.testing.expect(local_after.pending == null);
+    try std.testing.expect(selected_after.pending == null);
+    try std.testing.expect((try nodes[0].server.state.coordinators.?.certifiedFrontier(authority.volume_id)) == null);
+    var control = try nodes[0].server.state.coordinators.?.beginControl(
+        bindings[0].replica.placement_id,
+        bindings[0].replica.generation,
+    );
+    control.end();
 }

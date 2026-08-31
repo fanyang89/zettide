@@ -146,7 +146,12 @@ the controller-pinned two-witness decision. The internal coordinator loads the
 separate outbound target-key registry, obtains authenticated durable arm acks
 from all three routes before its first intent, and then performs local plus the
 first canonical remote PREPARE/COMMIT. Success is returned only after both
-participants and the coordinator completion are durable. Remote witness admission
+participants and the coordinator completion are durable. Real-socket tests arm a
+private one-shot receiver fault pinned to the SHA-256 of the exact protobuf
+request bytes after durable PREPARE or COMMIT processing but before response authentication;
+grpc-lite then emits only an unsigned failure,
+the client rejects the absent authenticated response, and exact retry/restart
+retrieves the durable evidence. Remote witness admission
 uses the unchanged canonical primary authority transcript with a process-local,
 ephemeral lease window. Runtime tracks the exact current READY binding separately
 from a staged renewal candidate, so witness-first renewal does not replace a still-live

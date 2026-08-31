@@ -112,8 +112,7 @@ pub const WriteCoordinatorManager = struct {
         fail_directory_sync_once: bool = false,
         fail_journal_creation_once: bool = false,
         fail_remote_prepare_before_request_once: bool = false,
-        lose_remote_prepare_response_once: bool = false,
-        lose_remote_commit_response_once: bool = false,
+        fail_remote_commit_before_request_once: bool = false,
     };
 
     allocator: std.mem.Allocator,
@@ -601,11 +600,6 @@ pub const WriteCoordinatorManager = struct {
                     .{ .write = write, .data = data },
                 );
             };
-            if (!std.mem.eql(u8, &witness, &topology.local_member_id)) if (self.faults) |faults|
-                if (faults.lose_remote_prepare_response_once) {
-                    faults.lose_remote_prepare_response_once = false;
-                    return error.InjectedRemotePrepareResponseLoss;
-                };
             try entry.instance.recordPrepared(evidence);
         }
 
@@ -637,6 +631,10 @@ pub const WriteCoordinatorManager = struct {
                 const projection = try protocol.write_evidence_contract.certificateProjection(certificate);
                 break :blk try signer.signCommit(committed.write, projection, committed.result);
             } else blk: {
+                if (self.faults) |faults| if (faults.fail_remote_commit_before_request_once) {
+                    faults.fail_remote_commit_before_request_once = false;
+                    return error.InjectedRemoteCommitBeforeRequestFailure;
+                };
                 var client = try self.clientForRoute(route);
                 defer client.deinit();
                 break :blk try client.commit(
@@ -646,11 +644,6 @@ pub const WriteCoordinatorManager = struct {
                     certificate,
                 );
             };
-            if (!std.mem.eql(u8, &witness, &topology.local_member_id)) if (self.faults) |faults|
-                if (faults.lose_remote_commit_response_once) {
-                    faults.lose_remote_commit_response_once = false;
-                    return error.InjectedRemoteCommitResponseLoss;
-                };
             _ = try entry.instance.recordCommitted(evidence);
         }
         const completed = (try entry.instance.inspect()).last_completed orelse return error.CoordinatorCompletionMissing;

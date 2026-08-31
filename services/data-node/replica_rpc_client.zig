@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const grpc = @import("grpc_lite");
 const pb = @import("data_node_proto");
@@ -17,6 +18,56 @@ pub const RemoteInspection = struct {
     pending: ?write_service.PendingInspection,
     last_completed: ?write_service.CommitResult,
 };
+
+/// Test-only hash of the exact protobuf request bytes emitted by `Client.prepare`.
+pub fn testPrepareRequestDigest(
+    allocator: std.mem.Allocator,
+    binding: Binding,
+    request: write_service.PrepareRequest,
+) !protocol.Digest {
+    if (!builtin.is_test) @compileError("test-only Replica PREPARE digest helper");
+    var binding_views: BindingProtoViews = undefined;
+    var write_member_views: [3][]const u8 = undefined;
+    return encodedDigest(allocator, pb.ReplicaPrepareRequest{
+        .binding = bindingProto(&binding, &binding_views),
+        .write = writeProto(&request.write, &write_member_views),
+        .data = request.data,
+    });
+}
+
+/// Test-only hash of the exact protobuf request bytes emitted by `Client.commit`.
+pub fn testCommitRequestDigest(
+    allocator: std.mem.Allocator,
+    binding: Binding,
+    write: write_service.WriteRequest,
+    certificate: write_service.SignedCommitCertificate,
+) !protocol.Digest {
+    if (!builtin.is_test) @compileError("test-only Replica COMMIT digest helper");
+    const stable_certificate = try protocol.write_evidence_contract.normalizeSignedCertificate(certificate);
+    if (!std.meta.eql(stable_certificate, certificate)) return error.NonCanonicalCertificate;
+    var binding_views: BindingProtoViews = undefined;
+    var evidence_views: [write_service.certificate_witness_count]pb.DataSignedPrepareEvidence = undefined;
+    for (&evidence_views, &stable_certificate.prepare_evidence) |*target, *value|
+        target.* = signedPrepareProto(value);
+    return encodedDigest(allocator, pb.ReplicaCommitRequest{
+        .binding = bindingProto(&binding, &binding_views),
+        .authority = authorityProto(&write.authority),
+        .transaction_id = &write.transaction_id,
+        .sequence = write.sequence,
+        .signed_certificate = .{
+            .prepare_evidence = .{ .items = &evidence_views, .capacity = evidence_views.len },
+        },
+    });
+}
+
+fn encodedDigest(allocator: std.mem.Allocator, request: anytype) !protocol.Digest {
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    defer writer.deinit();
+    try request.encode(&writer.writer, allocator);
+    var digest: protocol.Digest = undefined;
+    std.crypto.hash.sha2.Sha256.hash(writer.written(), &digest, .{});
+    return digest;
+}
 
 pub const Client = struct {
     allocator: std.mem.Allocator,
