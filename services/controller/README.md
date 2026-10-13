@@ -126,13 +126,15 @@ deinitialize the services.
 `RangeLeaseService` supports shared-read/exclusive-write Volume intervals with
 Acquire, Renew, Revoke, CompleteRevoke, Get, and List. Mutations commit through
 Raft; reads use ReadIndex. Revoke is two-phase: REVOKING still blocks conflicts
-until the trusted holder acknowledges drained I/O. Active/revoking leases block
-Volume deletion. Lease history and its canonical view digest are snapshot-stable.
+until a trusted holder drain ACK or an opt-in all-target storage fence.
+Active/revoking leases block Volume deletion. Lease history and its canonical view digest are snapshot-stable.
 
 See [range lease contract](../../docs/range-leases.md) for the holder session,
 local deadlines, RPC semantics, recovery, security, and current integration
-limits. In particular, lost holders are not automatically reclaimed, and the
-new gate is not yet mandatory on every existing payload path.
+limits. Automatic reclamation requires an explicit all-target storage fencer
+adapter.
+The shipped daemon does not configure it, and the storage gate is not yet
+mandatory on every existing payload path.
 
 ## Running
 

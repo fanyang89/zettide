@@ -652,6 +652,15 @@ pub const PoolStateMachine = struct {
         return self.state.range_leases.leases.get(lease_id[0..36].*);
     }
 
+    /// Driver-thread snapshot for the ReadIndex-backed expiry planner.
+    pub fn allRangeLeases(self: *const PoolStateMachine, allocator: std.mem.Allocator) ![]range_leases.Lease {
+        const records = try allocator.alloc(range_leases.Lease, self.state.range_leases.leases.count());
+        var iterator = self.state.range_leases.leases.valueIterator();
+        var index: usize = 0;
+        while (iterator.next()) |lease| : (index += 1) records[index] = lease.*;
+        return records;
+    }
+
     pub fn listRangeLeases(self: *const PoolStateMachine, allocator: std.mem.Allocator, volume_id: []const u8, after: []const u8, limit: usize) ![]range_leases.Lease {
         var result: std.ArrayList(range_leases.Lease) = .empty;
         errdefer result.deinit(allocator);

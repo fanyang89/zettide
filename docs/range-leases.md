@@ -8,7 +8,8 @@ reads. Writes exclude every overlapping lease, including another lease held by
 the same Node. Adjacent intervals do not overlap. Offsets and nonzero lengths
 must be 4096-byte aligned and fit the immutable Volume capacity.
 
-This is a **control-plane and holder-client foundation**, not a new payload RPC.
+This provides control-plane leases, holder admission, a durable storage fence,
+and an opt-in automatic reaper. It is not a new payload RPC.
 `controller_agent.RangeLeaseSession` provides acquire/renew/revoke, polling,
 and synchronized I/O admission/drain tracking for data services. No existing
 frontend is automatically opted into range leasing yet. An I/O path using this
@@ -95,13 +96,69 @@ Revoke success means **revocation was accepted**, not that old I/O has stopped.
 Only REVOKED releases the interval. Both ACTIVE and REVOKING prevent Volume
 deletion. A revoked lease remains queryable after Volume deletion.
 
-There is deliberately **no controller-clock automatic reclamation** and no
-force-release RPC. Local expiry stops admission but does not prove physical I/O
-has drained. If a holder is lost or restarted, its old leases continue to block
-conflicting grants. Automated takeover requires a future, verifiable backend
-fence/drain protocol; do not synthesize CompleteRevoke from elapsed wall time,
-heartbeat staleness, or a different process's boot ID. This trades availability
-for safety until that protocol is connected.
+Automatic reclamation is **opt-in through `Runtime.Options.range_lease_fencer`**.
+Without that storage adapter, lost holders continue to block conflicting grants.
+There is no force-release RPC. Neither elapsed time nor heartbeat staleness alone
+proves that physical I/O has drained.
+
+## Durable storage fencing and automatic expiry
+
+`data-service-contracts.range_fence.Gate` serializes token checks and physical I/O
+against durable fencing. A payload caller supplies the lease token, Volume,
+interval, and mode. The trusted `Backend.authorize` callback must validate the
+controller-issued full binding and required primary authority; a large integer
+is not a credential. Hold the returned guard until physical completion or
+cancellation drain, never merely until an RPC timeout.
+
+A barrier binds the last granted token to the committed REVOKING resource
+revision. That revision must be greater than the token revision. While holding
+the same gate, fencing drains pending/replay work through `Backend.drain_flush`,
+flushes media, appends the durable barrier, fsyncs the ledger, replaces it, and
+fsyncs its parent. Only then can it acknowledge. Failures poison admission until
+recovery; startup validates and syncs the recovered file and parent before an
+idempotent retry can acknowledge an earlier uncertain rename.
+
+Fencing is keyed by **Volume + lease ID**, not a Volume-wide maximum revision.
+Another valid overlapping reader remains authorized. A fenced lease ID is
+terminal, including delayed renewals or forged larger revisions. The reference
+gate serializes I/O per gate instance; it does not yet optimize physical I/O
+parallelism for disjoint intervals.
+
+Use a dedicated ledger, never the Replica primary-fence ledger. Bootstrap with
+`Gate.createLedger` once on new storage; it refuses to overwrite an existing
+file. Recovery uses `Gate.open`, which fails if history is missing or corrupt.
+Never recreate missing history as a recovery fallback. The enclosing storage
+service must own the process lock and gate lifetime.
+
+The opt-in controller worker performs:
+
+```text
+ReadIndex -> observe grant/renewal for 30 s -> Revoke CAS through Raft
+  -> storage fence_all -> check exact receipt -> CompleteRevoke through Raft
+```
+
+It uses the suspend-inclusive monotonic boot clock outside Raft apply. Renewal
+changes the observed revision and restarts the conservative expiry observation.
+A new leader/process waits a complete TTL for ACTIVE records; existing REVOKING
+records can resume fencing immediately. This can delay reclamation, but never
+extends the holder's local admission window. Version CAS handles a concurrent
+renewal; mutation retries retain deterministic request IDs. Reserve the
+`range-reaper/` request-ID prefix for the worker.
+
+The `Fencer.fence_all` adapter is a **trusted all-target assertion**, not a
+cryptographic certificate. It must cover every possible read/write destination,
+old routes, durable replay, and fence inheritance before publishing new routes.
+An unavailable target, unsupported ungated path, or mismatched receipt must fail
+without releasing the interval. Call cancellation must promptly unblock shutdown.
+Unavailable leases are retried round-robin; range work alternates with placement
+reconciliation so it does not starve primary recovery.
+
+**Production integration remains incomplete:** the shipped controller daemon
+does not configure this adapter, and existing payload paths are not yet all
+forced through the storage gate. There is intentionally no CLI/config switch
+that enables unsafe timer-only reclamation. The opt-in runtime is usable by an
+embedding that supplies a complete storage integration; a holder-local gate or
+one Replica ACK is insufficient.
 
 CompleteRevoke is a **trusted holder assertion**, not a cryptographic drain proof.
 The current controller transport does not authenticate/authorize callers. Keep
@@ -136,3 +193,12 @@ The three-voter runtime test also verifies that leader failover preserves a
 REVOKING barrier, rejects overlapping grants, and retains the terminal record
 when the former leader rejoins. Production payload-path enforcement remains
 outside this test coverage.
+
+The automatic-expiry integration test uses a real 30-second deadline, real Raft
+and RPC, a file-backed storage gate, and a physical write held across expiry.
+It verifies failed fencing and mismatched receipts leave REVOKING intact,
+completion releases without a holder ACK, and old tokens remain rejected after
+storage-gate reconstruction. Separate tests cover shared readers, uncertain
+fsync recovery, corrupt/missing ledgers, leader-term/clock resets, and renewal
+observations. The all-target network/routing adapter is not implemented or
+validated by this single-storage-target test.

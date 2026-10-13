@@ -87,3 +87,9 @@ cannot acknowledge a drain before every ticket completes. Fixed local deadlines
 are anchored before the grant request; replay and delayed responses do not
 revive closed leases. The controller/data-node protocol and remaining integration
 boundaries are documented in [range leases](../../docs/range-leases.md).
+
+`range_fence.Gate` supplies the distinct storage-side barrier: physical I/O and
+fence/drain/flush/persistence share one exclusion gate. A dedicated durable
+ledger retains terminal per-lease fences across restart without invalidating
+other readers. Authorization and all-target recovery remain responsibilities of
+the trusted storage adapter; do not use a holder-local gate as a fence proof.

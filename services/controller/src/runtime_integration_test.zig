@@ -1784,9 +1784,9 @@ test "range lease RPC shares readers and holds writers until drain ACK across re
         try crudStatus(runtime, prefix ++ "AcquireLease", writer_request, .failed_precondition);
 
         const token = contract.Token{
-            .lease_id = std.mem.toBytes(std.mem.nativeToBig(u128, try @import("uuid").urn.deserialize(request.lease_id))),
-            .volume_id = std.mem.toBytes(std.mem.nativeToBig(u128, try @import("uuid").urn.deserialize(volume.value.id))),
-            .holder_node_id = std.mem.toBytes(std.mem.nativeToBig(u128, try @import("uuid").urn.deserialize(node.id))),
+            .lease_id = std.mem.toBytes(std.mem.nativeToLittle(u128, try @import("uuid").urn.deserialize(request.lease_id))),
+            .volume_id = std.mem.toBytes(std.mem.nativeToLittle(u128, try @import("uuid").urn.deserialize(volume.value.id))),
+            .holder_node_id = std.mem.toBytes(std.mem.nativeToLittle(u128, try @import("uuid").urn.deserialize(node.id))),
             .holder_boot_id = reconcile_holder_boot_id,
             .offset = 0,
             .length = 4096,
@@ -1827,4 +1827,151 @@ test "range lease RPC shares readers and holds writers until drain ACK across re
         defer replay.deinit(config_allocator);
         try std.testing.expectEqual(ack.lease.?.resource_version, replay.lease.?.resource_version);
     }
+}
+
+const RangeFenceHarness = struct {
+    const protocol = @import("zettide_data_service_contracts");
+    const range_fence = protocol.range_fence;
+    const Lease = @import("range_leases.zig").Lease;
+    gate: *range_fence.Gate,
+    allow: std.atomic.Value(bool) = .init(false),
+    bad_receipt: std.atomic.Value(bool) = .init(true),
+    attempts: std.atomic.Value(u32) = .init(0),
+    fenced: std.atomic.Value(bool) = .init(false),
+    entered: std.atomic.Value(bool) = .init(false),
+
+    fn fence(context: *anyopaque, lease: Lease) !Lease {
+        const self: *RangeFenceHarness = @ptrCast(@alignCast(context));
+        _ = self.attempts.fetchAdd(1, .release);
+        if (!self.allow.load(.acquire)) return error.StorageUnavailable;
+        self.entered.store(true, .release);
+        _ = try self.gate.fence(.{ .token = try token(lease), .revision = lease.resource_version });
+        self.fenced.store(true, .release);
+        var receipt = lease;
+        if (self.bad_receipt.load(.acquire)) receipt.resource_version += 1;
+        return receipt;
+    }
+    fn cancel(_: *anyopaque) void {}
+    fn token(lease: Lease) !protocol.range_lease.Token {
+        return .{ .lease_id = try parseId(&lease.lease_id), .volume_id = try parseId(&lease.volume_id), .holder_node_id = try parseId(&lease.holder_node_id), .holder_boot_id = lease.holder_boot_id, .offset = lease.offset_bytes, .length = lease.length_bytes, .mode = if (lease.mode == .RANGE_LEASE_MODE_READ) .read else .write, .revision = lease.token_revision };
+    }
+    fn parseId(value: []const u8) !protocol.Id {
+        return std.mem.toBytes(std.mem.nativeToLittle(u128, try @import("uuid").urn.deserialize(value)));
+    }
+};
+
+const RangeStorageBackend = struct {
+    file: std.Io.File,
+    token: ?RangeFenceHarness.protocol.range_lease.Token = null,
+    fn authorize(context: *anyopaque, token: RangeFenceHarness.protocol.range_lease.Token) !void {
+        const self: *RangeStorageBackend = @ptrCast(@alignCast(context));
+        if (self.token == null or !std.meta.eql(self.token.?, token)) return error.InvalidGrant;
+    }
+    fn flush(context: *anyopaque, _: RangeFenceHarness.range_fence.Barrier) ![32]u8 {
+        const self: *RangeStorageBackend = @ptrCast(@alignCast(context));
+        try self.file.sync(std.testing.io);
+        return @splat(1);
+    }
+};
+
+test "expired lease is automatically reclaimed only after durable storage fencing, without holder ACK" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
+    defer config_allocator.free(root);
+    const data_dir = try std.fmt.allocPrintSentinel(config_allocator, "{s}/raft", .{root}, 0);
+    defer config_allocator.free(data_dir);
+    const ports = try reserveUniquePorts(1);
+    const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
+    defer config_allocator.free(address);
+    var config = try makeConfig(1, .{1} ++ @as([15]u8, @splat(0)), &.{address}, data_dir);
+    defer config.deinit();
+    const file = try tmp.dir.createFile(std.testing.io, "payload", .{ .read = true });
+    defer file.close(std.testing.io);
+    var backend = RangeStorageBackend{ .file = file };
+    const storage_backend = RangeFenceHarness.range_fence.Backend{ .context = &backend, .authorize = RangeStorageBackend.authorize, .drain_flush = RangeStorageBackend.flush };
+    try RangeFenceHarness.range_fence.Gate.createLedger(std.testing.io, tmp.dir, "ranges");
+    var gate = try RangeFenceHarness.range_fence.Gate.open(runtime_allocator, std.testing.io, tmp.dir, "ranges", storage_backend);
+    var gate_open = true;
+    defer if (gate_open) gate.deinit();
+    var harness = RangeFenceHarness{ .gate = &gate };
+    var options = test_options;
+    options.range_lease_fencer = .{ .context = &harness, .fence_all = RangeFenceHarness.fence, .cancel = RangeFenceHarness.cancel };
+    options.reconcile_interval_ms = 20;
+    const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, options);
+    defer destroyRuntime(runtime);
+    _ = try waitForStableLeader(&.{runtime});
+    var pool = try createPool(runtime, "auto-pool", "auto-pool");
+    defer pool.deinit();
+    var node = try registerNode(runtime, &config, "auto-node", "0198f54d-5c2a-7000-8000-000000000101");
+    defer node.deinit();
+    var volume = try createVolume(runtime, "auto-volume", pool.id, "auto-volume");
+    defer volume.deinit();
+    const prefix = "/zettide.controller.v1.RangeLeaseService/";
+    var request = pb.RangeLeaseRequest{ .request_id = "auto-grant", .lease_id = "0198f54d-5c2a-7000-8000-000000000301", .volume_id = volume.value.id, .holder_node_id = node.id, .holder_boot_id = &reconcile_holder_boot_id, .length_bytes = 4096, .mode = .RANGE_LEASE_MODE_WRITE };
+    var grant = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "AcquireLease", request);
+    defer grant.deinit(config_allocator);
+    const token = RangeFenceHarness.protocol.range_lease.Token{ .lease_id = try RangeFenceHarness.parseId(request.lease_id), .volume_id = try RangeFenceHarness.parseId(request.volume_id), .holder_node_id = try RangeFenceHarness.parseId(request.holder_node_id), .holder_boot_id = reconcile_holder_boot_id, .offset = 0, .length = 4096, .mode = .write, .revision = grant.lease.?.token_revision };
+    backend.token = token;
+    // Hold a real storage I/O admission across the 30-second expiry. No holder
+    // is polled and no caller sends RevokeLease or CompleteRevoke.
+    var guard = try gate.begin(token, token.volume_id, 0, 4096, .write);
+    var guarded = true;
+    defer if (guarded) guard.end();
+    var waited: usize = 0;
+    while (harness.attempts.load(.acquire) == 0) : (waited += 1) {
+        if (waited == 4000) return error.ExpiryTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(10), .awake);
+    }
+    var revoking = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "GetLease", pb.GetRangeLeaseRequest{ .lease_id = request.lease_id });
+    defer revoking.deinit(config_allocator);
+    try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKING, revoking.lease.?.state);
+    request.request_id = "auto-conflict";
+    request.lease_id = "0198f54d-5c2a-7000-8000-000000000302";
+    try crudStatus(runtime, prefix ++ "AcquireLease", request, .failed_precondition);
+    harness.allow.store(true, .release);
+    waited = 0;
+    while (!harness.entered.load(.acquire)) : (waited += 1) {
+        if (waited == 1000) return error.FenceStartTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try std.testing.expect(!harness.fenced.load(.acquire));
+    // A fence cannot acknowledge before this admitted physical write completes.
+    const payload: [4096]u8 = @splat(0x42);
+    try file.writePositionalAll(std.testing.io, &payload, 0);
+    guard.end();
+    guarded = false;
+    waited = 0;
+    while (!harness.fenced.load(.acquire)) : (waited += 1) {
+        if (waited == 1000) return error.FenceTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(5), .awake);
+    }
+    try std.testing.expectError(error.RangeLeaseFenced, gate.begin(token, token.volume_id, 0, 4096, .write));
+    // A real barrier with a mismatched receipt still cannot release metadata.
+    var pending = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "GetLease", pb.GetRangeLeaseRequest{ .lease_id = grant.lease.?.lease_id });
+    defer pending.deinit(config_allocator);
+    try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKING, pending.lease.?.state);
+    harness.bad_receipt.store(false, .release);
+    waited = 0;
+    while (true) : (waited += 1) {
+        var current = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "GetLease", pb.GetRangeLeaseRequest{ .lease_id = grant.lease.?.lease_id });
+        defer current.deinit(config_allocator);
+        if (current.lease.?.state == .RANGE_LEASE_STATE_REVOKED) break;
+        if (waited == 1000) return error.ReleaseTimeout;
+        try std.testing.io.sleep(.fromMilliseconds(5), .awake);
+    }
+    request.request_id = "auto-new-writer";
+    var replacement = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "AcquireLease", request);
+    defer replacement.deinit(config_allocator);
+    try std.testing.expect(replacement.lease.?.token_revision > revoking.lease.?.resource_version);
+    try runtime.shutdown();
+    // Durable storage rejection survives process-local gate reconstruction.
+    gate.deinit();
+    gate_open = false;
+    gate = try RangeFenceHarness.range_fence.Gate.open(runtime_allocator, std.testing.io, tmp.dir, "ranges", storage_backend);
+    gate_open = true;
+    try std.testing.expectError(error.RangeLeaseFenced, gate.begin(token, token.volume_id, 0, 4096, .write));
+    const stored = try tmp.dir.readFileAlloc(std.testing.io, "payload", config_allocator, .limited(4097));
+    defer config_allocator.free(stored);
+    try std.testing.expectEqualSlices(u8, &payload, stored);
 }

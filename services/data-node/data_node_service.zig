@@ -17,6 +17,7 @@ const write_participant_manager = @import("write_participant_manager.zig");
 const write_coordinator_manager = @import("write_coordinator_manager.zig");
 
 pub const range_lease = protocol.range_lease;
+pub const range_fence = protocol.range_fence;
 
 pub const ReplicaFileStore = replica_service.FileStore;
 pub const ReplicaCapacitySnapshot = replica_service.CapacitySnapshot;

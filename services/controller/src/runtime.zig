@@ -8,6 +8,8 @@ const reconciler_mod = @import("reconciler.zig");
 const service_mod = @import("service.zig");
 const state_machine = @import("state_machine.zig");
 
+const range_reaper = @import("range_lease_reaper.zig");
+
 const log = raft.log;
 
 pub const Options = struct {
@@ -23,6 +25,7 @@ pub const Options = struct {
     transport_graceful_timeout_ns: u64 = 5 * std.time.ns_per_s,
     data_service_client: ?reconciler_mod.DataServiceClient = null,
     reconcile_interval_ms: i64 = 1_000,
+    range_lease_fencer: ?range_reaper.Fencer = null,
 };
 
 pub const Runtime = struct {
@@ -44,6 +47,10 @@ pub const Runtime = struct {
     reconcile_stopping: std.atomic.Value(bool) = .init(false),
     reconcile_event: std.Io.Event = .unset,
     planned_action: ?*reconciler_mod.Action = null,
+    range_expiry: range_reaper.Reaper,
+    planned_range_action: ?range_reaper.Action = null,
+    planning_term: u64 = 0,
+    range_first: bool = false,
     reconcile_error: ?anyerror = null,
     proposal_response: ?[]u8 = null,
     proposal_allocator: ?std.mem.Allocator = null,
@@ -56,7 +63,7 @@ pub const Runtime = struct {
         options: Options,
     ) !*Runtime {
         if (options.management_graceful_timeout_ns == 0 or
-            (options.data_service_client != null and options.reconcile_interval_ms <= 0)) return error.InvalidConfig;
+            ((options.data_service_client != null or options.range_lease_fencer != null) and options.reconcile_interval_ms <= 0)) return error.InvalidConfig;
 
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
@@ -70,6 +77,11 @@ pub const Runtime = struct {
         self.reconcile_stopping = .init(false);
         self.reconcile_event = .unset;
         self.planned_action = null;
+        self.planned_range_action = null;
+        self.planning_term = 0;
+        self.range_first = false;
+        self.range_expiry = .{ .allocator = allocator };
+        errdefer self.range_expiry.deinit();
         self.reconcile_error = null;
         self.proposal_response = null;
         self.proposal_allocator = null;
@@ -156,7 +168,9 @@ pub const Runtime = struct {
                 data_client,
                 self.commandSubmitter(),
             );
-            errdefer self.reconciler.?.deinit();
+        }
+        errdefer if (self.reconciler) |*reconciler| reconciler.deinit();
+        if (options.data_service_client != null or options.range_lease_fencer != null) {
             self.reconcile_thread = try std.Thread.spawn(.{}, runReconciler, .{self});
         }
         self.running = true;
@@ -188,6 +202,7 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         std.debug.assert(!self.running);
+        self.range_expiry.deinit();
         if (self.reconciler) |*reconciler| reconciler.deinit();
         self.pool_rpc.deinit();
         self.management_server.deinit();
@@ -222,6 +237,7 @@ pub const Runtime = struct {
 
     fn stopReconciler(self: *Runtime) void {
         if (self.options.data_service_client) |data_client| data_client.cancel();
+        if (self.options.range_lease_fencer) |fencer| fencer.cancel(fencer.context);
         self.reconcile_stopping.store(true, .release);
         self.reconcile_event.set(self.io);
         if (self.reconcile_thread) |thread| {
@@ -254,6 +270,9 @@ pub const Runtime = struct {
 
     fn reconcileOnce(self: *Runtime) !void {
         self.planned_action = null;
+        self.planned_range_action = null;
+        self.planning_term = self.status().term;
+        self.range_first = !self.range_first;
         self.reconcile_error = null;
         self.reconcile_event.reset();
         if (self.reconcile_stopping.load(.acquire)) return error.ShuttingDown;
@@ -261,6 +280,10 @@ pub const Runtime = struct {
         self.reconcile_event.waitUncancelable(self.io);
         if (self.reconcile_stopping.load(.acquire)) return error.ShuttingDown;
         if (self.reconcile_error) |err| return err;
+        if (self.planned_range_action) |action| {
+            self.planned_range_action = null;
+            return action.execute(self.allocator, self.options.range_lease_fencer.?, self.commandSubmitter());
+        }
         const action = self.planned_action orelse return;
         self.planned_action = null;
         defer action.deinit();
@@ -272,13 +295,34 @@ pub const Runtime = struct {
         if (self.reconcile_stopping.load(.acquire)) {
             self.reconcile_error = error.ShuttingDown;
         } else switch (result) {
-            .ok => self.planned_action = self.reconciler.?.planOnce() catch |err| {
+            .ok => self.planReconciliation() catch |err| {
                 self.reconcile_error = err;
                 return self.reconcile_event.set(self.io);
             },
             .err => |err| self.reconcile_error = err,
         }
         self.reconcile_event.set(self.io);
+    }
+
+    fn planReconciliation(self: *Runtime) !void {
+        // An unreachable range fence must not starve placement/primary recovery.
+        var placement_planned = false;
+        if (!self.range_first) if (self.reconciler) |*reconciler| {
+            placement_planned = true;
+            self.planned_action = try reconciler.planOnce();
+            if (self.planned_action != null) return;
+        };
+        if (self.options.range_lease_fencer != null) {
+            const records = try self.machine.allRangeLeases(self.allocator);
+            defer self.allocator.free(records);
+            const now = std.Io.Timestamp.now(self.io, .boot).toMilliseconds();
+            if (now < 0) return error.InvalidClock;
+            self.planned_range_action = try self.range_expiry.plan(records, self.planning_term, @intCast(now));
+            if (self.planned_range_action != null) return;
+        }
+        if (!placement_planned) if (self.reconciler) |*reconciler| {
+            self.planned_action = try reconciler.planOnce();
+        };
     }
 
     fn commandSubmitter(self: *Runtime) reconciler_mod.CommandSubmitter {

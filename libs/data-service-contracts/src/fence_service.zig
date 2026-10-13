@@ -235,6 +235,36 @@ pub const FileStore = struct {
         };
     }
 
+    /// Explicit bootstrap only. Never recreate a missing ledger during recovery.
+    pub fn createEmpty(io: std.Io, parent: std.Io.Dir, basename: []const u8) !void {
+        const bytes = try encode(std.heap.page_allocator, &.{});
+        defer std.heap.page_allocator.free(bytes);
+        const file = try parent.createFile(io, basename, .{ .exclusive = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, bytes);
+        try file.sync(io);
+        const directory = try parent.openFile(io, ".", .{ .mode = .read_only });
+        defer directory.close(io);
+        try directory.sync(io);
+    }
+
+    /// Recovery must fail closed if durable fencing history has disappeared.
+    pub fn openRequired(allocator: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, basename: []const u8) !FileStore {
+        const bytes = try parent.readFileAlloc(io, basename, allocator, .limited(max_file_size + 1));
+        defer allocator.free(bytes);
+        const records = try decode(allocator, bytes);
+        errdefer if (records.len != 0) allocator.free(records);
+        // A previous process may have renamed the ledger but failed directory
+        // fsync. Repair durability before replay can acknowledge that record.
+        const file = try parent.openFile(io, basename, .{ .mode = .read_only });
+        defer file.close(io);
+        try file.sync(io);
+        const directory = try parent.openFile(io, ".", .{ .mode = .read_only });
+        defer directory.close(io);
+        try directory.sync(io);
+        return .{ .allocator = allocator, .io = io, .parent = parent, .basename = basename, .records = records };
+    }
+
     pub fn deinit(self: *FileStore) void {
         if (self.records.len != 0) self.allocator.free(self.records);
         self.* = undefined;
