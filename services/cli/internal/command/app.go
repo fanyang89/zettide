@@ -120,7 +120,7 @@ func writeRootUsage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintln(w, "Usage: zettidectl [global flags] <controller|data-node> <resource> <command> [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Targets:")
-	fmt.Fprintln(w, "  controller  Manage pools, nodes, members, volumes, and inspect heartbeats")
+	fmt.Fprintln(w, "  controller  Manage pools, nodes, members, volumes, filesystems, and inspect heartbeats")
 	fmt.Fprintln(w, "  data-node   Inspect holder and primary authority state")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags:")

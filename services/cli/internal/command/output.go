@@ -97,6 +97,12 @@ func (p *printer) printPageToken(message protoreflect.Message) error {
 	fields := message.Descriptor().Fields()
 	for i := 0; i < fields.Len(); i++ {
 		field := fields.Get(i)
+		if field.Name() == "next_after_filesystem_id" {
+			if cursor := message.Get(field).String(); cursor != "" {
+				_, err := fmt.Fprintf(p.w, "NEXT_AFTER_FILESYSTEM_ID\t%s\n", sanitizeCell(cursor))
+				return err
+			}
+		}
 		if field.Name() == "next_page_token" {
 			token := message.Get(field).Bytes()
 			if len(token) != 0 {

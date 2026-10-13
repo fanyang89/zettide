@@ -10,6 +10,7 @@ data-node diagnostics:
 - controller: Node register/get/list;
 - controller: Member register/get/list;
 - controller: Volume create/get/update/list/delete;
+- controller: Filesystem create/get/update/list/delete (logical provisioning only);
 - controller: Heartbeat get;
 - data-node: holder identify and primary inspect.
 
@@ -78,7 +79,9 @@ zettidectl --endpoint controller.storage.example:443 \
 zettidectl --endpoint 10.0.0.12:50052 data-node holder identify
 ```
 
-Opaque page tokens are accepted and printed as base64. Binary IDs accept either
+Pool/Volume/Node/Member page tokens are accepted and printed as base64.
+Filesystem lists instead use `--after-filesystem-id` with the returned UUID
+`NEXT_AFTER_FILESYSTEM_ID` (JSON: `next_after_filesystem_id`). Binary IDs accept either
 hexadecimal bytes or UUID text. `data-node primary inspect` requires the complete
 authority binding because the DataService validates the binding before returning
 its diagnostic state; run the command with `-h` to list all required fields.
@@ -115,7 +118,52 @@ zettidectl --endpoint 127.0.0.1:8001 controller pool delete \
   --request-id pool-delete-1
 ```
 
-A Pool cannot be deleted while it has live Volumes or registered Members.
+A Pool cannot be deleted while it has live Filesystems, live Volumes, or registered Members.
 Volume deletion may be asynchronous if Replica/Attachment dependencies exist;
 wait for `GetVolume` to return `NOT_FOUND` before deleting its Pool. No data nodes
 are needed for pure metadata CRUD; `PROVISIONING` does not mean data I/O is ready.
+
+## Filesystem metadata
+
+Filesystem commands manage **unmaterialized provisioning intents**, not mounted
+filesystems. They do not format storage, grant authority, publish exports, or
+perform file I/O. See [the API contract](../../docs/filesystem-metadata.md).
+
+Unlike Pool/Volume creation, supply a fresh canonical lowercase UUIDv7 with
+`--filesystem-id` and retain it across retries. Backend kind is fixed to Blob.
+The filename profile defaults to `legacy-raw` (case-sensitive); explicitly choose
+`--name-profile portable-v1` only when case-folded portable names are desired.
+The profile is immutable. Management names remain Pool-scoped and case-sensitive.
+
+```sh
+# Use an existing logical Pool and a fresh caller-selected UUIDv7.
+FILESYSTEM_ID=0198f54d-5c2a-7000-8000-000000000301
+zettidectl --endpoint 127.0.0.1:8001 controller filesystem create \
+  --filesystem-id "$FILESYSTEM_ID" --pool-id "$POOL_ID" --name files \
+  --name-profile legacy-raw --request-id filesystem-create-1
+zettidectl --endpoint 127.0.0.1:8001 controller filesystem get \
+  --filesystem-id "$FILESYSTEM_ID"
+zettidectl --endpoint 127.0.0.1:8001 controller filesystem list \
+  --pool-id "$POOL_ID" --page-size 1
+# Continue only if a cursor was returned; this is UUID text, not base64.
+zettidectl --endpoint 127.0.0.1:8001 controller filesystem list \
+  --pool-id "$POOL_ID" --after-filesystem-id "$NEXT_AFTER_FILESYSTEM_ID"
+# Use resource_version from Get; only description can be updated.
+zettidectl --endpoint 127.0.0.1:8001 controller filesystem update \
+  --filesystem-id "$FILESYSTEM_ID" --expected-resource-version "$FS_VERSION" \
+  --description "Shared files" --request-id filesystem-update-1
+# Refresh the version after an update. Delete cancels the provisioning intent.
+zettidectl --endpoint 127.0.0.1:8001 controller filesystem delete \
+  --filesystem-id "$FILESYSTEM_ID" --expected-resource-version "$LATEST_FS_VERSION" \
+  --request-id filesystem-delete-1
+```
+
+List defaults to 32 rows and accepts at most 32. Empty pages do not print a text
+continuation marker. Update with an empty or omitted description clears it.
+
+Mutation request IDs are generated when omitted. RPC and post-commit output
+errors include the key so an uncertain outcome can be retried with **identical
+fields and the same `--request-id`**; explicitly supplying keys is recommended.
+The CLI does not retry a mutation with a new ID. A stale-version rejection needs
+a fresh Get and a new request ID for a corrected operation. Historical retries
+can return a creation response after deletion without recreating the resource.

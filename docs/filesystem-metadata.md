@@ -90,8 +90,13 @@ Status mapping:
 - `RESOURCE_EXHAUSTED`: Filesystem/history limits;
 - leadership/quorum failures follow existing controller RPC behavior.
 
-No `zettidectl filesystem` subcommand is introduced in this slice. Generated Go
-bindings expose `FilesystemServiceClient`. A protobuf JSON Create request is:
+The CLI exposes `zettidectl controller filesystem create|get|list|update|delete`;
+see the [CLI examples](../services/cli/README.md#filesystem-metadata). Create
+requires `--filesystem-id` and defaults `--name-profile` to `legacy-raw`. Lists
+use `--after-filesystem-id`, not a base64 page token. Mutation RPC/output errors
+preserve the request ID needed for an exact retry, including generated IDs.
+Generated Go bindings also expose `FilesystemServiceClient`.
+A protobuf JSON Create request is:
 
 ```json
 {

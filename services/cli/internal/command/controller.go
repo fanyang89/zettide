@@ -10,10 +10,20 @@ import (
 
 func (a *app) runController(ctx context.Context, args []string) error {
 	if len(args) < 2 {
-		return errors.New("usage: zettidectl [global flags] controller <pool|node|member|volume|heartbeat> <command> [flags]")
+		return errors.New("usage: zettidectl [global flags] controller <pool|node|member|volume|filesystem|heartbeat> <command> [flags]")
 	}
 	resource, command, flags := args[0], args[1], args[2:]
 	switch resource + " " + command {
+	case "filesystem create":
+		return a.createFilesystem(ctx, flags)
+	case "filesystem update":
+		return a.mutateFilesystem(ctx, flags, false)
+	case "filesystem delete":
+		return a.mutateFilesystem(ctx, flags, true)
+	case "filesystem get":
+		return a.getFilesystem(ctx, flags)
+	case "filesystem list":
+		return a.listFilesystems(ctx, flags)
 	case "pool create":
 		return a.createPool(ctx, flags)
 	case "pool get":
