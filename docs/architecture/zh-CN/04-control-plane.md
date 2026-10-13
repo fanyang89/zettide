@@ -122,6 +122,12 @@ qtr/PVE 属于外部仓库；本仓库只冻结上述 managed contract，不维�
 
 ## Filesystem Control
 
+首版受管文件服务选择**单活、多客户端**：同一 Filesystem 的命名空间修改由一个活跃服务串行化，
+多个客户端不能各自直接打开底层介质。Controller 的 Filesystem CRUD、placement、authority 和 export
+进入 Raft；inode/dentry/data 事务由 BlobFilesystem 管理，不能把控制面 Raft 复制当作文件数据复制。
+字段、接管条件、协议状态边界与验收要求见 [ADR 0004](../../decisions/0004-single-active-filesystem-service.md)。
+该受管生命周期仍为目标，不代表现有 FUSE/NFS 已接通 controller 授权。
+
 - NFS：Export intent 绑定 BlobFilesystem identity、client scope、read/write mode 和 export generation；NFS server/export path 是 locator。
 - FUSE：Mount intent 绑定 BlobFilesystem identity、host identity、mount mode 和 mount point；PID/fd 是 observation。
 - 当前静态 FUSE CSI Node service 直接管理 regular Blob file mount；目标 CSI filesystem lifecycle 将 Controller publication 与 Node mount 分开，但不创建新的存储语义。

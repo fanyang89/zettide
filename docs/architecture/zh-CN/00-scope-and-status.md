@@ -49,6 +49,7 @@ fencing、failover、repair 和 republish。
 | SPDK | 部分 | managed runtime、provider bdev、Catalog NVMf TCP/RDMA export、vhost-user-blk 与 initiator wrapper 有 focused tests |
 | `zettide-controller` | 基础 | Pool/Node/Member/Volume metadata、heartbeat、Raft/WAL/snapshot/ReadIndex、placement、authority/lease state machine 与 leader reconciliation 已接线；公开 Lease/Publication API 仍不存在 |
 | Tier 3 Replica protocol | 基础 | 三节点 file Replica fencing/authority 生命周期与 restart failover 已验证；controller 配置 canonical three-Member/Node/key/route set，并将同一 authority 在 primary 与两个 remote witness 上建立进程内 fail-closed lease window；daemon 组合持久 participant、coordinator、active-Replica file apply 与共享 fence/replay gate。进程内 primary API 会先通过 pairwise-HMAC Replica RPC 持久 arm 三个 route，再固定 local 与第一个 canonical remote，执行 signed PREPARE/COMMIT 2/3 durable fanout；UNKNOWN 由同 state directory journal 精确重试，第三个 Replica 会落后。仍无 client-facing write/publication、read/repair、replacement coordinator recovery、confidentiality、key rotation/revocation 或 vendor-specific NVMf 用户数据命令 |
+| Controller-managed Filesystem | 目标 | 已选择单活文件服务、多客户端访问，见 [ADR 0004](../../decisions/0004-single-active-filesystem-service.md)；Filesystem CRUD、单活授权与 managed export 尚未实现，不能以现有本地 FUSE/NFS 路径替代这些准入条件 |
 | TxFS shared qcow2 | 部分 | transaction、SCSI CAW/data transport、voting 和 allocator 基础存在；POSIX/FUSE 与 qtr 未接线 |
 
 ## 两种 Pool
