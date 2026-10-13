@@ -279,6 +279,51 @@ pub const PoolService = struct {
         };
     }
 
+    pub fn updatePool(self: *PoolService, payload: []const u8, completion: Completion) void {
+        self.mutatePool(payload, completion, false);
+    }
+
+    pub fn deletePool(self: *PoolService, payload: []const u8, completion: Completion) void {
+        self.mutatePool(payload, completion, true);
+    }
+
+    fn mutatePool(self: *PoolService, payload: []const u8, completion: Completion, deleting: bool) void {
+        // Pool mutation requests share the bounded description-update wire layout.
+        preflightUpdateVolumeRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid Pool mutation request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        const request = pb.PoolMutationCommand.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid Pool mutation request"));
+            return;
+        };
+        if (deleting and request.description.len != 0) {
+            completion.invoke(invalidArgument("DeletePool cannot set a description"));
+            return;
+        }
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+        const command = state_machine.encodePoolMutationCommand(self.allocator, request, deleting) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        defer self.allocator.free(command);
+        const pending = self.allocator.create(PoolMutationPending) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion };
+        self.raftor.propose(command, pending.callback()) catch |err| {
+            self.allocator.destroy(pending);
+            completion.invoke(raftFailure(err));
+        };
+    }
+
     pub fn updateVolume(self: *PoolService, payload: []const u8, completion: Completion) void {
         preflightUpdateVolumeRequest(payload) catch {
             completion.invoke(invalidArgument("invalid UpdateVolume request"));
@@ -1021,6 +1066,53 @@ const GetVolumePending = struct {
     }
 };
 
+const PoolMutationPending = struct {
+    owner: *PoolService,
+    completion: Completion,
+
+    fn callback(self: *PoolMutationPending) raft.ProposalCallback {
+        return .{ .ctx = self, .function = complete };
+    }
+    fn complete(ctx: *anyopaque, result: raft.ProposalResult) void {
+        const self: *PoolMutationPending = @ptrCast(@alignCast(ctx));
+        defer self.owner.allocator.destroy(self);
+        switch (result) {
+            .ok => |payload| self.completeApplied(payload),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+    fn completeApplied(self: *PoolMutationPending, payload: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(self.owner.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        const response = pb.PoolMutationApplyResponse.decode(&reader, arena.allocator()) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        switch (response.code) {
+            .POOL_MUTATION_APPLY_CODE_UPDATED, .POOL_MUTATION_APPLY_CODE_DELETED => {
+                const pool = response.pool orelse {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                // Both public responses carry Pool at field 1.
+                const encoded = encodeMessage(self.owner.allocator, pb.UpdatePoolResponse{ .pool = pool }) catch {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                defer self.owner.allocator.free(encoded);
+                self.completion.invoke(.{ .status = .ok, .payload = encoded });
+            },
+            .POOL_MUTATION_APPLY_CODE_NOT_FOUND => self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Pool not found") }),
+            .POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Pool resource version does not match") }),
+            .POOL_MUTATION_APPLY_CODE_NOT_EMPTY => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Pool still has Volumes or Members") }),
+            .POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "request_id was reused with different fields") }),
+            .POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT => self.completion.invoke(.{ .status = grpc.Status.init(.resource_exhausted, "request history limit reached") }),
+            else => self.completion.invoke(internalError()),
+        }
+    }
+};
+
 const UpdateVolumePending = struct {
     owner: *PoolService,
     completion: Completion,
@@ -1662,6 +1754,8 @@ pub const PoolRpc = struct {
 
     pub fn register(self: *PoolRpc, server: *grpc.Server) !void {
         try server.registerStream("/zettide.controller.v1.PoolService/CreatePool", handler(self, .create));
+        try server.registerStream("/zettide.controller.v1.PoolService/UpdatePool", handler(self, .update_pool));
+        try server.registerStream("/zettide.controller.v1.PoolService/DeletePool", handler(self, .delete_pool));
         try server.registerStream("/zettide.controller.v1.PoolService/GetPool", handler(self, .get));
         try server.registerStream("/zettide.controller.v1.PoolService/ListPools", handler(self, .list));
         try server.registerStream("/zettide.controller.v1.NodeService/RegisterNode", handler(self, .register_node));
@@ -1707,6 +1801,8 @@ pub const PoolRpc = struct {
     }
 
     const Method = enum {
+        update_pool,
+        delete_pool,
         create,
         get,
         list,
@@ -1731,6 +1827,8 @@ pub const PoolRpc = struct {
             .initial_metadata_mode = .explicit,
             .on_start = onStart,
             .on_message = switch (method) {
+                .update_pool => onUpdatePool,
+                .delete_pool => onDeletePool,
                 .create => onCreate,
                 .get => onGet,
                 .list => onList,
@@ -1852,6 +1950,15 @@ pub const PoolRpc = struct {
         return receive(ctx, .get_volume, stream, payload);
     }
 
+    fn onUpdatePool(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .update_pool, stream, payload);
+    }
+    fn onDeletePool(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .delete_pool, stream, payload);
+    }
+
     fn onUpdateVolume(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
         _ = context;
         return receive(ctx, .update_volume, stream, payload);
@@ -1920,6 +2027,8 @@ pub const PoolRpc = struct {
         pending.payload = null;
         defer self.allocator.free(payload);
         switch (pending.method) {
+            .update_pool => self.service.updatePool(payload, pending.completion()),
+            .delete_pool => self.service.deletePool(payload, pending.completion()),
             .create => self.service.createPool(payload, pending.completion()),
             .get => self.service.getPool(payload, pending.completion()),
             .list => self.service.listPools(payload, pending.completion()),
@@ -2641,11 +2750,11 @@ test "Volume service completes asynchronous create get delete replay and status 
         .expected_resource_version = volume.resource_version + 1,
     }, .failed_precondition);
     try expectUpdateVolumeStatus(allocator, &service, raftor, .{
-        .request_id = "volume-update-state",
+        .request_id = "volume-update-invalid-version",
         .volume_id = volume.id,
         .description = "changed",
-        .expected_resource_version = volume.resource_version,
-    }, .failed_precondition);
+        .expected_resource_version = 0,
+    }, .invalid_argument);
 
     const get_payload = try encodeMessage(allocator, pb.GetVolumeRequest{ .volume_id = volume.id });
     defer allocator.free(get_payload);

@@ -12,6 +12,8 @@ pub const Pool = struct {
     description: []u8,
     created_at_unix_ms: i64,
     created_revision: u64,
+    resource_version: u64,
+    deleted_revision: u64,
 
     pub fn init(allocator: std.mem.Allocator, source: pb.Pool) !Pool {
         const id = try allocator.dupe(u8, source.id);
@@ -25,6 +27,8 @@ pub const Pool = struct {
             .description = description,
             .created_at_unix_ms = source.created_at_unix_ms,
             .created_revision = source.created_revision,
+            .resource_version = if (source.resource_version == 0) source.created_revision else source.resource_version,
+            .deleted_revision = source.deleted_revision,
         };
     }
 
@@ -42,6 +46,8 @@ pub const Pool = struct {
             .description = self.description,
             .created_at_unix_ms = self.created_at_unix_ms,
             .created_revision = self.created_revision,
+            .resource_version = self.resource_version,
+            .deleted_revision = self.deleted_revision,
         };
     }
 };

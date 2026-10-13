@@ -22,6 +22,8 @@ const (
 	PoolService_CreatePool_FullMethodName = "/zettide.controller.v1.PoolService/CreatePool"
 	PoolService_GetPool_FullMethodName    = "/zettide.controller.v1.PoolService/GetPool"
 	PoolService_ListPools_FullMethodName  = "/zettide.controller.v1.PoolService/ListPools"
+	PoolService_UpdatePool_FullMethodName = "/zettide.controller.v1.PoolService/UpdatePool"
+	PoolService_DeletePool_FullMethodName = "/zettide.controller.v1.PoolService/DeletePool"
 )
 
 // PoolServiceClient is the client API for PoolService service.
@@ -31,6 +33,8 @@ type PoolServiceClient interface {
 	CreatePool(ctx context.Context, in *CreatePoolRequest, opts ...grpc.CallOption) (*CreatePoolResponse, error)
 	GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*GetPoolResponse, error)
 	ListPools(ctx context.Context, in *ListPoolsRequest, opts ...grpc.CallOption) (*ListPoolsResponse, error)
+	UpdatePool(ctx context.Context, in *UpdatePoolRequest, opts ...grpc.CallOption) (*UpdatePoolResponse, error)
+	DeletePool(ctx context.Context, in *DeletePoolRequest, opts ...grpc.CallOption) (*DeletePoolResponse, error)
 }
 
 type poolServiceClient struct {
@@ -71,6 +75,26 @@ func (c *poolServiceClient) ListPools(ctx context.Context, in *ListPoolsRequest,
 	return out, nil
 }
 
+func (c *poolServiceClient) UpdatePool(ctx context.Context, in *UpdatePoolRequest, opts ...grpc.CallOption) (*UpdatePoolResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdatePoolResponse)
+	err := c.cc.Invoke(ctx, PoolService_UpdatePool_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *poolServiceClient) DeletePool(ctx context.Context, in *DeletePoolRequest, opts ...grpc.CallOption) (*DeletePoolResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeletePoolResponse)
+	err := c.cc.Invoke(ctx, PoolService_DeletePool_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PoolServiceServer is the server API for PoolService service.
 // All implementations must embed UnimplementedPoolServiceServer
 // for forward compatibility.
@@ -78,6 +102,8 @@ type PoolServiceServer interface {
 	CreatePool(context.Context, *CreatePoolRequest) (*CreatePoolResponse, error)
 	GetPool(context.Context, *GetPoolRequest) (*GetPoolResponse, error)
 	ListPools(context.Context, *ListPoolsRequest) (*ListPoolsResponse, error)
+	UpdatePool(context.Context, *UpdatePoolRequest) (*UpdatePoolResponse, error)
+	DeletePool(context.Context, *DeletePoolRequest) (*DeletePoolResponse, error)
 	mustEmbedUnimplementedPoolServiceServer()
 }
 
@@ -96,6 +122,12 @@ func (UnimplementedPoolServiceServer) GetPool(context.Context, *GetPoolRequest) 
 }
 func (UnimplementedPoolServiceServer) ListPools(context.Context, *ListPoolsRequest) (*ListPoolsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPools not implemented")
+}
+func (UnimplementedPoolServiceServer) UpdatePool(context.Context, *UpdatePoolRequest) (*UpdatePoolResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdatePool not implemented")
+}
+func (UnimplementedPoolServiceServer) DeletePool(context.Context, *DeletePoolRequest) (*DeletePoolResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeletePool not implemented")
 }
 func (UnimplementedPoolServiceServer) mustEmbedUnimplementedPoolServiceServer() {}
 func (UnimplementedPoolServiceServer) testEmbeddedByValue()                     {}
@@ -172,6 +204,42 @@ func _PoolService_ListPools_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PoolService_UpdatePool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdatePoolRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PoolServiceServer).UpdatePool(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PoolService_UpdatePool_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PoolServiceServer).UpdatePool(ctx, req.(*UpdatePoolRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PoolService_DeletePool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeletePoolRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PoolServiceServer).DeletePool(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PoolService_DeletePool_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PoolServiceServer).DeletePool(ctx, req.(*DeletePoolRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PoolService_ServiceDesc is the grpc.ServiceDesc for PoolService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -190,6 +258,14 @@ var PoolService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListPools",
 			Handler:    _PoolService_ListPools_Handler,
+		},
+		{
+			MethodName: "UpdatePool",
+			Handler:    _PoolService_UpdatePool_Handler,
+		},
+		{
+			MethodName: "DeletePool",
+			Handler:    _PoolService_DeletePool_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

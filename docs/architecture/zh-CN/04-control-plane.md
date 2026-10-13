@@ -35,8 +35,8 @@ flowchart TB
 
 | 资源/API | 当前状态 | 目标责任 |
 | --- | --- | --- |
-| Pool | `CreatePool`、`GetPool`、`ListPools` 当前 | Tier 1/2 data mode/member lifecycle；Tier 3 placement resource |
-| Volume | `CreateVolume`、`GetVolume`、`DeleteVolume` 当前 metadata intent | Catalog capacity/protection；Tier 3 Replica、primary、write epoch |
+| Pool | `CreatePool`、`GetPool`、`ListPools`、`UpdatePool`、`DeletePool` 当前逻辑 metadata CRUD | Tier 1/2 data mode/member lifecycle；Tier 3 placement resource |
+| Volume | `CreateVolume`、`GetVolume`、`ListVolumes`、`UpdateVolume`、`DeleteVolume` 当前 metadata CRUD | Catalog capacity/protection；Tier 3 Replica、primary、write epoch |
 | Node | `RegisterNode`、`GetNode`、`ListNodes` 当前 create-only | capability update、isolation、unregister、failure-domain eligibility |
 | Member | `RegisterMember`、`GetMember`、`ListMembers` 当前 create-only | member lifecycle、capacity allocation、quarantine |
 | Heartbeat | `ReportHeartbeat`、`GetHeartbeat` 当前 leader-local | Replica/path/lease/repair observation |
@@ -60,7 +60,7 @@ flowchart TB
 
 当前 endpoint registry 和 `zettide-controller` 各自在局部实现了持久 desired state 或 request ID 幂等，但尚无共享 API。
 
-在 `zettide-controller` 中，Pool、Node、Member、Volume 共享全局 request-ID 域；相同 ID 即使跨资源类型重用也按 fingerprint 冲突。状态机保存最终 apply response，以便响应丢失后返回原结果。Heartbeat 的 incarnation/sequence ordering tuple 是 observation 去重键，不等同于 management operation ID。
+在 `zettide-controller` 中，Pool、Node、Member、Volume 共享全局 request-ID 域；相同 ID 即使跨资源类型重用也按 fingerprint 冲突。状态机保存最终 apply response，以便响应丢失后返回原结果。Pool/Volume 更新只替换 description，更新和删除均要求 expected_resource_version；Pool 仍有 live Volume 或 Member 时拒绝删除。删除后名称可复用，ID 不可复用。Volume 在 placement 尚未开始的 PROVISIONING 阶段即可修改描述，因此不依赖数据节点也可完成纯 metadata CRUD。Heartbeat 的 incarnation/sequence ordering tuple 是 observation 去重键，不等同于 management operation ID。
 
 ## Raft 写入与读取
 
@@ -176,7 +176,7 @@ RPC、proposal、ReadIndex、heartbeat、endpoint action、migration 和 repair 
 5. 追平 committed/applied 后才提供一致性服务，并先作为 follower 加入。
 6. 成为 leader 后从空 heartbeat view 重新收集 observation 并启动 reconciliation。
 
-生产配置必须使用持久 `data_dir`。当前 v5 snapshot 保存 Pool、Node、Member、Volume 和全局业务幂等记录，兼容读取 v2/v3/v4；socket、heartbeat 和临时 action 不进入 snapshot。
+生产配置必须使用持久 `data_dir`。当前 v12 snapshot 保存 Pool（含删除 tombstone）、Node、Member、Volume、authority 和全局业务幂等记录，兼容读取 v2–v11；socket、heartbeat 和临时 action 不进入 snapshot。
 
 ## 当前差距
 

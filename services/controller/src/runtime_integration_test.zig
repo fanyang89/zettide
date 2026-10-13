@@ -1495,3 +1495,173 @@ fn reserveUniquePorts(comptime count: usize) ![count]u16 {
     }
     return ports;
 }
+
+test "logical Pool and Volume CRUD through RPC survives snapshot and WAL restart" {
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+    const root_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
+    defer config_allocator.free(root_path);
+    const data_dir = try std.fmt.allocPrintSentinel(config_allocator, "{s}/crud", .{root_path}, 0);
+    defer config_allocator.free(data_dir);
+    const ports = try reserveUniquePorts(1);
+    const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
+    defer config_allocator.free(address);
+    const addresses = [_][]const u8{address};
+    var config = try makeConfig(1, .{1} ++ @as([15]u8, @splat(0)), &addresses, data_dir);
+    defer config.deinit();
+    var pool: CreatedPool = undefined;
+    var volume: OwnedVolume = undefined;
+    var pool_version: u64 = 0;
+    var volume_version: u64 = 0;
+    var delete_pool_response: pb.DeletePoolResponse = undefined;
+    var delete_volume_response: DeletedVolume = undefined;
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        pool = try createPool(runtime, "crud-pool", "logical");
+        errdefer pool.deinit();
+        var updated = try crudRpc(pb.UpdatePoolResponse, runtime, "/zettide.controller.v1.PoolService/UpdatePool", pb.UpdatePoolRequest{
+            .request_id = "crud-pool-update",
+            .pool_id = pool.id,
+            .description = "pool description",
+            .expected_resource_version = pool.revision,
+        });
+        defer updated.deinit(config_allocator);
+        pool_version = updated.pool.?.resource_version;
+        try std.testing.expect(pool_version > pool.revision);
+        try std.testing.expectEqualStrings("pool description", updated.pool.?.description);
+        var got = try crudRpc(pb.GetPoolResponse, runtime, "/zettide.controller.v1.PoolService/GetPool", pb.GetPoolRequest{ .selector = .{ .id = pool.id } });
+        defer got.deinit(config_allocator);
+        try std.testing.expectEqual(pool_version, got.pool.?.resource_version);
+        try expectList(runtime, 1);
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/UpdatePool", pb.UpdatePoolRequest{
+            .request_id = "stale-pool",
+            .pool_id = pool.id,
+            .description = "stale",
+            .expected_resource_version = pool.revision,
+        }, .failed_precondition);
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/UpdatePool", pb.UpdatePoolRequest{
+            .request_id = "crud-pool-update",
+            .pool_id = pool.id,
+            .description = "conflicting retry",
+            .expected_resource_version = pool.revision,
+        }, .failed_precondition);
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/DeletePool", pb.DeletePoolRequest{
+            .request_id = "invalid-delete",
+            .pool_id = pool.id,
+        }, .invalid_argument);
+        volume = try createVolume(runtime, "crud-volume", pool.id, "volume");
+        errdefer volume.deinit();
+        var volume_update = try crudRpc(pb.UpdateVolumeResponse, runtime, "/zettide.controller.v1.VolumeService/UpdateVolume", pb.UpdateVolumeRequest{
+            .request_id = "crud-volume-update",
+            .volume_id = volume.value.id,
+            .description = "volume description",
+            .expected_resource_version = volume.value.resource_version,
+        });
+        defer volume_update.deinit(config_allocator);
+        volume_version = volume_update.volume.?.resource_version;
+        try std.testing.expect(volume_version > volume.value.resource_version);
+        try std.testing.expectEqualStrings("volume description", volume_update.volume.?.description);
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/DeletePool", pb.DeletePoolRequest{
+            .request_id = "nonempty-pool",
+            .pool_id = pool.id,
+            .expected_resource_version = pool_version,
+        }, .failed_precondition);
+        var listed = try crudRpc(pb.ListVolumesResponse, runtime, "/zettide.controller.v1.VolumeService/ListVolumes", pb.ListVolumesRequest{ .pool_id = pool.id });
+        defer listed.deinit(config_allocator);
+        try std.testing.expectEqual(@as(usize, 1), listed.volumes.items.len);
+        try std.testing.expectEqual(volume_version, listed.volumes.items[0].resource_version);
+        try runtime.shutdown();
+    }
+    defer pool.deinit();
+    defer volume.deinit();
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        var update_replay = try crudRpc(pb.UpdatePoolResponse, runtime, "/zettide.controller.v1.PoolService/UpdatePool", pb.UpdatePoolRequest{
+            .request_id = "crud-pool-update",
+            .pool_id = pool.id,
+            .description = "pool description",
+            .expected_resource_version = pool.revision,
+        });
+        defer update_replay.deinit(config_allocator);
+        try std.testing.expectEqual(pool_version, update_replay.pool.?.resource_version);
+        var recovered = (try getVolume(runtime, volume.value.id)).?;
+        defer recovered.deinit();
+        try std.testing.expectEqual(volume_version, recovered.value.resource_version);
+        try std.testing.expectEqualStrings("volume description", recovered.value.description);
+        var volume_replay = try crudRpc(pb.UpdateVolumeResponse, runtime, "/zettide.controller.v1.VolumeService/UpdateVolume", pb.UpdateVolumeRequest{
+            .request_id = "crud-volume-update",
+            .volume_id = volume.value.id,
+            .description = "volume description",
+            .expected_resource_version = volume.value.resource_version,
+        });
+        defer volume_replay.deinit(config_allocator);
+        try std.testing.expectEqual(volume_version, volume_replay.volume.?.resource_version);
+        delete_volume_response = try deleteVolume(runtime, "crud-volume-delete", volume.value.id, volume_version);
+        errdefer delete_volume_response.deinit();
+        try expectVolumeNotFound(runtime, volume.value.id);
+        // Retrying a previously blocked request still returns its original result.
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/DeletePool", pb.DeletePoolRequest{
+            .request_id = "nonempty-pool",
+            .pool_id = pool.id,
+            .expected_resource_version = pool_version,
+        }, .failed_precondition);
+        delete_pool_response = try crudRpc(pb.DeletePoolResponse, runtime, "/zettide.controller.v1.PoolService/DeletePool", pb.DeletePoolRequest{
+            .request_id = "crud-pool-delete",
+            .pool_id = pool.id,
+            .expected_resource_version = pool_version,
+        });
+        errdefer delete_pool_response.deinit(config_allocator);
+        try std.testing.expect(delete_pool_response.pool.?.deleted_revision > pool_version);
+        try expectList(runtime, 0);
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/GetPool", pb.GetPoolRequest{ .selector = .{ .id = pool.id } }, .not_found);
+        try runtime.shutdown();
+    }
+    defer delete_volume_response.deinit();
+    defer delete_pool_response.deinit(config_allocator);
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        var replay = try crudRpc(pb.DeletePoolResponse, runtime, "/zettide.controller.v1.PoolService/DeletePool", pb.DeletePoolRequest{
+            .request_id = "crud-pool-delete",
+            .pool_id = pool.id,
+            .expected_resource_version = pool_version,
+        });
+        defer replay.deinit(config_allocator);
+        try std.testing.expectEqual(delete_pool_response.pool.?.deleted_revision, replay.pool.?.deleted_revision);
+        var deleted_replay = try deleteVolume(runtime, "crud-volume-delete", volume.value.id, volume_version);
+        defer deleted_replay.deinit();
+        try expectDeletesEqual(delete_volume_response, deleted_replay);
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/GetPool", pb.GetPoolRequest{ .selector = .{ .name = "logical" } }, .not_found);
+        var reused = try createPool(runtime, "crud-reuse-name", "logical");
+        defer reused.deinit();
+        try std.testing.expect(!std.mem.eql(u8, pool.id, reused.id));
+        // A lost Create response remains replayable even after deletion/name reuse.
+        var original = try createPool(runtime, "crud-pool", "logical");
+        defer original.deinit();
+        try std.testing.expectEqualStrings(pool.id, original.id);
+        try expectList(runtime, 1);
+    }
+}
+
+fn crudRpc(comptime Response: type, runtime: *runtime_mod.Runtime, method: []const u8, request: anytype) !Response {
+    const encoded = try encodeMessage(request);
+    defer runtime_allocator.free(encoded);
+    var result = try call(runtime, method, encoded);
+    defer result.deinit();
+    try std.testing.expectEqual(grpc.StatusCode.ok, result.status.code);
+    var reader: std.Io.Reader = .fixed(result.payload);
+    return Response.decode(&reader, config_allocator);
+}
+
+fn crudStatus(runtime: *runtime_mod.Runtime, method: []const u8, request: anytype, expected: grpc.StatusCode) !void {
+    const encoded = try encodeMessage(request);
+    defer runtime_allocator.free(encoded);
+    var result = try call(runtime, method, encoded);
+    defer result.deinit();
+    try std.testing.expectEqual(expected, result.status.code);
+}

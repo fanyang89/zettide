@@ -1355,6 +1355,70 @@ func (PrimaryFailoverApplyCode) EnumDescriptor() ([]byte, []int) {
 	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{22}
 }
 
+type PoolMutationApplyCode int32
+
+const (
+	PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_UNSPECIFIED      PoolMutationApplyCode = 0
+	PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_UPDATED          PoolMutationApplyCode = 1
+	PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_DELETED          PoolMutationApplyCode = 2
+	PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_NOT_FOUND        PoolMutationApplyCode = 3
+	PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT PoolMutationApplyCode = 4
+	PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_NOT_EMPTY        PoolMutationApplyCode = 5
+	PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT PoolMutationApplyCode = 6
+	PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT    PoolMutationApplyCode = 7
+)
+
+// Enum value maps for PoolMutationApplyCode.
+var (
+	PoolMutationApplyCode_name = map[int32]string{
+		0: "POOL_MUTATION_APPLY_CODE_UNSPECIFIED",
+		1: "POOL_MUTATION_APPLY_CODE_UPDATED",
+		2: "POOL_MUTATION_APPLY_CODE_DELETED",
+		3: "POOL_MUTATION_APPLY_CODE_NOT_FOUND",
+		4: "POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT",
+		5: "POOL_MUTATION_APPLY_CODE_NOT_EMPTY",
+		6: "POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT",
+		7: "POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT",
+	}
+	PoolMutationApplyCode_value = map[string]int32{
+		"POOL_MUTATION_APPLY_CODE_UNSPECIFIED":      0,
+		"POOL_MUTATION_APPLY_CODE_UPDATED":          1,
+		"POOL_MUTATION_APPLY_CODE_DELETED":          2,
+		"POOL_MUTATION_APPLY_CODE_NOT_FOUND":        3,
+		"POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT": 4,
+		"POOL_MUTATION_APPLY_CODE_NOT_EMPTY":        5,
+		"POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT": 6,
+		"POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT":    7,
+	}
+)
+
+func (x PoolMutationApplyCode) Enum() *PoolMutationApplyCode {
+	p := new(PoolMutationApplyCode)
+	*p = x
+	return p
+}
+
+func (x PoolMutationApplyCode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PoolMutationApplyCode) Descriptor() protoreflect.EnumDescriptor {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[23].Descriptor()
+}
+
+func (PoolMutationApplyCode) Type() protoreflect.EnumType {
+	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[23]
+}
+
+func (x PoolMutationApplyCode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PoolMutationApplyCode.Descriptor instead.
+func (PoolMutationApplyCode) EnumDescriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{23}
+}
+
 type Pool struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -1362,6 +1426,9 @@ type Pool struct {
 	Description     string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
 	CreatedAtUnixMs int64                  `protobuf:"varint,4,opt,name=created_at_unix_ms,json=createdAtUnixMs,proto3" json:"created_at_unix_ms,omitempty"`
 	CreatedRevision uint64                 `protobuf:"varint,5,opt,name=created_revision,json=createdRevision,proto3" json:"created_revision,omitempty"`
+	ResourceVersion uint64                 `protobuf:"varint,6,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
+	// Nonzero only in durable tombstones and successful DeletePool responses.
+	DeletedRevision uint64 `protobuf:"varint,7,opt,name=deleted_revision,json=deletedRevision,proto3" json:"deleted_revision,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1431,6 +1498,237 @@ func (x *Pool) GetCreatedRevision() uint64 {
 	return 0
 }
 
+func (x *Pool) GetResourceVersion() uint64 {
+	if x != nil {
+		return x.ResourceVersion
+	}
+	return 0
+}
+
+func (x *Pool) GetDeletedRevision() uint64 {
+	if x != nil {
+		return x.DeletedRevision
+	}
+	return 0
+}
+
+// Updates only the description. Names and IDs remain immutable.
+type UpdatePoolRequest struct {
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	RequestId               string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	PoolId                  string                 `protobuf:"bytes,2,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
+	Description             string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	ExpectedResourceVersion uint64                 `protobuf:"varint,4,opt,name=expected_resource_version,json=expectedResourceVersion,proto3" json:"expected_resource_version,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *UpdatePoolRequest) Reset() {
+	*x = UpdatePoolRequest{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdatePoolRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdatePoolRequest) ProtoMessage() {}
+
+func (x *UpdatePoolRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdatePoolRequest.ProtoReflect.Descriptor instead.
+func (*UpdatePoolRequest) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *UpdatePoolRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *UpdatePoolRequest) GetPoolId() string {
+	if x != nil {
+		return x.PoolId
+	}
+	return ""
+}
+
+func (x *UpdatePoolRequest) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *UpdatePoolRequest) GetExpectedResourceVersion() uint64 {
+	if x != nil {
+		return x.ExpectedResourceVersion
+	}
+	return 0
+}
+
+type UpdatePoolResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Pool          *Pool                  `protobuf:"bytes,1,opt,name=pool,proto3" json:"pool,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdatePoolResponse) Reset() {
+	*x = UpdatePoolResponse{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdatePoolResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdatePoolResponse) ProtoMessage() {}
+
+func (x *UpdatePoolResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdatePoolResponse.ProtoReflect.Descriptor instead.
+func (*UpdatePoolResponse) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *UpdatePoolResponse) GetPool() *Pool {
+	if x != nil {
+		return x.Pool
+	}
+	return nil
+}
+
+type DeletePoolRequest struct {
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	RequestId               string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	PoolId                  string                 `protobuf:"bytes,2,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
+	ExpectedResourceVersion uint64                 `protobuf:"varint,4,opt,name=expected_resource_version,json=expectedResourceVersion,proto3" json:"expected_resource_version,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *DeletePoolRequest) Reset() {
+	*x = DeletePoolRequest{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeletePoolRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeletePoolRequest) ProtoMessage() {}
+
+func (x *DeletePoolRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeletePoolRequest.ProtoReflect.Descriptor instead.
+func (*DeletePoolRequest) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *DeletePoolRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *DeletePoolRequest) GetPoolId() string {
+	if x != nil {
+		return x.PoolId
+	}
+	return ""
+}
+
+func (x *DeletePoolRequest) GetExpectedResourceVersion() uint64 {
+	if x != nil {
+		return x.ExpectedResourceVersion
+	}
+	return 0
+}
+
+type DeletePoolResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Pool          *Pool                  `protobuf:"bytes,1,opt,name=pool,proto3" json:"pool,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeletePoolResponse) Reset() {
+	*x = DeletePoolResponse{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeletePoolResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeletePoolResponse) ProtoMessage() {}
+
+func (x *DeletePoolResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeletePoolResponse.ProtoReflect.Descriptor instead.
+func (*DeletePoolResponse) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *DeletePoolResponse) GetPool() *Pool {
+	if x != nil {
+		return x.Pool
+	}
+	return nil
+}
+
 type CreatePoolRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -1442,7 +1740,7 @@ type CreatePoolRequest struct {
 
 func (x *CreatePoolRequest) Reset() {
 	*x = CreatePoolRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[1]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1454,7 +1752,7 @@ func (x *CreatePoolRequest) String() string {
 func (*CreatePoolRequest) ProtoMessage() {}
 
 func (x *CreatePoolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[1]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1467,7 +1765,7 @@ func (x *CreatePoolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatePoolRequest.ProtoReflect.Descriptor instead.
 func (*CreatePoolRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{1}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *CreatePoolRequest) GetRequestId() string {
@@ -1500,7 +1798,7 @@ type CreatePoolResponse struct {
 
 func (x *CreatePoolResponse) Reset() {
 	*x = CreatePoolResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[2]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1512,7 +1810,7 @@ func (x *CreatePoolResponse) String() string {
 func (*CreatePoolResponse) ProtoMessage() {}
 
 func (x *CreatePoolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[2]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1525,7 +1823,7 @@ func (x *CreatePoolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatePoolResponse.ProtoReflect.Descriptor instead.
 func (*CreatePoolResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{2}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CreatePoolResponse) GetPool() *Pool {
@@ -1548,7 +1846,7 @@ type GetPoolRequest struct {
 
 func (x *GetPoolRequest) Reset() {
 	*x = GetPoolRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[3]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1560,7 +1858,7 @@ func (x *GetPoolRequest) String() string {
 func (*GetPoolRequest) ProtoMessage() {}
 
 func (x *GetPoolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[3]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1573,7 +1871,7 @@ func (x *GetPoolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPoolRequest.ProtoReflect.Descriptor instead.
 func (*GetPoolRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{3}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetPoolRequest) GetSelector() isGetPoolRequest_Selector {
@@ -1626,7 +1924,7 @@ type GetPoolResponse struct {
 
 func (x *GetPoolResponse) Reset() {
 	*x = GetPoolResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[4]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1638,7 +1936,7 @@ func (x *GetPoolResponse) String() string {
 func (*GetPoolResponse) ProtoMessage() {}
 
 func (x *GetPoolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[4]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1651,7 +1949,7 @@ func (x *GetPoolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPoolResponse.ProtoReflect.Descriptor instead.
 func (*GetPoolResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{4}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetPoolResponse) GetPool() *Pool {
@@ -1671,7 +1969,7 @@ type ListPoolsRequest struct {
 
 func (x *ListPoolsRequest) Reset() {
 	*x = ListPoolsRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[5]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1683,7 +1981,7 @@ func (x *ListPoolsRequest) String() string {
 func (*ListPoolsRequest) ProtoMessage() {}
 
 func (x *ListPoolsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[5]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1696,7 +1994,7 @@ func (x *ListPoolsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPoolsRequest.ProtoReflect.Descriptor instead.
 func (*ListPoolsRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{5}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ListPoolsRequest) GetPageSize() uint32 {
@@ -1723,7 +2021,7 @@ type ListPoolsResponse struct {
 
 func (x *ListPoolsResponse) Reset() {
 	*x = ListPoolsResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[6]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1735,7 +2033,7 @@ func (x *ListPoolsResponse) String() string {
 func (*ListPoolsResponse) ProtoMessage() {}
 
 func (x *ListPoolsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[6]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1748,7 +2046,7 @@ func (x *ListPoolsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPoolsResponse.ProtoReflect.Descriptor instead.
 func (*ListPoolsResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{6}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ListPoolsResponse) GetPools() []*Pool {
@@ -1784,7 +2082,7 @@ type Node struct {
 
 func (x *Node) Reset() {
 	*x = Node{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[7]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1796,7 +2094,7 @@ func (x *Node) String() string {
 func (*Node) ProtoMessage() {}
 
 func (x *Node) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[7]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1809,7 +2107,7 @@ func (x *Node) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Node.ProtoReflect.Descriptor instead.
 func (*Node) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{7}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Node) GetId() string {
@@ -1907,7 +2205,7 @@ type RegisterNodeRequest struct {
 
 func (x *RegisterNodeRequest) Reset() {
 	*x = RegisterNodeRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[8]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1919,7 +2217,7 @@ func (x *RegisterNodeRequest) String() string {
 func (*RegisterNodeRequest) ProtoMessage() {}
 
 func (x *RegisterNodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[8]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1932,7 +2230,7 @@ func (x *RegisterNodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterNodeRequest.ProtoReflect.Descriptor instead.
 func (*RegisterNodeRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{8}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RegisterNodeRequest) GetRequestId() string {
@@ -2014,7 +2312,7 @@ type RegisterNodeResponse struct {
 
 func (x *RegisterNodeResponse) Reset() {
 	*x = RegisterNodeResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[9]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2026,7 +2324,7 @@ func (x *RegisterNodeResponse) String() string {
 func (*RegisterNodeResponse) ProtoMessage() {}
 
 func (x *RegisterNodeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[9]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2039,7 +2337,7 @@ func (x *RegisterNodeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterNodeResponse.ProtoReflect.Descriptor instead.
 func (*RegisterNodeResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{9}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *RegisterNodeResponse) GetNode() *Node {
@@ -2058,7 +2356,7 @@ type GetNodeRequest struct {
 
 func (x *GetNodeRequest) Reset() {
 	*x = GetNodeRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[10]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2070,7 +2368,7 @@ func (x *GetNodeRequest) String() string {
 func (*GetNodeRequest) ProtoMessage() {}
 
 func (x *GetNodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[10]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2083,7 +2381,7 @@ func (x *GetNodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNodeRequest.ProtoReflect.Descriptor instead.
 func (*GetNodeRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{10}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *GetNodeRequest) GetNodeId() string {
@@ -2102,7 +2400,7 @@ type GetNodeResponse struct {
 
 func (x *GetNodeResponse) Reset() {
 	*x = GetNodeResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[11]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2114,7 +2412,7 @@ func (x *GetNodeResponse) String() string {
 func (*GetNodeResponse) ProtoMessage() {}
 
 func (x *GetNodeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[11]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2127,7 +2425,7 @@ func (x *GetNodeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetNodeResponse.ProtoReflect.Descriptor instead.
 func (*GetNodeResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{11}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GetNodeResponse) GetNode() *Node {
@@ -2147,7 +2445,7 @@ type ListNodesRequest struct {
 
 func (x *ListNodesRequest) Reset() {
 	*x = ListNodesRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[12]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2159,7 +2457,7 @@ func (x *ListNodesRequest) String() string {
 func (*ListNodesRequest) ProtoMessage() {}
 
 func (x *ListNodesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[12]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2172,7 +2470,7 @@ func (x *ListNodesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNodesRequest.ProtoReflect.Descriptor instead.
 func (*ListNodesRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{12}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ListNodesRequest) GetPageSize() uint32 {
@@ -2199,7 +2497,7 @@ type ListNodesResponse struct {
 
 func (x *ListNodesResponse) Reset() {
 	*x = ListNodesResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[13]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2211,7 +2509,7 @@ func (x *ListNodesResponse) String() string {
 func (*ListNodesResponse) ProtoMessage() {}
 
 func (x *ListNodesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[13]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2224,7 +2522,7 @@ func (x *ListNodesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListNodesResponse.ProtoReflect.Descriptor instead.
 func (*ListNodesResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{13}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ListNodesResponse) GetNodes() []*Node {
@@ -2260,7 +2558,7 @@ type Member struct {
 
 func (x *Member) Reset() {
 	*x = Member{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[14]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2272,7 +2570,7 @@ func (x *Member) String() string {
 func (*Member) ProtoMessage() {}
 
 func (x *Member) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[14]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2285,7 +2583,7 @@ func (x *Member) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Member.ProtoReflect.Descriptor instead.
 func (*Member) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{14}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Member) GetId() []byte {
@@ -2384,7 +2682,7 @@ type RegisterMemberRequest struct {
 
 func (x *RegisterMemberRequest) Reset() {
 	*x = RegisterMemberRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[15]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2396,7 +2694,7 @@ func (x *RegisterMemberRequest) String() string {
 func (*RegisterMemberRequest) ProtoMessage() {}
 
 func (x *RegisterMemberRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[15]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2409,7 +2707,7 @@ func (x *RegisterMemberRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterMemberRequest.ProtoReflect.Descriptor instead.
 func (*RegisterMemberRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{15}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RegisterMemberRequest) GetRequestId() string {
@@ -2498,7 +2796,7 @@ type RegisterMemberResponse struct {
 
 func (x *RegisterMemberResponse) Reset() {
 	*x = RegisterMemberResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[16]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2510,7 +2808,7 @@ func (x *RegisterMemberResponse) String() string {
 func (*RegisterMemberResponse) ProtoMessage() {}
 
 func (x *RegisterMemberResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[16]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2523,7 +2821,7 @@ func (x *RegisterMemberResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterMemberResponse.ProtoReflect.Descriptor instead.
 func (*RegisterMemberResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{16}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RegisterMemberResponse) GetMember() *Member {
@@ -2542,7 +2840,7 @@ type GetMemberRequest struct {
 
 func (x *GetMemberRequest) Reset() {
 	*x = GetMemberRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[17]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2554,7 +2852,7 @@ func (x *GetMemberRequest) String() string {
 func (*GetMemberRequest) ProtoMessage() {}
 
 func (x *GetMemberRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[17]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2567,7 +2865,7 @@ func (x *GetMemberRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMemberRequest.ProtoReflect.Descriptor instead.
 func (*GetMemberRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{17}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *GetMemberRequest) GetMemberId() []byte {
@@ -2586,7 +2884,7 @@ type GetMemberResponse struct {
 
 func (x *GetMemberResponse) Reset() {
 	*x = GetMemberResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[18]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2598,7 +2896,7 @@ func (x *GetMemberResponse) String() string {
 func (*GetMemberResponse) ProtoMessage() {}
 
 func (x *GetMemberResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[18]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2611,7 +2909,7 @@ func (x *GetMemberResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMemberResponse.ProtoReflect.Descriptor instead.
 func (*GetMemberResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{18}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *GetMemberResponse) GetMember() *Member {
@@ -2631,7 +2929,7 @@ type ListMembersRequest struct {
 
 func (x *ListMembersRequest) Reset() {
 	*x = ListMembersRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[19]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2643,7 +2941,7 @@ func (x *ListMembersRequest) String() string {
 func (*ListMembersRequest) ProtoMessage() {}
 
 func (x *ListMembersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[19]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2656,7 +2954,7 @@ func (x *ListMembersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMembersRequest.ProtoReflect.Descriptor instead.
 func (*ListMembersRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{19}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ListMembersRequest) GetPageSize() uint32 {
@@ -2683,7 +2981,7 @@ type ListMembersResponse struct {
 
 func (x *ListMembersResponse) Reset() {
 	*x = ListMembersResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[20]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2695,7 +2993,7 @@ func (x *ListMembersResponse) String() string {
 func (*ListMembersResponse) ProtoMessage() {}
 
 func (x *ListMembersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[20]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2708,7 +3006,7 @@ func (x *ListMembersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMembersResponse.ProtoReflect.Descriptor instead.
 func (*ListMembersResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{20}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ListMembersResponse) GetMembers() []*Member {
@@ -2737,7 +3035,7 @@ type MemberCapacity struct {
 
 func (x *MemberCapacity) Reset() {
 	*x = MemberCapacity{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[21]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2749,7 +3047,7 @@ func (x *MemberCapacity) String() string {
 func (*MemberCapacity) ProtoMessage() {}
 
 func (x *MemberCapacity) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[21]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2762,7 +3060,7 @@ func (x *MemberCapacity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MemberCapacity.ProtoReflect.Descriptor instead.
 func (*MemberCapacity) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{21}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *MemberCapacity) GetFreeExtentCount() uint64 {
@@ -2806,7 +3104,7 @@ type MemberHeartbeat struct {
 
 func (x *MemberHeartbeat) Reset() {
 	*x = MemberHeartbeat{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[22]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2818,7 +3116,7 @@ func (x *MemberHeartbeat) String() string {
 func (*MemberHeartbeat) ProtoMessage() {}
 
 func (x *MemberHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[22]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2831,7 +3129,7 @@ func (x *MemberHeartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MemberHeartbeat.ProtoReflect.Descriptor instead.
 func (*MemberHeartbeat) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{22}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *MemberHeartbeat) GetMemberId() []byte {
@@ -2882,7 +3180,7 @@ type ReportHeartbeatRequest struct {
 
 func (x *ReportHeartbeatRequest) Reset() {
 	*x = ReportHeartbeatRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[23]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2894,7 +3192,7 @@ func (x *ReportHeartbeatRequest) String() string {
 func (*ReportHeartbeatRequest) ProtoMessage() {}
 
 func (x *ReportHeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[23]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2907,7 +3205,7 @@ func (x *ReportHeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportHeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*ReportHeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{23}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ReportHeartbeatRequest) GetClusterId() []byte {
@@ -2959,7 +3257,7 @@ type NodeHeartbeat struct {
 
 func (x *NodeHeartbeat) Reset() {
 	*x = NodeHeartbeat{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[24]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2971,7 +3269,7 @@ func (x *NodeHeartbeat) String() string {
 func (*NodeHeartbeat) ProtoMessage() {}
 
 func (x *NodeHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[24]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2984,7 +3282,7 @@ func (x *NodeHeartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NodeHeartbeat.ProtoReflect.Descriptor instead.
 func (*NodeHeartbeat) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{24}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *NodeHeartbeat) GetNodeId() string {
@@ -3040,7 +3338,7 @@ type ReportHeartbeatResponse struct {
 
 func (x *ReportHeartbeatResponse) Reset() {
 	*x = ReportHeartbeatResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[25]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3052,7 +3350,7 @@ func (x *ReportHeartbeatResponse) String() string {
 func (*ReportHeartbeatResponse) ProtoMessage() {}
 
 func (x *ReportHeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[25]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3065,7 +3363,7 @@ func (x *ReportHeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReportHeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*ReportHeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{25}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ReportHeartbeatResponse) GetObservation() *NodeHeartbeat {
@@ -3098,7 +3396,7 @@ type GetHeartbeatRequest struct {
 
 func (x *GetHeartbeatRequest) Reset() {
 	*x = GetHeartbeatRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[26]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3110,7 +3408,7 @@ func (x *GetHeartbeatRequest) String() string {
 func (*GetHeartbeatRequest) ProtoMessage() {}
 
 func (x *GetHeartbeatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[26]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3123,7 +3421,7 @@ func (x *GetHeartbeatRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetHeartbeatRequest.ProtoReflect.Descriptor instead.
 func (*GetHeartbeatRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{26}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *GetHeartbeatRequest) GetNodeId() string {
@@ -3144,7 +3442,7 @@ type GetHeartbeatResponse struct {
 
 func (x *GetHeartbeatResponse) Reset() {
 	*x = GetHeartbeatResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[27]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3156,7 +3454,7 @@ func (x *GetHeartbeatResponse) String() string {
 func (*GetHeartbeatResponse) ProtoMessage() {}
 
 func (x *GetHeartbeatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[27]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3169,7 +3467,7 @@ func (x *GetHeartbeatResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetHeartbeatResponse.ProtoReflect.Descriptor instead.
 func (*GetHeartbeatResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{27}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *GetHeartbeatResponse) GetObservation() *NodeHeartbeat {
@@ -3219,7 +3517,7 @@ type Volume struct {
 
 func (x *Volume) Reset() {
 	*x = Volume{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[28]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3231,7 +3529,7 @@ func (x *Volume) String() string {
 func (*Volume) ProtoMessage() {}
 
 func (x *Volume) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[28]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3244,7 +3542,7 @@ func (x *Volume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Volume.ProtoReflect.Descriptor instead.
 func (*Volume) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{28}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Volume) GetId() string {
@@ -3386,7 +3684,7 @@ type CreateVolumeRequest struct {
 
 func (x *CreateVolumeRequest) Reset() {
 	*x = CreateVolumeRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[29]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3398,7 +3696,7 @@ func (x *CreateVolumeRequest) String() string {
 func (*CreateVolumeRequest) ProtoMessage() {}
 
 func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[29]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3411,7 +3709,7 @@ func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVolumeRequest.ProtoReflect.Descriptor instead.
 func (*CreateVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{29}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *CreateVolumeRequest) GetRequestId() string {
@@ -3458,7 +3756,7 @@ type CreateVolumeResponse struct {
 
 func (x *CreateVolumeResponse) Reset() {
 	*x = CreateVolumeResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[30]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3470,7 +3768,7 @@ func (x *CreateVolumeResponse) String() string {
 func (*CreateVolumeResponse) ProtoMessage() {}
 
 func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[30]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3483,7 +3781,7 @@ func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVolumeResponse.ProtoReflect.Descriptor instead.
 func (*CreateVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{30}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *CreateVolumeResponse) GetVolume() *Volume {
@@ -3502,7 +3800,7 @@ type GetVolumeRequest struct {
 
 func (x *GetVolumeRequest) Reset() {
 	*x = GetVolumeRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[31]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3514,7 +3812,7 @@ func (x *GetVolumeRequest) String() string {
 func (*GetVolumeRequest) ProtoMessage() {}
 
 func (x *GetVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[31]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3527,7 +3825,7 @@ func (x *GetVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVolumeRequest.ProtoReflect.Descriptor instead.
 func (*GetVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{31}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *GetVolumeRequest) GetVolumeId() string {
@@ -3546,7 +3844,7 @@ type GetVolumeResponse struct {
 
 func (x *GetVolumeResponse) Reset() {
 	*x = GetVolumeResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[32]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3558,7 +3856,7 @@ func (x *GetVolumeResponse) String() string {
 func (*GetVolumeResponse) ProtoMessage() {}
 
 func (x *GetVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[32]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3571,7 +3869,7 @@ func (x *GetVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVolumeResponse.ProtoReflect.Descriptor instead.
 func (*GetVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{32}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *GetVolumeResponse) GetVolume() *Volume {
@@ -3593,7 +3891,7 @@ type UpdateVolumeRequest struct {
 
 func (x *UpdateVolumeRequest) Reset() {
 	*x = UpdateVolumeRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[33]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3605,7 +3903,7 @@ func (x *UpdateVolumeRequest) String() string {
 func (*UpdateVolumeRequest) ProtoMessage() {}
 
 func (x *UpdateVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[33]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3618,7 +3916,7 @@ func (x *UpdateVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateVolumeRequest.ProtoReflect.Descriptor instead.
 func (*UpdateVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{33}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *UpdateVolumeRequest) GetRequestId() string {
@@ -3658,7 +3956,7 @@ type UpdateVolumeResponse struct {
 
 func (x *UpdateVolumeResponse) Reset() {
 	*x = UpdateVolumeResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[34]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3670,7 +3968,7 @@ func (x *UpdateVolumeResponse) String() string {
 func (*UpdateVolumeResponse) ProtoMessage() {}
 
 func (x *UpdateVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[34]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3683,7 +3981,7 @@ func (x *UpdateVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateVolumeResponse.ProtoReflect.Descriptor instead.
 func (*UpdateVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{34}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *UpdateVolumeResponse) GetVolume() *Volume {
@@ -3704,7 +4002,7 @@ type ListVolumesRequest struct {
 
 func (x *ListVolumesRequest) Reset() {
 	*x = ListVolumesRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[35]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3716,7 +4014,7 @@ func (x *ListVolumesRequest) String() string {
 func (*ListVolumesRequest) ProtoMessage() {}
 
 func (x *ListVolumesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[35]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3729,7 +4027,7 @@ func (x *ListVolumesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListVolumesRequest.ProtoReflect.Descriptor instead.
 func (*ListVolumesRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{35}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ListVolumesRequest) GetPoolId() string {
@@ -3763,7 +4061,7 @@ type ListVolumesResponse struct {
 
 func (x *ListVolumesResponse) Reset() {
 	*x = ListVolumesResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[36]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3775,7 +4073,7 @@ func (x *ListVolumesResponse) String() string {
 func (*ListVolumesResponse) ProtoMessage() {}
 
 func (x *ListVolumesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[36]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3788,7 +4086,7 @@ func (x *ListVolumesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListVolumesResponse.ProtoReflect.Descriptor instead.
 func (*ListVolumesResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{36}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ListVolumesResponse) GetVolumes() []*Volume {
@@ -3816,7 +4114,7 @@ type DeleteVolumeRequest struct {
 
 func (x *DeleteVolumeRequest) Reset() {
 	*x = DeleteVolumeRequest{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[37]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3828,7 +4126,7 @@ func (x *DeleteVolumeRequest) String() string {
 func (*DeleteVolumeRequest) ProtoMessage() {}
 
 func (x *DeleteVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[37]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3841,7 +4139,7 @@ func (x *DeleteVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteVolumeRequest.ProtoReflect.Descriptor instead.
 func (*DeleteVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{37}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *DeleteVolumeRequest) GetRequestId() string {
@@ -3878,7 +4176,7 @@ type DeleteVolumeResponse struct {
 
 func (x *DeleteVolumeResponse) Reset() {
 	*x = DeleteVolumeResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[38]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3890,7 +4188,7 @@ func (x *DeleteVolumeResponse) String() string {
 func (*DeleteVolumeResponse) ProtoMessage() {}
 
 func (x *DeleteVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[38]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3903,7 +4201,7 @@ func (x *DeleteVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteVolumeResponse.ProtoReflect.Descriptor instead.
 func (*DeleteVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{38}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *DeleteVolumeResponse) GetVolumeId() string {
@@ -3957,7 +4255,7 @@ type ReplicaAttestation struct {
 
 func (x *ReplicaAttestation) Reset() {
 	*x = ReplicaAttestation{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[39]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3969,7 +4267,7 @@ func (x *ReplicaAttestation) String() string {
 func (*ReplicaAttestation) ProtoMessage() {}
 
 func (x *ReplicaAttestation) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[39]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3982,7 +4280,7 @@ func (x *ReplicaAttestation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaAttestation.ProtoReflect.Descriptor instead.
 func (*ReplicaAttestation) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{39}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ReplicaAttestation) GetVolumeId() string {
@@ -4059,7 +4357,7 @@ type ReplicaPlacement struct {
 
 func (x *ReplicaPlacement) Reset() {
 	*x = ReplicaPlacement{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[40]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4071,7 +4369,7 @@ func (x *ReplicaPlacement) String() string {
 func (*ReplicaPlacement) ProtoMessage() {}
 
 func (x *ReplicaPlacement) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[40]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4084,7 +4382,7 @@ func (x *ReplicaPlacement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaPlacement.ProtoReflect.Descriptor instead.
 func (*ReplicaPlacement) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{40}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *ReplicaPlacement) GetId() string {
@@ -4174,7 +4472,7 @@ type ReplicaAllocation struct {
 
 func (x *ReplicaAllocation) Reset() {
 	*x = ReplicaAllocation{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[41]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4186,7 +4484,7 @@ func (x *ReplicaAllocation) String() string {
 func (*ReplicaAllocation) ProtoMessage() {}
 
 func (x *ReplicaAllocation) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[41]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4199,7 +4497,7 @@ func (x *ReplicaAllocation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaAllocation.ProtoReflect.Descriptor instead.
 func (*ReplicaAllocation) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{41}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ReplicaAllocation) GetId() string {
@@ -4282,7 +4580,7 @@ type VolumeAttachment struct {
 
 func (x *VolumeAttachment) Reset() {
 	*x = VolumeAttachment{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[42]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4294,7 +4592,7 @@ func (x *VolumeAttachment) String() string {
 func (*VolumeAttachment) ProtoMessage() {}
 
 func (x *VolumeAttachment) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[42]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4307,7 +4605,7 @@ func (x *VolumeAttachment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VolumeAttachment.ProtoReflect.Descriptor instead.
 func (*VolumeAttachment) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{42}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *VolumeAttachment) GetId() string {
@@ -4400,7 +4698,7 @@ type PrimaryAuthority struct {
 
 func (x *PrimaryAuthority) Reset() {
 	*x = PrimaryAuthority{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[43]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4412,7 +4710,7 @@ func (x *PrimaryAuthority) String() string {
 func (*PrimaryAuthority) ProtoMessage() {}
 
 func (x *PrimaryAuthority) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[43]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4425,7 +4723,7 @@ func (x *PrimaryAuthority) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrimaryAuthority.ProtoReflect.Descriptor instead.
 func (*PrimaryAuthority) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{43}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *PrimaryAuthority) GetVolumeId() string {
@@ -4578,7 +4876,7 @@ type PrimaryFailover struct {
 
 func (x *PrimaryFailover) Reset() {
 	*x = PrimaryFailover{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[44]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4590,7 +4888,7 @@ func (x *PrimaryFailover) String() string {
 func (*PrimaryFailover) ProtoMessage() {}
 
 func (x *PrimaryFailover) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[44]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4603,7 +4901,7 @@ func (x *PrimaryFailover) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrimaryFailover.ProtoReflect.Descriptor instead.
 func (*PrimaryFailover) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{44}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *PrimaryFailover) GetFailoverId() []byte {
@@ -4683,7 +4981,7 @@ type ReplicaFenceEvidence struct {
 
 func (x *ReplicaFenceEvidence) Reset() {
 	*x = ReplicaFenceEvidence{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[45]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4695,7 +4993,7 @@ func (x *ReplicaFenceEvidence) String() string {
 func (*ReplicaFenceEvidence) ProtoMessage() {}
 
 func (x *ReplicaFenceEvidence) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[45]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4708,7 +5006,7 @@ func (x *ReplicaFenceEvidence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaFenceEvidence.ProtoReflect.Descriptor instead.
 func (*ReplicaFenceEvidence) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{45}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ReplicaFenceEvidence) GetPlacementId() string {
@@ -4766,7 +5064,7 @@ type RecoveryEvidence struct {
 
 func (x *RecoveryEvidence) Reset() {
 	*x = RecoveryEvidence{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[46]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4778,7 +5076,7 @@ func (x *RecoveryEvidence) String() string {
 func (*RecoveryEvidence) ProtoMessage() {}
 
 func (x *RecoveryEvidence) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[46]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4791,7 +5089,7 @@ func (x *RecoveryEvidence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoveryEvidence.ProtoReflect.Descriptor instead.
 func (*RecoveryEvidence) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{46}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *RecoveryEvidence) GetVolumeId() string {
@@ -4840,7 +5138,7 @@ type VolumeTombstone struct {
 
 func (x *VolumeTombstone) Reset() {
 	*x = VolumeTombstone{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[47]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4852,7 +5150,7 @@ func (x *VolumeTombstone) String() string {
 func (*VolumeTombstone) ProtoMessage() {}
 
 func (x *VolumeTombstone) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[47]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4865,7 +5163,7 @@ func (x *VolumeTombstone) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VolumeTombstone.ProtoReflect.Descriptor instead.
 func (*VolumeTombstone) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{47}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *VolumeTombstone) GetVolume() *Volume {
@@ -4911,6 +5209,8 @@ type CommandEnvelope struct {
 	//	*CommandEnvelope_BeginPrimaryFailover
 	//	*CommandEnvelope_CommitPrimaryAuthorityFailoverReady
 	//	*CommandEnvelope_CompletePrimaryFailoverLeaseWait
+	//	*CommandEnvelope_UpdatePool
+	//	*CommandEnvelope_DeletePool
 	Command       isCommandEnvelope_Command `protobuf_oneof:"command"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4918,7 +5218,7 @@ type CommandEnvelope struct {
 
 func (x *CommandEnvelope) Reset() {
 	*x = CommandEnvelope{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[48]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4930,7 +5230,7 @@ func (x *CommandEnvelope) String() string {
 func (*CommandEnvelope) ProtoMessage() {}
 
 func (x *CommandEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[48]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4943,7 +5243,7 @@ func (x *CommandEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandEnvelope.ProtoReflect.Descriptor instead.
 func (*CommandEnvelope) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{48}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *CommandEnvelope) GetFormatVersion() uint32 {
@@ -5113,6 +5413,24 @@ func (x *CommandEnvelope) GetCompletePrimaryFailoverLeaseWait() *CompletePrimary
 	return nil
 }
 
+func (x *CommandEnvelope) GetUpdatePool() *PoolMutationCommand {
+	if x != nil {
+		if x, ok := x.Command.(*CommandEnvelope_UpdatePool); ok {
+			return x.UpdatePool
+		}
+	}
+	return nil
+}
+
+func (x *CommandEnvelope) GetDeletePool() *PoolMutationCommand {
+	if x != nil {
+		if x, ok := x.Command.(*CommandEnvelope_DeletePool); ok {
+			return x.DeletePool
+		}
+	}
+	return nil
+}
+
 type isCommandEnvelope_Command interface {
 	isCommandEnvelope_Command()
 }
@@ -5185,6 +5503,14 @@ type CommandEnvelope_CompletePrimaryFailoverLeaseWait struct {
 	CompletePrimaryFailoverLeaseWait *CompletePrimaryFailoverLeaseWaitCommand `protobuf:"bytes,18,opt,name=complete_primary_failover_lease_wait,json=completePrimaryFailoverLeaseWait,proto3,oneof"`
 }
 
+type CommandEnvelope_UpdatePool struct {
+	UpdatePool *PoolMutationCommand `protobuf:"bytes,19,opt,name=update_pool,json=updatePool,proto3,oneof"`
+}
+
+type CommandEnvelope_DeletePool struct {
+	DeletePool *PoolMutationCommand `protobuf:"bytes,20,opt,name=delete_pool,json=deletePool,proto3,oneof"`
+}
+
 func (*CommandEnvelope_CreatePool) isCommandEnvelope_Command() {}
 
 func (*CommandEnvelope_RegisterNode) isCommandEnvelope_Command() {}
@@ -5219,6 +5545,10 @@ func (*CommandEnvelope_CommitPrimaryAuthorityFailoverReady) isCommandEnvelope_Co
 
 func (*CommandEnvelope_CompletePrimaryFailoverLeaseWait) isCommandEnvelope_Command() {}
 
+func (*CommandEnvelope_UpdatePool) isCommandEnvelope_Command() {}
+
+func (*CommandEnvelope_DeletePool) isCommandEnvelope_Command() {}
+
 type CreatePoolCommand struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
 	RequestId               string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -5232,7 +5562,7 @@ type CreatePoolCommand struct {
 
 func (x *CreatePoolCommand) Reset() {
 	*x = CreatePoolCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[49]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5244,7 +5574,7 @@ func (x *CreatePoolCommand) String() string {
 func (*CreatePoolCommand) ProtoMessage() {}
 
 func (x *CreatePoolCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[49]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5257,7 +5587,7 @@ func (x *CreatePoolCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatePoolCommand.ProtoReflect.Descriptor instead.
 func (*CreatePoolCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{49}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *CreatePoolCommand) GetRequestId() string {
@@ -5314,7 +5644,7 @@ type RegisterNodeCommand struct {
 
 func (x *RegisterNodeCommand) Reset() {
 	*x = RegisterNodeCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[50]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5326,7 +5656,7 @@ func (x *RegisterNodeCommand) String() string {
 func (*RegisterNodeCommand) ProtoMessage() {}
 
 func (x *RegisterNodeCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[50]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5339,7 +5669,7 @@ func (x *RegisterNodeCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterNodeCommand.ProtoReflect.Descriptor instead.
 func (*RegisterNodeCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{50}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *RegisterNodeCommand) GetRequestId() string {
@@ -5439,7 +5769,7 @@ type RegisterMemberCommand struct {
 
 func (x *RegisterMemberCommand) Reset() {
 	*x = RegisterMemberCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[51]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5451,7 +5781,7 @@ func (x *RegisterMemberCommand) String() string {
 func (*RegisterMemberCommand) ProtoMessage() {}
 
 func (x *RegisterMemberCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[51]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5464,7 +5794,7 @@ func (x *RegisterMemberCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterMemberCommand.ProtoReflect.Descriptor instead.
 func (*RegisterMemberCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{51}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *RegisterMemberCommand) GetRequestId() string {
@@ -5566,7 +5896,7 @@ type CreateVolumeCommand struct {
 
 func (x *CreateVolumeCommand) Reset() {
 	*x = CreateVolumeCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[52]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5578,7 +5908,7 @@ func (x *CreateVolumeCommand) String() string {
 func (*CreateVolumeCommand) ProtoMessage() {}
 
 func (x *CreateVolumeCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[52]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5591,7 +5921,7 @@ func (x *CreateVolumeCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVolumeCommand.ProtoReflect.Descriptor instead.
 func (*CreateVolumeCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{52}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *CreateVolumeCommand) GetRequestId() string {
@@ -5655,7 +5985,7 @@ type DeleteVolumeCommand struct {
 
 func (x *DeleteVolumeCommand) Reset() {
 	*x = DeleteVolumeCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[53]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5667,7 +5997,7 @@ func (x *DeleteVolumeCommand) String() string {
 func (*DeleteVolumeCommand) ProtoMessage() {}
 
 func (x *DeleteVolumeCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[53]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5680,7 +6010,7 @@ func (x *DeleteVolumeCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteVolumeCommand.ProtoReflect.Descriptor instead.
 func (*DeleteVolumeCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{53}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *DeleteVolumeCommand) GetRequestId() string {
@@ -5723,7 +6053,7 @@ type UpdateVolumeCommand struct {
 
 func (x *UpdateVolumeCommand) Reset() {
 	*x = UpdateVolumeCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[54]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5735,7 +6065,7 @@ func (x *UpdateVolumeCommand) String() string {
 func (*UpdateVolumeCommand) ProtoMessage() {}
 
 func (x *UpdateVolumeCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[54]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5748,7 +6078,7 @@ func (x *UpdateVolumeCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateVolumeCommand.ProtoReflect.Descriptor instead.
 func (*UpdateVolumeCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{54}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *UpdateVolumeCommand) GetRequestId() string {
@@ -5789,7 +6119,7 @@ type ReplicaReservation struct {
 
 func (x *ReplicaReservation) Reset() {
 	*x = ReplicaReservation{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[55]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5801,7 +6131,7 @@ func (x *ReplicaReservation) String() string {
 func (*ReplicaReservation) ProtoMessage() {}
 
 func (x *ReplicaReservation) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[55]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5814,7 +6144,7 @@ func (x *ReplicaReservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReplicaReservation.ProtoReflect.Descriptor instead.
 func (*ReplicaReservation) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{55}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *ReplicaReservation) GetPlacement() *ReplicaPlacement {
@@ -5842,7 +6172,7 @@ type ReserveVolumeResourcesCommand struct {
 
 func (x *ReserveVolumeResourcesCommand) Reset() {
 	*x = ReserveVolumeResourcesCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[56]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5854,7 +6184,7 @@ func (x *ReserveVolumeResourcesCommand) String() string {
 func (*ReserveVolumeResourcesCommand) ProtoMessage() {}
 
 func (x *ReserveVolumeResourcesCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[56]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5867,7 +6197,7 @@ func (x *ReserveVolumeResourcesCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReserveVolumeResourcesCommand.ProtoReflect.Descriptor instead.
 func (*ReserveVolumeResourcesCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{56}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *ReserveVolumeResourcesCommand) GetVolumeId() string {
@@ -5906,7 +6236,7 @@ type ActivateReplicaCommand struct {
 
 func (x *ActivateReplicaCommand) Reset() {
 	*x = ActivateReplicaCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[57]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5918,7 +6248,7 @@ func (x *ActivateReplicaCommand) String() string {
 func (*ActivateReplicaCommand) ProtoMessage() {}
 
 func (x *ActivateReplicaCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[57]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5931,7 +6261,7 @@ func (x *ActivateReplicaCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivateReplicaCommand.ProtoReflect.Descriptor instead.
 func (*ActivateReplicaCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{57}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ActivateReplicaCommand) GetVolumeId() string {
@@ -5996,7 +6326,7 @@ type FinalizeVolumeDeletionCommand struct {
 
 func (x *FinalizeVolumeDeletionCommand) Reset() {
 	*x = FinalizeVolumeDeletionCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[58]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6008,7 +6338,7 @@ func (x *FinalizeVolumeDeletionCommand) String() string {
 func (*FinalizeVolumeDeletionCommand) ProtoMessage() {}
 
 func (x *FinalizeVolumeDeletionCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[58]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6021,7 +6351,7 @@ func (x *FinalizeVolumeDeletionCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FinalizeVolumeDeletionCommand.ProtoReflect.Descriptor instead.
 func (*FinalizeVolumeDeletionCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{58}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *FinalizeVolumeDeletionCommand) GetVolumeId() string {
@@ -6071,7 +6401,7 @@ type ProposePrimaryAuthorityCommand struct {
 
 func (x *ProposePrimaryAuthorityCommand) Reset() {
 	*x = ProposePrimaryAuthorityCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[59]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6083,7 +6413,7 @@ func (x *ProposePrimaryAuthorityCommand) String() string {
 func (*ProposePrimaryAuthorityCommand) ProtoMessage() {}
 
 func (x *ProposePrimaryAuthorityCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[59]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6096,7 +6426,7 @@ func (x *ProposePrimaryAuthorityCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposePrimaryAuthorityCommand.ProtoReflect.Descriptor instead.
 func (*ProposePrimaryAuthorityCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{59}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *ProposePrimaryAuthorityCommand) GetAuthority() *PrimaryAuthority {
@@ -6143,7 +6473,7 @@ type ActivatePrimaryAuthorityCommand struct {
 
 func (x *ActivatePrimaryAuthorityCommand) Reset() {
 	*x = ActivatePrimaryAuthorityCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[60]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6155,7 +6485,7 @@ func (x *ActivatePrimaryAuthorityCommand) String() string {
 func (*ActivatePrimaryAuthorityCommand) ProtoMessage() {}
 
 func (x *ActivatePrimaryAuthorityCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[60]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6168,7 +6498,7 @@ func (x *ActivatePrimaryAuthorityCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivatePrimaryAuthorityCommand.ProtoReflect.Descriptor instead.
 func (*ActivatePrimaryAuthorityCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{60}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *ActivatePrimaryAuthorityCommand) GetVolumeId() string {
@@ -6245,7 +6575,7 @@ type CommitPrimaryAuthorityReadyCommand struct {
 
 func (x *CommitPrimaryAuthorityReadyCommand) Reset() {
 	*x = CommitPrimaryAuthorityReadyCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[61]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6257,7 +6587,7 @@ func (x *CommitPrimaryAuthorityReadyCommand) String() string {
 func (*CommitPrimaryAuthorityReadyCommand) ProtoMessage() {}
 
 func (x *CommitPrimaryAuthorityReadyCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[61]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6270,7 +6600,7 @@ func (x *CommitPrimaryAuthorityReadyCommand) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use CommitPrimaryAuthorityReadyCommand.ProtoReflect.Descriptor instead.
 func (*CommitPrimaryAuthorityReadyCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{61}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *CommitPrimaryAuthorityReadyCommand) GetVolumeId() string {
@@ -6359,7 +6689,7 @@ type CommitPrimaryAuthorityRenewalReadyCommand struct {
 
 func (x *CommitPrimaryAuthorityRenewalReadyCommand) Reset() {
 	*x = CommitPrimaryAuthorityRenewalReadyCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[62]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6371,7 +6701,7 @@ func (x *CommitPrimaryAuthorityRenewalReadyCommand) String() string {
 func (*CommitPrimaryAuthorityRenewalReadyCommand) ProtoMessage() {}
 
 func (x *CommitPrimaryAuthorityRenewalReadyCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[62]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6384,7 +6714,7 @@ func (x *CommitPrimaryAuthorityRenewalReadyCommand) ProtoReflect() protoreflect.
 
 // Deprecated: Use CommitPrimaryAuthorityRenewalReadyCommand.ProtoReflect.Descriptor instead.
 func (*CommitPrimaryAuthorityRenewalReadyCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{62}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *CommitPrimaryAuthorityRenewalReadyCommand) GetVolumeId() string {
@@ -6457,7 +6787,7 @@ type AbortPrimaryAuthorityCandidateCommand struct {
 
 func (x *AbortPrimaryAuthorityCandidateCommand) Reset() {
 	*x = AbortPrimaryAuthorityCandidateCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[63]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6469,7 +6799,7 @@ func (x *AbortPrimaryAuthorityCandidateCommand) String() string {
 func (*AbortPrimaryAuthorityCandidateCommand) ProtoMessage() {}
 
 func (x *AbortPrimaryAuthorityCandidateCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[63]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6482,7 +6812,7 @@ func (x *AbortPrimaryAuthorityCandidateCommand) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use AbortPrimaryAuthorityCandidateCommand.ProtoReflect.Descriptor instead.
 func (*AbortPrimaryAuthorityCandidateCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{63}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *AbortPrimaryAuthorityCandidateCommand) GetVolumeId() string {
@@ -6542,7 +6872,7 @@ type BeginPrimaryFailoverCommand struct {
 
 func (x *BeginPrimaryFailoverCommand) Reset() {
 	*x = BeginPrimaryFailoverCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[64]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6554,7 +6884,7 @@ func (x *BeginPrimaryFailoverCommand) String() string {
 func (*BeginPrimaryFailoverCommand) ProtoMessage() {}
 
 func (x *BeginPrimaryFailoverCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[64]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6567,7 +6897,7 @@ func (x *BeginPrimaryFailoverCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BeginPrimaryFailoverCommand.ProtoReflect.Descriptor instead.
 func (*BeginPrimaryFailoverCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{64}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *BeginPrimaryFailoverCommand) GetVolumeId() string {
@@ -6635,7 +6965,7 @@ type CompletePrimaryFailoverLeaseWaitCommand struct {
 
 func (x *CompletePrimaryFailoverLeaseWaitCommand) Reset() {
 	*x = CompletePrimaryFailoverLeaseWaitCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[65]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6647,7 +6977,7 @@ func (x *CompletePrimaryFailoverLeaseWaitCommand) String() string {
 func (*CompletePrimaryFailoverLeaseWaitCommand) ProtoMessage() {}
 
 func (x *CompletePrimaryFailoverLeaseWaitCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[65]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6660,7 +6990,7 @@ func (x *CompletePrimaryFailoverLeaseWaitCommand) ProtoReflect() protoreflect.Me
 
 // Deprecated: Use CompletePrimaryFailoverLeaseWaitCommand.ProtoReflect.Descriptor instead.
 func (*CompletePrimaryFailoverLeaseWaitCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{65}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *CompletePrimaryFailoverLeaseWaitCommand) GetVolumeId() string {
@@ -6740,7 +7070,7 @@ type CommitPrimaryAuthorityFailoverReadyCommand struct {
 
 func (x *CommitPrimaryAuthorityFailoverReadyCommand) Reset() {
 	*x = CommitPrimaryAuthorityFailoverReadyCommand{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[66]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6752,7 +7082,7 @@ func (x *CommitPrimaryAuthorityFailoverReadyCommand) String() string {
 func (*CommitPrimaryAuthorityFailoverReadyCommand) ProtoMessage() {}
 
 func (x *CommitPrimaryAuthorityFailoverReadyCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[66]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6765,7 +7095,7 @@ func (x *CommitPrimaryAuthorityFailoverReadyCommand) ProtoReflect() protoreflect
 
 // Deprecated: Use CommitPrimaryAuthorityFailoverReadyCommand.ProtoReflect.Descriptor instead.
 func (*CommitPrimaryAuthorityFailoverReadyCommand) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{66}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *CommitPrimaryAuthorityFailoverReadyCommand) GetVolumeId() string {
@@ -6869,7 +7199,7 @@ type ApplyResponse struct {
 
 func (x *ApplyResponse) Reset() {
 	*x = ApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[67]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6881,7 +7211,7 @@ func (x *ApplyResponse) String() string {
 func (*ApplyResponse) ProtoMessage() {}
 
 func (x *ApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[67]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6894,7 +7224,7 @@ func (x *ApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApplyResponse.ProtoReflect.Descriptor instead.
 func (*ApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{67}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *ApplyResponse) GetCode() ApplyCode {
@@ -6921,7 +7251,7 @@ type RegisterNodeApplyResponse struct {
 
 func (x *RegisterNodeApplyResponse) Reset() {
 	*x = RegisterNodeApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[68]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6933,7 +7263,7 @@ func (x *RegisterNodeApplyResponse) String() string {
 func (*RegisterNodeApplyResponse) ProtoMessage() {}
 
 func (x *RegisterNodeApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[68]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6946,7 +7276,7 @@ func (x *RegisterNodeApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterNodeApplyResponse.ProtoReflect.Descriptor instead.
 func (*RegisterNodeApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{68}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *RegisterNodeApplyResponse) GetCode() RegisterNodeApplyCode {
@@ -6973,7 +7303,7 @@ type RegisterMemberApplyResponse struct {
 
 func (x *RegisterMemberApplyResponse) Reset() {
 	*x = RegisterMemberApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[69]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6985,7 +7315,7 @@ func (x *RegisterMemberApplyResponse) String() string {
 func (*RegisterMemberApplyResponse) ProtoMessage() {}
 
 func (x *RegisterMemberApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[69]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6998,7 +7328,7 @@ func (x *RegisterMemberApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterMemberApplyResponse.ProtoReflect.Descriptor instead.
 func (*RegisterMemberApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{69}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *RegisterMemberApplyResponse) GetCode() RegisterMemberApplyCode {
@@ -7025,7 +7355,7 @@ type CreateVolumeApplyResponse struct {
 
 func (x *CreateVolumeApplyResponse) Reset() {
 	*x = CreateVolumeApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[70]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7037,7 +7367,7 @@ func (x *CreateVolumeApplyResponse) String() string {
 func (*CreateVolumeApplyResponse) ProtoMessage() {}
 
 func (x *CreateVolumeApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[70]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7050,7 +7380,7 @@ func (x *CreateVolumeApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVolumeApplyResponse.ProtoReflect.Descriptor instead.
 func (*CreateVolumeApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{70}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *CreateVolumeApplyResponse) GetCode() CreateVolumeApplyCode {
@@ -7081,7 +7411,7 @@ type DeleteVolumeApplyResponse struct {
 
 func (x *DeleteVolumeApplyResponse) Reset() {
 	*x = DeleteVolumeApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[71]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7093,7 +7423,7 @@ func (x *DeleteVolumeApplyResponse) String() string {
 func (*DeleteVolumeApplyResponse) ProtoMessage() {}
 
 func (x *DeleteVolumeApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[71]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7106,7 +7436,7 @@ func (x *DeleteVolumeApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteVolumeApplyResponse.ProtoReflect.Descriptor instead.
 func (*DeleteVolumeApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{71}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *DeleteVolumeApplyResponse) GetCode() DeleteVolumeApplyCode {
@@ -7161,7 +7491,7 @@ type UpdateVolumeApplyResponse struct {
 
 func (x *UpdateVolumeApplyResponse) Reset() {
 	*x = UpdateVolumeApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[72]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7173,7 +7503,7 @@ func (x *UpdateVolumeApplyResponse) String() string {
 func (*UpdateVolumeApplyResponse) ProtoMessage() {}
 
 func (x *UpdateVolumeApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[72]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7186,7 +7516,7 @@ func (x *UpdateVolumeApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateVolumeApplyResponse.ProtoReflect.Descriptor instead.
 func (*UpdateVolumeApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{72}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *UpdateVolumeApplyResponse) GetCode() UpdateVolumeApplyCode {
@@ -7213,7 +7543,7 @@ type ReserveVolumeResourcesApplyResponse struct {
 
 func (x *ReserveVolumeResourcesApplyResponse) Reset() {
 	*x = ReserveVolumeResourcesApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[73]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7225,7 +7555,7 @@ func (x *ReserveVolumeResourcesApplyResponse) String() string {
 func (*ReserveVolumeResourcesApplyResponse) ProtoMessage() {}
 
 func (x *ReserveVolumeResourcesApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[73]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7238,7 +7568,7 @@ func (x *ReserveVolumeResourcesApplyResponse) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use ReserveVolumeResourcesApplyResponse.ProtoReflect.Descriptor instead.
 func (*ReserveVolumeResourcesApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{73}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *ReserveVolumeResourcesApplyResponse) GetCode() ReserveVolumeResourcesApplyCode {
@@ -7267,7 +7597,7 @@ type ActivateReplicaApplyResponse struct {
 
 func (x *ActivateReplicaApplyResponse) Reset() {
 	*x = ActivateReplicaApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[74]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7279,7 +7609,7 @@ func (x *ActivateReplicaApplyResponse) String() string {
 func (*ActivateReplicaApplyResponse) ProtoMessage() {}
 
 func (x *ActivateReplicaApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[74]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7292,7 +7622,7 @@ func (x *ActivateReplicaApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActivateReplicaApplyResponse.ProtoReflect.Descriptor instead.
 func (*ActivateReplicaApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{74}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *ActivateReplicaApplyResponse) GetCode() ActivateReplicaApplyCode {
@@ -7334,7 +7664,7 @@ type FinalizeVolumeDeletionApplyResponse struct {
 
 func (x *FinalizeVolumeDeletionApplyResponse) Reset() {
 	*x = FinalizeVolumeDeletionApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[75]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7346,7 +7676,7 @@ func (x *FinalizeVolumeDeletionApplyResponse) String() string {
 func (*FinalizeVolumeDeletionApplyResponse) ProtoMessage() {}
 
 func (x *FinalizeVolumeDeletionApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[75]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7359,7 +7689,7 @@ func (x *FinalizeVolumeDeletionApplyResponse) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use FinalizeVolumeDeletionApplyResponse.ProtoReflect.Descriptor instead.
 func (*FinalizeVolumeDeletionApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{75}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *FinalizeVolumeDeletionApplyResponse) GetCode() FinalizeVolumeDeletionApplyCode {
@@ -7394,7 +7724,7 @@ type PrimaryAuthorityApplyResponse struct {
 
 func (x *PrimaryAuthorityApplyResponse) Reset() {
 	*x = PrimaryAuthorityApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[76]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7406,7 +7736,7 @@ func (x *PrimaryAuthorityApplyResponse) String() string {
 func (*PrimaryAuthorityApplyResponse) ProtoMessage() {}
 
 func (x *PrimaryAuthorityApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[76]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7419,7 +7749,7 @@ func (x *PrimaryAuthorityApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrimaryAuthorityApplyResponse.ProtoReflect.Descriptor instead.
 func (*PrimaryAuthorityApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{76}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *PrimaryAuthorityApplyResponse) GetCode() PrimaryAuthorityApplyCode {
@@ -7455,7 +7785,7 @@ type PrimaryFailoverApplyResponse struct {
 
 func (x *PrimaryFailoverApplyResponse) Reset() {
 	*x = PrimaryFailoverApplyResponse{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[77]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7467,7 +7797,7 @@ func (x *PrimaryFailoverApplyResponse) String() string {
 func (*PrimaryFailoverApplyResponse) ProtoMessage() {}
 
 func (x *PrimaryFailoverApplyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[77]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7480,7 +7810,7 @@ func (x *PrimaryFailoverApplyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrimaryFailoverApplyResponse.ProtoReflect.Descriptor instead.
 func (*PrimaryFailoverApplyResponse) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{77}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *PrimaryFailoverApplyResponse) GetCode() PrimaryFailoverApplyCode {
@@ -7524,7 +7854,7 @@ type RequestRecord struct {
 
 func (x *RequestRecord) Reset() {
 	*x = RequestRecord{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[78]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7536,7 +7866,7 @@ func (x *RequestRecord) String() string {
 func (*RequestRecord) ProtoMessage() {}
 
 func (x *RequestRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[78]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7549,7 +7879,7 @@ func (x *RequestRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestRecord.ProtoReflect.Descriptor instead.
 func (*RequestRecord) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{78}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *RequestRecord) GetRequestId() string {
@@ -7608,7 +7938,7 @@ type StateSnapshot struct {
 
 func (x *StateSnapshot) Reset() {
 	*x = StateSnapshot{}
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[79]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7620,7 +7950,7 @@ func (x *StateSnapshot) String() string {
 func (*StateSnapshot) ProtoMessage() {}
 
 func (x *StateSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[79]
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7633,7 +7963,7 @@ func (x *StateSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateSnapshot.ProtoReflect.Descriptor instead.
 func (*StateSnapshot) Descriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{79}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *StateSnapshot) GetFormatVersion() uint32 {
@@ -7727,17 +8057,154 @@ func (x *StateSnapshot) GetPrimaryFailovers() []*PrimaryFailover {
 	return nil
 }
 
+type PoolMutationCommand struct {
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	RequestId               string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	PoolId                  string                 `protobuf:"bytes,2,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
+	Description             string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	ExpectedResourceVersion uint64                 `protobuf:"varint,4,opt,name=expected_resource_version,json=expectedResourceVersion,proto3" json:"expected_resource_version,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *PoolMutationCommand) Reset() {
+	*x = PoolMutationCommand{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[84]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PoolMutationCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PoolMutationCommand) ProtoMessage() {}
+
+func (x *PoolMutationCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[84]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PoolMutationCommand.ProtoReflect.Descriptor instead.
+func (*PoolMutationCommand) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{84}
+}
+
+func (x *PoolMutationCommand) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *PoolMutationCommand) GetPoolId() string {
+	if x != nil {
+		return x.PoolId
+	}
+	return ""
+}
+
+func (x *PoolMutationCommand) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *PoolMutationCommand) GetExpectedResourceVersion() uint64 {
+	if x != nil {
+		return x.ExpectedResourceVersion
+	}
+	return 0
+}
+
+type PoolMutationApplyResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          PoolMutationApplyCode  `protobuf:"varint,1,opt,name=code,proto3,enum=zettide.controller.v1.PoolMutationApplyCode" json:"code,omitempty"`
+	Pool          *Pool                  `protobuf:"bytes,2,opt,name=pool,proto3" json:"pool,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PoolMutationApplyResponse) Reset() {
+	*x = PoolMutationApplyResponse{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[85]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PoolMutationApplyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PoolMutationApplyResponse) ProtoMessage() {}
+
+func (x *PoolMutationApplyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[85]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PoolMutationApplyResponse.ProtoReflect.Descriptor instead.
+func (*PoolMutationApplyResponse) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{85}
+}
+
+func (x *PoolMutationApplyResponse) GetCode() PoolMutationApplyCode {
+	if x != nil {
+		return x.Code
+	}
+	return PoolMutationApplyCode_POOL_MUTATION_APPLY_CODE_UNSPECIFIED
+}
+
+func (x *PoolMutationApplyResponse) GetPool() *Pool {
+	if x != nil {
+		return x.Pool
+	}
+	return nil
+}
+
 var File_services_controller_proto_zettide_controller_v1_controller_proto protoreflect.FileDescriptor
 
 const file_services_controller_proto_zettide_controller_v1_controller_proto_rawDesc = "" +
 	"\n" +
-	"@services/controller/proto/zettide/controller/v1/controller.proto\x12\x15zettide.controller.v1\"\xa4\x01\n" +
+	"@services/controller/proto/zettide/controller/v1/controller.proto\x12\x15zettide.controller.v1\"\xfa\x01\n" +
 	"\x04Pool\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12+\n" +
 	"\x12created_at_unix_ms\x18\x04 \x01(\x03R\x0fcreatedAtUnixMs\x12)\n" +
-	"\x10created_revision\x18\x05 \x01(\x04R\x0fcreatedRevision\"h\n" +
+	"\x10created_revision\x18\x05 \x01(\x04R\x0fcreatedRevision\x12)\n" +
+	"\x10resource_version\x18\x06 \x01(\x04R\x0fresourceVersion\x12)\n" +
+	"\x10deleted_revision\x18\a \x01(\x04R\x0fdeletedRevision\"\xa9\x01\n" +
+	"\x11UpdatePoolRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
+	"\apool_id\x18\x02 \x01(\tR\x06poolId\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12:\n" +
+	"\x19expected_resource_version\x18\x04 \x01(\x04R\x17expectedResourceVersion\"E\n" +
+	"\x12UpdatePoolResponse\x12/\n" +
+	"\x04pool\x18\x01 \x01(\v2\x1b.zettide.controller.v1.PoolR\x04pool\"\x8d\x01\n" +
+	"\x11DeletePoolRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
+	"\apool_id\x18\x02 \x01(\tR\x06poolId\x12:\n" +
+	"\x19expected_resource_version\x18\x04 \x01(\x04R\x17expectedResourceVersionJ\x04\b\x03\x10\x04\"E\n" +
+	"\x12DeletePoolResponse\x12/\n" +
+	"\x04pool\x18\x01 \x01(\v2\x1b.zettide.controller.v1.PoolR\x04pool\"h\n" +
 	"\x11CreatePoolRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x12\n" +
@@ -8052,7 +8519,7 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x0fVolumeTombstone\x125\n" +
 	"\x06volume\x18\x01 \x01(\v2\x1d.zettide.controller.v1.VolumeR\x06volume\x12+\n" +
 	"\x12deleted_at_unix_ms\x18\x02 \x01(\x03R\x0fdeletedAtUnixMs\x12)\n" +
-	"\x10deleted_revision\x18\x03 \x01(\x04R\x0fdeletedRevision\"\xa5\x0f\n" +
+	"\x10deleted_revision\x18\x03 \x01(\x04R\x0fdeletedRevision\"\xc3\x10\n" +
 	"\x0fCommandEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x12K\n" +
 	"\vcreate_pool\x18\x02 \x01(\v2(.zettide.controller.v1.CreatePoolCommandH\x00R\n" +
@@ -8073,7 +8540,11 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"!abort_primary_authority_candidate\x18\x0f \x01(\v2<.zettide.controller.v1.AbortPrimaryAuthorityCandidateCommandH\x00R\x1eabortPrimaryAuthorityCandidate\x12j\n" +
 	"\x16begin_primary_failover\x18\x10 \x01(\v22.zettide.controller.v1.BeginPrimaryFailoverCommandH\x00R\x14beginPrimaryFailover\x12\x99\x01\n" +
 	"'commit_primary_authority_failover_ready\x18\x11 \x01(\v2A.zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommandH\x00R#commitPrimaryAuthorityFailoverReady\x12\x90\x01\n" +
-	"$complete_primary_failover_lease_wait\x18\x12 \x01(\v2>.zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommandH\x00R completePrimaryFailoverLeaseWaitB\t\n" +
+	"$complete_primary_failover_lease_wait\x18\x12 \x01(\v2>.zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommandH\x00R completePrimaryFailoverLeaseWait\x12M\n" +
+	"\vupdate_pool\x18\x13 \x01(\v2*.zettide.controller.v1.PoolMutationCommandH\x00R\n" +
+	"updatePool\x12M\n" +
+	"\vdelete_pool\x18\x14 \x01(\v2*.zettide.controller.v1.PoolMutationCommandH\x00R\n" +
+	"deletePoolB\t\n" +
 	"\acommand\"\xd0\x01\n" +
 	"\x11CreatePoolCommand\x12\x1d\n" +
 	"\n" +
@@ -8308,7 +8779,16 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	" \x03(\v2'.zettide.controller.v1.VolumeAttachmentR\x11volumeAttachments\x12X\n" +
 	"\x13primary_authorities\x18\v \x03(\v2'.zettide.controller.v1.PrimaryAuthorityR\x12primaryAuthorities\x12i\n" +
 	"\x1cprimary_authority_candidates\x18\f \x03(\v2'.zettide.controller.v1.PrimaryAuthorityR\x1aprimaryAuthorityCandidates\x12S\n" +
-	"\x11primary_failovers\x18\r \x03(\v2&.zettide.controller.v1.PrimaryFailoverR\x10primaryFailovers*\x8a\x01\n" +
+	"\x11primary_failovers\x18\r \x03(\v2&.zettide.controller.v1.PrimaryFailoverR\x10primaryFailovers\"\xab\x01\n" +
+	"\x13PoolMutationCommand\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
+	"\apool_id\x18\x02 \x01(\tR\x06poolId\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12:\n" +
+	"\x19expected_resource_version\x18\x04 \x01(\x04R\x17expectedResourceVersion\"\x8e\x01\n" +
+	"\x19PoolMutationApplyResponse\x12@\n" +
+	"\x04code\x18\x01 \x01(\x0e2,.zettide.controller.v1.PoolMutationApplyCodeR\x04code\x12/\n" +
+	"\x04pool\x18\x02 \x01(\v2\x1b.zettide.controller.v1.PoolR\x04pool*\x8a\x01\n" +
 	"\x14MemberHeartbeatState\x12&\n" +
 	"\"MEMBER_HEARTBEAT_STATE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eMEMBER_HEARTBEAT_STATE_PRESENT\x10\x01\x12&\n" +
@@ -8471,12 +8951,25 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	",PRIMARY_FAILOVER_APPLY_CODE_VERSION_CONFLICT\x10\x03\x12-\n" +
 	")PRIMARY_FAILOVER_APPLY_CODE_INVALID_STATE\x10\x04\x120\n" +
 	",PRIMARY_FAILOVER_APPLY_CODE_BINDING_MISMATCH\x10\x05\x124\n" +
-	"0PRIMARY_FAILOVER_APPLY_CODE_LEASE_WAIT_COMPLETED\x10\x062\xaa\x02\n" +
+	"0PRIMARY_FAILOVER_APPLY_CODE_LEASE_WAIT_COMPLETED\x10\x06*\xe7\x02\n" +
+	"\x15PoolMutationApplyCode\x12(\n" +
+	"$POOL_MUTATION_APPLY_CODE_UNSPECIFIED\x10\x00\x12$\n" +
+	" POOL_MUTATION_APPLY_CODE_UPDATED\x10\x01\x12$\n" +
+	" POOL_MUTATION_APPLY_CODE_DELETED\x10\x02\x12&\n" +
+	"\"POOL_MUTATION_APPLY_CODE_NOT_FOUND\x10\x03\x12-\n" +
+	")POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT\x10\x04\x12&\n" +
+	"\"POOL_MUTATION_APPLY_CODE_NOT_EMPTY\x10\x05\x12-\n" +
+	")POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT\x10\x06\x12*\n" +
+	"&POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT\x10\a2\xf0\x03\n" +
 	"\vPoolService\x12a\n" +
 	"\n" +
 	"CreatePool\x12(.zettide.controller.v1.CreatePoolRequest\x1a).zettide.controller.v1.CreatePoolResponse\x12X\n" +
 	"\aGetPool\x12%.zettide.controller.v1.GetPoolRequest\x1a&.zettide.controller.v1.GetPoolResponse\x12^\n" +
-	"\tListPools\x12'.zettide.controller.v1.ListPoolsRequest\x1a(.zettide.controller.v1.ListPoolsResponse2\xb0\x02\n" +
+	"\tListPools\x12'.zettide.controller.v1.ListPoolsRequest\x1a(.zettide.controller.v1.ListPoolsResponse\x12a\n" +
+	"\n" +
+	"UpdatePool\x12(.zettide.controller.v1.UpdatePoolRequest\x1a).zettide.controller.v1.UpdatePoolResponse\x12a\n" +
+	"\n" +
+	"DeletePool\x12(.zettide.controller.v1.DeletePoolRequest\x1a).zettide.controller.v1.DeletePoolResponse2\xb0\x02\n" +
 	"\vNodeService\x12g\n" +
 	"\fRegisterNode\x12*.zettide.controller.v1.RegisterNodeRequest\x1a+.zettide.controller.v1.RegisterNodeResponse\x12X\n" +
 	"\aGetNode\x12%.zettide.controller.v1.GetNodeRequest\x1a&.zettide.controller.v1.GetNodeResponse\x12^\n" +
@@ -8507,8 +9000,8 @@ func file_services_controller_proto_zettide_controller_v1_controller_proto_rawDe
 	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescData
 }
 
-var file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes = make([]protoimpl.EnumInfo, 23)
-var file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes = make([]protoimpl.MessageInfo, 80)
+var file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes = make([]protoimpl.EnumInfo, 24)
+var file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes = make([]protoimpl.MessageInfo, 86)
 var file_services_controller_proto_zettide_controller_v1_controller_proto_goTypes = []any{
 	(MemberHeartbeatState)(0),                          // 0: zettide.controller.v1.MemberHeartbeatState
 	(HeartbeatFreshness)(0),                            // 1: zettide.controller.v1.HeartbeatFreshness
@@ -8533,221 +9026,238 @@ var file_services_controller_proto_zettide_controller_v1_controller_proto_goType
 	(FinalizeVolumeDeletionApplyCode)(0),               // 20: zettide.controller.v1.FinalizeVolumeDeletionApplyCode
 	(PrimaryAuthorityApplyCode)(0),                     // 21: zettide.controller.v1.PrimaryAuthorityApplyCode
 	(PrimaryFailoverApplyCode)(0),                      // 22: zettide.controller.v1.PrimaryFailoverApplyCode
-	(*Pool)(nil),                                       // 23: zettide.controller.v1.Pool
-	(*CreatePoolRequest)(nil),                          // 24: zettide.controller.v1.CreatePoolRequest
-	(*CreatePoolResponse)(nil),                         // 25: zettide.controller.v1.CreatePoolResponse
-	(*GetPoolRequest)(nil),                             // 26: zettide.controller.v1.GetPoolRequest
-	(*GetPoolResponse)(nil),                            // 27: zettide.controller.v1.GetPoolResponse
-	(*ListPoolsRequest)(nil),                           // 28: zettide.controller.v1.ListPoolsRequest
-	(*ListPoolsResponse)(nil),                          // 29: zettide.controller.v1.ListPoolsResponse
-	(*Node)(nil),                                       // 30: zettide.controller.v1.Node
-	(*RegisterNodeRequest)(nil),                        // 31: zettide.controller.v1.RegisterNodeRequest
-	(*RegisterNodeResponse)(nil),                       // 32: zettide.controller.v1.RegisterNodeResponse
-	(*GetNodeRequest)(nil),                             // 33: zettide.controller.v1.GetNodeRequest
-	(*GetNodeResponse)(nil),                            // 34: zettide.controller.v1.GetNodeResponse
-	(*ListNodesRequest)(nil),                           // 35: zettide.controller.v1.ListNodesRequest
-	(*ListNodesResponse)(nil),                          // 36: zettide.controller.v1.ListNodesResponse
-	(*Member)(nil),                                     // 37: zettide.controller.v1.Member
-	(*RegisterMemberRequest)(nil),                      // 38: zettide.controller.v1.RegisterMemberRequest
-	(*RegisterMemberResponse)(nil),                     // 39: zettide.controller.v1.RegisterMemberResponse
-	(*GetMemberRequest)(nil),                           // 40: zettide.controller.v1.GetMemberRequest
-	(*GetMemberResponse)(nil),                          // 41: zettide.controller.v1.GetMemberResponse
-	(*ListMembersRequest)(nil),                         // 42: zettide.controller.v1.ListMembersRequest
-	(*ListMembersResponse)(nil),                        // 43: zettide.controller.v1.ListMembersResponse
-	(*MemberCapacity)(nil),                             // 44: zettide.controller.v1.MemberCapacity
-	(*MemberHeartbeat)(nil),                            // 45: zettide.controller.v1.MemberHeartbeat
-	(*ReportHeartbeatRequest)(nil),                     // 46: zettide.controller.v1.ReportHeartbeatRequest
-	(*NodeHeartbeat)(nil),                              // 47: zettide.controller.v1.NodeHeartbeat
-	(*ReportHeartbeatResponse)(nil),                    // 48: zettide.controller.v1.ReportHeartbeatResponse
-	(*GetHeartbeatRequest)(nil),                        // 49: zettide.controller.v1.GetHeartbeatRequest
-	(*GetHeartbeatResponse)(nil),                       // 50: zettide.controller.v1.GetHeartbeatResponse
-	(*Volume)(nil),                                     // 51: zettide.controller.v1.Volume
-	(*CreateVolumeRequest)(nil),                        // 52: zettide.controller.v1.CreateVolumeRequest
-	(*CreateVolumeResponse)(nil),                       // 53: zettide.controller.v1.CreateVolumeResponse
-	(*GetVolumeRequest)(nil),                           // 54: zettide.controller.v1.GetVolumeRequest
-	(*GetVolumeResponse)(nil),                          // 55: zettide.controller.v1.GetVolumeResponse
-	(*UpdateVolumeRequest)(nil),                        // 56: zettide.controller.v1.UpdateVolumeRequest
-	(*UpdateVolumeResponse)(nil),                       // 57: zettide.controller.v1.UpdateVolumeResponse
-	(*ListVolumesRequest)(nil),                         // 58: zettide.controller.v1.ListVolumesRequest
-	(*ListVolumesResponse)(nil),                        // 59: zettide.controller.v1.ListVolumesResponse
-	(*DeleteVolumeRequest)(nil),                        // 60: zettide.controller.v1.DeleteVolumeRequest
-	(*DeleteVolumeResponse)(nil),                       // 61: zettide.controller.v1.DeleteVolumeResponse
-	(*ReplicaAttestation)(nil),                         // 62: zettide.controller.v1.ReplicaAttestation
-	(*ReplicaPlacement)(nil),                           // 63: zettide.controller.v1.ReplicaPlacement
-	(*ReplicaAllocation)(nil),                          // 64: zettide.controller.v1.ReplicaAllocation
-	(*VolumeAttachment)(nil),                           // 65: zettide.controller.v1.VolumeAttachment
-	(*PrimaryAuthority)(nil),                           // 66: zettide.controller.v1.PrimaryAuthority
-	(*PrimaryFailover)(nil),                            // 67: zettide.controller.v1.PrimaryFailover
-	(*ReplicaFenceEvidence)(nil),                       // 68: zettide.controller.v1.ReplicaFenceEvidence
-	(*RecoveryEvidence)(nil),                           // 69: zettide.controller.v1.RecoveryEvidence
-	(*VolumeTombstone)(nil),                            // 70: zettide.controller.v1.VolumeTombstone
-	(*CommandEnvelope)(nil),                            // 71: zettide.controller.v1.CommandEnvelope
-	(*CreatePoolCommand)(nil),                          // 72: zettide.controller.v1.CreatePoolCommand
-	(*RegisterNodeCommand)(nil),                        // 73: zettide.controller.v1.RegisterNodeCommand
-	(*RegisterMemberCommand)(nil),                      // 74: zettide.controller.v1.RegisterMemberCommand
-	(*CreateVolumeCommand)(nil),                        // 75: zettide.controller.v1.CreateVolumeCommand
-	(*DeleteVolumeCommand)(nil),                        // 76: zettide.controller.v1.DeleteVolumeCommand
-	(*UpdateVolumeCommand)(nil),                        // 77: zettide.controller.v1.UpdateVolumeCommand
-	(*ReplicaReservation)(nil),                         // 78: zettide.controller.v1.ReplicaReservation
-	(*ReserveVolumeResourcesCommand)(nil),              // 79: zettide.controller.v1.ReserveVolumeResourcesCommand
-	(*ActivateReplicaCommand)(nil),                     // 80: zettide.controller.v1.ActivateReplicaCommand
-	(*FinalizeVolumeDeletionCommand)(nil),              // 81: zettide.controller.v1.FinalizeVolumeDeletionCommand
-	(*ProposePrimaryAuthorityCommand)(nil),             // 82: zettide.controller.v1.ProposePrimaryAuthorityCommand
-	(*ActivatePrimaryAuthorityCommand)(nil),            // 83: zettide.controller.v1.ActivatePrimaryAuthorityCommand
-	(*CommitPrimaryAuthorityReadyCommand)(nil),         // 84: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
-	(*CommitPrimaryAuthorityRenewalReadyCommand)(nil),  // 85: zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
-	(*AbortPrimaryAuthorityCandidateCommand)(nil),      // 86: zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
-	(*BeginPrimaryFailoverCommand)(nil),                // 87: zettide.controller.v1.BeginPrimaryFailoverCommand
-	(*CompletePrimaryFailoverLeaseWaitCommand)(nil),    // 88: zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
-	(*CommitPrimaryAuthorityFailoverReadyCommand)(nil), // 89: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
-	(*ApplyResponse)(nil),                              // 90: zettide.controller.v1.ApplyResponse
-	(*RegisterNodeApplyResponse)(nil),                  // 91: zettide.controller.v1.RegisterNodeApplyResponse
-	(*RegisterMemberApplyResponse)(nil),                // 92: zettide.controller.v1.RegisterMemberApplyResponse
-	(*CreateVolumeApplyResponse)(nil),                  // 93: zettide.controller.v1.CreateVolumeApplyResponse
-	(*DeleteVolumeApplyResponse)(nil),                  // 94: zettide.controller.v1.DeleteVolumeApplyResponse
-	(*UpdateVolumeApplyResponse)(nil),                  // 95: zettide.controller.v1.UpdateVolumeApplyResponse
-	(*ReserveVolumeResourcesApplyResponse)(nil),        // 96: zettide.controller.v1.ReserveVolumeResourcesApplyResponse
-	(*ActivateReplicaApplyResponse)(nil),               // 97: zettide.controller.v1.ActivateReplicaApplyResponse
-	(*FinalizeVolumeDeletionApplyResponse)(nil),        // 98: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse
-	(*PrimaryAuthorityApplyResponse)(nil),              // 99: zettide.controller.v1.PrimaryAuthorityApplyResponse
-	(*PrimaryFailoverApplyResponse)(nil),               // 100: zettide.controller.v1.PrimaryFailoverApplyResponse
-	(*RequestRecord)(nil),                              // 101: zettide.controller.v1.RequestRecord
-	(*StateSnapshot)(nil),                              // 102: zettide.controller.v1.StateSnapshot
+	(PoolMutationApplyCode)(0),                         // 23: zettide.controller.v1.PoolMutationApplyCode
+	(*Pool)(nil),                                       // 24: zettide.controller.v1.Pool
+	(*UpdatePoolRequest)(nil),                          // 25: zettide.controller.v1.UpdatePoolRequest
+	(*UpdatePoolResponse)(nil),                         // 26: zettide.controller.v1.UpdatePoolResponse
+	(*DeletePoolRequest)(nil),                          // 27: zettide.controller.v1.DeletePoolRequest
+	(*DeletePoolResponse)(nil),                         // 28: zettide.controller.v1.DeletePoolResponse
+	(*CreatePoolRequest)(nil),                          // 29: zettide.controller.v1.CreatePoolRequest
+	(*CreatePoolResponse)(nil),                         // 30: zettide.controller.v1.CreatePoolResponse
+	(*GetPoolRequest)(nil),                             // 31: zettide.controller.v1.GetPoolRequest
+	(*GetPoolResponse)(nil),                            // 32: zettide.controller.v1.GetPoolResponse
+	(*ListPoolsRequest)(nil),                           // 33: zettide.controller.v1.ListPoolsRequest
+	(*ListPoolsResponse)(nil),                          // 34: zettide.controller.v1.ListPoolsResponse
+	(*Node)(nil),                                       // 35: zettide.controller.v1.Node
+	(*RegisterNodeRequest)(nil),                        // 36: zettide.controller.v1.RegisterNodeRequest
+	(*RegisterNodeResponse)(nil),                       // 37: zettide.controller.v1.RegisterNodeResponse
+	(*GetNodeRequest)(nil),                             // 38: zettide.controller.v1.GetNodeRequest
+	(*GetNodeResponse)(nil),                            // 39: zettide.controller.v1.GetNodeResponse
+	(*ListNodesRequest)(nil),                           // 40: zettide.controller.v1.ListNodesRequest
+	(*ListNodesResponse)(nil),                          // 41: zettide.controller.v1.ListNodesResponse
+	(*Member)(nil),                                     // 42: zettide.controller.v1.Member
+	(*RegisterMemberRequest)(nil),                      // 43: zettide.controller.v1.RegisterMemberRequest
+	(*RegisterMemberResponse)(nil),                     // 44: zettide.controller.v1.RegisterMemberResponse
+	(*GetMemberRequest)(nil),                           // 45: zettide.controller.v1.GetMemberRequest
+	(*GetMemberResponse)(nil),                          // 46: zettide.controller.v1.GetMemberResponse
+	(*ListMembersRequest)(nil),                         // 47: zettide.controller.v1.ListMembersRequest
+	(*ListMembersResponse)(nil),                        // 48: zettide.controller.v1.ListMembersResponse
+	(*MemberCapacity)(nil),                             // 49: zettide.controller.v1.MemberCapacity
+	(*MemberHeartbeat)(nil),                            // 50: zettide.controller.v1.MemberHeartbeat
+	(*ReportHeartbeatRequest)(nil),                     // 51: zettide.controller.v1.ReportHeartbeatRequest
+	(*NodeHeartbeat)(nil),                              // 52: zettide.controller.v1.NodeHeartbeat
+	(*ReportHeartbeatResponse)(nil),                    // 53: zettide.controller.v1.ReportHeartbeatResponse
+	(*GetHeartbeatRequest)(nil),                        // 54: zettide.controller.v1.GetHeartbeatRequest
+	(*GetHeartbeatResponse)(nil),                       // 55: zettide.controller.v1.GetHeartbeatResponse
+	(*Volume)(nil),                                     // 56: zettide.controller.v1.Volume
+	(*CreateVolumeRequest)(nil),                        // 57: zettide.controller.v1.CreateVolumeRequest
+	(*CreateVolumeResponse)(nil),                       // 58: zettide.controller.v1.CreateVolumeResponse
+	(*GetVolumeRequest)(nil),                           // 59: zettide.controller.v1.GetVolumeRequest
+	(*GetVolumeResponse)(nil),                          // 60: zettide.controller.v1.GetVolumeResponse
+	(*UpdateVolumeRequest)(nil),                        // 61: zettide.controller.v1.UpdateVolumeRequest
+	(*UpdateVolumeResponse)(nil),                       // 62: zettide.controller.v1.UpdateVolumeResponse
+	(*ListVolumesRequest)(nil),                         // 63: zettide.controller.v1.ListVolumesRequest
+	(*ListVolumesResponse)(nil),                        // 64: zettide.controller.v1.ListVolumesResponse
+	(*DeleteVolumeRequest)(nil),                        // 65: zettide.controller.v1.DeleteVolumeRequest
+	(*DeleteVolumeResponse)(nil),                       // 66: zettide.controller.v1.DeleteVolumeResponse
+	(*ReplicaAttestation)(nil),                         // 67: zettide.controller.v1.ReplicaAttestation
+	(*ReplicaPlacement)(nil),                           // 68: zettide.controller.v1.ReplicaPlacement
+	(*ReplicaAllocation)(nil),                          // 69: zettide.controller.v1.ReplicaAllocation
+	(*VolumeAttachment)(nil),                           // 70: zettide.controller.v1.VolumeAttachment
+	(*PrimaryAuthority)(nil),                           // 71: zettide.controller.v1.PrimaryAuthority
+	(*PrimaryFailover)(nil),                            // 72: zettide.controller.v1.PrimaryFailover
+	(*ReplicaFenceEvidence)(nil),                       // 73: zettide.controller.v1.ReplicaFenceEvidence
+	(*RecoveryEvidence)(nil),                           // 74: zettide.controller.v1.RecoveryEvidence
+	(*VolumeTombstone)(nil),                            // 75: zettide.controller.v1.VolumeTombstone
+	(*CommandEnvelope)(nil),                            // 76: zettide.controller.v1.CommandEnvelope
+	(*CreatePoolCommand)(nil),                          // 77: zettide.controller.v1.CreatePoolCommand
+	(*RegisterNodeCommand)(nil),                        // 78: zettide.controller.v1.RegisterNodeCommand
+	(*RegisterMemberCommand)(nil),                      // 79: zettide.controller.v1.RegisterMemberCommand
+	(*CreateVolumeCommand)(nil),                        // 80: zettide.controller.v1.CreateVolumeCommand
+	(*DeleteVolumeCommand)(nil),                        // 81: zettide.controller.v1.DeleteVolumeCommand
+	(*UpdateVolumeCommand)(nil),                        // 82: zettide.controller.v1.UpdateVolumeCommand
+	(*ReplicaReservation)(nil),                         // 83: zettide.controller.v1.ReplicaReservation
+	(*ReserveVolumeResourcesCommand)(nil),              // 84: zettide.controller.v1.ReserveVolumeResourcesCommand
+	(*ActivateReplicaCommand)(nil),                     // 85: zettide.controller.v1.ActivateReplicaCommand
+	(*FinalizeVolumeDeletionCommand)(nil),              // 86: zettide.controller.v1.FinalizeVolumeDeletionCommand
+	(*ProposePrimaryAuthorityCommand)(nil),             // 87: zettide.controller.v1.ProposePrimaryAuthorityCommand
+	(*ActivatePrimaryAuthorityCommand)(nil),            // 88: zettide.controller.v1.ActivatePrimaryAuthorityCommand
+	(*CommitPrimaryAuthorityReadyCommand)(nil),         // 89: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
+	(*CommitPrimaryAuthorityRenewalReadyCommand)(nil),  // 90: zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
+	(*AbortPrimaryAuthorityCandidateCommand)(nil),      // 91: zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
+	(*BeginPrimaryFailoverCommand)(nil),                // 92: zettide.controller.v1.BeginPrimaryFailoverCommand
+	(*CompletePrimaryFailoverLeaseWaitCommand)(nil),    // 93: zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
+	(*CommitPrimaryAuthorityFailoverReadyCommand)(nil), // 94: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
+	(*ApplyResponse)(nil),                              // 95: zettide.controller.v1.ApplyResponse
+	(*RegisterNodeApplyResponse)(nil),                  // 96: zettide.controller.v1.RegisterNodeApplyResponse
+	(*RegisterMemberApplyResponse)(nil),                // 97: zettide.controller.v1.RegisterMemberApplyResponse
+	(*CreateVolumeApplyResponse)(nil),                  // 98: zettide.controller.v1.CreateVolumeApplyResponse
+	(*DeleteVolumeApplyResponse)(nil),                  // 99: zettide.controller.v1.DeleteVolumeApplyResponse
+	(*UpdateVolumeApplyResponse)(nil),                  // 100: zettide.controller.v1.UpdateVolumeApplyResponse
+	(*ReserveVolumeResourcesApplyResponse)(nil),        // 101: zettide.controller.v1.ReserveVolumeResourcesApplyResponse
+	(*ActivateReplicaApplyResponse)(nil),               // 102: zettide.controller.v1.ActivateReplicaApplyResponse
+	(*FinalizeVolumeDeletionApplyResponse)(nil),        // 103: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse
+	(*PrimaryAuthorityApplyResponse)(nil),              // 104: zettide.controller.v1.PrimaryAuthorityApplyResponse
+	(*PrimaryFailoverApplyResponse)(nil),               // 105: zettide.controller.v1.PrimaryFailoverApplyResponse
+	(*RequestRecord)(nil),                              // 106: zettide.controller.v1.RequestRecord
+	(*StateSnapshot)(nil),                              // 107: zettide.controller.v1.StateSnapshot
+	(*PoolMutationCommand)(nil),                        // 108: zettide.controller.v1.PoolMutationCommand
+	(*PoolMutationApplyResponse)(nil),                  // 109: zettide.controller.v1.PoolMutationApplyResponse
 }
 var file_services_controller_proto_zettide_controller_v1_controller_proto_depIdxs = []int32{
-	23,  // 0: zettide.controller.v1.CreatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	23,  // 1: zettide.controller.v1.GetPoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	23,  // 2: zettide.controller.v1.ListPoolsResponse.pools:type_name -> zettide.controller.v1.Pool
-	30,  // 3: zettide.controller.v1.RegisterNodeResponse.node:type_name -> zettide.controller.v1.Node
-	30,  // 4: zettide.controller.v1.GetNodeResponse.node:type_name -> zettide.controller.v1.Node
-	30,  // 5: zettide.controller.v1.ListNodesResponse.nodes:type_name -> zettide.controller.v1.Node
-	37,  // 6: zettide.controller.v1.RegisterMemberResponse.member:type_name -> zettide.controller.v1.Member
-	37,  // 7: zettide.controller.v1.GetMemberResponse.member:type_name -> zettide.controller.v1.Member
-	37,  // 8: zettide.controller.v1.ListMembersResponse.members:type_name -> zettide.controller.v1.Member
-	0,   // 9: zettide.controller.v1.MemberHeartbeat.state:type_name -> zettide.controller.v1.MemberHeartbeatState
-	44,  // 10: zettide.controller.v1.MemberHeartbeat.capacity:type_name -> zettide.controller.v1.MemberCapacity
-	45,  // 11: zettide.controller.v1.ReportHeartbeatRequest.members:type_name -> zettide.controller.v1.MemberHeartbeat
-	45,  // 12: zettide.controller.v1.NodeHeartbeat.members:type_name -> zettide.controller.v1.MemberHeartbeat
-	47,  // 13: zettide.controller.v1.ReportHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
-	47,  // 14: zettide.controller.v1.GetHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
-	1,   // 15: zettide.controller.v1.GetHeartbeatResponse.freshness:type_name -> zettide.controller.v1.HeartbeatFreshness
-	5,   // 16: zettide.controller.v1.Volume.protection_kind:type_name -> zettide.controller.v1.VolumeProtectionKind
-	2,   // 17: zettide.controller.v1.Volume.lifecycle_state:type_name -> zettide.controller.v1.VolumeLifecycleState
-	3,   // 18: zettide.controller.v1.Volume.availability_state:type_name -> zettide.controller.v1.VolumeAvailabilityState
-	4,   // 19: zettide.controller.v1.Volume.operation_phase:type_name -> zettide.controller.v1.VolumeOperationPhase
-	51,  // 20: zettide.controller.v1.CreateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	51,  // 21: zettide.controller.v1.GetVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	51,  // 22: zettide.controller.v1.UpdateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	51,  // 23: zettide.controller.v1.ListVolumesResponse.volumes:type_name -> zettide.controller.v1.Volume
-	51,  // 24: zettide.controller.v1.DeleteVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	6,   // 25: zettide.controller.v1.ReplicaPlacement.state:type_name -> zettide.controller.v1.ReplicaPlacementState
-	7,   // 26: zettide.controller.v1.ReplicaAllocation.state:type_name -> zettide.controller.v1.ReplicaAllocationState
-	8,   // 27: zettide.controller.v1.VolumeAttachment.access_mode:type_name -> zettide.controller.v1.VolumeAccessMode
-	9,   // 28: zettide.controller.v1.VolumeAttachment.state:type_name -> zettide.controller.v1.VolumeAttachmentState
-	10,  // 29: zettide.controller.v1.PrimaryAuthority.state:type_name -> zettide.controller.v1.PrimaryAuthorityState
-	11,  // 30: zettide.controller.v1.PrimaryFailover.state:type_name -> zettide.controller.v1.PrimaryFailoverState
-	51,  // 31: zettide.controller.v1.VolumeTombstone.volume:type_name -> zettide.controller.v1.Volume
-	72,  // 32: zettide.controller.v1.CommandEnvelope.create_pool:type_name -> zettide.controller.v1.CreatePoolCommand
-	73,  // 33: zettide.controller.v1.CommandEnvelope.register_node:type_name -> zettide.controller.v1.RegisterNodeCommand
-	74,  // 34: zettide.controller.v1.CommandEnvelope.register_member:type_name -> zettide.controller.v1.RegisterMemberCommand
-	75,  // 35: zettide.controller.v1.CommandEnvelope.create_volume:type_name -> zettide.controller.v1.CreateVolumeCommand
-	76,  // 36: zettide.controller.v1.CommandEnvelope.delete_volume:type_name -> zettide.controller.v1.DeleteVolumeCommand
-	77,  // 37: zettide.controller.v1.CommandEnvelope.update_volume:type_name -> zettide.controller.v1.UpdateVolumeCommand
-	79,  // 38: zettide.controller.v1.CommandEnvelope.reserve_volume_resources:type_name -> zettide.controller.v1.ReserveVolumeResourcesCommand
-	80,  // 39: zettide.controller.v1.CommandEnvelope.activate_replica:type_name -> zettide.controller.v1.ActivateReplicaCommand
-	81,  // 40: zettide.controller.v1.CommandEnvelope.finalize_volume_deletion:type_name -> zettide.controller.v1.FinalizeVolumeDeletionCommand
-	82,  // 41: zettide.controller.v1.CommandEnvelope.propose_primary_authority:type_name -> zettide.controller.v1.ProposePrimaryAuthorityCommand
-	83,  // 42: zettide.controller.v1.CommandEnvelope.activate_primary_authority:type_name -> zettide.controller.v1.ActivatePrimaryAuthorityCommand
-	84,  // 43: zettide.controller.v1.CommandEnvelope.commit_primary_authority_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
-	85,  // 44: zettide.controller.v1.CommandEnvelope.commit_primary_authority_renewal_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
-	86,  // 45: zettide.controller.v1.CommandEnvelope.abort_primary_authority_candidate:type_name -> zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
-	87,  // 46: zettide.controller.v1.CommandEnvelope.begin_primary_failover:type_name -> zettide.controller.v1.BeginPrimaryFailoverCommand
-	89,  // 47: zettide.controller.v1.CommandEnvelope.commit_primary_authority_failover_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
-	88,  // 48: zettide.controller.v1.CommandEnvelope.complete_primary_failover_lease_wait:type_name -> zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
-	63,  // 49: zettide.controller.v1.ReplicaReservation.placement:type_name -> zettide.controller.v1.ReplicaPlacement
-	64,  // 50: zettide.controller.v1.ReplicaReservation.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
-	78,  // 51: zettide.controller.v1.ReserveVolumeResourcesCommand.reservations:type_name -> zettide.controller.v1.ReplicaReservation
-	62,  // 52: zettide.controller.v1.ActivateReplicaCommand.attestation:type_name -> zettide.controller.v1.ReplicaAttestation
-	66,  // 53: zettide.controller.v1.ProposePrimaryAuthorityCommand.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	68,  // 54: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
-	69,  // 55: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
-	68,  // 56: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
-	69,  // 57: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
-	12,  // 58: zettide.controller.v1.ApplyResponse.code:type_name -> zettide.controller.v1.ApplyCode
-	23,  // 59: zettide.controller.v1.ApplyResponse.pool:type_name -> zettide.controller.v1.Pool
-	13,  // 60: zettide.controller.v1.RegisterNodeApplyResponse.code:type_name -> zettide.controller.v1.RegisterNodeApplyCode
-	30,  // 61: zettide.controller.v1.RegisterNodeApplyResponse.node:type_name -> zettide.controller.v1.Node
-	14,  // 62: zettide.controller.v1.RegisterMemberApplyResponse.code:type_name -> zettide.controller.v1.RegisterMemberApplyCode
-	37,  // 63: zettide.controller.v1.RegisterMemberApplyResponse.member:type_name -> zettide.controller.v1.Member
-	15,  // 64: zettide.controller.v1.CreateVolumeApplyResponse.code:type_name -> zettide.controller.v1.CreateVolumeApplyCode
-	51,  // 65: zettide.controller.v1.CreateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	16,  // 66: zettide.controller.v1.DeleteVolumeApplyResponse.code:type_name -> zettide.controller.v1.DeleteVolumeApplyCode
-	51,  // 67: zettide.controller.v1.DeleteVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	17,  // 68: zettide.controller.v1.UpdateVolumeApplyResponse.code:type_name -> zettide.controller.v1.UpdateVolumeApplyCode
-	51,  // 69: zettide.controller.v1.UpdateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	18,  // 70: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.code:type_name -> zettide.controller.v1.ReserveVolumeResourcesApplyCode
-	51,  // 71: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	19,  // 72: zettide.controller.v1.ActivateReplicaApplyResponse.code:type_name -> zettide.controller.v1.ActivateReplicaApplyCode
-	51,  // 73: zettide.controller.v1.ActivateReplicaApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	63,  // 74: zettide.controller.v1.ActivateReplicaApplyResponse.placement:type_name -> zettide.controller.v1.ReplicaPlacement
-	64,  // 75: zettide.controller.v1.ActivateReplicaApplyResponse.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
-	20,  // 76: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse.code:type_name -> zettide.controller.v1.FinalizeVolumeDeletionApplyCode
-	21,  // 77: zettide.controller.v1.PrimaryAuthorityApplyResponse.code:type_name -> zettide.controller.v1.PrimaryAuthorityApplyCode
-	66,  // 78: zettide.controller.v1.PrimaryAuthorityApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	51,  // 79: zettide.controller.v1.PrimaryAuthorityApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	22,  // 80: zettide.controller.v1.PrimaryFailoverApplyResponse.code:type_name -> zettide.controller.v1.PrimaryFailoverApplyCode
-	67,  // 81: zettide.controller.v1.PrimaryFailoverApplyResponse.failover:type_name -> zettide.controller.v1.PrimaryFailover
-	66,  // 82: zettide.controller.v1.PrimaryFailoverApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	51,  // 83: zettide.controller.v1.PrimaryFailoverApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	23,  // 84: zettide.controller.v1.StateSnapshot.pools:type_name -> zettide.controller.v1.Pool
-	101, // 85: zettide.controller.v1.StateSnapshot.requests:type_name -> zettide.controller.v1.RequestRecord
-	30,  // 86: zettide.controller.v1.StateSnapshot.nodes:type_name -> zettide.controller.v1.Node
-	37,  // 87: zettide.controller.v1.StateSnapshot.members:type_name -> zettide.controller.v1.Member
-	51,  // 88: zettide.controller.v1.StateSnapshot.volumes:type_name -> zettide.controller.v1.Volume
-	70,  // 89: zettide.controller.v1.StateSnapshot.volume_tombstones:type_name -> zettide.controller.v1.VolumeTombstone
-	63,  // 90: zettide.controller.v1.StateSnapshot.replica_placements:type_name -> zettide.controller.v1.ReplicaPlacement
-	64,  // 91: zettide.controller.v1.StateSnapshot.replica_allocations:type_name -> zettide.controller.v1.ReplicaAllocation
-	65,  // 92: zettide.controller.v1.StateSnapshot.volume_attachments:type_name -> zettide.controller.v1.VolumeAttachment
-	66,  // 93: zettide.controller.v1.StateSnapshot.primary_authorities:type_name -> zettide.controller.v1.PrimaryAuthority
-	66,  // 94: zettide.controller.v1.StateSnapshot.primary_authority_candidates:type_name -> zettide.controller.v1.PrimaryAuthority
-	67,  // 95: zettide.controller.v1.StateSnapshot.primary_failovers:type_name -> zettide.controller.v1.PrimaryFailover
-	24,  // 96: zettide.controller.v1.PoolService.CreatePool:input_type -> zettide.controller.v1.CreatePoolRequest
-	26,  // 97: zettide.controller.v1.PoolService.GetPool:input_type -> zettide.controller.v1.GetPoolRequest
-	28,  // 98: zettide.controller.v1.PoolService.ListPools:input_type -> zettide.controller.v1.ListPoolsRequest
-	31,  // 99: zettide.controller.v1.NodeService.RegisterNode:input_type -> zettide.controller.v1.RegisterNodeRequest
-	33,  // 100: zettide.controller.v1.NodeService.GetNode:input_type -> zettide.controller.v1.GetNodeRequest
-	35,  // 101: zettide.controller.v1.NodeService.ListNodes:input_type -> zettide.controller.v1.ListNodesRequest
-	38,  // 102: zettide.controller.v1.MemberService.RegisterMember:input_type -> zettide.controller.v1.RegisterMemberRequest
-	40,  // 103: zettide.controller.v1.MemberService.GetMember:input_type -> zettide.controller.v1.GetMemberRequest
-	42,  // 104: zettide.controller.v1.MemberService.ListMembers:input_type -> zettide.controller.v1.ListMembersRequest
-	46,  // 105: zettide.controller.v1.HeartbeatService.ReportHeartbeat:input_type -> zettide.controller.v1.ReportHeartbeatRequest
-	49,  // 106: zettide.controller.v1.HeartbeatService.GetHeartbeat:input_type -> zettide.controller.v1.GetHeartbeatRequest
-	52,  // 107: zettide.controller.v1.VolumeService.CreateVolume:input_type -> zettide.controller.v1.CreateVolumeRequest
-	54,  // 108: zettide.controller.v1.VolumeService.GetVolume:input_type -> zettide.controller.v1.GetVolumeRequest
-	56,  // 109: zettide.controller.v1.VolumeService.UpdateVolume:input_type -> zettide.controller.v1.UpdateVolumeRequest
-	58,  // 110: zettide.controller.v1.VolumeService.ListVolumes:input_type -> zettide.controller.v1.ListVolumesRequest
-	60,  // 111: zettide.controller.v1.VolumeService.DeleteVolume:input_type -> zettide.controller.v1.DeleteVolumeRequest
-	25,  // 112: zettide.controller.v1.PoolService.CreatePool:output_type -> zettide.controller.v1.CreatePoolResponse
-	27,  // 113: zettide.controller.v1.PoolService.GetPool:output_type -> zettide.controller.v1.GetPoolResponse
-	29,  // 114: zettide.controller.v1.PoolService.ListPools:output_type -> zettide.controller.v1.ListPoolsResponse
-	32,  // 115: zettide.controller.v1.NodeService.RegisterNode:output_type -> zettide.controller.v1.RegisterNodeResponse
-	34,  // 116: zettide.controller.v1.NodeService.GetNode:output_type -> zettide.controller.v1.GetNodeResponse
-	36,  // 117: zettide.controller.v1.NodeService.ListNodes:output_type -> zettide.controller.v1.ListNodesResponse
-	39,  // 118: zettide.controller.v1.MemberService.RegisterMember:output_type -> zettide.controller.v1.RegisterMemberResponse
-	41,  // 119: zettide.controller.v1.MemberService.GetMember:output_type -> zettide.controller.v1.GetMemberResponse
-	43,  // 120: zettide.controller.v1.MemberService.ListMembers:output_type -> zettide.controller.v1.ListMembersResponse
-	48,  // 121: zettide.controller.v1.HeartbeatService.ReportHeartbeat:output_type -> zettide.controller.v1.ReportHeartbeatResponse
-	50,  // 122: zettide.controller.v1.HeartbeatService.GetHeartbeat:output_type -> zettide.controller.v1.GetHeartbeatResponse
-	53,  // 123: zettide.controller.v1.VolumeService.CreateVolume:output_type -> zettide.controller.v1.CreateVolumeResponse
-	55,  // 124: zettide.controller.v1.VolumeService.GetVolume:output_type -> zettide.controller.v1.GetVolumeResponse
-	57,  // 125: zettide.controller.v1.VolumeService.UpdateVolume:output_type -> zettide.controller.v1.UpdateVolumeResponse
-	59,  // 126: zettide.controller.v1.VolumeService.ListVolumes:output_type -> zettide.controller.v1.ListVolumesResponse
-	61,  // 127: zettide.controller.v1.VolumeService.DeleteVolume:output_type -> zettide.controller.v1.DeleteVolumeResponse
-	112, // [112:128] is the sub-list for method output_type
-	96,  // [96:112] is the sub-list for method input_type
-	96,  // [96:96] is the sub-list for extension type_name
-	96,  // [96:96] is the sub-list for extension extendee
-	0,   // [0:96] is the sub-list for field type_name
+	24,  // 0: zettide.controller.v1.UpdatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	24,  // 1: zettide.controller.v1.DeletePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	24,  // 2: zettide.controller.v1.CreatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	24,  // 3: zettide.controller.v1.GetPoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	24,  // 4: zettide.controller.v1.ListPoolsResponse.pools:type_name -> zettide.controller.v1.Pool
+	35,  // 5: zettide.controller.v1.RegisterNodeResponse.node:type_name -> zettide.controller.v1.Node
+	35,  // 6: zettide.controller.v1.GetNodeResponse.node:type_name -> zettide.controller.v1.Node
+	35,  // 7: zettide.controller.v1.ListNodesResponse.nodes:type_name -> zettide.controller.v1.Node
+	42,  // 8: zettide.controller.v1.RegisterMemberResponse.member:type_name -> zettide.controller.v1.Member
+	42,  // 9: zettide.controller.v1.GetMemberResponse.member:type_name -> zettide.controller.v1.Member
+	42,  // 10: zettide.controller.v1.ListMembersResponse.members:type_name -> zettide.controller.v1.Member
+	0,   // 11: zettide.controller.v1.MemberHeartbeat.state:type_name -> zettide.controller.v1.MemberHeartbeatState
+	49,  // 12: zettide.controller.v1.MemberHeartbeat.capacity:type_name -> zettide.controller.v1.MemberCapacity
+	50,  // 13: zettide.controller.v1.ReportHeartbeatRequest.members:type_name -> zettide.controller.v1.MemberHeartbeat
+	50,  // 14: zettide.controller.v1.NodeHeartbeat.members:type_name -> zettide.controller.v1.MemberHeartbeat
+	52,  // 15: zettide.controller.v1.ReportHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
+	52,  // 16: zettide.controller.v1.GetHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
+	1,   // 17: zettide.controller.v1.GetHeartbeatResponse.freshness:type_name -> zettide.controller.v1.HeartbeatFreshness
+	5,   // 18: zettide.controller.v1.Volume.protection_kind:type_name -> zettide.controller.v1.VolumeProtectionKind
+	2,   // 19: zettide.controller.v1.Volume.lifecycle_state:type_name -> zettide.controller.v1.VolumeLifecycleState
+	3,   // 20: zettide.controller.v1.Volume.availability_state:type_name -> zettide.controller.v1.VolumeAvailabilityState
+	4,   // 21: zettide.controller.v1.Volume.operation_phase:type_name -> zettide.controller.v1.VolumeOperationPhase
+	56,  // 22: zettide.controller.v1.CreateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	56,  // 23: zettide.controller.v1.GetVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	56,  // 24: zettide.controller.v1.UpdateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	56,  // 25: zettide.controller.v1.ListVolumesResponse.volumes:type_name -> zettide.controller.v1.Volume
+	56,  // 26: zettide.controller.v1.DeleteVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	6,   // 27: zettide.controller.v1.ReplicaPlacement.state:type_name -> zettide.controller.v1.ReplicaPlacementState
+	7,   // 28: zettide.controller.v1.ReplicaAllocation.state:type_name -> zettide.controller.v1.ReplicaAllocationState
+	8,   // 29: zettide.controller.v1.VolumeAttachment.access_mode:type_name -> zettide.controller.v1.VolumeAccessMode
+	9,   // 30: zettide.controller.v1.VolumeAttachment.state:type_name -> zettide.controller.v1.VolumeAttachmentState
+	10,  // 31: zettide.controller.v1.PrimaryAuthority.state:type_name -> zettide.controller.v1.PrimaryAuthorityState
+	11,  // 32: zettide.controller.v1.PrimaryFailover.state:type_name -> zettide.controller.v1.PrimaryFailoverState
+	56,  // 33: zettide.controller.v1.VolumeTombstone.volume:type_name -> zettide.controller.v1.Volume
+	77,  // 34: zettide.controller.v1.CommandEnvelope.create_pool:type_name -> zettide.controller.v1.CreatePoolCommand
+	78,  // 35: zettide.controller.v1.CommandEnvelope.register_node:type_name -> zettide.controller.v1.RegisterNodeCommand
+	79,  // 36: zettide.controller.v1.CommandEnvelope.register_member:type_name -> zettide.controller.v1.RegisterMemberCommand
+	80,  // 37: zettide.controller.v1.CommandEnvelope.create_volume:type_name -> zettide.controller.v1.CreateVolumeCommand
+	81,  // 38: zettide.controller.v1.CommandEnvelope.delete_volume:type_name -> zettide.controller.v1.DeleteVolumeCommand
+	82,  // 39: zettide.controller.v1.CommandEnvelope.update_volume:type_name -> zettide.controller.v1.UpdateVolumeCommand
+	84,  // 40: zettide.controller.v1.CommandEnvelope.reserve_volume_resources:type_name -> zettide.controller.v1.ReserveVolumeResourcesCommand
+	85,  // 41: zettide.controller.v1.CommandEnvelope.activate_replica:type_name -> zettide.controller.v1.ActivateReplicaCommand
+	86,  // 42: zettide.controller.v1.CommandEnvelope.finalize_volume_deletion:type_name -> zettide.controller.v1.FinalizeVolumeDeletionCommand
+	87,  // 43: zettide.controller.v1.CommandEnvelope.propose_primary_authority:type_name -> zettide.controller.v1.ProposePrimaryAuthorityCommand
+	88,  // 44: zettide.controller.v1.CommandEnvelope.activate_primary_authority:type_name -> zettide.controller.v1.ActivatePrimaryAuthorityCommand
+	89,  // 45: zettide.controller.v1.CommandEnvelope.commit_primary_authority_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
+	90,  // 46: zettide.controller.v1.CommandEnvelope.commit_primary_authority_renewal_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
+	91,  // 47: zettide.controller.v1.CommandEnvelope.abort_primary_authority_candidate:type_name -> zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
+	92,  // 48: zettide.controller.v1.CommandEnvelope.begin_primary_failover:type_name -> zettide.controller.v1.BeginPrimaryFailoverCommand
+	94,  // 49: zettide.controller.v1.CommandEnvelope.commit_primary_authority_failover_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
+	93,  // 50: zettide.controller.v1.CommandEnvelope.complete_primary_failover_lease_wait:type_name -> zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
+	108, // 51: zettide.controller.v1.CommandEnvelope.update_pool:type_name -> zettide.controller.v1.PoolMutationCommand
+	108, // 52: zettide.controller.v1.CommandEnvelope.delete_pool:type_name -> zettide.controller.v1.PoolMutationCommand
+	68,  // 53: zettide.controller.v1.ReplicaReservation.placement:type_name -> zettide.controller.v1.ReplicaPlacement
+	69,  // 54: zettide.controller.v1.ReplicaReservation.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
+	83,  // 55: zettide.controller.v1.ReserveVolumeResourcesCommand.reservations:type_name -> zettide.controller.v1.ReplicaReservation
+	67,  // 56: zettide.controller.v1.ActivateReplicaCommand.attestation:type_name -> zettide.controller.v1.ReplicaAttestation
+	71,  // 57: zettide.controller.v1.ProposePrimaryAuthorityCommand.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	73,  // 58: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
+	74,  // 59: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
+	73,  // 60: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
+	74,  // 61: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
+	12,  // 62: zettide.controller.v1.ApplyResponse.code:type_name -> zettide.controller.v1.ApplyCode
+	24,  // 63: zettide.controller.v1.ApplyResponse.pool:type_name -> zettide.controller.v1.Pool
+	13,  // 64: zettide.controller.v1.RegisterNodeApplyResponse.code:type_name -> zettide.controller.v1.RegisterNodeApplyCode
+	35,  // 65: zettide.controller.v1.RegisterNodeApplyResponse.node:type_name -> zettide.controller.v1.Node
+	14,  // 66: zettide.controller.v1.RegisterMemberApplyResponse.code:type_name -> zettide.controller.v1.RegisterMemberApplyCode
+	42,  // 67: zettide.controller.v1.RegisterMemberApplyResponse.member:type_name -> zettide.controller.v1.Member
+	15,  // 68: zettide.controller.v1.CreateVolumeApplyResponse.code:type_name -> zettide.controller.v1.CreateVolumeApplyCode
+	56,  // 69: zettide.controller.v1.CreateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	16,  // 70: zettide.controller.v1.DeleteVolumeApplyResponse.code:type_name -> zettide.controller.v1.DeleteVolumeApplyCode
+	56,  // 71: zettide.controller.v1.DeleteVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	17,  // 72: zettide.controller.v1.UpdateVolumeApplyResponse.code:type_name -> zettide.controller.v1.UpdateVolumeApplyCode
+	56,  // 73: zettide.controller.v1.UpdateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	18,  // 74: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.code:type_name -> zettide.controller.v1.ReserveVolumeResourcesApplyCode
+	56,  // 75: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	19,  // 76: zettide.controller.v1.ActivateReplicaApplyResponse.code:type_name -> zettide.controller.v1.ActivateReplicaApplyCode
+	56,  // 77: zettide.controller.v1.ActivateReplicaApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	68,  // 78: zettide.controller.v1.ActivateReplicaApplyResponse.placement:type_name -> zettide.controller.v1.ReplicaPlacement
+	69,  // 79: zettide.controller.v1.ActivateReplicaApplyResponse.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
+	20,  // 80: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse.code:type_name -> zettide.controller.v1.FinalizeVolumeDeletionApplyCode
+	21,  // 81: zettide.controller.v1.PrimaryAuthorityApplyResponse.code:type_name -> zettide.controller.v1.PrimaryAuthorityApplyCode
+	71,  // 82: zettide.controller.v1.PrimaryAuthorityApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	56,  // 83: zettide.controller.v1.PrimaryAuthorityApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	22,  // 84: zettide.controller.v1.PrimaryFailoverApplyResponse.code:type_name -> zettide.controller.v1.PrimaryFailoverApplyCode
+	72,  // 85: zettide.controller.v1.PrimaryFailoverApplyResponse.failover:type_name -> zettide.controller.v1.PrimaryFailover
+	71,  // 86: zettide.controller.v1.PrimaryFailoverApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	56,  // 87: zettide.controller.v1.PrimaryFailoverApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	24,  // 88: zettide.controller.v1.StateSnapshot.pools:type_name -> zettide.controller.v1.Pool
+	106, // 89: zettide.controller.v1.StateSnapshot.requests:type_name -> zettide.controller.v1.RequestRecord
+	35,  // 90: zettide.controller.v1.StateSnapshot.nodes:type_name -> zettide.controller.v1.Node
+	42,  // 91: zettide.controller.v1.StateSnapshot.members:type_name -> zettide.controller.v1.Member
+	56,  // 92: zettide.controller.v1.StateSnapshot.volumes:type_name -> zettide.controller.v1.Volume
+	75,  // 93: zettide.controller.v1.StateSnapshot.volume_tombstones:type_name -> zettide.controller.v1.VolumeTombstone
+	68,  // 94: zettide.controller.v1.StateSnapshot.replica_placements:type_name -> zettide.controller.v1.ReplicaPlacement
+	69,  // 95: zettide.controller.v1.StateSnapshot.replica_allocations:type_name -> zettide.controller.v1.ReplicaAllocation
+	70,  // 96: zettide.controller.v1.StateSnapshot.volume_attachments:type_name -> zettide.controller.v1.VolumeAttachment
+	71,  // 97: zettide.controller.v1.StateSnapshot.primary_authorities:type_name -> zettide.controller.v1.PrimaryAuthority
+	71,  // 98: zettide.controller.v1.StateSnapshot.primary_authority_candidates:type_name -> zettide.controller.v1.PrimaryAuthority
+	72,  // 99: zettide.controller.v1.StateSnapshot.primary_failovers:type_name -> zettide.controller.v1.PrimaryFailover
+	23,  // 100: zettide.controller.v1.PoolMutationApplyResponse.code:type_name -> zettide.controller.v1.PoolMutationApplyCode
+	24,  // 101: zettide.controller.v1.PoolMutationApplyResponse.pool:type_name -> zettide.controller.v1.Pool
+	29,  // 102: zettide.controller.v1.PoolService.CreatePool:input_type -> zettide.controller.v1.CreatePoolRequest
+	31,  // 103: zettide.controller.v1.PoolService.GetPool:input_type -> zettide.controller.v1.GetPoolRequest
+	33,  // 104: zettide.controller.v1.PoolService.ListPools:input_type -> zettide.controller.v1.ListPoolsRequest
+	25,  // 105: zettide.controller.v1.PoolService.UpdatePool:input_type -> zettide.controller.v1.UpdatePoolRequest
+	27,  // 106: zettide.controller.v1.PoolService.DeletePool:input_type -> zettide.controller.v1.DeletePoolRequest
+	36,  // 107: zettide.controller.v1.NodeService.RegisterNode:input_type -> zettide.controller.v1.RegisterNodeRequest
+	38,  // 108: zettide.controller.v1.NodeService.GetNode:input_type -> zettide.controller.v1.GetNodeRequest
+	40,  // 109: zettide.controller.v1.NodeService.ListNodes:input_type -> zettide.controller.v1.ListNodesRequest
+	43,  // 110: zettide.controller.v1.MemberService.RegisterMember:input_type -> zettide.controller.v1.RegisterMemberRequest
+	45,  // 111: zettide.controller.v1.MemberService.GetMember:input_type -> zettide.controller.v1.GetMemberRequest
+	47,  // 112: zettide.controller.v1.MemberService.ListMembers:input_type -> zettide.controller.v1.ListMembersRequest
+	51,  // 113: zettide.controller.v1.HeartbeatService.ReportHeartbeat:input_type -> zettide.controller.v1.ReportHeartbeatRequest
+	54,  // 114: zettide.controller.v1.HeartbeatService.GetHeartbeat:input_type -> zettide.controller.v1.GetHeartbeatRequest
+	57,  // 115: zettide.controller.v1.VolumeService.CreateVolume:input_type -> zettide.controller.v1.CreateVolumeRequest
+	59,  // 116: zettide.controller.v1.VolumeService.GetVolume:input_type -> zettide.controller.v1.GetVolumeRequest
+	61,  // 117: zettide.controller.v1.VolumeService.UpdateVolume:input_type -> zettide.controller.v1.UpdateVolumeRequest
+	63,  // 118: zettide.controller.v1.VolumeService.ListVolumes:input_type -> zettide.controller.v1.ListVolumesRequest
+	65,  // 119: zettide.controller.v1.VolumeService.DeleteVolume:input_type -> zettide.controller.v1.DeleteVolumeRequest
+	30,  // 120: zettide.controller.v1.PoolService.CreatePool:output_type -> zettide.controller.v1.CreatePoolResponse
+	32,  // 121: zettide.controller.v1.PoolService.GetPool:output_type -> zettide.controller.v1.GetPoolResponse
+	34,  // 122: zettide.controller.v1.PoolService.ListPools:output_type -> zettide.controller.v1.ListPoolsResponse
+	26,  // 123: zettide.controller.v1.PoolService.UpdatePool:output_type -> zettide.controller.v1.UpdatePoolResponse
+	28,  // 124: zettide.controller.v1.PoolService.DeletePool:output_type -> zettide.controller.v1.DeletePoolResponse
+	37,  // 125: zettide.controller.v1.NodeService.RegisterNode:output_type -> zettide.controller.v1.RegisterNodeResponse
+	39,  // 126: zettide.controller.v1.NodeService.GetNode:output_type -> zettide.controller.v1.GetNodeResponse
+	41,  // 127: zettide.controller.v1.NodeService.ListNodes:output_type -> zettide.controller.v1.ListNodesResponse
+	44,  // 128: zettide.controller.v1.MemberService.RegisterMember:output_type -> zettide.controller.v1.RegisterMemberResponse
+	46,  // 129: zettide.controller.v1.MemberService.GetMember:output_type -> zettide.controller.v1.GetMemberResponse
+	48,  // 130: zettide.controller.v1.MemberService.ListMembers:output_type -> zettide.controller.v1.ListMembersResponse
+	53,  // 131: zettide.controller.v1.HeartbeatService.ReportHeartbeat:output_type -> zettide.controller.v1.ReportHeartbeatResponse
+	55,  // 132: zettide.controller.v1.HeartbeatService.GetHeartbeat:output_type -> zettide.controller.v1.GetHeartbeatResponse
+	58,  // 133: zettide.controller.v1.VolumeService.CreateVolume:output_type -> zettide.controller.v1.CreateVolumeResponse
+	60,  // 134: zettide.controller.v1.VolumeService.GetVolume:output_type -> zettide.controller.v1.GetVolumeResponse
+	62,  // 135: zettide.controller.v1.VolumeService.UpdateVolume:output_type -> zettide.controller.v1.UpdateVolumeResponse
+	64,  // 136: zettide.controller.v1.VolumeService.ListVolumes:output_type -> zettide.controller.v1.ListVolumesResponse
+	66,  // 137: zettide.controller.v1.VolumeService.DeleteVolume:output_type -> zettide.controller.v1.DeleteVolumeResponse
+	120, // [120:138] is the sub-list for method output_type
+	102, // [102:120] is the sub-list for method input_type
+	102, // [102:102] is the sub-list for extension type_name
+	102, // [102:102] is the sub-list for extension extendee
+	0,   // [0:102] is the sub-list for field type_name
 }
 
 func init() { file_services_controller_proto_zettide_controller_v1_controller_proto_init() }
@@ -8755,11 +9265,11 @@ func file_services_controller_proto_zettide_controller_v1_controller_proto_init(
 	if File_services_controller_proto_zettide_controller_v1_controller_proto != nil {
 		return
 	}
-	file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[3].OneofWrappers = []any{
+	file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[7].OneofWrappers = []any{
 		(*GetPoolRequest_Id)(nil),
 		(*GetPoolRequest_Name)(nil),
 	}
-	file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[48].OneofWrappers = []any{
+	file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[52].OneofWrappers = []any{
 		(*CommandEnvelope_CreatePool)(nil),
 		(*CommandEnvelope_RegisterNode)(nil),
 		(*CommandEnvelope_RegisterMember)(nil),
@@ -8777,14 +9287,16 @@ func file_services_controller_proto_zettide_controller_v1_controller_proto_init(
 		(*CommandEnvelope_BeginPrimaryFailover)(nil),
 		(*CommandEnvelope_CommitPrimaryAuthorityFailoverReady)(nil),
 		(*CommandEnvelope_CompletePrimaryFailoverLeaseWait)(nil),
+		(*CommandEnvelope_UpdatePool)(nil),
+		(*CommandEnvelope_DeletePool)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_services_controller_proto_zettide_controller_v1_controller_proto_rawDesc), len(file_services_controller_proto_zettide_controller_v1_controller_proto_rawDesc)),
-			NumEnums:      23,
-			NumMessages:   80,
+			NumEnums:      24,
+			NumMessages:   86,
 			NumExtensions: 0,
 			NumServices:   5,
 		},

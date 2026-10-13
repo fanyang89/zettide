@@ -111,7 +111,7 @@ pub const PoolStateMachine = struct {
     }
 
     pub fn poolCount(self: *const PoolStateMachine) usize {
-        return self.state.pools_by_id.count();
+        return self.state.pool_ids_by_revision.items.len;
     }
 
     pub fn requestCount(self: *const PoolStateMachine) usize {
@@ -201,6 +201,7 @@ pub const PoolStateMachine = struct {
 
     pub fn getPoolById(self: *const PoolStateMachine, allocator: std.mem.Allocator, id: []const u8) !?pb.Pool {
         const pool = self.state.pools_by_id.get(id) orelse return null;
+        if (pool.deleted_revision != 0) return null;
         return try dupePool(allocator, pool.proto());
     }
 
@@ -612,6 +613,8 @@ pub const PoolStateMachine = struct {
         if (envelope.format_version < 1 or envelope.format_version > command_format_version) return error.PayloadParseFailed;
         return switch (envelope.command orelse return error.PayloadParseFailed) {
             .create_pool => |command| self.applyCreatePool(entry.index, command),
+            .update_pool => |command| self.applyPoolMutation(entry.index, command, false),
+            .delete_pool => |command| self.applyPoolMutation(entry.index, command, true),
             .register_node => |command| self.applyRegisterNode(entry.index, command),
             .register_member => |command| self.applyRegisterMember(entry.index, command),
             .create_volume => |command| if (envelope.format_version >= 2)
@@ -622,7 +625,7 @@ pub const PoolStateMachine = struct {
                 self.applyDeleteVolume(entry.index, command)
             else
                 error.PayloadParseFailed,
-            .update_volume => |command| if (envelope.format_version >= 3) self.applyUpdateVolume(entry.index, command) else error.PayloadParseFailed,
+            .update_volume => |command| if (envelope.format_version >= 3) self.applyUpdateVolume(entry.index, command, envelope.format_version >= 9) else error.PayloadParseFailed,
             .reserve_volume_resources => |command| if (envelope.format_version >= 3) self.applyReserveVolumeResources(entry.index, command) else error.PayloadParseFailed,
             .activate_replica => |command| if (envelope.format_version >= 4)
                 self.applyActivateReplica(entry.index, command)
@@ -640,6 +643,50 @@ pub const PoolStateMachine = struct {
             .commit_primary_authority_failover_ready => |command| if (envelope.format_version >= 8) self.applyCommitPrimaryAuthorityFailoverReady(entry.index, command) else error.PayloadParseFailed,
             .complete_primary_failover_lease_wait => |command| if (envelope.format_version >= 8) self.applyCompletePrimaryFailoverLeaseWait(entry.index, command) else error.PayloadParseFailed,
         };
+    }
+
+    fn applyPoolMutation(self: *PoolStateMachine, revision: u64, command: pb.PoolMutationCommand, deleting: bool) raft.Error!raft.ApplyResult {
+        try validatePoolMutationCommand(command, deleting);
+        if (revision == 0) return error.PayloadParseFailed;
+        const kind: RequestKind = if (deleting) .delete_pool else .update_pool;
+        const fingerprint = poolMutationFingerprint(command);
+        if (self.state.requests.get(command.request_id)) |request| {
+            if (request.kind != kind or !std.mem.eql(u8, &fingerprint, &request.fingerprint))
+                return .{ .response = try encodePoolMutationResponse(self.allocator, .POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT, null) };
+            return .{ .response = try self.allocator.dupe(u8, request.encoded_response) };
+        }
+        if (self.state.requests.count() >= max_requests)
+            return .{ .response = try encodePoolMutationResponse(self.allocator, .POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT, null) };
+        const pool = self.state.pools_by_id.getPtr(command.pool_id);
+        const result = poolMutationResult(&self.state, if (pool) |value| value.proto() else null, command, deleting, revision);
+        const encoded_response = try encodeMessage(self.allocator, result);
+        errdefer self.allocator.free(encoded_response);
+        const returned_response = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned_response);
+        const encoded_command = try encodePoolMutationCommand(self.allocator, command, deleting);
+        errdefer self.allocator.free(encoded_command);
+        const request_id = try self.allocator.dupe(u8, command.request_id);
+        errdefer self.allocator.free(request_id);
+        const description = if (result.code == .POOL_MUTATION_APPLY_CODE_UPDATED) try self.allocator.dupe(u8, command.description) else null;
+        errdefer if (description) |value| self.allocator.free(value);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        if (description) |value| {
+            self.allocator.free(pool.?.description);
+            pool.?.description = value;
+            pool.?.resource_version = revision;
+        } else if (result.code == .POOL_MUTATION_APPLY_CODE_DELETED) {
+            pool.?.resource_version = revision;
+            pool.?.deleted_revision = revision;
+            _ = self.state.pool_ids_by_name.remove(pool.?.name);
+            for (self.state.pool_ids_by_revision.items, 0..) |id, index| {
+                if (std.mem.eql(u8, id, pool.?.id)) {
+                    _ = self.state.pool_ids_by_revision.orderedRemove(index);
+                    break;
+                }
+            }
+        }
+        self.state.requests.putAssumeCapacity(request_id, .{ .request_id = request_id, .kind = kind, .fingerprint = fingerprint, .encoded_response = encoded_response, .encoded_command = encoded_command, .applied_revision = revision });
+        return .{ .response = returned_response };
     }
 
     fn applyCreatePool(self: *PoolStateMachine, revision: u64, command: pb.CreatePoolCommand) raft.Error!raft.ApplyResult {
@@ -688,6 +735,7 @@ pub const PoolStateMachine = struct {
             .description = command.description,
             .created_at_unix_ms = command.proposed_created_at_unix_ms,
             .created_revision = revision,
+            .resource_version = revision,
         };
         const encoded_response = try encodeApplyResponse(self.allocator, .APPLY_CODE_CREATED, pool_proto);
         errdefer self.allocator.free(encoded_response);
@@ -889,7 +937,7 @@ pub const PoolStateMachine = struct {
             return .{ .response = try encodeRegisterMemberApplyResponse(self.allocator, .REGISTER_MEMBER_APPLY_CODE_REQUEST_LIMIT, null) };
         }
 
-        if (!self.state.pools_by_id.contains(command.pool_id)) {
+        if (!poolIsLive(&self.state, command.pool_id)) {
             return self.recordMemberResponse(command, fingerprint, try encodeRegisterMemberApplyResponse(
                 self.allocator,
                 .REGISTER_MEMBER_APPLY_CODE_POOL_NOT_FOUND,
@@ -1031,7 +1079,7 @@ pub const PoolStateMachine = struct {
         if (self.state.requests.count() >= max_requests) {
             return .{ .response = try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_REQUEST_LIMIT, null) };
         }
-        if (!self.state.pools_by_id.contains(command.pool_id)) {
+        if (!poolIsLive(&self.state, command.pool_id)) {
             return self.recordCreateVolumeResponse(command, fingerprint, try encodeCreateVolumeApplyResponse(self.allocator, .CREATE_VOLUME_APPLY_CODE_POOL_NOT_FOUND, null), revision);
         }
         if (self.state.volumes_by_id.get(command.proposed_volume_id)) |existing| {
@@ -1106,7 +1154,7 @@ pub const PoolStateMachine = struct {
         return .{ .response = returned_response };
     }
 
-    fn applyUpdateVolume(self: *PoolStateMachine, revision: u64, command: pb.UpdateVolumeCommand) raft.Error!raft.ApplyResult {
+    fn applyUpdateVolume(self: *PoolStateMachine, revision: u64, command: pb.UpdateVolumeCommand, allow_provisioning: bool) raft.Error!raft.ApplyResult {
         try validateUpdateVolumeCommand(command);
         if (revision == 0) return error.PayloadParseFailed;
         const fingerprint = updateVolumeFingerprint(command);
@@ -1117,7 +1165,7 @@ pub const PoolStateMachine = struct {
         if (self.state.requests.count() >= max_requests) return .{ .response = try encodeUpdateVolumeApplyResponse(self.allocator, .UPDATE_VOLUME_APPLY_CODE_REQUEST_LIMIT, null) };
         const volume = self.state.volumes_by_id.getPtr(command.volume_id) orelse return self.recordUpdateVolumeResponse(command, fingerprint, try encodeUpdateVolumeApplyResponse(self.allocator, .UPDATE_VOLUME_APPLY_CODE_NOT_FOUND, null), revision);
         if (volume.resource_version != command.expected_resource_version) return self.recordUpdateVolumeResponse(command, fingerprint, try encodeUpdateVolumeApplyResponse(self.allocator, .UPDATE_VOLUME_APPLY_CODE_VERSION_CONFLICT, volume.proto()), revision);
-        if (volume.lifecycle_state != .VOLUME_LIFECYCLE_STATE_ACTIVE) return self.recordUpdateVolumeResponse(command, fingerprint, try encodeUpdateVolumeApplyResponse(self.allocator, .UPDATE_VOLUME_APPLY_CODE_INVALID_STATE, volume.proto()), revision);
+        if (!(volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE or (allow_provisioning and volumeDescriptionMutable(volume.proto())))) return self.recordUpdateVolumeResponse(command, fingerprint, try encodeUpdateVolumeApplyResponse(self.allocator, .UPDATE_VOLUME_APPLY_CODE_INVALID_STATE, volume.proto()), revision);
 
         const description = try self.allocator.dupe(u8, command.description);
         errdefer self.allocator.free(description);
@@ -1905,7 +1953,8 @@ pub const PoolStateMachine = struct {
         var revisions: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer revisions.deinit(self.allocator);
         for (snapshot.pools.items) |source| {
-            if (source.created_revision > metadata.index or revisions.contains(source.created_revision)) return error.PayloadParseFailed;
+            if (source.created_revision > metadata.index or source.resource_version > metadata.index or
+                (snapshot.format_version < 12 and ((source.resource_version != 0 and source.resource_version != source.created_revision) or source.deleted_revision != 0)) or revisions.contains(source.created_revision)) return error.PayloadParseFailed;
             try revisions.put(self.allocator, source.created_revision, {});
             try restorePool(self.allocator, &restored, source);
         }
@@ -2081,6 +2130,7 @@ pub const PoolStateMachine = struct {
         {
             return error.PayloadParseFailed;
         }
+        try validatePoolHistory(arena.allocator(), &restored);
         self.state.deinit(self.allocator);
         self.state = restored;
         if (self.heartbeat_store) |store| store.clearObservations();
@@ -2275,7 +2325,9 @@ fn validatePool(pool: pb.Pool) raft.Error!void {
     if (!validUuidV7(pool.id)) return error.PayloadParseFailed;
     if (!validText(pool.name, max_name_bytes, false)) return error.PayloadParseFailed;
     if (!validText(pool.description, max_description_bytes, true)) return error.PayloadParseFailed;
-    if (pool.created_at_unix_ms <= 0 or pool.created_revision == 0) return error.PayloadParseFailed;
+    if (pool.created_at_unix_ms <= 0 or pool.created_revision == 0 or
+        (pool.resource_version != 0 and pool.resource_version < pool.created_revision) or
+        (pool.deleted_revision != 0 and (pool.deleted_revision != pool.resource_version or pool.deleted_revision <= pool.created_revision))) return error.PayloadParseFailed;
 }
 
 fn validateRegisterNodeCommand(command: pb.RegisterNodeCommand) raft.Error!void {
@@ -2668,15 +2720,17 @@ const mapDecodeError = codec.mapDecodeError;
 
 fn restorePool(allocator: std.mem.Allocator, state: *State, source: pb.Pool) raft.Error!void {
     try validatePool(source);
-    if (state.pools_by_id.contains(source.id) or state.pool_ids_by_name.contains(source.name)) return error.PayloadParseFailed;
+    if (state.pools_by_id.contains(source.id) or (source.deleted_revision == 0 and state.pool_ids_by_name.contains(source.name))) return error.PayloadParseFailed;
     var pool = try Pool.init(allocator, source);
     errdefer pool.deinit(allocator);
     try state.pools_by_id.ensureUnusedCapacity(allocator, 1);
     try state.pool_ids_by_name.ensureUnusedCapacity(allocator, 1);
     try state.pool_ids_by_revision.ensureUnusedCapacity(allocator, 1);
     state.pools_by_id.putAssumeCapacity(pool.id, pool);
-    state.pool_ids_by_name.putAssumeCapacity(pool.name, pool.id);
-    state.pool_ids_by_revision.appendAssumeCapacity(pool.id);
+    if (pool.deleted_revision == 0) {
+        state.pool_ids_by_name.putAssumeCapacity(pool.name, pool.id);
+        state.pool_ids_by_revision.appendAssumeCapacity(pool.id);
+    }
     state.max_pool_created_revision = @max(state.max_pool_created_revision, pool.created_revision);
 }
 
@@ -2694,7 +2748,7 @@ fn restoreNode(allocator: std.mem.Allocator, state: *State, source: pb.Node) raf
 
 fn restoreMember(allocator: std.mem.Allocator, state: *State, source: pb.Member) raft.Error!void {
     try validateMember(source);
-    if (!state.pools_by_id.contains(source.pool_id) or !state.nodes_by_id.contains(source.node_id)) return error.PayloadParseFailed;
+    if (!poolIsLive(state, source.pool_id) or !state.nodes_by_id.contains(source.node_id)) return error.PayloadParseFailed;
     if (state.members_by_id.contains(source.id)) return error.PayloadParseFailed;
     if (state.pool_ids_by_local_set.get(source.local_set_id)) |pool_id| {
         if (!std.mem.eql(u8, pool_id, source.pool_id)) return error.PayloadParseFailed;
@@ -2720,7 +2774,7 @@ fn restoreMember(allocator: std.mem.Allocator, state: *State, source: pb.Member)
 
 fn restoreVolume(allocator: std.mem.Allocator, state: *State, source: pb.Volume) raft.Error!void {
     try validateVolume(source);
-    if (!state.pools_by_id.contains(source.pool_id) or state.volumes_by_id.contains(source.id) or state.volume_tombstones_by_id.contains(source.id)) return error.PayloadParseFailed;
+    if (!poolIsLive(state, source.pool_id) or state.volumes_by_id.contains(source.id) or state.volume_tombstones_by_id.contains(source.id)) return error.PayloadParseFailed;
     var scoped_buffer: [36 + 1 + max_name_bytes]u8 = undefined;
     if (state.volume_ids_by_scoped_name.contains(scopedKey(source.pool_id, source.name, &scoped_buffer))) return error.PayloadParseFailed;
     var volume = try Volume.init(allocator, source);
@@ -2765,7 +2819,7 @@ fn restoreReplicaPlacement(allocator: std.mem.Allocator, state: *State, source_v
     }
     const attested = validFixedNonzero(source.backend_digest, 32) and source.attested_revision >= source.created_revision and source.attested_revision <= source.resource_version;
     if ((source.state == .REPLICA_PLACEMENT_STATE_RESERVED and (source.backend_digest.len != 0 or source.attested_revision != 0)) or
-        (source.state != .REPLICA_PLACEMENT_STATE_RESERVED and !attested and snapshot_version >= snapshot_format_version)) return error.PayloadParseFailed;
+        (source.state != .REPLICA_PLACEMENT_STATE_RESERVED and !attested and snapshot_version >= 11)) return error.PayloadParseFailed;
     const volume = state.volumes_by_id.getPtr(source.volume_id) orelse return error.PayloadParseFailed;
     if (source.state != .REPLICA_PLACEMENT_STATE_RESERVED and !attested) {
         source.state = .REPLICA_PLACEMENT_STATE_RESERVED;
@@ -2813,7 +2867,7 @@ fn restoreReplicaAllocation(allocator: std.mem.Allocator, state: *State, source_
         else => false,
     };
     if (!states_match) {
-        if (snapshot_version < snapshot_format_version and replica.state == .REPLICA_PLACEMENT_STATE_RESERVED)
+        if (snapshot_version < 11 and replica.state == .REPLICA_PLACEMENT_STATE_RESERVED)
             source.state = .REPLICA_ALLOCATION_STATE_RESERVED
         else
             return error.PayloadParseFailed;
@@ -3023,6 +3077,20 @@ fn restoreRequest(
             try insertRestoredRequest(allocator, state, source, .create_pool, encoded_response, encoded_command);
             return if (created_pool_id) |id| RestoredCreation{ .pool = id } else null;
         },
+        .update_pool, .delete_pool => |command| {
+            if (snapshot_version < 12 or envelope.format_version < 9) return error.PayloadParseFailed;
+            const deleting = envelope.command.? == .delete_pool;
+            try validatePoolMutationCommand(command, deleting);
+            if (!std.mem.eql(u8, source.request_id, command.request_id)) return error.PayloadParseFailed;
+            const fingerprint = poolMutationFingerprint(command);
+            if (!std.mem.eql(u8, source.request_fingerprint, &fingerprint)) return error.PayloadParseFailed;
+            const encoded_response = try allocator.dupe(u8, source.encoded_response);
+            errdefer allocator.free(encoded_response);
+            const encoded_command = try encodePoolMutationCommand(allocator, command, deleting);
+            errdefer allocator.free(encoded_command);
+            try insertRestoredRequest(allocator, state, source, if (deleting) .delete_pool else .update_pool, encoded_response, encoded_command);
+            return null;
+        },
         .register_node => |command| {
             if (snapshot_version == 2) return error.PayloadParseFailed;
             try validateRegisterNodeCommand(command);
@@ -3175,7 +3243,7 @@ fn validateStoredResponse(
         .APPLY_CODE_CREATED => {
             const response_pool = response.pool orelse return error.PayloadParseFailed;
             const stored_pool = state.pools_by_id.get(response_pool.id) orelse return error.PayloadParseFailed;
-            if (!poolsEqual(stored_pool.proto(), response_pool)) return error.PayloadParseFailed;
+            if (!poolHistoryMatches(stored_pool.proto(), response_pool)) return error.PayloadParseFailed;
             if (!std.mem.eql(u8, command.proposed_pool_id, response_pool.id) or
                 !std.mem.eql(u8, command.name, response_pool.name) or
                 !std.mem.eql(u8, command.description, response_pool.description) or
@@ -3189,7 +3257,7 @@ fn validateStoredResponse(
         .APPLY_CODE_NAME_EXISTS => {
             const response_pool = response.pool orelse return error.PayloadParseFailed;
             const stored_pool = state.pools_by_id.get(response_pool.id) orelse return error.PayloadParseFailed;
-            if (!poolsEqual(stored_pool.proto(), response_pool) or
+            if (!poolHistoryMatches(stored_pool.proto(), response_pool) or
                 !std.mem.eql(u8, command.name, response_pool.name) or
                 response_pool.created_revision >= applied_revision)
             {
@@ -3204,7 +3272,7 @@ fn validateStoredResponse(
                 state.pools_by_id.get(name_pool_id).?.created_revision < applied_revision
             else
                 false;
-            if (!poolsEqual(stored_pool.proto(), response_pool) or
+            if (!poolHistoryMatches(stored_pool.proto(), response_pool) or
                 !std.mem.eql(u8, command.proposed_pool_id, response_pool.id) or
                 response_pool.created_revision >= applied_revision or
                 name_conflict_before_request)
@@ -3351,7 +3419,7 @@ fn validateStoredMemberResponse(
 ) raft.Error!?[]const u8 {
     const pool = state.pools_by_id.get(command.pool_id);
     const node = state.nodes_by_id.get(command.node_id);
-    const pool_existed = if (pool) |value| value.created_revision < applied_revision else false;
+    const pool_existed = if (pool) |value| value.created_revision < applied_revision and (value.deleted_revision == 0 or value.deleted_revision > applied_revision) else false;
     const node_existed = if (node) |value| value.registered_revision < applied_revision else false;
     const node_matches_cluster = if (node) |value| std.mem.eql(u8, value.cluster_id, command.cluster_id) else false;
     const existing_id = state.members_by_id.get(command.member_id);
@@ -3442,7 +3510,7 @@ fn validateStoredVolumeResponse(
     applied_revision: u64,
 ) raft.Error!?[]const u8 {
     const pool = state.pools_by_id.get(command.pool_id);
-    const pool_existed = if (pool) |value| value.created_revision < applied_revision else false;
+    const pool_existed = if (pool) |value| value.created_revision < applied_revision and (value.deleted_revision == 0 or value.deleted_revision > applied_revision) else false;
     const id_volume = storedVolumeById(state, command.proposed_volume_id);
     const id_existed = if (id_volume) |value| volumeWasLiveAt(state, value.id, applied_revision) else false;
     const name_volume = volumeByScopedNameAt(state, command.pool_id, command.name, applied_revision);
@@ -7851,4 +7919,313 @@ test "version 4 member snapshot restore is atomic across allocation failures" {
         MemberRestoreAllocationCheck.run,
         .{ existing_command, snapshot.data, snapshot.metadata },
     );
+}
+
+fn poolIsLive(state: *const State, id: []const u8) bool {
+    const pool = state.pools_by_id.get(id) orelse return false;
+    return pool.deleted_revision == 0;
+}
+
+fn volumeDescriptionMutable(volume: pb.Volume) bool {
+    return volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_ACTIVE or
+        (volume.lifecycle_state == .VOLUME_LIFECYCLE_STATE_PROVISIONING and volume.operation_phase == .VOLUME_OPERATION_PHASE_NONE);
+}
+
+fn validatePoolMutationCommand(command: pb.PoolMutationCommand, deleting: bool) raft.Error!void {
+    if (!validText(command.request_id, max_request_id_bytes, false) or !validUuidV7(command.pool_id) or
+        !validText(command.description, max_description_bytes, true) or command.expected_resource_version == 0 or
+        (deleting and command.description.len != 0)) return error.PayloadParseFailed;
+}
+
+pub fn encodePoolMutationCommand(allocator: std.mem.Allocator, command: pb.PoolMutationCommand, deleting: bool) ![]u8 {
+    try validatePoolMutationCommand(command, deleting);
+    return encodeMessage(allocator, pb.CommandEnvelope{ .format_version = command_format_version, .command = if (deleting) .{ .delete_pool = command } else .{ .update_pool = command } });
+}
+
+fn poolMutationFingerprint(command: pb.PoolMutationCommand) Fingerprint {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hashField(&hasher, command.pool_id);
+    hashField(&hasher, command.description);
+    hashInt(&hasher, u64, command.expected_resource_version);
+    var result: Fingerprint = undefined;
+    hasher.final(&result);
+    return result;
+}
+
+fn encodePoolMutationResponse(allocator: std.mem.Allocator, code: pb.PoolMutationApplyCode, pool: ?pb.Pool) ![]u8 {
+    return encodeMessage(allocator, pb.PoolMutationApplyResponse{ .code = code, .pool = pool });
+}
+
+// Use historical dependency lifetimes when validating retained request results.
+fn poolHasDependenciesAt(state: *const State, pool_id: []const u8, revision: u64) bool {
+    var members = state.members_by_id.valueIterator();
+    while (members.next()) |member| {
+        if (std.mem.eql(u8, member.pool_id, pool_id) and member.registered_revision < revision) return true;
+    }
+    var volumes = state.volumes_by_id.valueIterator();
+    while (volumes.next()) |volume| {
+        if (std.mem.eql(u8, volume.pool_id, pool_id) and volume.created_revision < revision) return true;
+    }
+    var tombstones = state.volume_tombstones_by_id.valueIterator();
+    while (tombstones.next()) |tombstone| {
+        if (std.mem.eql(u8, tombstone.volume.pool_id, pool_id) and tombstone.volume.created_revision < revision and tombstone.deleted_revision >= revision) return true;
+    }
+    return false;
+}
+
+fn poolMutationResult(state: *const State, current: ?pb.Pool, command: pb.PoolMutationCommand, deleting: bool, revision: u64) pb.PoolMutationApplyResponse {
+    var pool = current orelse return .{ .code = .POOL_MUTATION_APPLY_CODE_NOT_FOUND };
+    if (pool.deleted_revision != 0) return .{ .code = .POOL_MUTATION_APPLY_CODE_NOT_FOUND };
+    if (pool.resource_version != command.expected_resource_version) return .{ .code = .POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT, .pool = pool };
+    if (deleting and poolHasDependenciesAt(state, pool.id, revision)) return .{ .code = .POOL_MUTATION_APPLY_CODE_NOT_EMPTY, .pool = pool };
+    pool.resource_version = revision;
+    if (deleting) pool.deleted_revision = revision else pool.description = command.description;
+    return .{ .code = if (deleting) .POOL_MUTATION_APPLY_CODE_DELETED else .POOL_MUTATION_APPLY_CODE_UPDATED, .pool = pool };
+}
+
+fn poolHistoryMatches(current: pb.Pool, previous: pb.Pool) bool {
+    const version = if (previous.resource_version == 0) previous.created_revision else previous.resource_version;
+    return std.mem.eql(u8, current.id, previous.id) and std.mem.eql(u8, current.name, previous.name) and
+        current.created_revision == previous.created_revision and current.created_at_unix_ms == previous.created_at_unix_ms and
+        current.resource_version >= version and (current.resource_version != version or poolsEqual(current, previous));
+}
+
+fn validatePoolHistory(allocator: std.mem.Allocator, state: *const State) raft.Error!void {
+    var requests: std.ArrayList(*const Request) = .empty;
+    defer requests.deinit(allocator);
+    var iterator = state.requests.valueIterator();
+    while (iterator.next()) |request| {
+        if (request.kind == .create_pool or request.kind == .update_pool or request.kind == .delete_pool) try requests.append(allocator, request);
+    }
+    std.mem.sort(*const Request, requests.items, {}, struct {
+        fn lessThan(_: void, lhs: *const Request, rhs: *const Request) bool {
+            return lhs.applied_revision < rhs.applied_revision;
+        }
+    }.lessThan);
+    var history: std.StringHashMapUnmanaged(pb.Pool) = .empty;
+    defer history.deinit(allocator);
+    var names: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer names.deinit(allocator);
+    for (requests.items) |request| {
+        var reader: std.Io.Reader = .fixed(request.encoded_response);
+        if (request.kind == .create_pool) {
+            var create_reader: std.Io.Reader = .fixed(request.encoded_command);
+            const envelope = pb.CommandEnvelope.decode(&create_reader, allocator) catch |err| return mapDecodeError(err);
+            const command = envelope.command.?.create_pool;
+            const response = pb.ApplyResponse.decode(&reader, allocator) catch |err| return mapDecodeError(err);
+            const expected_code: pb.ApplyCode = if (names.contains(command.name)) .APPLY_CODE_NAME_EXISTS else if (history.contains(command.proposed_pool_id)) .APPLY_CODE_ID_EXISTS else if (history.count() >= max_pools) .APPLY_CODE_POOL_LIMIT else .APPLY_CODE_CREATED;
+            if (response.code != expected_code) return error.PayloadParseFailed;
+            if (response.code == .APPLY_CODE_CREATED) {
+                var pool = response.pool.?;
+                if (pool.resource_version == 0) pool.resource_version = pool.created_revision;
+                if (pool.resource_version != request.applied_revision or pool.deleted_revision != 0) return error.PayloadParseFailed;
+                try history.put(allocator, pool.id, pool);
+                try names.put(allocator, pool.name, pool.id);
+            } else if (response.pool) |pool| {
+                const previous = history.get(pool.id) orelse return error.PayloadParseFailed;
+                const version = if (pool.resource_version == 0) pool.created_revision else pool.resource_version;
+                if (!poolsEqual(pool, previous) or version != previous.resource_version or pool.deleted_revision != previous.deleted_revision) return error.PayloadParseFailed;
+                if (response.code == .APPLY_CODE_NAME_EXISTS and previous.deleted_revision != 0) return error.PayloadParseFailed;
+            }
+            continue;
+        }
+        var command_reader: std.Io.Reader = .fixed(request.encoded_command);
+        const envelope = pb.CommandEnvelope.decode(&command_reader, allocator) catch |err| return mapDecodeError(err);
+        const command = switch (envelope.command.?) {
+            .update_pool, .delete_pool => |value| value,
+            else => unreachable,
+        };
+        const actual = pb.PoolMutationApplyResponse.decode(&reader, allocator) catch |err| return mapDecodeError(err);
+        const expected = poolMutationResult(state, history.get(command.pool_id), command, request.kind == .delete_pool, request.applied_revision);
+        if (actual.code != expected.code or (actual.pool == null) != (expected.pool == null)) return error.PayloadParseFailed;
+        if (actual.pool) |pool| {
+            if (!poolsEqual(pool, expected.pool.?) or pool.resource_version != expected.pool.?.resource_version or pool.deleted_revision != expected.pool.?.deleted_revision) return error.PayloadParseFailed;
+            if (actual.code == .POOL_MUTATION_APPLY_CODE_UPDATED or actual.code == .POOL_MUTATION_APPLY_CODE_DELETED) try history.put(allocator, pool.id, pool);
+            if (actual.code == .POOL_MUTATION_APPLY_CODE_DELETED) _ = names.remove(pool.name);
+        }
+    }
+    var pools = state.pools_by_id.valueIterator();
+    while (pools.next()) |pool| {
+        const expected = history.get(pool.id) orelse return error.PayloadParseFailed;
+        if (!poolsEqual(pool.proto(), expected) or pool.resource_version != expected.resource_version or pool.deleted_revision != expected.deleted_revision or
+            (pool.deleted_revision != 0 and poolHasDependenciesAt(state, pool.id, pool.deleted_revision))) return error.PayloadParseFailed;
+    }
+}
+
+test "Pool CRUD preserves tombstones request history and name reuse" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var created = try applyTestCommand(allocator, &machine, 1, testCommand("pool-create", test_pool_id, "logical", "original", 1_753_744_000_000));
+    defer created.deinit(allocator);
+    const update = pb.PoolMutationCommand{ .request_id = "pool-update", .pool_id = test_pool_id, .description = "updated", .expected_resource_version = 1 };
+    const update_wire = try encodePoolMutationCommand(allocator, update, false);
+    defer allocator.free(update_wire);
+    var updated = try applyEncodedTestCommand(allocator, &machine, 2, update_wire);
+    defer updated.deinit(allocator);
+    var pool = (try machine.getPoolById(allocator, test_pool_id)).?;
+    defer pool.deinit(allocator);
+    try std.testing.expectEqualStrings("updated", pool.description);
+    try std.testing.expectEqual(@as(u64, 2), pool.resource_version);
+    try expectPoolMutation(allocator, &machine, 3, .{ .request_id = "stale", .pool_id = test_pool_id, .description = "stale", .expected_resource_version = 1 }, false, .POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT);
+    try expectPoolMutation(allocator, &machine, 4, .{ .request_id = "pool-create", .pool_id = test_pool_id, .expected_resource_version = 2 }, true, .POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT);
+    try expectPoolMutation(allocator, &machine, 5, .{ .request_id = "pool-delete", .pool_id = test_pool_id, .expected_resource_version = 2 }, true, .POOL_MUTATION_APPLY_CODE_DELETED);
+    try std.testing.expectEqual(@as(usize, 0), machine.poolCount());
+    try std.testing.expect((try machine.getPoolById(allocator, test_pool_id)) == null);
+    try std.testing.expect((try machine.getPoolByName(allocator, "logical")) == null);
+    var reused = try applyTestCommand(allocator, &machine, 6, testCommand("pool-reuse-name", test_second_volume_id, "logical", "new", 1_753_744_000_001));
+    defer reused.deinit(allocator);
+    var denied = try applyTestCommand(allocator, &machine, 7, testCommand("pool-reuse-id", test_pool_id, "different", "", 1_753_744_000_002));
+    defer denied.deinit(allocator);
+    var denied_response = try decodeApplyResponse(allocator, denied.response.?);
+    defer denied_response.deinit(allocator);
+    try std.testing.expectEqual(pb.ApplyCode.APPLY_CODE_ID_EXISTS, denied_response.code);
+    try expectPoolMutation(allocator, &machine, 8, .{ .request_id = "missing", .pool_id = test_pool_id, .description = "", .expected_resource_version = 5 }, false, .POOL_MUTATION_APPLY_CODE_NOT_FOUND);
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, 8, 1, .{});
+    defer snapshot.deinit(allocator);
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var reader = TestSnapshotReader{ .data = snapshot.data };
+    try restored.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
+    var replay = try applyEncodedTestCommand(allocator, &restored, 9, update_wire);
+    defer replay.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, updated.response.?, replay.response.?);
+    try expectPoolMutation(allocator, &restored, 10, .{ .request_id = "pool-delete", .pool_id = test_pool_id, .expected_resource_version = 2 }, true, .POOL_MUTATION_APPLY_CODE_DELETED);
+    var page = try restored.listPoolsPage(allocator, null, 10);
+    defer page.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), page.pools.len);
+    try std.testing.expectEqualStrings(test_second_volume_id, page.pools[0].id);
+
+    // Missing history or a forged final value must not replace live state.
+    for (0..3) |corruption| {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var wire_reader: std.Io.Reader = .fixed(snapshot.data);
+        var decoded = try pb.StateSnapshot.decode(&wire_reader, arena.allocator());
+        switch (corruption) {
+            0 => for (decoded.requests.items, 0..) |request, index| {
+                if (std.mem.eql(u8, request.request_id, "pool-update")) {
+                    _ = decoded.requests.orderedRemove(index);
+                    break;
+                }
+            },
+            1 => decoded.pools.items[0].description = "forged",
+            2 => decoded.format_version = 11,
+            else => unreachable,
+        }
+        const bad_wire = try encodeMessage(allocator, decoded);
+        defer allocator.free(bad_wire);
+        var bad_reader = TestSnapshotReader{ .data = bad_wire };
+        try std.testing.expectError(error.PayloadParseFailed, restored.stateMachine().restoreSnapshot(snapshot.metadata, bad_reader.reader()));
+        try std.testing.expectEqual(@as(usize, 1), restored.poolCount());
+    }
+}
+
+fn expectPoolMutation(allocator: std.mem.Allocator, machine: *PoolStateMachine, revision: u64, command: pb.PoolMutationCommand, deleting: bool, expected: pb.PoolMutationApplyCode) !void {
+    const wire = try encodePoolMutationCommand(allocator, command, deleting);
+    defer allocator.free(wire);
+    var applied = try applyEncodedTestCommand(allocator, machine, revision, wire);
+    defer applied.deinit(allocator);
+    var reader: std.Io.Reader = .fixed(applied.response.?);
+    var response = try pb.PoolMutationApplyResponse.decode(&reader, allocator);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(expected, response.code);
+}
+
+test "Pool deletion rejects live Volumes and Members but allows deleted Volumes" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    var volume = try applyTestVolumeCommand(allocator, &machine, 3, testVolumeCommand("volume", test_volume_id, "volume", "", min_volume_size_bytes, 1_753_744_000_002));
+    defer volume.deinit(allocator);
+    try expectPoolMutation(allocator, &machine, 4, .{ .request_id = "blocked-volume", .pool_id = test_pool_id, .expected_resource_version = 1 }, true, .POOL_MUTATION_APPLY_CODE_NOT_EMPTY);
+    var deleted = try applyTestDeleteVolumeCommand(allocator, &machine, 5, testDeleteVolumeCommand("delete-volume", test_volume_id, 3, 1_753_744_000_003));
+    defer deleted.deinit(allocator);
+    try expectPoolMutation(allocator, &machine, 6, .{ .request_id = "delete-pool", .pool_id = test_pool_id, .expected_resource_version = 1 }, true, .POOL_MUTATION_APPLY_CODE_DELETED);
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, 6, 1, .{});
+    defer snapshot.deinit(allocator);
+    var reader = TestSnapshotReader{ .data = snapshot.data };
+    try machine.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
+    var missing_volume = try applyTestVolumeCommand(allocator, &machine, 7, testVolumeCommand("missing-pool-volume", test_second_volume_id, "other", "", min_volume_size_bytes, 1_753_744_000_004));
+    defer missing_volume.deinit(allocator);
+    var response = try decodeCreateVolumeApplyResponse(allocator, missing_volume.response.?);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(pb.CreateVolumeApplyCode.CREATE_VOLUME_APPLY_CODE_POOL_NOT_FOUND, response.code);
+
+    var member_machine = PoolStateMachine.init(allocator);
+    defer member_machine.deinit();
+    try addTestPoolAndNode(allocator, &member_machine);
+    var member = try applyTestMemberCommand(allocator, &member_machine, 3, testMemberCommand("member", &test_member_id_a, test_pool_id, test_node_id, &test_local_set_id, 0, 1_753_744_000_002));
+    defer member.deinit(allocator);
+    try expectPoolMutation(allocator, &member_machine, 4, .{ .request_id = "blocked-member", .pool_id = test_pool_id, .expected_resource_version = 1 }, true, .POOL_MUTATION_APPLY_CODE_NOT_EMPTY);
+}
+
+test "Pool mutations are atomic across allocation failures" {
+    const allocator = std.testing.allocator;
+    const create = try encodeCreatePoolCommand(allocator, testCommand("create", test_pool_id, "pool", "original", 1_753_744_000_000));
+    defer allocator.free(create);
+    for ([_]bool{ false, true }) |deleting| {
+        const mutation = try encodePoolMutationCommand(allocator, .{ .request_id = "mutation", .pool_id = test_pool_id, .description = if (deleting) "" else "changed", .expected_resource_version = 1 }, deleting);
+        defer allocator.free(mutation);
+        try checkAllAllocationFailures(struct {
+            fn run(failing: std.mem.Allocator, create_wire: []const u8, mutation_wire: []const u8) !void {
+                var machine = PoolStateMachine.init(failing);
+                defer machine.deinit();
+                var created = try applyEncodedTestCommand(failing, &machine, 1, create_wire);
+                defer created.deinit(failing);
+                var result = applyEncodedTestCommand(failing, &machine, 2, mutation_wire) catch |err| {
+                    try std.testing.expectEqual(@as(usize, 1), machine.requestCount());
+                    try std.testing.expectEqual(@as(usize, 1), machine.poolCount());
+                    const pool = machine.state.pools_by_id.get(test_pool_id).?;
+                    try std.testing.expectEqualStrings("original", pool.description);
+                    try std.testing.expectEqual(@as(u64, 1), pool.resource_version);
+                    return err;
+                };
+                defer result.deinit(failing);
+            }
+        }.run, .{ create, mutation });
+    }
+}
+
+test "Pool mutations require v9 and legacy Volume update replay preserves its old result" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    const pool_command = pb.PoolMutationCommand{ .request_id = "update", .pool_id = test_pool_id, .description = "new", .expected_resource_version = 1 };
+    for ([_]bool{ false, true }) |deleting| {
+        var command = pool_command;
+        if (deleting) command.description = "";
+        const wire = try encodeMessage(allocator, pb.CommandEnvelope{ .format_version = 8, .command = if (deleting) .{ .delete_pool = command } else .{ .update_pool = command } });
+        defer allocator.free(wire);
+        try std.testing.expectError(error.PayloadParseFailed, applyEncodedTestCommand(allocator, &machine, 3, wire));
+    }
+    var volume = try applyTestVolumeCommand(allocator, &machine, 3, testVolumeCommand("volume", test_volume_id, "volume", "old", min_volume_size_bytes, 1_753_744_000_002));
+    defer volume.deinit(allocator);
+    var command = pb.UpdateVolumeCommand{ .request_id = "legacy-update", .volume_id = test_volume_id, .description = "new", .expected_resource_version = 3 };
+    const legacy_wire = try encodeMessage(allocator, pb.CommandEnvelope{ .format_version = 8, .command = .{ .update_volume = command } });
+    defer allocator.free(legacy_wire);
+    var old = try applyEncodedTestCommand(allocator, &machine, 4, legacy_wire);
+    defer old.deinit(allocator);
+    var response = try decodeUpdateVolumeApplyResponse(allocator, old.response.?);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(pb.UpdateVolumeApplyCode.UPDATE_VOLUME_APPLY_CODE_INVALID_STATE, response.code);
+    const retry_wire = try encodeUpdateVolumeCommand(allocator, command);
+    defer allocator.free(retry_wire);
+    var retried = try applyEncodedTestCommand(allocator, &machine, 5, retry_wire);
+    defer retried.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, old.response.?, retried.response.?);
+    command.request_id = "new-update";
+    const new_wire = try encodeUpdateVolumeCommand(allocator, command);
+    defer allocator.free(new_wire);
+    var updated = try applyEncodedTestCommand(allocator, &machine, 6, new_wire);
+    defer updated.deinit(allocator);
+    var updated_response = try decodeUpdateVolumeApplyResponse(allocator, updated.response.?);
+    defer updated_response.deinit(allocator);
+    try std.testing.expectEqual(pb.UpdateVolumeApplyCode.UPDATE_VOLUME_APPLY_CODE_UPDATED, updated_response.code);
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, 6, 1, .{});
+    defer snapshot.deinit(allocator);
+    var reader = TestSnapshotReader{ .data = snapshot.data };
+    try machine.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
 }

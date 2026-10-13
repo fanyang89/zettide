@@ -150,10 +150,16 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
             kind = .complete_primary_failover_lease_wait;
             try preflightCompletePrimaryFailoverLeaseWaitCommand(try cursor.readBytes(max_command_wire_bytes));
         },
+        19, 20 => {
+            if (field.wire_type != 2 or kind != null) return error.InvalidWire;
+            kind = if (field.number == 19) .update_pool else .delete_pool;
+            try preflightUpdateVolumeCommand(try cursor.readBytes(max_pool_wire_bytes));
+        },
         else => return error.InvalidWire,
     };
     if (!seen_format) return error.InvalidWire;
     const result = kind orelse return error.InvalidWire;
+    if ((result == .update_pool or result == .delete_pool) and format_version < 9) return error.InvalidWire;
     if ((result == .create_volume or result == .delete_volume) and format_version < 2) return error.InvalidWire;
     if ((result == .update_volume or result == .reserve_volume_resources or result == .activate_replica or result == .finalize_volume_deletion) and format_version < 3) return error.InvalidWire;
     if ((result == .propose_primary_authority or result == .activate_primary_authority or result == .commit_primary_authority_ready) and format_version < 5) return error.InvalidWire;
@@ -779,9 +785,9 @@ fn preflightPrimaryFailover(bytes: []const u8) WireError!void {
 
 fn preflightPool(bytes: []const u8) WireError!void {
     var cursor = WireCursor{ .bytes = bytes };
-    var seen: [6]bool = @splat(false);
+    var seen: [8]bool = @splat(false);
     while (try cursor.next()) |field| {
-        if (field.number > 5 or seen[field.number]) return error.InvalidWire;
+        if (field.number > 7 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
         switch (field.number) {
             1 => {
@@ -798,7 +804,7 @@ fn preflightPool(bytes: []const u8) WireError!void {
                 const timestamp = try cursor.readVarint();
                 if (timestamp == 0 or timestamp > std.math.maxInt(i64)) return error.InvalidWire;
             },
-            5 => {
+            5, 6, 7 => {
                 if (field.wire_type != 0 or try cursor.readVarint() == 0) return error.InvalidWire;
             },
             else => unreachable,
@@ -1131,7 +1137,9 @@ fn preflightRequest(bytes: []const u8, snapshot_version: u32) WireError!void {
         kind == .begin_primary_failover or kind == .commit_primary_authority_failover_ready or
         kind == .complete_primary_failover_lease_wait or
         (kind == .update_volume and snapshot_version < 6)) return error.InvalidWire;
+    if ((kind == .update_pool or kind == .delete_pool) and snapshot_version < 12) return error.InvalidWire;
     switch (kind) {
+        .update_pool, .delete_pool => try preflightPoolMutationResponse(response_bytes.?),
         .create_pool => try preflightApplyResponse(response_bytes.?),
         .register_node => try preflightRegisterNodeApplyResponse(response_bytes.?),
         .register_member => try preflightRegisterMemberApplyResponse(response_bytes.?),
@@ -1291,4 +1299,26 @@ fn preflightDeleteVolumeApplyResponse(bytes: []const u8) WireError!void {
     if (code == 8) {
         if (!seen[2] or !seen[5] or !seen[6]) return error.InvalidWire;
     } else if (seen[5] or seen[6]) return error.InvalidWire;
+}
+
+fn preflightPoolMutationResponse(bytes: []const u8) WireError!void {
+    var cursor = WireCursor{ .bytes = bytes };
+    var seen: [3]bool = @splat(false);
+    while (try cursor.next()) |field| {
+        if (field.number > 2 or seen[field.number]) return error.InvalidWire;
+        seen[field.number] = true;
+        switch (field.number) {
+            1 => {
+                if (field.wire_type != 0) return error.InvalidWire;
+                const code = try cursor.readVarint();
+                if (code == 0 or code > 7) return error.InvalidWire;
+            },
+            2 => {
+                if (field.wire_type != 2) return error.InvalidWire;
+                try preflightPool(try cursor.readBytes(max_pool_wire_bytes));
+            },
+            else => unreachable,
+        }
+    }
+    if (!seen[1]) return error.InvalidWire;
 }

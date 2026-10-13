@@ -1,11 +1,9 @@
 const std = @import("std");
 const uuid = @import("uuid");
 
-// Append-only optional Node signing_public_key fields fit the existing bounds
-// and decode empty in legacy v8 commands/v11 snapshots, so no format bump is
-// required. Their semantic fingerprint is likewise conditional when absent.
-pub const command_format_version: u32 = 8;
-pub const snapshot_format_version: u32 = 11;
+// Pool mutations require coordinated upgrades of all controller voters.
+pub const command_format_version: u32 = 9;
+pub const snapshot_format_version: u32 = 12;
 pub const max_name_bytes: usize = 127;
 pub const max_description_bytes: usize = 1024;
 pub const max_request_id_bytes: usize = 127;
@@ -47,6 +45,8 @@ pub const Fingerprint = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 
 pub const RequestKind = enum {
     create_pool,
+    update_pool,
+    delete_pool,
     register_node,
     register_member,
     create_volume,

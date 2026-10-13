@@ -50,10 +50,38 @@ Pool, Volume, Node, and Member mutations are committed and applied through Raft
 before an RPC reports success. Reads use Raft ReadIndex rather than serving
 follower-local state.
 
-`DeleteVolume` requires the current resource version and succeeds only while the
-Volume has no Replica or Attachment dependencies. It atomically removes the live
-metadata and retains a durable tombstone so the Volume ID cannot be reused.
-Deleted names may be reused; `GetVolume` returns `NOT_FOUND` after deletion.
+## Logical Pool and Volume CRUD
+
+These are controller metadata APIs, not physical Pool provisioning or a promise
+that Volume data I/O is ready. They are available over gRPC and `zettidectl`.
+
+| Resource | Methods | Update scope |
+| --- | --- | --- |
+| Pool | CreatePool, GetPool, ListPools, UpdatePool, DeletePool | Description only |
+| Volume | CreateVolume, GetVolume, ListVolumes, UpdateVolume, DeleteVolume | Description only |
+
+Names, IDs, Volume size, and Pool binding are immutable. Update replaces the full
+description; an empty description clears it. Volume descriptions can be updated
+while `ACTIVE`, or while `PROVISIONING` before placement starts. A metadata-only
+Volume can therefore complete CRUD without any registered data nodes.
+
+Update and delete require the latest `resource_version` returned by Get/List.
+Version mismatch returns `FAILED_PRECONDITION`; missing/deleted resources return
+`NOT_FOUND`. Every mutation uses a globally unique `request_id`. Reuse the exact
+request after a timeout: both successful and rejected business results are durable.
+After fixing a version conflict or nonempty-Pool failure, use a **new** request ID.
+
+`DeletePool` rejects Pools with any live Volume (including deleting Volumes) or
+registered Member. Member unregistration is not implemented, so a Pool with
+registered Members cannot currently be deleted. Volume tombstones do not block
+Pool deletion. Pool tombstones retain the last description, creation identity,
+`resource_version`, and `deleted_revision`; they are hidden from Get/List.
+Deleted names may be reused, but deleted IDs cannot be reused.
+
+`DeleteVolume` immediately removes metadata when there are no Replica/Attachment
+dependencies, retaining a durable tombstone. Otherwise it accepts asynchronous
+deletion (`deletion_pending = true`) and reconciliation removes dependencies;
+Get/List may still show the deleting Volume until finalization.
 
 `ReportHeartbeat` and `GetHeartbeat` use ReadIndex callbacks to serialize
 durable binding checks and observation access on the Raft driver thread.
@@ -66,14 +94,19 @@ The state machine stores canonical commands and responses for idempotent
 request replay. Request IDs share one namespace across resource kinds, so
 cross-kind reuse returns a request conflict. Snapshots are deterministic
 protobuf messages and are validated before atomically replacing live state.
-The current format limits a cluster to 25,000 Pools, 25,000 live Volumes,
+The current format limits a cluster to 25,000 Pools including tombstones, 25,000 live Volumes,
 25,000 Volume tombstones, 75,000 Replica placements, 75,000 Replica
 allocations, 25,000 Volume attachments, 10,000 Nodes, 10,000 Members, and
 50,000 retained request records so committed input cannot grow memory and
-snapshots without bound. Snapshot format v5 reads v2 Pool-only, v3 Pool/Node,
-v4 Pool/Node/Member, and v5 Volume snapshots. Command format v2 reads legacy v1
-commands. Activating v2 requires a coordinated upgrade because old binaries do
-not understand Volume commands or v2 envelopes.
+snapshots without bound. Snapshot format v12 reads v2–v11 snapshots and preserves
+Pool mutation history/tombstones. Legacy Pools receive their creation revision
+as `resource_version`. Command format v9 reads v1–v8 commands; legacy Volume
+update commands retain their original active-only behavior during WAL replay.
+All controller voters must be upgraded together before enabling v9 writes.
+Older binaries cannot restore v12 snapshots; do not downgrade against an upgraded
+data directory. Snapshot restore replays Pool history to verify final values,
+versions, tombstones, name reuse, and historical deletion dependencies before
+atomically replacing live state.
 The heartbeat store separately limits itself to 10,000 Nodes, 10,000 Member
 observations, and 256 Members per report.
 

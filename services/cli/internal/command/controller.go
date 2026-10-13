@@ -20,6 +20,10 @@ func (a *app) runController(ctx context.Context, args []string) error {
 		return a.getPool(ctx, flags)
 	case "pool list":
 		return a.listPools(ctx, flags)
+	case "pool update":
+		return a.updatePool(ctx, flags)
+	case "pool delete":
+		return a.deletePool(ctx, flags)
 	case "node register":
 		return a.registerNode(ctx, flags)
 	case "node get":
@@ -509,6 +513,67 @@ func (a *app) deleteVolume(ctx context.Context, args []string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("delete volume: %w", err)
+	}
+	return a.printer.print(response)
+}
+
+func (a *app) updatePool(ctx context.Context, args []string) error {
+	fs := newFlagSet("controller pool update", a.stderr)
+	request := fs.String("request-id", "", "idempotency key (generated when omitted)")
+	poolID := fs.String("pool-id", "", "pool ID (required)")
+	description := fs.String("description", "", "new description")
+	expectedVersion := fs.Uint64("expected-resource-version", 0, "required optimistic concurrency version")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := require(*poolID, "pool-id"); err != nil {
+		return err
+	}
+	if *expectedVersion == 0 {
+		return errors.New("--expected-resource-version must be greater than zero")
+	}
+	if err := validateUUIDv7Text(*poolID, "pool-id"); err != nil {
+		return err
+	}
+	id, err := requestID(*request)
+	if err != nil {
+		return err
+	}
+	response, err := pb.NewPoolServiceClient(a.conn).UpdatePool(ctx, &pb.UpdatePoolRequest{
+		RequestId: id, PoolId: *poolID, Description: *description, ExpectedResourceVersion: *expectedVersion,
+	})
+	if err != nil {
+		return fmt.Errorf("update pool: %w", err)
+	}
+	return a.printer.print(response)
+}
+
+func (a *app) deletePool(ctx context.Context, args []string) error {
+	fs := newFlagSet("controller pool delete", a.stderr)
+	request := fs.String("request-id", "", "idempotency key (generated when omitted)")
+	poolID := fs.String("pool-id", "", "pool ID (required)")
+	expectedVersion := fs.Uint64("expected-resource-version", 0, "required optimistic concurrency version")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if err := require(*poolID, "pool-id"); err != nil {
+		return err
+	}
+	if *expectedVersion == 0 {
+		return errors.New("--expected-resource-version must be greater than zero")
+	}
+	if err := validateUUIDv7Text(*poolID, "pool-id"); err != nil {
+		return err
+	}
+	id, err := requestID(*request)
+	if err != nil {
+		return err
+	}
+	response, err := pb.NewPoolServiceClient(a.conn).DeletePool(ctx, &pb.DeletePoolRequest{
+		RequestId: id, PoolId: *poolID, ExpectedResourceVersion: *expectedVersion,
+	})
+	if err != nil {
+		return fmt.Errorf("delete pool: %w", err)
 	}
 	return a.printer.print(response)
 }

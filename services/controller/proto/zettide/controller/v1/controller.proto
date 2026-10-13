@@ -6,6 +6,8 @@ service PoolService {
   rpc CreatePool(CreatePoolRequest) returns (CreatePoolResponse);
   rpc GetPool(GetPoolRequest) returns (GetPoolResponse);
   rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+  rpc UpdatePool(UpdatePoolRequest) returns (UpdatePoolResponse);
+  rpc DeletePool(DeletePoolRequest) returns (DeletePoolResponse);
 }
 
 service NodeService {
@@ -39,7 +41,26 @@ message Pool {
   string description = 3;
   int64 created_at_unix_ms = 4;
   uint64 created_revision = 5;
+  uint64 resource_version = 6;
+  // Nonzero only in durable tombstones and successful DeletePool responses.
+  uint64 deleted_revision = 7;
 }
+
+// Updates only the description. Names and IDs remain immutable.
+message UpdatePoolRequest {
+  string request_id = 1;
+  string pool_id = 2;
+  string description = 3;
+  uint64 expected_resource_version = 4;
+}
+message UpdatePoolResponse { Pool pool = 1; }
+message DeletePoolRequest {
+  reserved 3;
+  string request_id = 1;
+  string pool_id = 2;
+  uint64 expected_resource_version = 4;
+}
+message DeletePoolResponse { Pool pool = 1; }
 
 message CreatePoolRequest {
   string request_id = 1;
@@ -506,6 +527,8 @@ message CommandEnvelope {
     BeginPrimaryFailoverCommand begin_primary_failover = 16;
     CommitPrimaryAuthorityFailoverReadyCommand commit_primary_authority_failover_ready = 17;
     CompletePrimaryFailoverLeaseWaitCommand complete_primary_failover_lease_wait = 18;
+    PoolMutationCommand update_pool = 19;
+    PoolMutationCommand delete_pool = 20;
   }
 }
 
@@ -897,4 +920,25 @@ message StateSnapshot {
   repeated PrimaryAuthority primary_authorities = 11;
   repeated PrimaryAuthority primary_authority_candidates = 12;
   repeated PrimaryFailover primary_failovers = 13;
+}
+
+message PoolMutationCommand {
+  string request_id = 1;
+  string pool_id = 2;
+  string description = 3;
+  uint64 expected_resource_version = 4;
+}
+enum PoolMutationApplyCode {
+  POOL_MUTATION_APPLY_CODE_UNSPECIFIED = 0;
+  POOL_MUTATION_APPLY_CODE_UPDATED = 1;
+  POOL_MUTATION_APPLY_CODE_DELETED = 2;
+  POOL_MUTATION_APPLY_CODE_NOT_FOUND = 3;
+  POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT = 4;
+  POOL_MUTATION_APPLY_CODE_NOT_EMPTY = 5;
+  POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT = 6;
+  POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT = 7;
+}
+message PoolMutationApplyResponse {
+  PoolMutationApplyCode code = 1;
+  Pool pool = 2;
 }
