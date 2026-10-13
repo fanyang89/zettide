@@ -25,6 +25,7 @@ pub const write_service = @import("write_service.zig");
 pub const write_evidence_contract = @import("write_evidence_contract.zig");
 pub const write_evidence = @import("write_evidence.zig");
 pub const write_coordinator = @import("write_coordinator.zig");
+pub const range_lease = @import("range_lease.zig");
 pub const primary_lease = @import("primary_lease.zig");
 pub const authority_contract = @import("authority_contract.zig");
 
@@ -35,6 +36,7 @@ test {
     _ = write_evidence;
     _ = write_coordinator;
     _ = primary_lease;
+    _ = range_lease;
     _ = authority_contract;
 }
 

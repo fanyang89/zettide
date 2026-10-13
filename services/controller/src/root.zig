@@ -21,6 +21,7 @@ pub const data_service = data_service_contracts.replica_service;
 pub const DataService = data_service.Service;
 pub const reconciler = @import("reconciler.zig");
 pub const Reconciler = reconciler.Reconciler;
+pub const range_leases = @import("range_leases.zig");
 pub const primary_lease = @import("primary_lease.zig");
 pub const replica_fence = @import("replica_fence.zig");
 pub const data_service_wire = @import("data_service_wire.zig");

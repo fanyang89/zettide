@@ -4,6 +4,7 @@ const grpc = @import("grpc_lite");
 const pb = @import("controller_proto");
 const raft = @import("raftz");
 const uuid = @import("uuid");
+const range_leases = @import("range_leases.zig");
 const heartbeat = @import("heartbeat.zig");
 const state_machine = @import("state_machine.zig");
 const rpc_response = @import("service/rpc_response.zig");
@@ -275,6 +276,82 @@ pub const PoolService = struct {
         pending.* = .{ .owner = self, .completion = completion, .volume_id = volume_id };
         self.raftor.readIndex("get-volume", pending.callback()) catch |err| {
             pending.destroy();
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn mutateRangeLease(self: *PoolService, operation: pb.RangeLeaseOperation, payload: []const u8, completion: Completion) void {
+        range_leases.preflightRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid range lease request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        const request = pb.RangeLeaseRequest.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid range lease request"));
+            return;
+        };
+        const proposed = pb.RangeLeaseCommand{ .request = request, .operation = operation };
+        range_leases.validate(proposed) catch {
+            completion.invoke(invalidArgument("invalid range lease binding or version"));
+            return;
+        };
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+        const command = state_machine.encodeRangeLeaseCommand(self.allocator, proposed) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        defer self.allocator.free(command);
+        const pending = self.allocator.create(RangeLeasePending) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion };
+        self.raftor.propose(command, .{ .ctx = pending, .function = RangeLeasePending.complete }) catch |err| {
+            self.allocator.destroy(pending);
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn queryRangeLease(self: *PoolService, list: bool, payload: []const u8, completion: Completion) void {
+        range_leases.preflightQuery(payload, list) catch {
+            completion.invoke(invalidArgument("invalid range lease query"));
+            return;
+        };
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        var query: RangeLeaseQuery = .{ .owner = self, .completion = completion, .list = list, .id = undefined };
+        if (list) {
+            const request = pb.ListRangeLeasesRequest.decode(&reader, arena.allocator()) catch |err| {
+                completion.invoke(decodeFailure(err, "invalid lease query"));
+                return;
+            };
+            query.id = request.volume_id[0..36].*;
+            if (request.after_lease_id.len != 0) query.after = request.after_lease_id[0..36].*;
+            query.limit = if (request.page_size == 0) 100 else request.page_size;
+        } else {
+            const request = pb.GetRangeLeaseRequest.decode(&reader, arena.allocator()) catch |err| {
+                completion.invoke(decodeFailure(err, "invalid lease query"));
+                return;
+            };
+            query.id = request.lease_id[0..36].*;
+        }
+        const pending = self.allocator.create(RangeLeaseQuery) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = query;
+        self.raftor.readIndex("range-lease", .{ .ctx = pending, .function = RangeLeaseQuery.complete }) catch |err| {
+            self.allocator.destroy(pending);
             completion.invoke(raftFailure(err));
         };
     }
@@ -1066,6 +1143,89 @@ const GetVolumePending = struct {
     }
 };
 
+const RangeLeasePending = struct {
+    owner: *PoolService,
+    completion: Completion,
+    fn complete(ctx: *anyopaque, result: raft.ProposalResult) void {
+        const self: *RangeLeasePending = @ptrCast(@alignCast(ctx));
+        defer self.owner.allocator.destroy(self);
+        switch (result) {
+            .ok => |payload| self.applied(payload),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+    fn applied(self: *RangeLeasePending, payload: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(self.owner.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        const response = pb.RangeLeaseApplyResponse.decode(&reader, arena.allocator()) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        switch (response.code) {
+            .RANGE_LEASE_CODE_OK => {
+                if (response.lease == null) {
+                    self.completion.invoke(internalError());
+                    return;
+                }
+                const encoded = encodeMessage(self.owner.allocator, pb.RangeLeaseResponse{ .lease = response.lease }) catch {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                defer self.owner.allocator.free(encoded);
+                self.completion.invoke(.{ .status = .ok, .payload = encoded });
+            },
+            .RANGE_LEASE_CODE_NOT_FOUND => self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Lease, Volume or holder Node not found") }),
+            .RANGE_LEASE_CODE_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Lease ID or range conflicts with an existing lease") }),
+            .RANGE_LEASE_CODE_VERSION_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Lease resource version does not match") }),
+            .RANGE_LEASE_CODE_BINDING_MISMATCH => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Lease holder, boot or range does not match") }),
+            .RANGE_LEASE_CODE_INVALID_STATE => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Lease state does not permit this operation") }),
+            .RANGE_LEASE_CODE_RESOURCE_LIMIT => self.completion.invoke(.{ .status = grpc.Status.init(.resource_exhausted, "Lease or request history limit reached") }),
+            .RANGE_LEASE_CODE_OUT_OF_RANGE => self.completion.invoke(.{ .status = grpc.Status.init(.out_of_range, "Lease range exceeds Volume size") }),
+            .RANGE_LEASE_CODE_REQUEST_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "request_id was reused with different fields") }),
+            else => self.completion.invoke(internalError()),
+        }
+    }
+};
+
+const RangeLeaseQuery = struct {
+    owner: *PoolService,
+    completion: Completion,
+    list: bool,
+    id: [36]u8,
+    after: ?[36]u8 = null,
+    limit: usize = 100,
+    fn complete(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *RangeLeaseQuery = @ptrCast(@alignCast(ctx));
+        defer self.owner.allocator.destroy(self);
+        switch (result) {
+            .ok => self.read() catch self.completion.invoke(internalError()),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+    fn read(self: *RangeLeaseQuery) !void {
+        const allocator = self.owner.allocator;
+        if (!self.list) {
+            const lease = self.owner.machine.getRangeLease(&self.id) orelse {
+                self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Lease not found") });
+                return;
+            };
+            const encoded = try encodeMessage(allocator, pb.RangeLeaseResponse{ .lease = lease.proto() });
+            defer allocator.free(encoded);
+            self.completion.invoke(.{ .status = .ok, .payload = encoded });
+            return;
+        }
+        const leases = try self.owner.machine.listRangeLeases(allocator, &self.id, if (self.after) |*value| value else "", self.limit + 1);
+        defer allocator.free(leases);
+        var values: std.ArrayList(pb.RangeLease) = .empty;
+        defer values.deinit(allocator);
+        for (leases[0..@min(leases.len, self.limit)]) |*lease| try values.append(allocator, lease.proto());
+        const encoded = try encodeMessage(allocator, pb.ListRangeLeasesResponse{ .leases = values, .next_after_lease_id = if (leases.len > self.limit) &leases[self.limit - 1].lease_id else "" });
+        defer allocator.free(encoded);
+        self.completion.invoke(.{ .status = .ok, .payload = encoded });
+    }
+};
+
 const PoolMutationPending = struct {
     owner: *PoolService,
     completion: Completion,
@@ -1274,7 +1434,7 @@ const DeleteVolumePending = struct {
                 .status = grpc.Status.init(.failed_precondition, "Volume resource version does not match"),
             }),
             .DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES => self.completion.invoke(.{
-                .status = grpc.Status.init(.failed_precondition, "Volume has dependencies"),
+                .status = grpc.Status.init(.failed_precondition, "Volume has active leases or other dependencies"),
             }),
             .DELETE_VOLUME_APPLY_CODE_REQUEST_CONFLICT => self.completion.invoke(.{
                 .status = grpc.Status.init(.failed_precondition, "request_id was reused with different fields"),
@@ -1753,6 +1913,12 @@ pub const PoolRpc = struct {
     }
 
     pub fn register(self: *PoolRpc, server: *grpc.Server) !void {
+        try server.registerStream("/zettide.controller.v1.RangeLeaseService/AcquireLease", handler(self, .acquire_lease));
+        try server.registerStream("/zettide.controller.v1.RangeLeaseService/RenewLease", handler(self, .renew_lease));
+        try server.registerStream("/zettide.controller.v1.RangeLeaseService/RevokeLease", handler(self, .revoke_lease));
+        try server.registerStream("/zettide.controller.v1.RangeLeaseService/CompleteRevoke", handler(self, .complete_revoke));
+        try server.registerStream("/zettide.controller.v1.RangeLeaseService/GetLease", handler(self, .get_lease));
+        try server.registerStream("/zettide.controller.v1.RangeLeaseService/ListLeases", handler(self, .list_leases));
         try server.registerStream("/zettide.controller.v1.PoolService/CreatePool", handler(self, .create));
         try server.registerStream("/zettide.controller.v1.PoolService/UpdatePool", handler(self, .update_pool));
         try server.registerStream("/zettide.controller.v1.PoolService/DeletePool", handler(self, .delete_pool));
@@ -1801,6 +1967,12 @@ pub const PoolRpc = struct {
     }
 
     const Method = enum {
+        list_leases,
+        get_lease,
+        complete_revoke,
+        revoke_lease,
+        renew_lease,
+        acquire_lease,
         update_pool,
         delete_pool,
         create,
@@ -1829,6 +2001,12 @@ pub const PoolRpc = struct {
             .on_message = switch (method) {
                 .update_pool => onUpdatePool,
                 .delete_pool => onDeletePool,
+                .acquire_lease => onAcquireLease,
+                .renew_lease => onRenewLease,
+                .revoke_lease => onRevokeLease,
+                .complete_revoke => onCompleteRevoke,
+                .get_lease => onGetLease,
+                .list_leases => onListLeases,
                 .create => onCreate,
                 .get => onGet,
                 .list => onList,
@@ -1883,6 +2061,36 @@ pub const PoolRpc = struct {
         };
         _ = self.pending_calls.fetchAdd(1, .monotonic);
         self.unlockCalls();
+    }
+
+    fn onAcquireLease(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .acquire_lease, stream, payload);
+    }
+
+    fn onRenewLease(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .renew_lease, stream, payload);
+    }
+
+    fn onRevokeLease(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .revoke_lease, stream, payload);
+    }
+
+    fn onCompleteRevoke(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .complete_revoke, stream, payload);
+    }
+
+    fn onGetLease(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .get_lease, stream, payload);
+    }
+
+    fn onListLeases(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        _ = context;
+        return receive(ctx, .list_leases, stream, payload);
     }
 
     fn onCreate(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
@@ -2027,6 +2235,12 @@ pub const PoolRpc = struct {
         pending.payload = null;
         defer self.allocator.free(payload);
         switch (pending.method) {
+            .list_leases => self.service.queryRangeLease(true, payload, pending.completion()),
+            .get_lease => self.service.queryRangeLease(false, payload, pending.completion()),
+            .complete_revoke => self.service.mutateRangeLease(.RANGE_LEASE_OPERATION_COMPLETE_REVOKE, payload, pending.completion()),
+            .revoke_lease => self.service.mutateRangeLease(.RANGE_LEASE_OPERATION_REVOKE, payload, pending.completion()),
+            .renew_lease => self.service.mutateRangeLease(.RANGE_LEASE_OPERATION_RENEW, payload, pending.completion()),
+            .acquire_lease => self.service.mutateRangeLease(.RANGE_LEASE_OPERATION_ACQUIRE, payload, pending.completion()),
             .update_pool => self.service.updatePool(payload, pending.completion()),
             .delete_pool => self.service.deletePool(payload, pending.completion()),
             .create => self.service.createPool(payload, pending.completion()),

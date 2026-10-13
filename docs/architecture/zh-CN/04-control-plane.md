@@ -41,7 +41,7 @@ flowchart TB
 | Member | `RegisterMember`、`GetMember`、`ListMembers` 当前 create-only | member lifecycle、capacity allocation、quarantine |
 | Heartbeat | `ReportHeartbeat`、`GetHeartbeat` 当前 leader-local | Replica/path/lease/repair observation |
 | Placement/Allocation | durable schema 当前、无 mutation | reserve/move/tombstone Replica extents |
-| Lease | 当前无 schema/RPC | pending grant、activation、renew、revoke、epoch |
+| Lease | 当前区间租约 Acquire/Renew/Revoke/CompleteRevoke/Get/List；共享读、独占写 | 数据服务 I/O 接入、可验证 fencing 后的失联接管 |
 | Filesystem | Blob identity 与 export eligibility 当前局部存在 | NFS/FUSE lifecycle；不由 block Replica schema 推导 |
 | Publication | endpoint primitives 当前局部存在 | protocol、consumer、access generation、locator、Raft republish authority |
 | Attachment | storage-side 占位 schema，无 mutation | adapter intent、host session/device、libvirt 与 caller-directed republish |
@@ -176,7 +176,7 @@ RPC、proposal、ReadIndex、heartbeat、endpoint action、migration 和 repair 
 5. 追平 committed/applied 后才提供一致性服务，并先作为 follower 加入。
 6. 成为 leader 后从空 heartbeat view 重新收集 observation 并启动 reconciliation。
 
-生产配置必须使用持久 `data_dir`。当前 v12 snapshot 保存 Pool（含删除 tombstone）、Node、Member、Volume、authority 和全局业务幂等记录，兼容读取 v2–v11；socket、heartbeat 和临时 action 不进入 snapshot。
+生产配置必须使用持久 `data_dir`。当前 v13 snapshot 保存 Pool（含删除 tombstone）、Node、Member、Volume、authority 和全局业务幂等记录，兼容读取 v2–v12；socket、heartbeat 和临时 action 不进入 snapshot。
 
 ## 当前差距
 
@@ -188,3 +188,7 @@ RPC、proposal、ReadIndex、heartbeat、endpoint action、migration 和 repair 
   empty-frontier recovery 与 readiness admission，但用户数据复制、failover/repair 验证和 publication
   lifecycle 尚未闭环。
 - 当前控制 RPC 不具备生产级双向认证与授权。
+
+## Volume 区间 Lease
+
+区间 Lease 的 Raft 状态、RPC、数据服务申请/续租/撤销客户端及本地 I/O gate 已提供。撤销先进入 REVOKING，只有可信持有者确认在途 I/O 已排空后才释放区间。失联和本地超时不自动授权另一写者；现有 payload 路径尚未全部挂接 gate。详见 [range lease contract](../../range-leases.md)。

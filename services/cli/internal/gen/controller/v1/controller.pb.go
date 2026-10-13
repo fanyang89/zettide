@@ -1419,6 +1419,232 @@ func (PoolMutationApplyCode) EnumDescriptor() ([]byte, []int) {
 	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{23}
 }
 
+type RangeLeaseMode int32
+
+const (
+	RangeLeaseMode_RANGE_LEASE_MODE_UNSPECIFIED RangeLeaseMode = 0
+	RangeLeaseMode_RANGE_LEASE_MODE_READ        RangeLeaseMode = 1
+	RangeLeaseMode_RANGE_LEASE_MODE_WRITE       RangeLeaseMode = 2
+)
+
+// Enum value maps for RangeLeaseMode.
+var (
+	RangeLeaseMode_name = map[int32]string{
+		0: "RANGE_LEASE_MODE_UNSPECIFIED",
+		1: "RANGE_LEASE_MODE_READ",
+		2: "RANGE_LEASE_MODE_WRITE",
+	}
+	RangeLeaseMode_value = map[string]int32{
+		"RANGE_LEASE_MODE_UNSPECIFIED": 0,
+		"RANGE_LEASE_MODE_READ":        1,
+		"RANGE_LEASE_MODE_WRITE":       2,
+	}
+)
+
+func (x RangeLeaseMode) Enum() *RangeLeaseMode {
+	p := new(RangeLeaseMode)
+	*p = x
+	return p
+}
+
+func (x RangeLeaseMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RangeLeaseMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[24].Descriptor()
+}
+
+func (RangeLeaseMode) Type() protoreflect.EnumType {
+	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[24]
+}
+
+func (x RangeLeaseMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RangeLeaseMode.Descriptor instead.
+func (RangeLeaseMode) EnumDescriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{24}
+}
+
+type RangeLeaseState int32
+
+const (
+	RangeLeaseState_RANGE_LEASE_STATE_UNSPECIFIED RangeLeaseState = 0
+	RangeLeaseState_RANGE_LEASE_STATE_ACTIVE      RangeLeaseState = 1
+	RangeLeaseState_RANGE_LEASE_STATE_REVOKING    RangeLeaseState = 2
+	RangeLeaseState_RANGE_LEASE_STATE_REVOKED     RangeLeaseState = 3
+)
+
+// Enum value maps for RangeLeaseState.
+var (
+	RangeLeaseState_name = map[int32]string{
+		0: "RANGE_LEASE_STATE_UNSPECIFIED",
+		1: "RANGE_LEASE_STATE_ACTIVE",
+		2: "RANGE_LEASE_STATE_REVOKING",
+		3: "RANGE_LEASE_STATE_REVOKED",
+	}
+	RangeLeaseState_value = map[string]int32{
+		"RANGE_LEASE_STATE_UNSPECIFIED": 0,
+		"RANGE_LEASE_STATE_ACTIVE":      1,
+		"RANGE_LEASE_STATE_REVOKING":    2,
+		"RANGE_LEASE_STATE_REVOKED":     3,
+	}
+)
+
+func (x RangeLeaseState) Enum() *RangeLeaseState {
+	p := new(RangeLeaseState)
+	*p = x
+	return p
+}
+
+func (x RangeLeaseState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RangeLeaseState) Descriptor() protoreflect.EnumDescriptor {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[25].Descriptor()
+}
+
+func (RangeLeaseState) Type() protoreflect.EnumType {
+	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[25]
+}
+
+func (x RangeLeaseState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RangeLeaseState.Descriptor instead.
+func (RangeLeaseState) EnumDescriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{25}
+}
+
+type RangeLeaseOperation int32
+
+const (
+	RangeLeaseOperation_RANGE_LEASE_OPERATION_UNSPECIFIED     RangeLeaseOperation = 0
+	RangeLeaseOperation_RANGE_LEASE_OPERATION_ACQUIRE         RangeLeaseOperation = 1
+	RangeLeaseOperation_RANGE_LEASE_OPERATION_RENEW           RangeLeaseOperation = 2
+	RangeLeaseOperation_RANGE_LEASE_OPERATION_REVOKE          RangeLeaseOperation = 3
+	RangeLeaseOperation_RANGE_LEASE_OPERATION_COMPLETE_REVOKE RangeLeaseOperation = 4
+)
+
+// Enum value maps for RangeLeaseOperation.
+var (
+	RangeLeaseOperation_name = map[int32]string{
+		0: "RANGE_LEASE_OPERATION_UNSPECIFIED",
+		1: "RANGE_LEASE_OPERATION_ACQUIRE",
+		2: "RANGE_LEASE_OPERATION_RENEW",
+		3: "RANGE_LEASE_OPERATION_REVOKE",
+		4: "RANGE_LEASE_OPERATION_COMPLETE_REVOKE",
+	}
+	RangeLeaseOperation_value = map[string]int32{
+		"RANGE_LEASE_OPERATION_UNSPECIFIED":     0,
+		"RANGE_LEASE_OPERATION_ACQUIRE":         1,
+		"RANGE_LEASE_OPERATION_RENEW":           2,
+		"RANGE_LEASE_OPERATION_REVOKE":          3,
+		"RANGE_LEASE_OPERATION_COMPLETE_REVOKE": 4,
+	}
+)
+
+func (x RangeLeaseOperation) Enum() *RangeLeaseOperation {
+	p := new(RangeLeaseOperation)
+	*p = x
+	return p
+}
+
+func (x RangeLeaseOperation) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RangeLeaseOperation) Descriptor() protoreflect.EnumDescriptor {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[26].Descriptor()
+}
+
+func (RangeLeaseOperation) Type() protoreflect.EnumType {
+	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[26]
+}
+
+func (x RangeLeaseOperation) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RangeLeaseOperation.Descriptor instead.
+func (RangeLeaseOperation) EnumDescriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{26}
+}
+
+type RangeLeaseCode int32
+
+const (
+	RangeLeaseCode_RANGE_LEASE_CODE_UNSPECIFIED      RangeLeaseCode = 0
+	RangeLeaseCode_RANGE_LEASE_CODE_OK               RangeLeaseCode = 1
+	RangeLeaseCode_RANGE_LEASE_CODE_NOT_FOUND        RangeLeaseCode = 2
+	RangeLeaseCode_RANGE_LEASE_CODE_CONFLICT         RangeLeaseCode = 3
+	RangeLeaseCode_RANGE_LEASE_CODE_VERSION_CONFLICT RangeLeaseCode = 4
+	RangeLeaseCode_RANGE_LEASE_CODE_BINDING_MISMATCH RangeLeaseCode = 5
+	RangeLeaseCode_RANGE_LEASE_CODE_INVALID_STATE    RangeLeaseCode = 6
+	RangeLeaseCode_RANGE_LEASE_CODE_RESOURCE_LIMIT   RangeLeaseCode = 7
+	RangeLeaseCode_RANGE_LEASE_CODE_OUT_OF_RANGE     RangeLeaseCode = 8
+	RangeLeaseCode_RANGE_LEASE_CODE_REQUEST_CONFLICT RangeLeaseCode = 9
+)
+
+// Enum value maps for RangeLeaseCode.
+var (
+	RangeLeaseCode_name = map[int32]string{
+		0: "RANGE_LEASE_CODE_UNSPECIFIED",
+		1: "RANGE_LEASE_CODE_OK",
+		2: "RANGE_LEASE_CODE_NOT_FOUND",
+		3: "RANGE_LEASE_CODE_CONFLICT",
+		4: "RANGE_LEASE_CODE_VERSION_CONFLICT",
+		5: "RANGE_LEASE_CODE_BINDING_MISMATCH",
+		6: "RANGE_LEASE_CODE_INVALID_STATE",
+		7: "RANGE_LEASE_CODE_RESOURCE_LIMIT",
+		8: "RANGE_LEASE_CODE_OUT_OF_RANGE",
+		9: "RANGE_LEASE_CODE_REQUEST_CONFLICT",
+	}
+	RangeLeaseCode_value = map[string]int32{
+		"RANGE_LEASE_CODE_UNSPECIFIED":      0,
+		"RANGE_LEASE_CODE_OK":               1,
+		"RANGE_LEASE_CODE_NOT_FOUND":        2,
+		"RANGE_LEASE_CODE_CONFLICT":         3,
+		"RANGE_LEASE_CODE_VERSION_CONFLICT": 4,
+		"RANGE_LEASE_CODE_BINDING_MISMATCH": 5,
+		"RANGE_LEASE_CODE_INVALID_STATE":    6,
+		"RANGE_LEASE_CODE_RESOURCE_LIMIT":   7,
+		"RANGE_LEASE_CODE_OUT_OF_RANGE":     8,
+		"RANGE_LEASE_CODE_REQUEST_CONFLICT": 9,
+	}
+)
+
+func (x RangeLeaseCode) Enum() *RangeLeaseCode {
+	p := new(RangeLeaseCode)
+	*p = x
+	return p
+}
+
+func (x RangeLeaseCode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RangeLeaseCode) Descriptor() protoreflect.EnumDescriptor {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[27].Descriptor()
+}
+
+func (RangeLeaseCode) Type() protoreflect.EnumType {
+	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[27]
+}
+
+func (x RangeLeaseCode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RangeLeaseCode.Descriptor instead.
+func (RangeLeaseCode) EnumDescriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{27}
+}
+
 type Pool struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -5211,6 +5437,7 @@ type CommandEnvelope struct {
 	//	*CommandEnvelope_CompletePrimaryFailoverLeaseWait
 	//	*CommandEnvelope_UpdatePool
 	//	*CommandEnvelope_DeletePool
+	//	*CommandEnvelope_RangeLease
 	Command       isCommandEnvelope_Command `protobuf_oneof:"command"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5431,6 +5658,15 @@ func (x *CommandEnvelope) GetDeletePool() *PoolMutationCommand {
 	return nil
 }
 
+func (x *CommandEnvelope) GetRangeLease() *RangeLeaseCommand {
+	if x != nil {
+		if x, ok := x.Command.(*CommandEnvelope_RangeLease); ok {
+			return x.RangeLease
+		}
+	}
+	return nil
+}
+
 type isCommandEnvelope_Command interface {
 	isCommandEnvelope_Command()
 }
@@ -5511,6 +5747,10 @@ type CommandEnvelope_DeletePool struct {
 	DeletePool *PoolMutationCommand `protobuf:"bytes,20,opt,name=delete_pool,json=deletePool,proto3,oneof"`
 }
 
+type CommandEnvelope_RangeLease struct {
+	RangeLease *RangeLeaseCommand `protobuf:"bytes,21,opt,name=range_lease,json=rangeLease,proto3,oneof"`
+}
+
 func (*CommandEnvelope_CreatePool) isCommandEnvelope_Command() {}
 
 func (*CommandEnvelope_RegisterNode) isCommandEnvelope_Command() {}
@@ -5548,6 +5788,8 @@ func (*CommandEnvelope_CompletePrimaryFailoverLeaseWait) isCommandEnvelope_Comma
 func (*CommandEnvelope_UpdatePool) isCommandEnvelope_Command() {}
 
 func (*CommandEnvelope_DeletePool) isCommandEnvelope_Command() {}
+
+func (*CommandEnvelope_RangeLease) isCommandEnvelope_Command() {}
 
 type CreatePoolCommand struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
@@ -7932,8 +8174,10 @@ type StateSnapshot struct {
 	PrimaryAuthorities         []*PrimaryAuthority    `protobuf:"bytes,11,rep,name=primary_authorities,json=primaryAuthorities,proto3" json:"primary_authorities,omitempty"`
 	PrimaryAuthorityCandidates []*PrimaryAuthority    `protobuf:"bytes,12,rep,name=primary_authority_candidates,json=primaryAuthorityCandidates,proto3" json:"primary_authority_candidates,omitempty"`
 	PrimaryFailovers           []*PrimaryFailover     `protobuf:"bytes,13,rep,name=primary_failovers,json=primaryFailovers,proto3" json:"primary_failovers,omitempty"`
-	unknownFields              protoimpl.UnknownFields
-	sizeCache                  protoimpl.SizeCache
+	// Checks the lease view reconstructed from retained range-lease requests.
+	RangeLeaseDigest []byte `protobuf:"bytes,14,opt,name=range_lease_digest,json=rangeLeaseDigest,proto3" json:"range_lease_digest,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StateSnapshot) Reset() {
@@ -8057,6 +8301,13 @@ func (x *StateSnapshot) GetPrimaryFailovers() []*PrimaryFailover {
 	return nil
 }
 
+func (x *StateSnapshot) GetRangeLeaseDigest() []byte {
+	if x != nil {
+		return x.RangeLeaseDigest
+	}
+	return nil
+}
+
 type PoolMutationCommand struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
 	RequestId               string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -8173,6 +8424,550 @@ func (x *PoolMutationApplyResponse) GetCode() PoolMutationApplyCode {
 func (x *PoolMutationApplyResponse) GetPool() *Pool {
 	if x != nil {
 		return x.Pool
+	}
+	return nil
+}
+
+type RangeLeaseRequest struct {
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	RequestId               string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	LeaseId                 string                 `protobuf:"bytes,2,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	VolumeId                string                 `protobuf:"bytes,3,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	HolderNodeId            string                 `protobuf:"bytes,4,opt,name=holder_node_id,json=holderNodeId,proto3" json:"holder_node_id,omitempty"`
+	HolderBootId            []byte                 `protobuf:"bytes,5,opt,name=holder_boot_id,json=holderBootId,proto3" json:"holder_boot_id,omitempty"`
+	OffsetBytes             uint64                 `protobuf:"varint,6,opt,name=offset_bytes,json=offsetBytes,proto3" json:"offset_bytes,omitempty"`
+	LengthBytes             uint64                 `protobuf:"varint,7,opt,name=length_bytes,json=lengthBytes,proto3" json:"length_bytes,omitempty"`
+	Mode                    RangeLeaseMode         `protobuf:"varint,8,opt,name=mode,proto3,enum=zettide.controller.v1.RangeLeaseMode" json:"mode,omitempty"`
+	ExpectedResourceVersion uint64                 `protobuf:"varint,9,opt,name=expected_resource_version,json=expectedResourceVersion,proto3" json:"expected_resource_version,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
+}
+
+func (x *RangeLeaseRequest) Reset() {
+	*x = RangeLeaseRequest{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[86]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RangeLeaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RangeLeaseRequest) ProtoMessage() {}
+
+func (x *RangeLeaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[86]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RangeLeaseRequest.ProtoReflect.Descriptor instead.
+func (*RangeLeaseRequest) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{86}
+}
+
+func (x *RangeLeaseRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *RangeLeaseRequest) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *RangeLeaseRequest) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *RangeLeaseRequest) GetHolderNodeId() string {
+	if x != nil {
+		return x.HolderNodeId
+	}
+	return ""
+}
+
+func (x *RangeLeaseRequest) GetHolderBootId() []byte {
+	if x != nil {
+		return x.HolderBootId
+	}
+	return nil
+}
+
+func (x *RangeLeaseRequest) GetOffsetBytes() uint64 {
+	if x != nil {
+		return x.OffsetBytes
+	}
+	return 0
+}
+
+func (x *RangeLeaseRequest) GetLengthBytes() uint64 {
+	if x != nil {
+		return x.LengthBytes
+	}
+	return 0
+}
+
+func (x *RangeLeaseRequest) GetMode() RangeLeaseMode {
+	if x != nil {
+		return x.Mode
+	}
+	return RangeLeaseMode_RANGE_LEASE_MODE_UNSPECIFIED
+}
+
+func (x *RangeLeaseRequest) GetExpectedResourceVersion() uint64 {
+	if x != nil {
+		return x.ExpectedResourceVersion
+	}
+	return 0
+}
+
+type RangeLease struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	LeaseId         string                 `protobuf:"bytes,1,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	VolumeId        string                 `protobuf:"bytes,2,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	HolderNodeId    string                 `protobuf:"bytes,3,opt,name=holder_node_id,json=holderNodeId,proto3" json:"holder_node_id,omitempty"`
+	HolderBootId    []byte                 `protobuf:"bytes,4,opt,name=holder_boot_id,json=holderBootId,proto3" json:"holder_boot_id,omitempty"`
+	OffsetBytes     uint64                 `protobuf:"varint,5,opt,name=offset_bytes,json=offsetBytes,proto3" json:"offset_bytes,omitempty"`
+	LengthBytes     uint64                 `protobuf:"varint,6,opt,name=length_bytes,json=lengthBytes,proto3" json:"length_bytes,omitempty"`
+	Mode            RangeLeaseMode         `protobuf:"varint,7,opt,name=mode,proto3,enum=zettide.controller.v1.RangeLeaseMode" json:"mode,omitempty"`
+	TokenRevision   uint64                 `protobuf:"varint,8,opt,name=token_revision,json=tokenRevision,proto3" json:"token_revision,omitempty"`
+	ResourceVersion uint64                 `protobuf:"varint,9,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
+	State           RangeLeaseState        `protobuf:"varint,10,opt,name=state,proto3,enum=zettide.controller.v1.RangeLeaseState" json:"state,omitempty"`
+	CreatedRevision uint64                 `protobuf:"varint,11,opt,name=created_revision,json=createdRevision,proto3" json:"created_revision,omitempty"`
+	DurationMs      uint64                 `protobuf:"varint,12,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *RangeLease) Reset() {
+	*x = RangeLease{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[87]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RangeLease) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RangeLease) ProtoMessage() {}
+
+func (x *RangeLease) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[87]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RangeLease.ProtoReflect.Descriptor instead.
+func (*RangeLease) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{87}
+}
+
+func (x *RangeLease) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *RangeLease) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *RangeLease) GetHolderNodeId() string {
+	if x != nil {
+		return x.HolderNodeId
+	}
+	return ""
+}
+
+func (x *RangeLease) GetHolderBootId() []byte {
+	if x != nil {
+		return x.HolderBootId
+	}
+	return nil
+}
+
+func (x *RangeLease) GetOffsetBytes() uint64 {
+	if x != nil {
+		return x.OffsetBytes
+	}
+	return 0
+}
+
+func (x *RangeLease) GetLengthBytes() uint64 {
+	if x != nil {
+		return x.LengthBytes
+	}
+	return 0
+}
+
+func (x *RangeLease) GetMode() RangeLeaseMode {
+	if x != nil {
+		return x.Mode
+	}
+	return RangeLeaseMode_RANGE_LEASE_MODE_UNSPECIFIED
+}
+
+func (x *RangeLease) GetTokenRevision() uint64 {
+	if x != nil {
+		return x.TokenRevision
+	}
+	return 0
+}
+
+func (x *RangeLease) GetResourceVersion() uint64 {
+	if x != nil {
+		return x.ResourceVersion
+	}
+	return 0
+}
+
+func (x *RangeLease) GetState() RangeLeaseState {
+	if x != nil {
+		return x.State
+	}
+	return RangeLeaseState_RANGE_LEASE_STATE_UNSPECIFIED
+}
+
+func (x *RangeLease) GetCreatedRevision() uint64 {
+	if x != nil {
+		return x.CreatedRevision
+	}
+	return 0
+}
+
+func (x *RangeLease) GetDurationMs() uint64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
+type RangeLeaseResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Lease         *RangeLease            `protobuf:"bytes,1,opt,name=lease,proto3" json:"lease,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RangeLeaseResponse) Reset() {
+	*x = RangeLeaseResponse{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[88]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RangeLeaseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RangeLeaseResponse) ProtoMessage() {}
+
+func (x *RangeLeaseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[88]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RangeLeaseResponse.ProtoReflect.Descriptor instead.
+func (*RangeLeaseResponse) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{88}
+}
+
+func (x *RangeLeaseResponse) GetLease() *RangeLease {
+	if x != nil {
+		return x.Lease
+	}
+	return nil
+}
+
+type GetRangeLeaseRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	LeaseId       string                 `protobuf:"bytes,1,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetRangeLeaseRequest) Reset() {
+	*x = GetRangeLeaseRequest{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[89]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetRangeLeaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetRangeLeaseRequest) ProtoMessage() {}
+
+func (x *GetRangeLeaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[89]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetRangeLeaseRequest.ProtoReflect.Descriptor instead.
+func (*GetRangeLeaseRequest) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{89}
+}
+
+func (x *GetRangeLeaseRequest) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+type ListRangeLeasesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	AfterLeaseId  string                 `protobuf:"bytes,2,opt,name=after_lease_id,json=afterLeaseId,proto3" json:"after_lease_id,omitempty"`
+	PageSize      uint32                 `protobuf:"varint,3,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRangeLeasesRequest) Reset() {
+	*x = ListRangeLeasesRequest{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[90]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRangeLeasesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRangeLeasesRequest) ProtoMessage() {}
+
+func (x *ListRangeLeasesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[90]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRangeLeasesRequest.ProtoReflect.Descriptor instead.
+func (*ListRangeLeasesRequest) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{90}
+}
+
+func (x *ListRangeLeasesRequest) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+func (x *ListRangeLeasesRequest) GetAfterLeaseId() string {
+	if x != nil {
+		return x.AfterLeaseId
+	}
+	return ""
+}
+
+func (x *ListRangeLeasesRequest) GetPageSize() uint32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+type ListRangeLeasesResponse struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Leases           []*RangeLease          `protobuf:"bytes,1,rep,name=leases,proto3" json:"leases,omitempty"`
+	NextAfterLeaseId string                 `protobuf:"bytes,2,opt,name=next_after_lease_id,json=nextAfterLeaseId,proto3" json:"next_after_lease_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ListRangeLeasesResponse) Reset() {
+	*x = ListRangeLeasesResponse{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[91]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRangeLeasesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRangeLeasesResponse) ProtoMessage() {}
+
+func (x *ListRangeLeasesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[91]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRangeLeasesResponse.ProtoReflect.Descriptor instead.
+func (*ListRangeLeasesResponse) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{91}
+}
+
+func (x *ListRangeLeasesResponse) GetLeases() []*RangeLease {
+	if x != nil {
+		return x.Leases
+	}
+	return nil
+}
+
+func (x *ListRangeLeasesResponse) GetNextAfterLeaseId() string {
+	if x != nil {
+		return x.NextAfterLeaseId
+	}
+	return ""
+}
+
+type RangeLeaseCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Request       *RangeLeaseRequest     `protobuf:"bytes,1,opt,name=request,proto3" json:"request,omitempty"`
+	Operation     RangeLeaseOperation    `protobuf:"varint,2,opt,name=operation,proto3,enum=zettide.controller.v1.RangeLeaseOperation" json:"operation,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RangeLeaseCommand) Reset() {
+	*x = RangeLeaseCommand{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[92]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RangeLeaseCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RangeLeaseCommand) ProtoMessage() {}
+
+func (x *RangeLeaseCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[92]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RangeLeaseCommand.ProtoReflect.Descriptor instead.
+func (*RangeLeaseCommand) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{92}
+}
+
+func (x *RangeLeaseCommand) GetRequest() *RangeLeaseRequest {
+	if x != nil {
+		return x.Request
+	}
+	return nil
+}
+
+func (x *RangeLeaseCommand) GetOperation() RangeLeaseOperation {
+	if x != nil {
+		return x.Operation
+	}
+	return RangeLeaseOperation_RANGE_LEASE_OPERATION_UNSPECIFIED
+}
+
+type RangeLeaseApplyResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Code          RangeLeaseCode         `protobuf:"varint,1,opt,name=code,proto3,enum=zettide.controller.v1.RangeLeaseCode" json:"code,omitempty"`
+	Lease         *RangeLease            `protobuf:"bytes,2,opt,name=lease,proto3" json:"lease,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RangeLeaseApplyResponse) Reset() {
+	*x = RangeLeaseApplyResponse{}
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[93]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RangeLeaseApplyResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RangeLeaseApplyResponse) ProtoMessage() {}
+
+func (x *RangeLeaseApplyResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes[93]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RangeLeaseApplyResponse.ProtoReflect.Descriptor instead.
+func (*RangeLeaseApplyResponse) Descriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{93}
+}
+
+func (x *RangeLeaseApplyResponse) GetCode() RangeLeaseCode {
+	if x != nil {
+		return x.Code
+	}
+	return RangeLeaseCode_RANGE_LEASE_CODE_UNSPECIFIED
+}
+
+func (x *RangeLeaseApplyResponse) GetLease() *RangeLease {
+	if x != nil {
+		return x.Lease
 	}
 	return nil
 }
@@ -8519,7 +9314,7 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x0fVolumeTombstone\x125\n" +
 	"\x06volume\x18\x01 \x01(\v2\x1d.zettide.controller.v1.VolumeR\x06volume\x12+\n" +
 	"\x12deleted_at_unix_ms\x18\x02 \x01(\x03R\x0fdeletedAtUnixMs\x12)\n" +
-	"\x10deleted_revision\x18\x03 \x01(\x04R\x0fdeletedRevision\"\xc3\x10\n" +
+	"\x10deleted_revision\x18\x03 \x01(\x04R\x0fdeletedRevision\"\x90\x11\n" +
 	"\x0fCommandEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x12K\n" +
 	"\vcreate_pool\x18\x02 \x01(\v2(.zettide.controller.v1.CreatePoolCommandH\x00R\n" +
@@ -8544,7 +9339,9 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\vupdate_pool\x18\x13 \x01(\v2*.zettide.controller.v1.PoolMutationCommandH\x00R\n" +
 	"updatePool\x12M\n" +
 	"\vdelete_pool\x18\x14 \x01(\v2*.zettide.controller.v1.PoolMutationCommandH\x00R\n" +
-	"deletePoolB\t\n" +
+	"deletePool\x12K\n" +
+	"\vrange_lease\x18\x15 \x01(\v2(.zettide.controller.v1.RangeLeaseCommandH\x00R\n" +
+	"rangeLeaseB\t\n" +
 	"\acommand\"\xd0\x01\n" +
 	"\x11CreatePoolCommand\x12\x1d\n" +
 	"\n" +
@@ -8764,7 +9561,7 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x13request_fingerprint\x18\x02 \x01(\fR\x12requestFingerprint\x12)\n" +
 	"\x10encoded_response\x18\x03 \x01(\fR\x0fencodedResponse\x12'\n" +
 	"\x0fencoded_command\x18\x04 \x01(\fR\x0eencodedCommand\x12)\n" +
-	"\x10applied_revision\x18\x05 \x01(\x04R\x0fappliedRevision\"\xca\a\n" +
+	"\x10applied_revision\x18\x05 \x01(\x04R\x0fappliedRevision\"\xf8\a\n" +
 	"\rStateSnapshot\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x121\n" +
 	"\x05pools\x18\x02 \x03(\v2\x1b.zettide.controller.v1.PoolR\x05pools\x12@\n" +
@@ -8779,7 +9576,8 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	" \x03(\v2'.zettide.controller.v1.VolumeAttachmentR\x11volumeAttachments\x12X\n" +
 	"\x13primary_authorities\x18\v \x03(\v2'.zettide.controller.v1.PrimaryAuthorityR\x12primaryAuthorities\x12i\n" +
 	"\x1cprimary_authority_candidates\x18\f \x03(\v2'.zettide.controller.v1.PrimaryAuthorityR\x1aprimaryAuthorityCandidates\x12S\n" +
-	"\x11primary_failovers\x18\r \x03(\v2&.zettide.controller.v1.PrimaryFailoverR\x10primaryFailovers\"\xab\x01\n" +
+	"\x11primary_failovers\x18\r \x03(\v2&.zettide.controller.v1.PrimaryFailoverR\x10primaryFailovers\x12,\n" +
+	"\x12range_lease_digest\x18\x0e \x01(\fR\x10rangeLeaseDigest\"\xab\x01\n" +
 	"\x13PoolMutationCommand\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x17\n" +
@@ -8788,7 +9586,51 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x19expected_resource_version\x18\x04 \x01(\x04R\x17expectedResourceVersion\"\x8e\x01\n" +
 	"\x19PoolMutationApplyResponse\x12@\n" +
 	"\x04code\x18\x01 \x01(\x0e2,.zettide.controller.v1.PoolMutationApplyCodeR\x04code\x12/\n" +
-	"\x04pool\x18\x02 \x01(\v2\x1b.zettide.controller.v1.PoolR\x04pool*\x8a\x01\n" +
+	"\x04pool\x18\x02 \x01(\v2\x1b.zettide.controller.v1.PoolR\x04pool\"\xf3\x02\n" +
+	"\x11RangeLeaseRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x19\n" +
+	"\blease_id\x18\x02 \x01(\tR\aleaseId\x12\x1b\n" +
+	"\tvolume_id\x18\x03 \x01(\tR\bvolumeId\x12$\n" +
+	"\x0eholder_node_id\x18\x04 \x01(\tR\fholderNodeId\x12$\n" +
+	"\x0eholder_boot_id\x18\x05 \x01(\fR\fholderBootId\x12!\n" +
+	"\foffset_bytes\x18\x06 \x01(\x04R\voffsetBytes\x12!\n" +
+	"\flength_bytes\x18\a \x01(\x04R\vlengthBytes\x129\n" +
+	"\x04mode\x18\b \x01(\x0e2%.zettide.controller.v1.RangeLeaseModeR\x04mode\x12:\n" +
+	"\x19expected_resource_version\x18\t \x01(\x04R\x17expectedResourceVersion\"\xed\x03\n" +
+	"\n" +
+	"RangeLease\x12\x19\n" +
+	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1b\n" +
+	"\tvolume_id\x18\x02 \x01(\tR\bvolumeId\x12$\n" +
+	"\x0eholder_node_id\x18\x03 \x01(\tR\fholderNodeId\x12$\n" +
+	"\x0eholder_boot_id\x18\x04 \x01(\fR\fholderBootId\x12!\n" +
+	"\foffset_bytes\x18\x05 \x01(\x04R\voffsetBytes\x12!\n" +
+	"\flength_bytes\x18\x06 \x01(\x04R\vlengthBytes\x129\n" +
+	"\x04mode\x18\a \x01(\x0e2%.zettide.controller.v1.RangeLeaseModeR\x04mode\x12%\n" +
+	"\x0etoken_revision\x18\b \x01(\x04R\rtokenRevision\x12)\n" +
+	"\x10resource_version\x18\t \x01(\x04R\x0fresourceVersion\x12<\n" +
+	"\x05state\x18\n" +
+	" \x01(\x0e2&.zettide.controller.v1.RangeLeaseStateR\x05state\x12)\n" +
+	"\x10created_revision\x18\v \x01(\x04R\x0fcreatedRevision\x12\x1f\n" +
+	"\vduration_ms\x18\f \x01(\x04R\n" +
+	"durationMs\"M\n" +
+	"\x12RangeLeaseResponse\x127\n" +
+	"\x05lease\x18\x01 \x01(\v2!.zettide.controller.v1.RangeLeaseR\x05lease\"1\n" +
+	"\x14GetRangeLeaseRequest\x12\x19\n" +
+	"\blease_id\x18\x01 \x01(\tR\aleaseId\"x\n" +
+	"\x16ListRangeLeasesRequest\x12\x1b\n" +
+	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\x12$\n" +
+	"\x0eafter_lease_id\x18\x02 \x01(\tR\fafterLeaseId\x12\x1b\n" +
+	"\tpage_size\x18\x03 \x01(\rR\bpageSize\"\x83\x01\n" +
+	"\x17ListRangeLeasesResponse\x129\n" +
+	"\x06leases\x18\x01 \x03(\v2!.zettide.controller.v1.RangeLeaseR\x06leases\x12-\n" +
+	"\x13next_after_lease_id\x18\x02 \x01(\tR\x10nextAfterLeaseId\"\xa1\x01\n" +
+	"\x11RangeLeaseCommand\x12B\n" +
+	"\arequest\x18\x01 \x01(\v2(.zettide.controller.v1.RangeLeaseRequestR\arequest\x12H\n" +
+	"\toperation\x18\x02 \x01(\x0e2*.zettide.controller.v1.RangeLeaseOperationR\toperation\"\x8d\x01\n" +
+	"\x17RangeLeaseApplyResponse\x129\n" +
+	"\x04code\x18\x01 \x01(\x0e2%.zettide.controller.v1.RangeLeaseCodeR\x04code\x127\n" +
+	"\x05lease\x18\x02 \x01(\v2!.zettide.controller.v1.RangeLeaseR\x05lease*\x8a\x01\n" +
 	"\x14MemberHeartbeatState\x12&\n" +
 	"\"MEMBER_HEARTBEAT_STATE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eMEMBER_HEARTBEAT_STATE_PRESENT\x10\x01\x12&\n" +
@@ -8960,7 +9802,33 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	")POOL_MUTATION_APPLY_CODE_VERSION_CONFLICT\x10\x04\x12&\n" +
 	"\"POOL_MUTATION_APPLY_CODE_NOT_EMPTY\x10\x05\x12-\n" +
 	")POOL_MUTATION_APPLY_CODE_REQUEST_CONFLICT\x10\x06\x12*\n" +
-	"&POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT\x10\a2\xf0\x03\n" +
+	"&POOL_MUTATION_APPLY_CODE_REQUEST_LIMIT\x10\a*i\n" +
+	"\x0eRangeLeaseMode\x12 \n" +
+	"\x1cRANGE_LEASE_MODE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15RANGE_LEASE_MODE_READ\x10\x01\x12\x1a\n" +
+	"\x16RANGE_LEASE_MODE_WRITE\x10\x02*\x91\x01\n" +
+	"\x0fRangeLeaseState\x12!\n" +
+	"\x1dRANGE_LEASE_STATE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18RANGE_LEASE_STATE_ACTIVE\x10\x01\x12\x1e\n" +
+	"\x1aRANGE_LEASE_STATE_REVOKING\x10\x02\x12\x1d\n" +
+	"\x19RANGE_LEASE_STATE_REVOKED\x10\x03*\xcd\x01\n" +
+	"\x13RangeLeaseOperation\x12%\n" +
+	"!RANGE_LEASE_OPERATION_UNSPECIFIED\x10\x00\x12!\n" +
+	"\x1dRANGE_LEASE_OPERATION_ACQUIRE\x10\x01\x12\x1f\n" +
+	"\x1bRANGE_LEASE_OPERATION_RENEW\x10\x02\x12 \n" +
+	"\x1cRANGE_LEASE_OPERATION_REVOKE\x10\x03\x12)\n" +
+	"%RANGE_LEASE_OPERATION_COMPLETE_REVOKE\x10\x04*\xeb\x02\n" +
+	"\x0eRangeLeaseCode\x12 \n" +
+	"\x1cRANGE_LEASE_CODE_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13RANGE_LEASE_CODE_OK\x10\x01\x12\x1e\n" +
+	"\x1aRANGE_LEASE_CODE_NOT_FOUND\x10\x02\x12\x1d\n" +
+	"\x19RANGE_LEASE_CODE_CONFLICT\x10\x03\x12%\n" +
+	"!RANGE_LEASE_CODE_VERSION_CONFLICT\x10\x04\x12%\n" +
+	"!RANGE_LEASE_CODE_BINDING_MISMATCH\x10\x05\x12\"\n" +
+	"\x1eRANGE_LEASE_CODE_INVALID_STATE\x10\x06\x12#\n" +
+	"\x1fRANGE_LEASE_CODE_RESOURCE_LIMIT\x10\a\x12!\n" +
+	"\x1dRANGE_LEASE_CODE_OUT_OF_RANGE\x10\b\x12%\n" +
+	"!RANGE_LEASE_CODE_REQUEST_CONFLICT\x10\t2\xf0\x03\n" +
 	"\vPoolService\x12a\n" +
 	"\n" +
 	"CreatePool\x12(.zettide.controller.v1.CreatePoolRequest\x1a).zettide.controller.v1.CreatePoolResponse\x12X\n" +
@@ -8986,7 +9854,16 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\tGetVolume\x12'.zettide.controller.v1.GetVolumeRequest\x1a(.zettide.controller.v1.GetVolumeResponse\x12g\n" +
 	"\fUpdateVolume\x12*.zettide.controller.v1.UpdateVolumeRequest\x1a+.zettide.controller.v1.UpdateVolumeResponse\x12d\n" +
 	"\vListVolumes\x12).zettide.controller.v1.ListVolumesRequest\x1a*.zettide.controller.v1.ListVolumesResponse\x12g\n" +
-	"\fDeleteVolume\x12*.zettide.controller.v1.DeleteVolumeRequest\x1a+.zettide.controller.v1.DeleteVolumeResponseb\x06proto3"
+	"\fDeleteVolume\x12*.zettide.controller.v1.DeleteVolumeRequest\x1a+.zettide.controller.v1.DeleteVolumeResponse2\xf7\x04\n" +
+	"\x11RangeLeaseService\x12c\n" +
+	"\fAcquireLease\x12(.zettide.controller.v1.RangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12a\n" +
+	"\n" +
+	"RenewLease\x12(.zettide.controller.v1.RangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12b\n" +
+	"\vRevokeLease\x12(.zettide.controller.v1.RangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12e\n" +
+	"\x0eCompleteRevoke\x12(.zettide.controller.v1.RangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12b\n" +
+	"\bGetLease\x12+.zettide.controller.v1.GetRangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12k\n" +
+	"\n" +
+	"ListLeases\x12-.zettide.controller.v1.ListRangeLeasesRequest\x1a..zettide.controller.v1.ListRangeLeasesResponseb\x06proto3"
 
 var (
 	file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescOnce sync.Once
@@ -9000,8 +9877,8 @@ func file_services_controller_proto_zettide_controller_v1_controller_proto_rawDe
 	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescData
 }
 
-var file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes = make([]protoimpl.EnumInfo, 24)
-var file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes = make([]protoimpl.MessageInfo, 86)
+var file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes = make([]protoimpl.EnumInfo, 28)
+var file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes = make([]protoimpl.MessageInfo, 94)
 var file_services_controller_proto_zettide_controller_v1_controller_proto_goTypes = []any{
 	(MemberHeartbeatState)(0),                          // 0: zettide.controller.v1.MemberHeartbeatState
 	(HeartbeatFreshness)(0),                            // 1: zettide.controller.v1.HeartbeatFreshness
@@ -9027,237 +9904,271 @@ var file_services_controller_proto_zettide_controller_v1_controller_proto_goType
 	(PrimaryAuthorityApplyCode)(0),                     // 21: zettide.controller.v1.PrimaryAuthorityApplyCode
 	(PrimaryFailoverApplyCode)(0),                      // 22: zettide.controller.v1.PrimaryFailoverApplyCode
 	(PoolMutationApplyCode)(0),                         // 23: zettide.controller.v1.PoolMutationApplyCode
-	(*Pool)(nil),                                       // 24: zettide.controller.v1.Pool
-	(*UpdatePoolRequest)(nil),                          // 25: zettide.controller.v1.UpdatePoolRequest
-	(*UpdatePoolResponse)(nil),                         // 26: zettide.controller.v1.UpdatePoolResponse
-	(*DeletePoolRequest)(nil),                          // 27: zettide.controller.v1.DeletePoolRequest
-	(*DeletePoolResponse)(nil),                         // 28: zettide.controller.v1.DeletePoolResponse
-	(*CreatePoolRequest)(nil),                          // 29: zettide.controller.v1.CreatePoolRequest
-	(*CreatePoolResponse)(nil),                         // 30: zettide.controller.v1.CreatePoolResponse
-	(*GetPoolRequest)(nil),                             // 31: zettide.controller.v1.GetPoolRequest
-	(*GetPoolResponse)(nil),                            // 32: zettide.controller.v1.GetPoolResponse
-	(*ListPoolsRequest)(nil),                           // 33: zettide.controller.v1.ListPoolsRequest
-	(*ListPoolsResponse)(nil),                          // 34: zettide.controller.v1.ListPoolsResponse
-	(*Node)(nil),                                       // 35: zettide.controller.v1.Node
-	(*RegisterNodeRequest)(nil),                        // 36: zettide.controller.v1.RegisterNodeRequest
-	(*RegisterNodeResponse)(nil),                       // 37: zettide.controller.v1.RegisterNodeResponse
-	(*GetNodeRequest)(nil),                             // 38: zettide.controller.v1.GetNodeRequest
-	(*GetNodeResponse)(nil),                            // 39: zettide.controller.v1.GetNodeResponse
-	(*ListNodesRequest)(nil),                           // 40: zettide.controller.v1.ListNodesRequest
-	(*ListNodesResponse)(nil),                          // 41: zettide.controller.v1.ListNodesResponse
-	(*Member)(nil),                                     // 42: zettide.controller.v1.Member
-	(*RegisterMemberRequest)(nil),                      // 43: zettide.controller.v1.RegisterMemberRequest
-	(*RegisterMemberResponse)(nil),                     // 44: zettide.controller.v1.RegisterMemberResponse
-	(*GetMemberRequest)(nil),                           // 45: zettide.controller.v1.GetMemberRequest
-	(*GetMemberResponse)(nil),                          // 46: zettide.controller.v1.GetMemberResponse
-	(*ListMembersRequest)(nil),                         // 47: zettide.controller.v1.ListMembersRequest
-	(*ListMembersResponse)(nil),                        // 48: zettide.controller.v1.ListMembersResponse
-	(*MemberCapacity)(nil),                             // 49: zettide.controller.v1.MemberCapacity
-	(*MemberHeartbeat)(nil),                            // 50: zettide.controller.v1.MemberHeartbeat
-	(*ReportHeartbeatRequest)(nil),                     // 51: zettide.controller.v1.ReportHeartbeatRequest
-	(*NodeHeartbeat)(nil),                              // 52: zettide.controller.v1.NodeHeartbeat
-	(*ReportHeartbeatResponse)(nil),                    // 53: zettide.controller.v1.ReportHeartbeatResponse
-	(*GetHeartbeatRequest)(nil),                        // 54: zettide.controller.v1.GetHeartbeatRequest
-	(*GetHeartbeatResponse)(nil),                       // 55: zettide.controller.v1.GetHeartbeatResponse
-	(*Volume)(nil),                                     // 56: zettide.controller.v1.Volume
-	(*CreateVolumeRequest)(nil),                        // 57: zettide.controller.v1.CreateVolumeRequest
-	(*CreateVolumeResponse)(nil),                       // 58: zettide.controller.v1.CreateVolumeResponse
-	(*GetVolumeRequest)(nil),                           // 59: zettide.controller.v1.GetVolumeRequest
-	(*GetVolumeResponse)(nil),                          // 60: zettide.controller.v1.GetVolumeResponse
-	(*UpdateVolumeRequest)(nil),                        // 61: zettide.controller.v1.UpdateVolumeRequest
-	(*UpdateVolumeResponse)(nil),                       // 62: zettide.controller.v1.UpdateVolumeResponse
-	(*ListVolumesRequest)(nil),                         // 63: zettide.controller.v1.ListVolumesRequest
-	(*ListVolumesResponse)(nil),                        // 64: zettide.controller.v1.ListVolumesResponse
-	(*DeleteVolumeRequest)(nil),                        // 65: zettide.controller.v1.DeleteVolumeRequest
-	(*DeleteVolumeResponse)(nil),                       // 66: zettide.controller.v1.DeleteVolumeResponse
-	(*ReplicaAttestation)(nil),                         // 67: zettide.controller.v1.ReplicaAttestation
-	(*ReplicaPlacement)(nil),                           // 68: zettide.controller.v1.ReplicaPlacement
-	(*ReplicaAllocation)(nil),                          // 69: zettide.controller.v1.ReplicaAllocation
-	(*VolumeAttachment)(nil),                           // 70: zettide.controller.v1.VolumeAttachment
-	(*PrimaryAuthority)(nil),                           // 71: zettide.controller.v1.PrimaryAuthority
-	(*PrimaryFailover)(nil),                            // 72: zettide.controller.v1.PrimaryFailover
-	(*ReplicaFenceEvidence)(nil),                       // 73: zettide.controller.v1.ReplicaFenceEvidence
-	(*RecoveryEvidence)(nil),                           // 74: zettide.controller.v1.RecoveryEvidence
-	(*VolumeTombstone)(nil),                            // 75: zettide.controller.v1.VolumeTombstone
-	(*CommandEnvelope)(nil),                            // 76: zettide.controller.v1.CommandEnvelope
-	(*CreatePoolCommand)(nil),                          // 77: zettide.controller.v1.CreatePoolCommand
-	(*RegisterNodeCommand)(nil),                        // 78: zettide.controller.v1.RegisterNodeCommand
-	(*RegisterMemberCommand)(nil),                      // 79: zettide.controller.v1.RegisterMemberCommand
-	(*CreateVolumeCommand)(nil),                        // 80: zettide.controller.v1.CreateVolumeCommand
-	(*DeleteVolumeCommand)(nil),                        // 81: zettide.controller.v1.DeleteVolumeCommand
-	(*UpdateVolumeCommand)(nil),                        // 82: zettide.controller.v1.UpdateVolumeCommand
-	(*ReplicaReservation)(nil),                         // 83: zettide.controller.v1.ReplicaReservation
-	(*ReserveVolumeResourcesCommand)(nil),              // 84: zettide.controller.v1.ReserveVolumeResourcesCommand
-	(*ActivateReplicaCommand)(nil),                     // 85: zettide.controller.v1.ActivateReplicaCommand
-	(*FinalizeVolumeDeletionCommand)(nil),              // 86: zettide.controller.v1.FinalizeVolumeDeletionCommand
-	(*ProposePrimaryAuthorityCommand)(nil),             // 87: zettide.controller.v1.ProposePrimaryAuthorityCommand
-	(*ActivatePrimaryAuthorityCommand)(nil),            // 88: zettide.controller.v1.ActivatePrimaryAuthorityCommand
-	(*CommitPrimaryAuthorityReadyCommand)(nil),         // 89: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
-	(*CommitPrimaryAuthorityRenewalReadyCommand)(nil),  // 90: zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
-	(*AbortPrimaryAuthorityCandidateCommand)(nil),      // 91: zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
-	(*BeginPrimaryFailoverCommand)(nil),                // 92: zettide.controller.v1.BeginPrimaryFailoverCommand
-	(*CompletePrimaryFailoverLeaseWaitCommand)(nil),    // 93: zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
-	(*CommitPrimaryAuthorityFailoverReadyCommand)(nil), // 94: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
-	(*ApplyResponse)(nil),                              // 95: zettide.controller.v1.ApplyResponse
-	(*RegisterNodeApplyResponse)(nil),                  // 96: zettide.controller.v1.RegisterNodeApplyResponse
-	(*RegisterMemberApplyResponse)(nil),                // 97: zettide.controller.v1.RegisterMemberApplyResponse
-	(*CreateVolumeApplyResponse)(nil),                  // 98: zettide.controller.v1.CreateVolumeApplyResponse
-	(*DeleteVolumeApplyResponse)(nil),                  // 99: zettide.controller.v1.DeleteVolumeApplyResponse
-	(*UpdateVolumeApplyResponse)(nil),                  // 100: zettide.controller.v1.UpdateVolumeApplyResponse
-	(*ReserveVolumeResourcesApplyResponse)(nil),        // 101: zettide.controller.v1.ReserveVolumeResourcesApplyResponse
-	(*ActivateReplicaApplyResponse)(nil),               // 102: zettide.controller.v1.ActivateReplicaApplyResponse
-	(*FinalizeVolumeDeletionApplyResponse)(nil),        // 103: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse
-	(*PrimaryAuthorityApplyResponse)(nil),              // 104: zettide.controller.v1.PrimaryAuthorityApplyResponse
-	(*PrimaryFailoverApplyResponse)(nil),               // 105: zettide.controller.v1.PrimaryFailoverApplyResponse
-	(*RequestRecord)(nil),                              // 106: zettide.controller.v1.RequestRecord
-	(*StateSnapshot)(nil),                              // 107: zettide.controller.v1.StateSnapshot
-	(*PoolMutationCommand)(nil),                        // 108: zettide.controller.v1.PoolMutationCommand
-	(*PoolMutationApplyResponse)(nil),                  // 109: zettide.controller.v1.PoolMutationApplyResponse
+	(RangeLeaseMode)(0),                                // 24: zettide.controller.v1.RangeLeaseMode
+	(RangeLeaseState)(0),                               // 25: zettide.controller.v1.RangeLeaseState
+	(RangeLeaseOperation)(0),                           // 26: zettide.controller.v1.RangeLeaseOperation
+	(RangeLeaseCode)(0),                                // 27: zettide.controller.v1.RangeLeaseCode
+	(*Pool)(nil),                                       // 28: zettide.controller.v1.Pool
+	(*UpdatePoolRequest)(nil),                          // 29: zettide.controller.v1.UpdatePoolRequest
+	(*UpdatePoolResponse)(nil),                         // 30: zettide.controller.v1.UpdatePoolResponse
+	(*DeletePoolRequest)(nil),                          // 31: zettide.controller.v1.DeletePoolRequest
+	(*DeletePoolResponse)(nil),                         // 32: zettide.controller.v1.DeletePoolResponse
+	(*CreatePoolRequest)(nil),                          // 33: zettide.controller.v1.CreatePoolRequest
+	(*CreatePoolResponse)(nil),                         // 34: zettide.controller.v1.CreatePoolResponse
+	(*GetPoolRequest)(nil),                             // 35: zettide.controller.v1.GetPoolRequest
+	(*GetPoolResponse)(nil),                            // 36: zettide.controller.v1.GetPoolResponse
+	(*ListPoolsRequest)(nil),                           // 37: zettide.controller.v1.ListPoolsRequest
+	(*ListPoolsResponse)(nil),                          // 38: zettide.controller.v1.ListPoolsResponse
+	(*Node)(nil),                                       // 39: zettide.controller.v1.Node
+	(*RegisterNodeRequest)(nil),                        // 40: zettide.controller.v1.RegisterNodeRequest
+	(*RegisterNodeResponse)(nil),                       // 41: zettide.controller.v1.RegisterNodeResponse
+	(*GetNodeRequest)(nil),                             // 42: zettide.controller.v1.GetNodeRequest
+	(*GetNodeResponse)(nil),                            // 43: zettide.controller.v1.GetNodeResponse
+	(*ListNodesRequest)(nil),                           // 44: zettide.controller.v1.ListNodesRequest
+	(*ListNodesResponse)(nil),                          // 45: zettide.controller.v1.ListNodesResponse
+	(*Member)(nil),                                     // 46: zettide.controller.v1.Member
+	(*RegisterMemberRequest)(nil),                      // 47: zettide.controller.v1.RegisterMemberRequest
+	(*RegisterMemberResponse)(nil),                     // 48: zettide.controller.v1.RegisterMemberResponse
+	(*GetMemberRequest)(nil),                           // 49: zettide.controller.v1.GetMemberRequest
+	(*GetMemberResponse)(nil),                          // 50: zettide.controller.v1.GetMemberResponse
+	(*ListMembersRequest)(nil),                         // 51: zettide.controller.v1.ListMembersRequest
+	(*ListMembersResponse)(nil),                        // 52: zettide.controller.v1.ListMembersResponse
+	(*MemberCapacity)(nil),                             // 53: zettide.controller.v1.MemberCapacity
+	(*MemberHeartbeat)(nil),                            // 54: zettide.controller.v1.MemberHeartbeat
+	(*ReportHeartbeatRequest)(nil),                     // 55: zettide.controller.v1.ReportHeartbeatRequest
+	(*NodeHeartbeat)(nil),                              // 56: zettide.controller.v1.NodeHeartbeat
+	(*ReportHeartbeatResponse)(nil),                    // 57: zettide.controller.v1.ReportHeartbeatResponse
+	(*GetHeartbeatRequest)(nil),                        // 58: zettide.controller.v1.GetHeartbeatRequest
+	(*GetHeartbeatResponse)(nil),                       // 59: zettide.controller.v1.GetHeartbeatResponse
+	(*Volume)(nil),                                     // 60: zettide.controller.v1.Volume
+	(*CreateVolumeRequest)(nil),                        // 61: zettide.controller.v1.CreateVolumeRequest
+	(*CreateVolumeResponse)(nil),                       // 62: zettide.controller.v1.CreateVolumeResponse
+	(*GetVolumeRequest)(nil),                           // 63: zettide.controller.v1.GetVolumeRequest
+	(*GetVolumeResponse)(nil),                          // 64: zettide.controller.v1.GetVolumeResponse
+	(*UpdateVolumeRequest)(nil),                        // 65: zettide.controller.v1.UpdateVolumeRequest
+	(*UpdateVolumeResponse)(nil),                       // 66: zettide.controller.v1.UpdateVolumeResponse
+	(*ListVolumesRequest)(nil),                         // 67: zettide.controller.v1.ListVolumesRequest
+	(*ListVolumesResponse)(nil),                        // 68: zettide.controller.v1.ListVolumesResponse
+	(*DeleteVolumeRequest)(nil),                        // 69: zettide.controller.v1.DeleteVolumeRequest
+	(*DeleteVolumeResponse)(nil),                       // 70: zettide.controller.v1.DeleteVolumeResponse
+	(*ReplicaAttestation)(nil),                         // 71: zettide.controller.v1.ReplicaAttestation
+	(*ReplicaPlacement)(nil),                           // 72: zettide.controller.v1.ReplicaPlacement
+	(*ReplicaAllocation)(nil),                          // 73: zettide.controller.v1.ReplicaAllocation
+	(*VolumeAttachment)(nil),                           // 74: zettide.controller.v1.VolumeAttachment
+	(*PrimaryAuthority)(nil),                           // 75: zettide.controller.v1.PrimaryAuthority
+	(*PrimaryFailover)(nil),                            // 76: zettide.controller.v1.PrimaryFailover
+	(*ReplicaFenceEvidence)(nil),                       // 77: zettide.controller.v1.ReplicaFenceEvidence
+	(*RecoveryEvidence)(nil),                           // 78: zettide.controller.v1.RecoveryEvidence
+	(*VolumeTombstone)(nil),                            // 79: zettide.controller.v1.VolumeTombstone
+	(*CommandEnvelope)(nil),                            // 80: zettide.controller.v1.CommandEnvelope
+	(*CreatePoolCommand)(nil),                          // 81: zettide.controller.v1.CreatePoolCommand
+	(*RegisterNodeCommand)(nil),                        // 82: zettide.controller.v1.RegisterNodeCommand
+	(*RegisterMemberCommand)(nil),                      // 83: zettide.controller.v1.RegisterMemberCommand
+	(*CreateVolumeCommand)(nil),                        // 84: zettide.controller.v1.CreateVolumeCommand
+	(*DeleteVolumeCommand)(nil),                        // 85: zettide.controller.v1.DeleteVolumeCommand
+	(*UpdateVolumeCommand)(nil),                        // 86: zettide.controller.v1.UpdateVolumeCommand
+	(*ReplicaReservation)(nil),                         // 87: zettide.controller.v1.ReplicaReservation
+	(*ReserveVolumeResourcesCommand)(nil),              // 88: zettide.controller.v1.ReserveVolumeResourcesCommand
+	(*ActivateReplicaCommand)(nil),                     // 89: zettide.controller.v1.ActivateReplicaCommand
+	(*FinalizeVolumeDeletionCommand)(nil),              // 90: zettide.controller.v1.FinalizeVolumeDeletionCommand
+	(*ProposePrimaryAuthorityCommand)(nil),             // 91: zettide.controller.v1.ProposePrimaryAuthorityCommand
+	(*ActivatePrimaryAuthorityCommand)(nil),            // 92: zettide.controller.v1.ActivatePrimaryAuthorityCommand
+	(*CommitPrimaryAuthorityReadyCommand)(nil),         // 93: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
+	(*CommitPrimaryAuthorityRenewalReadyCommand)(nil),  // 94: zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
+	(*AbortPrimaryAuthorityCandidateCommand)(nil),      // 95: zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
+	(*BeginPrimaryFailoverCommand)(nil),                // 96: zettide.controller.v1.BeginPrimaryFailoverCommand
+	(*CompletePrimaryFailoverLeaseWaitCommand)(nil),    // 97: zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
+	(*CommitPrimaryAuthorityFailoverReadyCommand)(nil), // 98: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
+	(*ApplyResponse)(nil),                              // 99: zettide.controller.v1.ApplyResponse
+	(*RegisterNodeApplyResponse)(nil),                  // 100: zettide.controller.v1.RegisterNodeApplyResponse
+	(*RegisterMemberApplyResponse)(nil),                // 101: zettide.controller.v1.RegisterMemberApplyResponse
+	(*CreateVolumeApplyResponse)(nil),                  // 102: zettide.controller.v1.CreateVolumeApplyResponse
+	(*DeleteVolumeApplyResponse)(nil),                  // 103: zettide.controller.v1.DeleteVolumeApplyResponse
+	(*UpdateVolumeApplyResponse)(nil),                  // 104: zettide.controller.v1.UpdateVolumeApplyResponse
+	(*ReserveVolumeResourcesApplyResponse)(nil),        // 105: zettide.controller.v1.ReserveVolumeResourcesApplyResponse
+	(*ActivateReplicaApplyResponse)(nil),               // 106: zettide.controller.v1.ActivateReplicaApplyResponse
+	(*FinalizeVolumeDeletionApplyResponse)(nil),        // 107: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse
+	(*PrimaryAuthorityApplyResponse)(nil),              // 108: zettide.controller.v1.PrimaryAuthorityApplyResponse
+	(*PrimaryFailoverApplyResponse)(nil),               // 109: zettide.controller.v1.PrimaryFailoverApplyResponse
+	(*RequestRecord)(nil),                              // 110: zettide.controller.v1.RequestRecord
+	(*StateSnapshot)(nil),                              // 111: zettide.controller.v1.StateSnapshot
+	(*PoolMutationCommand)(nil),                        // 112: zettide.controller.v1.PoolMutationCommand
+	(*PoolMutationApplyResponse)(nil),                  // 113: zettide.controller.v1.PoolMutationApplyResponse
+	(*RangeLeaseRequest)(nil),                          // 114: zettide.controller.v1.RangeLeaseRequest
+	(*RangeLease)(nil),                                 // 115: zettide.controller.v1.RangeLease
+	(*RangeLeaseResponse)(nil),                         // 116: zettide.controller.v1.RangeLeaseResponse
+	(*GetRangeLeaseRequest)(nil),                       // 117: zettide.controller.v1.GetRangeLeaseRequest
+	(*ListRangeLeasesRequest)(nil),                     // 118: zettide.controller.v1.ListRangeLeasesRequest
+	(*ListRangeLeasesResponse)(nil),                    // 119: zettide.controller.v1.ListRangeLeasesResponse
+	(*RangeLeaseCommand)(nil),                          // 120: zettide.controller.v1.RangeLeaseCommand
+	(*RangeLeaseApplyResponse)(nil),                    // 121: zettide.controller.v1.RangeLeaseApplyResponse
 }
 var file_services_controller_proto_zettide_controller_v1_controller_proto_depIdxs = []int32{
-	24,  // 0: zettide.controller.v1.UpdatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	24,  // 1: zettide.controller.v1.DeletePoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	24,  // 2: zettide.controller.v1.CreatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	24,  // 3: zettide.controller.v1.GetPoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	24,  // 4: zettide.controller.v1.ListPoolsResponse.pools:type_name -> zettide.controller.v1.Pool
-	35,  // 5: zettide.controller.v1.RegisterNodeResponse.node:type_name -> zettide.controller.v1.Node
-	35,  // 6: zettide.controller.v1.GetNodeResponse.node:type_name -> zettide.controller.v1.Node
-	35,  // 7: zettide.controller.v1.ListNodesResponse.nodes:type_name -> zettide.controller.v1.Node
-	42,  // 8: zettide.controller.v1.RegisterMemberResponse.member:type_name -> zettide.controller.v1.Member
-	42,  // 9: zettide.controller.v1.GetMemberResponse.member:type_name -> zettide.controller.v1.Member
-	42,  // 10: zettide.controller.v1.ListMembersResponse.members:type_name -> zettide.controller.v1.Member
+	28,  // 0: zettide.controller.v1.UpdatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	28,  // 1: zettide.controller.v1.DeletePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	28,  // 2: zettide.controller.v1.CreatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	28,  // 3: zettide.controller.v1.GetPoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	28,  // 4: zettide.controller.v1.ListPoolsResponse.pools:type_name -> zettide.controller.v1.Pool
+	39,  // 5: zettide.controller.v1.RegisterNodeResponse.node:type_name -> zettide.controller.v1.Node
+	39,  // 6: zettide.controller.v1.GetNodeResponse.node:type_name -> zettide.controller.v1.Node
+	39,  // 7: zettide.controller.v1.ListNodesResponse.nodes:type_name -> zettide.controller.v1.Node
+	46,  // 8: zettide.controller.v1.RegisterMemberResponse.member:type_name -> zettide.controller.v1.Member
+	46,  // 9: zettide.controller.v1.GetMemberResponse.member:type_name -> zettide.controller.v1.Member
+	46,  // 10: zettide.controller.v1.ListMembersResponse.members:type_name -> zettide.controller.v1.Member
 	0,   // 11: zettide.controller.v1.MemberHeartbeat.state:type_name -> zettide.controller.v1.MemberHeartbeatState
-	49,  // 12: zettide.controller.v1.MemberHeartbeat.capacity:type_name -> zettide.controller.v1.MemberCapacity
-	50,  // 13: zettide.controller.v1.ReportHeartbeatRequest.members:type_name -> zettide.controller.v1.MemberHeartbeat
-	50,  // 14: zettide.controller.v1.NodeHeartbeat.members:type_name -> zettide.controller.v1.MemberHeartbeat
-	52,  // 15: zettide.controller.v1.ReportHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
-	52,  // 16: zettide.controller.v1.GetHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
+	53,  // 12: zettide.controller.v1.MemberHeartbeat.capacity:type_name -> zettide.controller.v1.MemberCapacity
+	54,  // 13: zettide.controller.v1.ReportHeartbeatRequest.members:type_name -> zettide.controller.v1.MemberHeartbeat
+	54,  // 14: zettide.controller.v1.NodeHeartbeat.members:type_name -> zettide.controller.v1.MemberHeartbeat
+	56,  // 15: zettide.controller.v1.ReportHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
+	56,  // 16: zettide.controller.v1.GetHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
 	1,   // 17: zettide.controller.v1.GetHeartbeatResponse.freshness:type_name -> zettide.controller.v1.HeartbeatFreshness
 	5,   // 18: zettide.controller.v1.Volume.protection_kind:type_name -> zettide.controller.v1.VolumeProtectionKind
 	2,   // 19: zettide.controller.v1.Volume.lifecycle_state:type_name -> zettide.controller.v1.VolumeLifecycleState
 	3,   // 20: zettide.controller.v1.Volume.availability_state:type_name -> zettide.controller.v1.VolumeAvailabilityState
 	4,   // 21: zettide.controller.v1.Volume.operation_phase:type_name -> zettide.controller.v1.VolumeOperationPhase
-	56,  // 22: zettide.controller.v1.CreateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	56,  // 23: zettide.controller.v1.GetVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	56,  // 24: zettide.controller.v1.UpdateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	56,  // 25: zettide.controller.v1.ListVolumesResponse.volumes:type_name -> zettide.controller.v1.Volume
-	56,  // 26: zettide.controller.v1.DeleteVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	60,  // 22: zettide.controller.v1.CreateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	60,  // 23: zettide.controller.v1.GetVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	60,  // 24: zettide.controller.v1.UpdateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	60,  // 25: zettide.controller.v1.ListVolumesResponse.volumes:type_name -> zettide.controller.v1.Volume
+	60,  // 26: zettide.controller.v1.DeleteVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
 	6,   // 27: zettide.controller.v1.ReplicaPlacement.state:type_name -> zettide.controller.v1.ReplicaPlacementState
 	7,   // 28: zettide.controller.v1.ReplicaAllocation.state:type_name -> zettide.controller.v1.ReplicaAllocationState
 	8,   // 29: zettide.controller.v1.VolumeAttachment.access_mode:type_name -> zettide.controller.v1.VolumeAccessMode
 	9,   // 30: zettide.controller.v1.VolumeAttachment.state:type_name -> zettide.controller.v1.VolumeAttachmentState
 	10,  // 31: zettide.controller.v1.PrimaryAuthority.state:type_name -> zettide.controller.v1.PrimaryAuthorityState
 	11,  // 32: zettide.controller.v1.PrimaryFailover.state:type_name -> zettide.controller.v1.PrimaryFailoverState
-	56,  // 33: zettide.controller.v1.VolumeTombstone.volume:type_name -> zettide.controller.v1.Volume
-	77,  // 34: zettide.controller.v1.CommandEnvelope.create_pool:type_name -> zettide.controller.v1.CreatePoolCommand
-	78,  // 35: zettide.controller.v1.CommandEnvelope.register_node:type_name -> zettide.controller.v1.RegisterNodeCommand
-	79,  // 36: zettide.controller.v1.CommandEnvelope.register_member:type_name -> zettide.controller.v1.RegisterMemberCommand
-	80,  // 37: zettide.controller.v1.CommandEnvelope.create_volume:type_name -> zettide.controller.v1.CreateVolumeCommand
-	81,  // 38: zettide.controller.v1.CommandEnvelope.delete_volume:type_name -> zettide.controller.v1.DeleteVolumeCommand
-	82,  // 39: zettide.controller.v1.CommandEnvelope.update_volume:type_name -> zettide.controller.v1.UpdateVolumeCommand
-	84,  // 40: zettide.controller.v1.CommandEnvelope.reserve_volume_resources:type_name -> zettide.controller.v1.ReserveVolumeResourcesCommand
-	85,  // 41: zettide.controller.v1.CommandEnvelope.activate_replica:type_name -> zettide.controller.v1.ActivateReplicaCommand
-	86,  // 42: zettide.controller.v1.CommandEnvelope.finalize_volume_deletion:type_name -> zettide.controller.v1.FinalizeVolumeDeletionCommand
-	87,  // 43: zettide.controller.v1.CommandEnvelope.propose_primary_authority:type_name -> zettide.controller.v1.ProposePrimaryAuthorityCommand
-	88,  // 44: zettide.controller.v1.CommandEnvelope.activate_primary_authority:type_name -> zettide.controller.v1.ActivatePrimaryAuthorityCommand
-	89,  // 45: zettide.controller.v1.CommandEnvelope.commit_primary_authority_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
-	90,  // 46: zettide.controller.v1.CommandEnvelope.commit_primary_authority_renewal_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
-	91,  // 47: zettide.controller.v1.CommandEnvelope.abort_primary_authority_candidate:type_name -> zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
-	92,  // 48: zettide.controller.v1.CommandEnvelope.begin_primary_failover:type_name -> zettide.controller.v1.BeginPrimaryFailoverCommand
-	94,  // 49: zettide.controller.v1.CommandEnvelope.commit_primary_authority_failover_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
-	93,  // 50: zettide.controller.v1.CommandEnvelope.complete_primary_failover_lease_wait:type_name -> zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
-	108, // 51: zettide.controller.v1.CommandEnvelope.update_pool:type_name -> zettide.controller.v1.PoolMutationCommand
-	108, // 52: zettide.controller.v1.CommandEnvelope.delete_pool:type_name -> zettide.controller.v1.PoolMutationCommand
-	68,  // 53: zettide.controller.v1.ReplicaReservation.placement:type_name -> zettide.controller.v1.ReplicaPlacement
-	69,  // 54: zettide.controller.v1.ReplicaReservation.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
-	83,  // 55: zettide.controller.v1.ReserveVolumeResourcesCommand.reservations:type_name -> zettide.controller.v1.ReplicaReservation
-	67,  // 56: zettide.controller.v1.ActivateReplicaCommand.attestation:type_name -> zettide.controller.v1.ReplicaAttestation
-	71,  // 57: zettide.controller.v1.ProposePrimaryAuthorityCommand.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	73,  // 58: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
-	74,  // 59: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
-	73,  // 60: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
-	74,  // 61: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
-	12,  // 62: zettide.controller.v1.ApplyResponse.code:type_name -> zettide.controller.v1.ApplyCode
-	24,  // 63: zettide.controller.v1.ApplyResponse.pool:type_name -> zettide.controller.v1.Pool
-	13,  // 64: zettide.controller.v1.RegisterNodeApplyResponse.code:type_name -> zettide.controller.v1.RegisterNodeApplyCode
-	35,  // 65: zettide.controller.v1.RegisterNodeApplyResponse.node:type_name -> zettide.controller.v1.Node
-	14,  // 66: zettide.controller.v1.RegisterMemberApplyResponse.code:type_name -> zettide.controller.v1.RegisterMemberApplyCode
-	42,  // 67: zettide.controller.v1.RegisterMemberApplyResponse.member:type_name -> zettide.controller.v1.Member
-	15,  // 68: zettide.controller.v1.CreateVolumeApplyResponse.code:type_name -> zettide.controller.v1.CreateVolumeApplyCode
-	56,  // 69: zettide.controller.v1.CreateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	16,  // 70: zettide.controller.v1.DeleteVolumeApplyResponse.code:type_name -> zettide.controller.v1.DeleteVolumeApplyCode
-	56,  // 71: zettide.controller.v1.DeleteVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	17,  // 72: zettide.controller.v1.UpdateVolumeApplyResponse.code:type_name -> zettide.controller.v1.UpdateVolumeApplyCode
-	56,  // 73: zettide.controller.v1.UpdateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	18,  // 74: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.code:type_name -> zettide.controller.v1.ReserveVolumeResourcesApplyCode
-	56,  // 75: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	19,  // 76: zettide.controller.v1.ActivateReplicaApplyResponse.code:type_name -> zettide.controller.v1.ActivateReplicaApplyCode
-	56,  // 77: zettide.controller.v1.ActivateReplicaApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	68,  // 78: zettide.controller.v1.ActivateReplicaApplyResponse.placement:type_name -> zettide.controller.v1.ReplicaPlacement
-	69,  // 79: zettide.controller.v1.ActivateReplicaApplyResponse.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
-	20,  // 80: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse.code:type_name -> zettide.controller.v1.FinalizeVolumeDeletionApplyCode
-	21,  // 81: zettide.controller.v1.PrimaryAuthorityApplyResponse.code:type_name -> zettide.controller.v1.PrimaryAuthorityApplyCode
-	71,  // 82: zettide.controller.v1.PrimaryAuthorityApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	56,  // 83: zettide.controller.v1.PrimaryAuthorityApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	22,  // 84: zettide.controller.v1.PrimaryFailoverApplyResponse.code:type_name -> zettide.controller.v1.PrimaryFailoverApplyCode
-	72,  // 85: zettide.controller.v1.PrimaryFailoverApplyResponse.failover:type_name -> zettide.controller.v1.PrimaryFailover
-	71,  // 86: zettide.controller.v1.PrimaryFailoverApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	56,  // 87: zettide.controller.v1.PrimaryFailoverApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	24,  // 88: zettide.controller.v1.StateSnapshot.pools:type_name -> zettide.controller.v1.Pool
-	106, // 89: zettide.controller.v1.StateSnapshot.requests:type_name -> zettide.controller.v1.RequestRecord
-	35,  // 90: zettide.controller.v1.StateSnapshot.nodes:type_name -> zettide.controller.v1.Node
-	42,  // 91: zettide.controller.v1.StateSnapshot.members:type_name -> zettide.controller.v1.Member
-	56,  // 92: zettide.controller.v1.StateSnapshot.volumes:type_name -> zettide.controller.v1.Volume
-	75,  // 93: zettide.controller.v1.StateSnapshot.volume_tombstones:type_name -> zettide.controller.v1.VolumeTombstone
-	68,  // 94: zettide.controller.v1.StateSnapshot.replica_placements:type_name -> zettide.controller.v1.ReplicaPlacement
-	69,  // 95: zettide.controller.v1.StateSnapshot.replica_allocations:type_name -> zettide.controller.v1.ReplicaAllocation
-	70,  // 96: zettide.controller.v1.StateSnapshot.volume_attachments:type_name -> zettide.controller.v1.VolumeAttachment
-	71,  // 97: zettide.controller.v1.StateSnapshot.primary_authorities:type_name -> zettide.controller.v1.PrimaryAuthority
-	71,  // 98: zettide.controller.v1.StateSnapshot.primary_authority_candidates:type_name -> zettide.controller.v1.PrimaryAuthority
-	72,  // 99: zettide.controller.v1.StateSnapshot.primary_failovers:type_name -> zettide.controller.v1.PrimaryFailover
-	23,  // 100: zettide.controller.v1.PoolMutationApplyResponse.code:type_name -> zettide.controller.v1.PoolMutationApplyCode
-	24,  // 101: zettide.controller.v1.PoolMutationApplyResponse.pool:type_name -> zettide.controller.v1.Pool
-	29,  // 102: zettide.controller.v1.PoolService.CreatePool:input_type -> zettide.controller.v1.CreatePoolRequest
-	31,  // 103: zettide.controller.v1.PoolService.GetPool:input_type -> zettide.controller.v1.GetPoolRequest
-	33,  // 104: zettide.controller.v1.PoolService.ListPools:input_type -> zettide.controller.v1.ListPoolsRequest
-	25,  // 105: zettide.controller.v1.PoolService.UpdatePool:input_type -> zettide.controller.v1.UpdatePoolRequest
-	27,  // 106: zettide.controller.v1.PoolService.DeletePool:input_type -> zettide.controller.v1.DeletePoolRequest
-	36,  // 107: zettide.controller.v1.NodeService.RegisterNode:input_type -> zettide.controller.v1.RegisterNodeRequest
-	38,  // 108: zettide.controller.v1.NodeService.GetNode:input_type -> zettide.controller.v1.GetNodeRequest
-	40,  // 109: zettide.controller.v1.NodeService.ListNodes:input_type -> zettide.controller.v1.ListNodesRequest
-	43,  // 110: zettide.controller.v1.MemberService.RegisterMember:input_type -> zettide.controller.v1.RegisterMemberRequest
-	45,  // 111: zettide.controller.v1.MemberService.GetMember:input_type -> zettide.controller.v1.GetMemberRequest
-	47,  // 112: zettide.controller.v1.MemberService.ListMembers:input_type -> zettide.controller.v1.ListMembersRequest
-	51,  // 113: zettide.controller.v1.HeartbeatService.ReportHeartbeat:input_type -> zettide.controller.v1.ReportHeartbeatRequest
-	54,  // 114: zettide.controller.v1.HeartbeatService.GetHeartbeat:input_type -> zettide.controller.v1.GetHeartbeatRequest
-	57,  // 115: zettide.controller.v1.VolumeService.CreateVolume:input_type -> zettide.controller.v1.CreateVolumeRequest
-	59,  // 116: zettide.controller.v1.VolumeService.GetVolume:input_type -> zettide.controller.v1.GetVolumeRequest
-	61,  // 117: zettide.controller.v1.VolumeService.UpdateVolume:input_type -> zettide.controller.v1.UpdateVolumeRequest
-	63,  // 118: zettide.controller.v1.VolumeService.ListVolumes:input_type -> zettide.controller.v1.ListVolumesRequest
-	65,  // 119: zettide.controller.v1.VolumeService.DeleteVolume:input_type -> zettide.controller.v1.DeleteVolumeRequest
-	30,  // 120: zettide.controller.v1.PoolService.CreatePool:output_type -> zettide.controller.v1.CreatePoolResponse
-	32,  // 121: zettide.controller.v1.PoolService.GetPool:output_type -> zettide.controller.v1.GetPoolResponse
-	34,  // 122: zettide.controller.v1.PoolService.ListPools:output_type -> zettide.controller.v1.ListPoolsResponse
-	26,  // 123: zettide.controller.v1.PoolService.UpdatePool:output_type -> zettide.controller.v1.UpdatePoolResponse
-	28,  // 124: zettide.controller.v1.PoolService.DeletePool:output_type -> zettide.controller.v1.DeletePoolResponse
-	37,  // 125: zettide.controller.v1.NodeService.RegisterNode:output_type -> zettide.controller.v1.RegisterNodeResponse
-	39,  // 126: zettide.controller.v1.NodeService.GetNode:output_type -> zettide.controller.v1.GetNodeResponse
-	41,  // 127: zettide.controller.v1.NodeService.ListNodes:output_type -> zettide.controller.v1.ListNodesResponse
-	44,  // 128: zettide.controller.v1.MemberService.RegisterMember:output_type -> zettide.controller.v1.RegisterMemberResponse
-	46,  // 129: zettide.controller.v1.MemberService.GetMember:output_type -> zettide.controller.v1.GetMemberResponse
-	48,  // 130: zettide.controller.v1.MemberService.ListMembers:output_type -> zettide.controller.v1.ListMembersResponse
-	53,  // 131: zettide.controller.v1.HeartbeatService.ReportHeartbeat:output_type -> zettide.controller.v1.ReportHeartbeatResponse
-	55,  // 132: zettide.controller.v1.HeartbeatService.GetHeartbeat:output_type -> zettide.controller.v1.GetHeartbeatResponse
-	58,  // 133: zettide.controller.v1.VolumeService.CreateVolume:output_type -> zettide.controller.v1.CreateVolumeResponse
-	60,  // 134: zettide.controller.v1.VolumeService.GetVolume:output_type -> zettide.controller.v1.GetVolumeResponse
-	62,  // 135: zettide.controller.v1.VolumeService.UpdateVolume:output_type -> zettide.controller.v1.UpdateVolumeResponse
-	64,  // 136: zettide.controller.v1.VolumeService.ListVolumes:output_type -> zettide.controller.v1.ListVolumesResponse
-	66,  // 137: zettide.controller.v1.VolumeService.DeleteVolume:output_type -> zettide.controller.v1.DeleteVolumeResponse
-	120, // [120:138] is the sub-list for method output_type
-	102, // [102:120] is the sub-list for method input_type
-	102, // [102:102] is the sub-list for extension type_name
-	102, // [102:102] is the sub-list for extension extendee
-	0,   // [0:102] is the sub-list for field type_name
+	60,  // 33: zettide.controller.v1.VolumeTombstone.volume:type_name -> zettide.controller.v1.Volume
+	81,  // 34: zettide.controller.v1.CommandEnvelope.create_pool:type_name -> zettide.controller.v1.CreatePoolCommand
+	82,  // 35: zettide.controller.v1.CommandEnvelope.register_node:type_name -> zettide.controller.v1.RegisterNodeCommand
+	83,  // 36: zettide.controller.v1.CommandEnvelope.register_member:type_name -> zettide.controller.v1.RegisterMemberCommand
+	84,  // 37: zettide.controller.v1.CommandEnvelope.create_volume:type_name -> zettide.controller.v1.CreateVolumeCommand
+	85,  // 38: zettide.controller.v1.CommandEnvelope.delete_volume:type_name -> zettide.controller.v1.DeleteVolumeCommand
+	86,  // 39: zettide.controller.v1.CommandEnvelope.update_volume:type_name -> zettide.controller.v1.UpdateVolumeCommand
+	88,  // 40: zettide.controller.v1.CommandEnvelope.reserve_volume_resources:type_name -> zettide.controller.v1.ReserveVolumeResourcesCommand
+	89,  // 41: zettide.controller.v1.CommandEnvelope.activate_replica:type_name -> zettide.controller.v1.ActivateReplicaCommand
+	90,  // 42: zettide.controller.v1.CommandEnvelope.finalize_volume_deletion:type_name -> zettide.controller.v1.FinalizeVolumeDeletionCommand
+	91,  // 43: zettide.controller.v1.CommandEnvelope.propose_primary_authority:type_name -> zettide.controller.v1.ProposePrimaryAuthorityCommand
+	92,  // 44: zettide.controller.v1.CommandEnvelope.activate_primary_authority:type_name -> zettide.controller.v1.ActivatePrimaryAuthorityCommand
+	93,  // 45: zettide.controller.v1.CommandEnvelope.commit_primary_authority_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
+	94,  // 46: zettide.controller.v1.CommandEnvelope.commit_primary_authority_renewal_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
+	95,  // 47: zettide.controller.v1.CommandEnvelope.abort_primary_authority_candidate:type_name -> zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
+	96,  // 48: zettide.controller.v1.CommandEnvelope.begin_primary_failover:type_name -> zettide.controller.v1.BeginPrimaryFailoverCommand
+	98,  // 49: zettide.controller.v1.CommandEnvelope.commit_primary_authority_failover_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
+	97,  // 50: zettide.controller.v1.CommandEnvelope.complete_primary_failover_lease_wait:type_name -> zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
+	112, // 51: zettide.controller.v1.CommandEnvelope.update_pool:type_name -> zettide.controller.v1.PoolMutationCommand
+	112, // 52: zettide.controller.v1.CommandEnvelope.delete_pool:type_name -> zettide.controller.v1.PoolMutationCommand
+	120, // 53: zettide.controller.v1.CommandEnvelope.range_lease:type_name -> zettide.controller.v1.RangeLeaseCommand
+	72,  // 54: zettide.controller.v1.ReplicaReservation.placement:type_name -> zettide.controller.v1.ReplicaPlacement
+	73,  // 55: zettide.controller.v1.ReplicaReservation.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
+	87,  // 56: zettide.controller.v1.ReserveVolumeResourcesCommand.reservations:type_name -> zettide.controller.v1.ReplicaReservation
+	71,  // 57: zettide.controller.v1.ActivateReplicaCommand.attestation:type_name -> zettide.controller.v1.ReplicaAttestation
+	75,  // 58: zettide.controller.v1.ProposePrimaryAuthorityCommand.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	77,  // 59: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
+	78,  // 60: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
+	77,  // 61: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
+	78,  // 62: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
+	12,  // 63: zettide.controller.v1.ApplyResponse.code:type_name -> zettide.controller.v1.ApplyCode
+	28,  // 64: zettide.controller.v1.ApplyResponse.pool:type_name -> zettide.controller.v1.Pool
+	13,  // 65: zettide.controller.v1.RegisterNodeApplyResponse.code:type_name -> zettide.controller.v1.RegisterNodeApplyCode
+	39,  // 66: zettide.controller.v1.RegisterNodeApplyResponse.node:type_name -> zettide.controller.v1.Node
+	14,  // 67: zettide.controller.v1.RegisterMemberApplyResponse.code:type_name -> zettide.controller.v1.RegisterMemberApplyCode
+	46,  // 68: zettide.controller.v1.RegisterMemberApplyResponse.member:type_name -> zettide.controller.v1.Member
+	15,  // 69: zettide.controller.v1.CreateVolumeApplyResponse.code:type_name -> zettide.controller.v1.CreateVolumeApplyCode
+	60,  // 70: zettide.controller.v1.CreateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	16,  // 71: zettide.controller.v1.DeleteVolumeApplyResponse.code:type_name -> zettide.controller.v1.DeleteVolumeApplyCode
+	60,  // 72: zettide.controller.v1.DeleteVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	17,  // 73: zettide.controller.v1.UpdateVolumeApplyResponse.code:type_name -> zettide.controller.v1.UpdateVolumeApplyCode
+	60,  // 74: zettide.controller.v1.UpdateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	18,  // 75: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.code:type_name -> zettide.controller.v1.ReserveVolumeResourcesApplyCode
+	60,  // 76: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	19,  // 77: zettide.controller.v1.ActivateReplicaApplyResponse.code:type_name -> zettide.controller.v1.ActivateReplicaApplyCode
+	60,  // 78: zettide.controller.v1.ActivateReplicaApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	72,  // 79: zettide.controller.v1.ActivateReplicaApplyResponse.placement:type_name -> zettide.controller.v1.ReplicaPlacement
+	73,  // 80: zettide.controller.v1.ActivateReplicaApplyResponse.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
+	20,  // 81: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse.code:type_name -> zettide.controller.v1.FinalizeVolumeDeletionApplyCode
+	21,  // 82: zettide.controller.v1.PrimaryAuthorityApplyResponse.code:type_name -> zettide.controller.v1.PrimaryAuthorityApplyCode
+	75,  // 83: zettide.controller.v1.PrimaryAuthorityApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	60,  // 84: zettide.controller.v1.PrimaryAuthorityApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	22,  // 85: zettide.controller.v1.PrimaryFailoverApplyResponse.code:type_name -> zettide.controller.v1.PrimaryFailoverApplyCode
+	76,  // 86: zettide.controller.v1.PrimaryFailoverApplyResponse.failover:type_name -> zettide.controller.v1.PrimaryFailover
+	75,  // 87: zettide.controller.v1.PrimaryFailoverApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	60,  // 88: zettide.controller.v1.PrimaryFailoverApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	28,  // 89: zettide.controller.v1.StateSnapshot.pools:type_name -> zettide.controller.v1.Pool
+	110, // 90: zettide.controller.v1.StateSnapshot.requests:type_name -> zettide.controller.v1.RequestRecord
+	39,  // 91: zettide.controller.v1.StateSnapshot.nodes:type_name -> zettide.controller.v1.Node
+	46,  // 92: zettide.controller.v1.StateSnapshot.members:type_name -> zettide.controller.v1.Member
+	60,  // 93: zettide.controller.v1.StateSnapshot.volumes:type_name -> zettide.controller.v1.Volume
+	79,  // 94: zettide.controller.v1.StateSnapshot.volume_tombstones:type_name -> zettide.controller.v1.VolumeTombstone
+	72,  // 95: zettide.controller.v1.StateSnapshot.replica_placements:type_name -> zettide.controller.v1.ReplicaPlacement
+	73,  // 96: zettide.controller.v1.StateSnapshot.replica_allocations:type_name -> zettide.controller.v1.ReplicaAllocation
+	74,  // 97: zettide.controller.v1.StateSnapshot.volume_attachments:type_name -> zettide.controller.v1.VolumeAttachment
+	75,  // 98: zettide.controller.v1.StateSnapshot.primary_authorities:type_name -> zettide.controller.v1.PrimaryAuthority
+	75,  // 99: zettide.controller.v1.StateSnapshot.primary_authority_candidates:type_name -> zettide.controller.v1.PrimaryAuthority
+	76,  // 100: zettide.controller.v1.StateSnapshot.primary_failovers:type_name -> zettide.controller.v1.PrimaryFailover
+	23,  // 101: zettide.controller.v1.PoolMutationApplyResponse.code:type_name -> zettide.controller.v1.PoolMutationApplyCode
+	28,  // 102: zettide.controller.v1.PoolMutationApplyResponse.pool:type_name -> zettide.controller.v1.Pool
+	24,  // 103: zettide.controller.v1.RangeLeaseRequest.mode:type_name -> zettide.controller.v1.RangeLeaseMode
+	24,  // 104: zettide.controller.v1.RangeLease.mode:type_name -> zettide.controller.v1.RangeLeaseMode
+	25,  // 105: zettide.controller.v1.RangeLease.state:type_name -> zettide.controller.v1.RangeLeaseState
+	115, // 106: zettide.controller.v1.RangeLeaseResponse.lease:type_name -> zettide.controller.v1.RangeLease
+	115, // 107: zettide.controller.v1.ListRangeLeasesResponse.leases:type_name -> zettide.controller.v1.RangeLease
+	114, // 108: zettide.controller.v1.RangeLeaseCommand.request:type_name -> zettide.controller.v1.RangeLeaseRequest
+	26,  // 109: zettide.controller.v1.RangeLeaseCommand.operation:type_name -> zettide.controller.v1.RangeLeaseOperation
+	27,  // 110: zettide.controller.v1.RangeLeaseApplyResponse.code:type_name -> zettide.controller.v1.RangeLeaseCode
+	115, // 111: zettide.controller.v1.RangeLeaseApplyResponse.lease:type_name -> zettide.controller.v1.RangeLease
+	33,  // 112: zettide.controller.v1.PoolService.CreatePool:input_type -> zettide.controller.v1.CreatePoolRequest
+	35,  // 113: zettide.controller.v1.PoolService.GetPool:input_type -> zettide.controller.v1.GetPoolRequest
+	37,  // 114: zettide.controller.v1.PoolService.ListPools:input_type -> zettide.controller.v1.ListPoolsRequest
+	29,  // 115: zettide.controller.v1.PoolService.UpdatePool:input_type -> zettide.controller.v1.UpdatePoolRequest
+	31,  // 116: zettide.controller.v1.PoolService.DeletePool:input_type -> zettide.controller.v1.DeletePoolRequest
+	40,  // 117: zettide.controller.v1.NodeService.RegisterNode:input_type -> zettide.controller.v1.RegisterNodeRequest
+	42,  // 118: zettide.controller.v1.NodeService.GetNode:input_type -> zettide.controller.v1.GetNodeRequest
+	44,  // 119: zettide.controller.v1.NodeService.ListNodes:input_type -> zettide.controller.v1.ListNodesRequest
+	47,  // 120: zettide.controller.v1.MemberService.RegisterMember:input_type -> zettide.controller.v1.RegisterMemberRequest
+	49,  // 121: zettide.controller.v1.MemberService.GetMember:input_type -> zettide.controller.v1.GetMemberRequest
+	51,  // 122: zettide.controller.v1.MemberService.ListMembers:input_type -> zettide.controller.v1.ListMembersRequest
+	55,  // 123: zettide.controller.v1.HeartbeatService.ReportHeartbeat:input_type -> zettide.controller.v1.ReportHeartbeatRequest
+	58,  // 124: zettide.controller.v1.HeartbeatService.GetHeartbeat:input_type -> zettide.controller.v1.GetHeartbeatRequest
+	61,  // 125: zettide.controller.v1.VolumeService.CreateVolume:input_type -> zettide.controller.v1.CreateVolumeRequest
+	63,  // 126: zettide.controller.v1.VolumeService.GetVolume:input_type -> zettide.controller.v1.GetVolumeRequest
+	65,  // 127: zettide.controller.v1.VolumeService.UpdateVolume:input_type -> zettide.controller.v1.UpdateVolumeRequest
+	67,  // 128: zettide.controller.v1.VolumeService.ListVolumes:input_type -> zettide.controller.v1.ListVolumesRequest
+	69,  // 129: zettide.controller.v1.VolumeService.DeleteVolume:input_type -> zettide.controller.v1.DeleteVolumeRequest
+	114, // 130: zettide.controller.v1.RangeLeaseService.AcquireLease:input_type -> zettide.controller.v1.RangeLeaseRequest
+	114, // 131: zettide.controller.v1.RangeLeaseService.RenewLease:input_type -> zettide.controller.v1.RangeLeaseRequest
+	114, // 132: zettide.controller.v1.RangeLeaseService.RevokeLease:input_type -> zettide.controller.v1.RangeLeaseRequest
+	114, // 133: zettide.controller.v1.RangeLeaseService.CompleteRevoke:input_type -> zettide.controller.v1.RangeLeaseRequest
+	117, // 134: zettide.controller.v1.RangeLeaseService.GetLease:input_type -> zettide.controller.v1.GetRangeLeaseRequest
+	118, // 135: zettide.controller.v1.RangeLeaseService.ListLeases:input_type -> zettide.controller.v1.ListRangeLeasesRequest
+	34,  // 136: zettide.controller.v1.PoolService.CreatePool:output_type -> zettide.controller.v1.CreatePoolResponse
+	36,  // 137: zettide.controller.v1.PoolService.GetPool:output_type -> zettide.controller.v1.GetPoolResponse
+	38,  // 138: zettide.controller.v1.PoolService.ListPools:output_type -> zettide.controller.v1.ListPoolsResponse
+	30,  // 139: zettide.controller.v1.PoolService.UpdatePool:output_type -> zettide.controller.v1.UpdatePoolResponse
+	32,  // 140: zettide.controller.v1.PoolService.DeletePool:output_type -> zettide.controller.v1.DeletePoolResponse
+	41,  // 141: zettide.controller.v1.NodeService.RegisterNode:output_type -> zettide.controller.v1.RegisterNodeResponse
+	43,  // 142: zettide.controller.v1.NodeService.GetNode:output_type -> zettide.controller.v1.GetNodeResponse
+	45,  // 143: zettide.controller.v1.NodeService.ListNodes:output_type -> zettide.controller.v1.ListNodesResponse
+	48,  // 144: zettide.controller.v1.MemberService.RegisterMember:output_type -> zettide.controller.v1.RegisterMemberResponse
+	50,  // 145: zettide.controller.v1.MemberService.GetMember:output_type -> zettide.controller.v1.GetMemberResponse
+	52,  // 146: zettide.controller.v1.MemberService.ListMembers:output_type -> zettide.controller.v1.ListMembersResponse
+	57,  // 147: zettide.controller.v1.HeartbeatService.ReportHeartbeat:output_type -> zettide.controller.v1.ReportHeartbeatResponse
+	59,  // 148: zettide.controller.v1.HeartbeatService.GetHeartbeat:output_type -> zettide.controller.v1.GetHeartbeatResponse
+	62,  // 149: zettide.controller.v1.VolumeService.CreateVolume:output_type -> zettide.controller.v1.CreateVolumeResponse
+	64,  // 150: zettide.controller.v1.VolumeService.GetVolume:output_type -> zettide.controller.v1.GetVolumeResponse
+	66,  // 151: zettide.controller.v1.VolumeService.UpdateVolume:output_type -> zettide.controller.v1.UpdateVolumeResponse
+	68,  // 152: zettide.controller.v1.VolumeService.ListVolumes:output_type -> zettide.controller.v1.ListVolumesResponse
+	70,  // 153: zettide.controller.v1.VolumeService.DeleteVolume:output_type -> zettide.controller.v1.DeleteVolumeResponse
+	116, // 154: zettide.controller.v1.RangeLeaseService.AcquireLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	116, // 155: zettide.controller.v1.RangeLeaseService.RenewLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	116, // 156: zettide.controller.v1.RangeLeaseService.RevokeLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	116, // 157: zettide.controller.v1.RangeLeaseService.CompleteRevoke:output_type -> zettide.controller.v1.RangeLeaseResponse
+	116, // 158: zettide.controller.v1.RangeLeaseService.GetLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	119, // 159: zettide.controller.v1.RangeLeaseService.ListLeases:output_type -> zettide.controller.v1.ListRangeLeasesResponse
+	136, // [136:160] is the sub-list for method output_type
+	112, // [112:136] is the sub-list for method input_type
+	112, // [112:112] is the sub-list for extension type_name
+	112, // [112:112] is the sub-list for extension extendee
+	0,   // [0:112] is the sub-list for field type_name
 }
 
 func init() { file_services_controller_proto_zettide_controller_v1_controller_proto_init() }
@@ -9289,16 +10200,17 @@ func file_services_controller_proto_zettide_controller_v1_controller_proto_init(
 		(*CommandEnvelope_CompletePrimaryFailoverLeaseWait)(nil),
 		(*CommandEnvelope_UpdatePool)(nil),
 		(*CommandEnvelope_DeletePool)(nil),
+		(*CommandEnvelope_RangeLease)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_services_controller_proto_zettide_controller_v1_controller_proto_rawDesc), len(file_services_controller_proto_zettide_controller_v1_controller_proto_rawDesc)),
-			NumEnums:      24,
-			NumMessages:   86,
+			NumEnums:      28,
+			NumMessages:   94,
 			NumExtensions: 0,
-			NumServices:   5,
+			NumServices:   6,
 		},
 		GoTypes:           file_services_controller_proto_zettide_controller_v1_controller_proto_goTypes,
 		DependencyIndexes: file_services_controller_proto_zettide_controller_v1_controller_proto_depIdxs,

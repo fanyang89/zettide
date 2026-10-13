@@ -1,9 +1,9 @@
 const std = @import("std");
 const uuid = @import("uuid");
 
-// Pool mutations require coordinated upgrades of all controller voters.
-pub const command_format_version: u32 = 9;
-pub const snapshot_format_version: u32 = 12;
+// Range-lease commands and replay-verified snapshots require coordinated upgrades.
+pub const command_format_version: u32 = 10;
+pub const snapshot_format_version: u32 = 13;
 pub const max_name_bytes: usize = 127;
 pub const max_description_bytes: usize = 1024;
 pub const max_request_id_bytes: usize = 127;
@@ -44,6 +44,7 @@ pub const max_request_wire_bytes: usize = max_request_id_bytes + @sizeOf(Fingerp
 pub const Fingerprint = [std.crypto.hash.sha2.Sha256.digest_length]u8;
 
 pub const RequestKind = enum {
+    range_lease,
     create_pool,
     update_pool,
     delete_pool,

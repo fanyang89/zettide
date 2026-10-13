@@ -98,12 +98,12 @@ The current format limits a cluster to 25,000 Pools including tombstones, 25,000
 25,000 Volume tombstones, 75,000 Replica placements, 75,000 Replica
 allocations, 25,000 Volume attachments, 10,000 Nodes, 10,000 Members, and
 50,000 retained request records so committed input cannot grow memory and
-snapshots without bound. Snapshot format v12 reads v2–v11 snapshots and preserves
+snapshots without bound. Snapshot format v13 reads v2–v12 snapshots and preserves
 Pool mutation history/tombstones. Legacy Pools receive their creation revision
-as `resource_version`. Command format v9 reads v1–v8 commands; legacy Volume
+as `resource_version`. Command format v10 reads v1–v9 commands; legacy Volume
 update commands retain their original active-only behavior during WAL replay.
-All controller voters must be upgraded together before enabling v9 writes.
-Older binaries cannot restore v12 snapshots; do not downgrade against an upgraded
+All controller voters must be upgraded together before enabling v10 writes.
+Older binaries cannot restore v13 snapshots; do not downgrade against an upgraded
 data directory. Snapshot restore replays Pool history to verify final values,
 versions, tombstones, name reuse, and historical deletion dependencies before
 atomically replacing live state.
@@ -120,6 +120,19 @@ configured voters. Existing storage is automatically opened in restart mode.
 Shutdown order is: stop RPC admission, stop and wait for the gRPC server, stop
 Raft, join the driver and drain callbacks, verify `PoolRpc` is idle, then
 deinitialize the services.
+
+## Range leases
+
+`RangeLeaseService` supports shared-read/exclusive-write Volume intervals with
+Acquire, Renew, Revoke, CompleteRevoke, Get, and List. Mutations commit through
+Raft; reads use ReadIndex. Revoke is two-phase: REVOKING still blocks conflicts
+until the trusted holder acknowledges drained I/O. Active/revoking leases block
+Volume deletion. Lease history and its canonical view digest are snapshot-stable.
+
+See [range lease contract](../../docs/range-leases.md) for the holder session,
+local deadlines, RPC semantics, recovery, security, and current integration
+limits. In particular, lost holders are not automatically reclaimed, and the
+new gate is not yet mandatory on every existing payload path.
 
 ## Running
 

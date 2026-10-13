@@ -1021,3 +1021,301 @@ var VolumeService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/controller/proto/zettide/controller/v1/controller.proto",
 }
+
+const (
+	RangeLeaseService_AcquireLease_FullMethodName   = "/zettide.controller.v1.RangeLeaseService/AcquireLease"
+	RangeLeaseService_RenewLease_FullMethodName     = "/zettide.controller.v1.RangeLeaseService/RenewLease"
+	RangeLeaseService_RevokeLease_FullMethodName    = "/zettide.controller.v1.RangeLeaseService/RevokeLease"
+	RangeLeaseService_CompleteRevoke_FullMethodName = "/zettide.controller.v1.RangeLeaseService/CompleteRevoke"
+	RangeLeaseService_GetLease_FullMethodName       = "/zettide.controller.v1.RangeLeaseService/GetLease"
+	RangeLeaseService_ListLeases_FullMethodName     = "/zettide.controller.v1.RangeLeaseService/ListLeases"
+)
+
+// RangeLeaseServiceClient is the client API for RangeLeaseService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Trusted data-service control API. CompleteRevoke is a holder drain ACK,
+// not an administrative force-release operation.
+type RangeLeaseServiceClient interface {
+	AcquireLease(ctx context.Context, in *RangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error)
+	RenewLease(ctx context.Context, in *RangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error)
+	RevokeLease(ctx context.Context, in *RangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error)
+	CompleteRevoke(ctx context.Context, in *RangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error)
+	GetLease(ctx context.Context, in *GetRangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error)
+	ListLeases(ctx context.Context, in *ListRangeLeasesRequest, opts ...grpc.CallOption) (*ListRangeLeasesResponse, error)
+}
+
+type rangeLeaseServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewRangeLeaseServiceClient(cc grpc.ClientConnInterface) RangeLeaseServiceClient {
+	return &rangeLeaseServiceClient{cc}
+}
+
+func (c *rangeLeaseServiceClient) AcquireLease(ctx context.Context, in *RangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RangeLeaseResponse)
+	err := c.cc.Invoke(ctx, RangeLeaseService_AcquireLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rangeLeaseServiceClient) RenewLease(ctx context.Context, in *RangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RangeLeaseResponse)
+	err := c.cc.Invoke(ctx, RangeLeaseService_RenewLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rangeLeaseServiceClient) RevokeLease(ctx context.Context, in *RangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RangeLeaseResponse)
+	err := c.cc.Invoke(ctx, RangeLeaseService_RevokeLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rangeLeaseServiceClient) CompleteRevoke(ctx context.Context, in *RangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RangeLeaseResponse)
+	err := c.cc.Invoke(ctx, RangeLeaseService_CompleteRevoke_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rangeLeaseServiceClient) GetLease(ctx context.Context, in *GetRangeLeaseRequest, opts ...grpc.CallOption) (*RangeLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RangeLeaseResponse)
+	err := c.cc.Invoke(ctx, RangeLeaseService_GetLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *rangeLeaseServiceClient) ListLeases(ctx context.Context, in *ListRangeLeasesRequest, opts ...grpc.CallOption) (*ListRangeLeasesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRangeLeasesResponse)
+	err := c.cc.Invoke(ctx, RangeLeaseService_ListLeases_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RangeLeaseServiceServer is the server API for RangeLeaseService service.
+// All implementations must embed UnimplementedRangeLeaseServiceServer
+// for forward compatibility.
+//
+// Trusted data-service control API. CompleteRevoke is a holder drain ACK,
+// not an administrative force-release operation.
+type RangeLeaseServiceServer interface {
+	AcquireLease(context.Context, *RangeLeaseRequest) (*RangeLeaseResponse, error)
+	RenewLease(context.Context, *RangeLeaseRequest) (*RangeLeaseResponse, error)
+	RevokeLease(context.Context, *RangeLeaseRequest) (*RangeLeaseResponse, error)
+	CompleteRevoke(context.Context, *RangeLeaseRequest) (*RangeLeaseResponse, error)
+	GetLease(context.Context, *GetRangeLeaseRequest) (*RangeLeaseResponse, error)
+	ListLeases(context.Context, *ListRangeLeasesRequest) (*ListRangeLeasesResponse, error)
+	mustEmbedUnimplementedRangeLeaseServiceServer()
+}
+
+// UnimplementedRangeLeaseServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedRangeLeaseServiceServer struct{}
+
+func (UnimplementedRangeLeaseServiceServer) AcquireLease(context.Context, *RangeLeaseRequest) (*RangeLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AcquireLease not implemented")
+}
+func (UnimplementedRangeLeaseServiceServer) RenewLease(context.Context, *RangeLeaseRequest) (*RangeLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenewLease not implemented")
+}
+func (UnimplementedRangeLeaseServiceServer) RevokeLease(context.Context, *RangeLeaseRequest) (*RangeLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeLease not implemented")
+}
+func (UnimplementedRangeLeaseServiceServer) CompleteRevoke(context.Context, *RangeLeaseRequest) (*RangeLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CompleteRevoke not implemented")
+}
+func (UnimplementedRangeLeaseServiceServer) GetLease(context.Context, *GetRangeLeaseRequest) (*RangeLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetLease not implemented")
+}
+func (UnimplementedRangeLeaseServiceServer) ListLeases(context.Context, *ListRangeLeasesRequest) (*ListRangeLeasesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListLeases not implemented")
+}
+func (UnimplementedRangeLeaseServiceServer) mustEmbedUnimplementedRangeLeaseServiceServer() {}
+func (UnimplementedRangeLeaseServiceServer) testEmbeddedByValue()                           {}
+
+// UnsafeRangeLeaseServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to RangeLeaseServiceServer will
+// result in compilation errors.
+type UnsafeRangeLeaseServiceServer interface {
+	mustEmbedUnimplementedRangeLeaseServiceServer()
+}
+
+func RegisterRangeLeaseServiceServer(s grpc.ServiceRegistrar, srv RangeLeaseServiceServer) {
+	// If the following call panics, it indicates UnimplementedRangeLeaseServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&RangeLeaseService_ServiceDesc, srv)
+}
+
+func _RangeLeaseService_AcquireLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RangeLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RangeLeaseServiceServer).AcquireLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RangeLeaseService_AcquireLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RangeLeaseServiceServer).AcquireLease(ctx, req.(*RangeLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RangeLeaseService_RenewLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RangeLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RangeLeaseServiceServer).RenewLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RangeLeaseService_RenewLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RangeLeaseServiceServer).RenewLease(ctx, req.(*RangeLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RangeLeaseService_RevokeLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RangeLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RangeLeaseServiceServer).RevokeLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RangeLeaseService_RevokeLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RangeLeaseServiceServer).RevokeLease(ctx, req.(*RangeLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RangeLeaseService_CompleteRevoke_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RangeLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RangeLeaseServiceServer).CompleteRevoke(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RangeLeaseService_CompleteRevoke_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RangeLeaseServiceServer).CompleteRevoke(ctx, req.(*RangeLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RangeLeaseService_GetLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRangeLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RangeLeaseServiceServer).GetLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RangeLeaseService_GetLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RangeLeaseServiceServer).GetLease(ctx, req.(*GetRangeLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RangeLeaseService_ListLeases_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRangeLeasesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RangeLeaseServiceServer).ListLeases(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RangeLeaseService_ListLeases_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RangeLeaseServiceServer).ListLeases(ctx, req.(*ListRangeLeasesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// RangeLeaseService_ServiceDesc is the grpc.ServiceDesc for RangeLeaseService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var RangeLeaseService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "zettide.controller.v1.RangeLeaseService",
+	HandlerType: (*RangeLeaseServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "AcquireLease",
+			Handler:    _RangeLeaseService_AcquireLease_Handler,
+		},
+		{
+			MethodName: "RenewLease",
+			Handler:    _RangeLeaseService_RenewLease_Handler,
+		},
+		{
+			MethodName: "RevokeLease",
+			Handler:    _RangeLeaseService_RevokeLease_Handler,
+		},
+		{
+			MethodName: "CompleteRevoke",
+			Handler:    _RangeLeaseService_CompleteRevoke_Handler,
+		},
+		{
+			MethodName: "GetLease",
+			Handler:    _RangeLeaseService_GetLease_Handler,
+		},
+		{
+			MethodName: "ListLeases",
+			Handler:    _RangeLeaseService_ListLeases_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "services/controller/proto/zettide/controller/v1/controller.proto",
+}

@@ -4,6 +4,8 @@ const pb = @import("controller_proto");
 const data_node = @import("data_node_service");
 const grpc = @import("grpc_lite");
 
+pub const RangeLeaseSession = @import("range_lease_session.zig").Session;
+
 const registration_attempts = 60;
 const retry_interval_ms: u32 = 1_000;
 const rpc_timeout_ns = 5 * std.time.ns_per_s;
@@ -503,4 +505,8 @@ test "member registration and heartbeat use controller gRPC contracts" {
         error.HeartbeatObservationMismatch,
         worker.report(2, try store.capacitySnapshot()),
     );
+}
+
+test {
+    _ = @import("range_lease_session.zig");
 }

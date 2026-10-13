@@ -617,6 +617,24 @@ test "three-voter runtime survives leader failover and restart" {
     const initial_heartbeat = (try getHeartbeat(runtimes[initial_leader].?, registered.id)) orelse return error.MissingHeartbeat;
     try expectFreshHeartbeat(initial_report, initial_heartbeat);
 
+    const lease_prefix = "/zettide.controller.v1.RangeLeaseService/";
+    var lease_request = pb.RangeLeaseRequest{
+        .request_id = "failover-range-grant",
+        .lease_id = "0198f54d-5c2a-7000-8000-000000000401",
+        .volume_id = created_volume.value.id,
+        .holder_node_id = registered.id,
+        .holder_boot_id = &reconcile_holder_boot_id,
+        .length_bytes = 4096,
+        .mode = .RANGE_LEASE_MODE_WRITE,
+    };
+    var lease_grant = try crudRpc(pb.RangeLeaseResponse, runtimes[initial_leader].?, lease_prefix ++ "AcquireLease", lease_request);
+    defer lease_grant.deinit(config_allocator);
+    lease_request.request_id = "failover-range-revoke";
+    lease_request.expected_resource_version = lease_grant.lease.?.resource_version;
+    var lease_revoke = try crudRpc(pb.RangeLeaseResponse, runtimes[initial_leader].?, lease_prefix ++ "RevokeLease", lease_request);
+    defer lease_revoke.deinit(config_allocator);
+    try waitForApplied(&runtimes, lease_revoke.lease.?.resource_version);
+
     try runtimes[initial_leader].?.shutdown();
     runtimes[initial_leader].?.deinit();
     runtimes[initial_leader] = null;
@@ -682,6 +700,25 @@ test "three-voter runtime survives leader failover and restart" {
     defer replayed_member.deinit();
     try std.testing.expectEqualSlices(u8, registered_member.id, replayed_member.id);
     try std.testing.expectEqual(registered_member.revision, replayed_member.revision);
+    var recovered_lease = try crudRpc(pb.RangeLeaseResponse, runtimes[replacement_leader].?, lease_prefix ++ "GetLease", pb.GetRangeLeaseRequest{ .lease_id = lease_request.lease_id });
+    defer recovered_lease.deinit(config_allocator);
+    try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKING, recovered_lease.lease.?.state);
+    try std.testing.expectEqual(lease_revoke.lease.?.resource_version, recovered_lease.lease.?.resource_version);
+    var revoke_replay = try crudRpc(pb.RangeLeaseResponse, runtimes[replacement_leader].?, lease_prefix ++ "RevokeLease", lease_request);
+    defer revoke_replay.deinit(config_allocator);
+    try std.testing.expectEqual(lease_revoke.lease.?.resource_version, revoke_replay.lease.?.resource_version);
+    var conflict_lease = lease_request;
+    conflict_lease.request_id = "failover-range-conflict";
+    conflict_lease.lease_id = "0198f54d-5c2a-7000-8000-000000000402";
+    conflict_lease.expected_resource_version = 0;
+    conflict_lease.mode = .RANGE_LEASE_MODE_READ;
+    try crudStatus(runtimes[replacement_leader].?, lease_prefix ++ "AcquireLease", conflict_lease, .failed_precondition);
+    lease_request.request_id = "failover-range-drained";
+    lease_request.expected_resource_version = recovered_lease.lease.?.resource_version;
+    var lease_completed = try crudRpc(pb.RangeLeaseResponse, runtimes[replacement_leader].?, lease_prefix ++ "CompleteRevoke", lease_request);
+    defer lease_completed.deinit(config_allocator);
+    try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKED, lease_completed.lease.?.state);
+
     var deleted_volume = try deleteVolume(
         runtimes[replacement_leader].?,
         "request-delete-volume-failover",
@@ -712,6 +749,7 @@ test "three-voter runtime survives leader failover and restart" {
     try expectVolumeNotFound(runtimes[final_leader].?, created_volume.value.id);
     for (&runtimes) |runtime| {
         try runtime.?.shutdown();
+        try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKED, runtime.?.machine.getRangeLease(lease_request.lease_id).?.state);
         try std.testing.expectEqual(@as(usize, 0), runtime.?.machine.volumeCount());
         try std.testing.expectEqual(@as(usize, 1), runtime.?.machine.volumeTombstoneCount());
     }
@@ -1664,4 +1702,129 @@ fn crudStatus(runtime: *runtime_mod.Runtime, method: []const u8, request: anytyp
     var result = try call(runtime, method, encoded);
     defer result.deinit();
     try std.testing.expectEqual(expected, result.status.code);
+}
+
+test "range lease RPC shares readers and holds writers until drain ACK across restart" {
+    const contract = @import("zettide_data_service_contracts").range_lease;
+    var tmp_dir = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+    const root_path = try tmp_dir.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
+    defer config_allocator.free(root_path);
+    const data_dir = try std.fmt.allocPrintSentinel(config_allocator, "{s}/leases", .{root_path}, 0);
+    defer config_allocator.free(data_dir);
+    const ports = try reserveUniquePorts(1);
+    const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
+    defer config_allocator.free(address);
+    const addresses = [_][]const u8{address};
+    var config = try makeConfig(1, .{1} ++ @as([15]u8, @splat(0)), &addresses, data_dir);
+    defer config.deinit();
+    var pool: CreatedPool = undefined;
+    var node: RegisteredNode = undefined;
+    var volume: OwnedVolume = undefined;
+    var first: pb.RangeLeaseResponse = undefined;
+    var second: pb.RangeLeaseResponse = undefined;
+    var revoking: pb.RangeLeaseResponse = undefined;
+    var request: pb.RangeLeaseRequest = undefined;
+    var other_request: pb.RangeLeaseRequest = undefined;
+    var writer_request: pb.RangeLeaseRequest = undefined;
+    const prefix = "/zettide.controller.v1.RangeLeaseService/";
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        pool = try createPool(runtime, "lease-pool", "lease-pool");
+        errdefer pool.deinit();
+        node = try registerNode(runtime, &config, "lease-node", "0198f54d-5c2a-7000-8000-000000000101");
+        errdefer node.deinit();
+        volume = try createVolume(runtime, "lease-volume", pool.id, "lease-volume");
+        errdefer volume.deinit();
+        request = .{ .request_id = "lease-read-a", .lease_id = "0198f54d-5c2a-7000-8000-000000000301", .volume_id = volume.value.id, .holder_node_id = node.id, .holder_boot_id = &reconcile_holder_boot_id, .length_bytes = 4096, .mode = .RANGE_LEASE_MODE_READ };
+        first = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "AcquireLease", request);
+        errdefer first.deinit(config_allocator);
+        other_request = request;
+        other_request.request_id = "lease-read-b";
+        other_request.lease_id = "0198f54d-5c2a-7000-8000-000000000302";
+        second = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "AcquireLease", other_request);
+        errdefer second.deinit(config_allocator);
+        writer_request = request;
+        writer_request.request_id = "lease-write-conflict";
+        writer_request.lease_id = "0198f54d-5c2a-7000-8000-000000000303";
+        writer_request.mode = .RANGE_LEASE_MODE_WRITE;
+        try crudStatus(runtime, prefix ++ "AcquireLease", writer_request, .failed_precondition);
+        var listed = try crudRpc(pb.ListRangeLeasesResponse, runtime, prefix ++ "ListLeases", pb.ListRangeLeasesRequest{ .volume_id = volume.value.id, .page_size = 1 });
+        defer listed.deinit(config_allocator);
+        try std.testing.expectEqual(@as(usize, 1), listed.leases.items.len);
+        try std.testing.expectEqualStrings(request.lease_id, listed.next_after_lease_id);
+        request.request_id = "lease-renew-a";
+        request.expected_resource_version = first.lease.?.resource_version;
+        var renewed = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "RenewLease", request);
+        defer renewed.deinit(config_allocator);
+        request.request_id = "lease-revoke-a";
+        request.expected_resource_version = renewed.lease.?.resource_version;
+        revoking = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "RevokeLease", request);
+        errdefer revoking.deinit(config_allocator);
+        try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKING, revoking.lease.?.state);
+        try runtime.shutdown();
+    }
+    defer pool.deinit();
+    defer node.deinit();
+    defer volume.deinit();
+    defer first.deinit(config_allocator);
+    defer second.deinit(config_allocator);
+    defer revoking.deinit(config_allocator);
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        var fetched = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "GetLease", pb.GetRangeLeaseRequest{ .lease_id = request.lease_id });
+        defer fetched.deinit(config_allocator);
+        try std.testing.expectEqual(revoking.lease.?.resource_version, fetched.lease.?.resource_version);
+        try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKING, fetched.lease.?.state);
+        writer_request.request_id = "lease-write-still-blocked";
+        try crudStatus(runtime, prefix ++ "AcquireLease", writer_request, .failed_precondition);
+
+        const token = contract.Token{
+            .lease_id = std.mem.toBytes(std.mem.nativeToBig(u128, try @import("uuid").urn.deserialize(request.lease_id))),
+            .volume_id = std.mem.toBytes(std.mem.nativeToBig(u128, try @import("uuid").urn.deserialize(volume.value.id))),
+            .holder_node_id = std.mem.toBytes(std.mem.nativeToBig(u128, try @import("uuid").urn.deserialize(node.id))),
+            .holder_boot_id = reconcile_holder_boot_id,
+            .offset = 0,
+            .length = 4096,
+            .mode = .read,
+            .revision = fetched.lease.?.token_revision,
+        };
+        var gate = try contract.Gate.init(config_allocator, token.holder_node_id, token.holder_boot_id);
+        defer gate.deinit();
+        // Simulate an already-admitted read at the holder before it observes Revoke.
+        try gate.install(token, 100, 101);
+        const read = try gate.begin(token, token.volume_id, 0, 4096, .read, 102);
+        try gate.revoke(token, fetched.lease.?.resource_version);
+        try std.testing.expect(!gate.drained(token.lease_id, fetched.lease.?.resource_version));
+        try std.testing.expectError(error.LeaseRevoked, gate.begin(token, token.volume_id, 0, 4096, .read, 103));
+        try gate.finish(read, 104);
+        try std.testing.expect(gate.drained(token.lease_id, fetched.lease.?.resource_version));
+        request.request_id = "lease-ack-a";
+        request.expected_resource_version = fetched.lease.?.resource_version;
+        var ack = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "CompleteRevoke", request);
+        defer ack.deinit(config_allocator);
+        try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKED, ack.lease.?.state);
+        writer_request.request_id = "lease-write-reader-b";
+        try crudStatus(runtime, prefix ++ "AcquireLease", writer_request, .failed_precondition);
+        other_request.request_id = "lease-revoke-b";
+        other_request.expected_resource_version = second.lease.?.resource_version;
+        var revoke_b = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "RevokeLease", other_request);
+        defer revoke_b.deinit(config_allocator);
+        other_request.request_id = "lease-ack-b";
+        other_request.expected_resource_version = revoke_b.lease.?.resource_version;
+        var ack_b = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "CompleteRevoke", other_request);
+        defer ack_b.deinit(config_allocator);
+        writer_request.request_id = "lease-write-ready";
+        var granted = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "AcquireLease", writer_request);
+        defer granted.deinit(config_allocator);
+        try std.testing.expectEqual(pb.RangeLeaseMode.RANGE_LEASE_MODE_WRITE, granted.lease.?.mode);
+        try std.testing.expect(granted.lease.?.token_revision > ack_b.lease.?.resource_version);
+        var replay = try crudRpc(pb.RangeLeaseResponse, runtime, prefix ++ "CompleteRevoke", request);
+        defer replay.deinit(config_allocator);
+        try std.testing.expectEqual(ack.lease.?.resource_version, replay.lease.?.resource_version);
+    }
 }

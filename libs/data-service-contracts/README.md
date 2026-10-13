@@ -78,3 +78,12 @@ read/repair, and managed publication remain future work.
 ```sh
 zig build test
 ```
+
+## Range lease gate
+
+`range_lease` defines the shared-read/exclusive-write conflict model and a
+caller-serialized holder gate. Tickets track actual in-flight I/O; revocation
+cannot acknowledge a drain before every ticket completes. Fixed local deadlines
+are anchored before the grant request; replay and delayed responses do not
+revive closed leases. The controller/data-node protocol and remaining integration
+boundaries are documented in [range leases](../../docs/range-leases.md).

@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const pb = @import("controller_proto");
+const range_leases = @import("range_leases.zig");
 const heartbeat = @import("heartbeat.zig");
 const primary_lease = @import("primary_lease.zig");
 const raft = @import("raftz");
@@ -612,6 +613,7 @@ pub const PoolStateMachine = struct {
         defer envelope.deinit(arena.allocator());
         if (envelope.format_version < 1 or envelope.format_version > command_format_version) return error.PayloadParseFailed;
         return switch (envelope.command orelse return error.PayloadParseFailed) {
+            .range_lease => |command| self.applyRangeLease(entry.index, command),
             .create_pool => |command| self.applyCreatePool(entry.index, command),
             .update_pool => |command| self.applyPoolMutation(entry.index, command, false),
             .delete_pool => |command| self.applyPoolMutation(entry.index, command, true),
@@ -643,6 +645,58 @@ pub const PoolStateMachine = struct {
             .commit_primary_authority_failover_ready => |command| if (envelope.format_version >= 8) self.applyCommitPrimaryAuthorityFailoverReady(entry.index, command) else error.PayloadParseFailed,
             .complete_primary_failover_lease_wait => |command| if (envelope.format_version >= 8) self.applyCompletePrimaryFailoverLeaseWait(entry.index, command) else error.PayloadParseFailed,
         };
+    }
+
+    pub fn getRangeLease(self: *const PoolStateMachine, lease_id: []const u8) ?range_leases.Lease {
+        if (lease_id.len != 36) return null;
+        return self.state.range_leases.leases.get(lease_id[0..36].*);
+    }
+
+    pub fn listRangeLeases(self: *const PoolStateMachine, allocator: std.mem.Allocator, volume_id: []const u8, after: []const u8, limit: usize) ![]range_leases.Lease {
+        var result: std.ArrayList(range_leases.Lease) = .empty;
+        errdefer result.deinit(allocator);
+        var iterator = self.state.range_leases.leases.valueIterator();
+        while (iterator.next()) |lease| {
+            if (std.mem.eql(u8, &lease.volume_id, volume_id) and (after.len == 0 or std.mem.lessThan(u8, after, &lease.lease_id))) try result.append(allocator, lease.*);
+        }
+        std.mem.sort(range_leases.Lease, result.items, {}, struct {
+            fn lessThan(_: void, a: range_leases.Lease, b: range_leases.Lease) bool {
+                return std.mem.lessThan(u8, &a.lease_id, &b.lease_id);
+            }
+        }.lessThan);
+        result.shrinkRetainingCapacity(@min(result.items.len, limit));
+        return result.toOwnedSlice(allocator);
+    }
+
+    fn applyRangeLease(self: *PoolStateMachine, revision: u64, command: pb.RangeLeaseCommand) raft.Error!raft.ApplyResult {
+        range_leases.validate(command) catch return error.PayloadParseFailed;
+        if (revision == 0) return error.PayloadParseFailed;
+        const request = command.request.?;
+        const fingerprint = rangeLeaseFingerprint(command);
+        if (self.state.requests.get(request.request_id)) |existing| {
+            if (existing.kind != .range_lease or !std.mem.eql(u8, &existing.fingerprint, &fingerprint)) return .{ .response = try encodeMessage(self.allocator, pb.RangeLeaseApplyResponse{ .code = .RANGE_LEASE_CODE_REQUEST_CONFLICT }) };
+            return .{ .response = try self.allocator.dupe(u8, existing.encoded_response) };
+        }
+        if (self.state.requests.count() >= max_requests) return .{ .response = try encodeMessage(self.allocator, pb.RangeLeaseApplyResponse{ .code = .RANGE_LEASE_CODE_RESOURCE_LIMIT }) };
+        const volume = self.state.volumes_by_id.get(request.volume_id);
+        const outcome = self.state.range_leases.evaluate(command, .{
+            .volume_available = if (volume) |value| value.lifecycle_state != .VOLUME_LIFECYCLE_STATE_DELETING else false,
+            .volume_size = if (volume) |value| value.size_bytes else 0,
+            .node_exists = self.state.nodes_by_id.contains(request.holder_node_id),
+        }, revision);
+        const encoded_response = try encodeMessage(self.allocator, outcome.proto());
+        errdefer self.allocator.free(encoded_response);
+        const returned = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned);
+        const encoded_command = try encodeRangeLeaseCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        const request_id = try self.allocator.dupe(u8, request.request_id);
+        errdefer self.allocator.free(request_id);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.range_leases.reserve(self.allocator, outcome);
+        self.state.range_leases.commit(outcome);
+        self.state.requests.putAssumeCapacity(request_id, .{ .request_id = request_id, .kind = .range_lease, .fingerprint = fingerprint, .encoded_response = encoded_response, .encoded_command = encoded_command, .applied_revision = revision });
+        return .{ .response = returned };
     }
 
     fn applyPoolMutation(self: *PoolStateMachine, revision: u64, command: pb.PoolMutationCommand, deleting: bool) raft.Error!raft.ApplyResult {
@@ -1688,6 +1742,7 @@ pub const PoolStateMachine = struct {
         if (volume.lifecycle_state != .VOLUME_LIFECYCLE_STATE_DELETING) return .{ .response = try encodeFinalizeApplyResponse(self.allocator, .FINALIZE_VOLUME_DELETION_APPLY_CODE_INVALID_STATE, "", 0) };
         var attachment_iterator = self.state.volume_attachments_by_id.valueIterator();
         while (attachment_iterator.next()) |attachment| if (std.mem.eql(u8, attachment.volume_id, volume.id)) return .{ .response = try encodeFinalizeApplyResponse(self.allocator, .FINALIZE_VOLUME_DELETION_APPLY_CODE_HAS_ATTACHMENTS, "", 0) };
+        if (self.state.range_leases.hasBlocking(volume.id)) return .{ .response = try encodeFinalizeApplyResponse(self.allocator, .FINALIZE_VOLUME_DELETION_APPLY_CODE_INVALID_STATE, "", 0) };
         if (!deletionProofMatches(&self.state, volume.id, command.placement_ids.items, command.allocation_ids.items)) return .{ .response = try encodeFinalizeApplyResponse(self.allocator, .FINALIZE_VOLUME_DELETION_APPLY_CODE_PROOF_MISMATCH, "", 0) };
         if (self.state.volume_tombstones_by_id.count() >= max_volume_tombstones) return .{ .response = try encodeFinalizeApplyResponse(self.allocator, .FINALIZE_VOLUME_DELETION_APPLY_CODE_TOMBSTONE_LIMIT, "", 0) };
         const response = try encodeFinalizeApplyResponse(self.allocator, .FINALIZE_VOLUME_DELETION_APPLY_CODE_FINALIZED, volume.id, revision);
@@ -1728,6 +1783,7 @@ pub const PoolStateMachine = struct {
         if (volume.resource_version != command.expected_resource_version) {
             return self.recordDeleteVolumeResponse(command, fingerprint, try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_VERSION_CONFLICT, "", 0, 0, false, null), revision);
         }
+        if (self.state.range_leases.hasBlocking(volume.id)) return self.recordDeleteVolumeResponse(command, fingerprint, try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES, "", 0, 0, false, null), revision);
         if (self.state.volume_tombstones_by_id.count() >= max_volume_tombstones) {
             return self.recordDeleteVolumeResponse(command, fingerprint, try encodeDeleteVolumeApplyResponse(self.allocator, .DELETE_VOLUME_APPLY_CODE_TOMBSTONE_LIMIT, "", 0, 0, false, null), revision);
         }
@@ -1883,7 +1939,9 @@ pub const PoolStateMachine = struct {
         }
         std.mem.sort(pb.RequestRecord, requests.items, {}, requestIdLessThan);
 
+        const lease_digest = try self.state.range_leases.digest(allocator);
         const data = try encodeMessage(allocator, pb.StateSnapshot{
+            .range_lease_digest = if (self.state.range_leases.leases.count() == 0) "" else &lease_digest,
             .format_version = snapshot_format_version,
             .pools = pools,
             .requests = requests,
@@ -2023,6 +2081,12 @@ pub const PoolStateMachine = struct {
                 }
             }
         }
+
+        try restoreRangeLeaseHistory(self.allocator, arena.allocator(), &restored, snapshot.requests.items);
+        if (restored.range_leases.leases.count() != 0) {
+            const digest = try restored.range_leases.digest(self.allocator);
+            if (!std.mem.eql(u8, snapshot.range_lease_digest, &digest)) return error.PayloadParseFailed;
+        } else if (snapshot.range_lease_digest.len != 0) return error.PayloadParseFailed;
 
         var created_pool_ids: std.StringHashMapUnmanaged(void) = .empty;
         defer created_pool_ids.deinit(self.allocator);
@@ -3077,6 +3141,19 @@ fn restoreRequest(
             try insertRestoredRequest(allocator, state, source, .create_pool, encoded_response, encoded_command);
             return if (created_pool_id) |id| RestoredCreation{ .pool = id } else null;
         },
+        .range_lease => |command| {
+            if (snapshot_version < 13 or envelope.format_version < 10) return error.PayloadParseFailed;
+            range_leases.validate(command) catch return error.PayloadParseFailed;
+            if (!std.mem.eql(u8, source.request_id, command.request.?.request_id)) return error.PayloadParseFailed;
+            const fingerprint = rangeLeaseFingerprint(command);
+            if (!std.mem.eql(u8, source.request_fingerprint, &fingerprint)) return error.PayloadParseFailed;
+            const encoded_command = try encodeRangeLeaseCommand(allocator, command);
+            errdefer allocator.free(encoded_command);
+            const encoded_response = try allocator.dupe(u8, source.encoded_response);
+            errdefer allocator.free(encoded_response);
+            try insertRestoredRequest(allocator, state, source, .range_lease, encoded_response, encoded_command);
+            return null;
+        },
         .update_pool, .delete_pool => |command| {
             if (snapshot_version < 12 or envelope.format_version < 9) return error.PayloadParseFailed;
             const deleting = envelope.command.? == .delete_pool;
@@ -4071,6 +4148,11 @@ fn removeVolumeChildren(self: *PoolStateMachine, volume_id: []const u8) void {
 }
 
 fn hasVolumeDependenciesBefore(state: *const State, volume_id: []const u8, revision: u64) bool {
+    var leases = state.range_leases.leases.valueIterator();
+    while (leases.next()) |lease| {
+        if (std.mem.eql(u8, &lease.volume_id, volume_id) and lease.created_revision < revision and
+            (lease.state != .RANGE_LEASE_STATE_REVOKED or lease.resource_version >= revision)) return true;
+    }
     var replica_iterator = state.replica_placements_by_id.valueIterator();
     while (replica_iterator.next()) |replica| if (replica.created_revision < revision and std.mem.eql(u8, replica.volume_id, volume_id)) return true;
     var attachment_iterator = state.volume_attachments_by_id.valueIterator();
@@ -8228,4 +8310,288 @@ test "Pool mutations require v9 and legacy Volume update replay preserves its ol
     defer snapshot.deinit(allocator);
     var reader = TestSnapshotReader{ .data = snapshot.data };
     try machine.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
+}
+
+pub fn encodeRangeLeaseCommand(allocator: std.mem.Allocator, command: pb.RangeLeaseCommand) ![]u8 {
+    range_leases.validate(command) catch return error.PayloadParseFailed;
+    return encodeMessage(allocator, pb.CommandEnvelope{ .format_version = command_format_version, .command = .{ .range_lease = command } });
+}
+
+fn rangeLeaseFingerprint(command: pb.RangeLeaseCommand) Fingerprint {
+    const request = command.request.?;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashInt(&hash, i32, @intFromEnum(command.operation));
+    hashField(&hash, request.lease_id);
+    hashField(&hash, request.volume_id);
+    hashField(&hash, request.holder_node_id);
+    hashField(&hash, request.holder_boot_id);
+    hashInt(&hash, u64, request.offset_bytes);
+    hashInt(&hash, u64, request.length_bytes);
+    hashInt(&hash, i32, @intFromEnum(request.mode));
+    hashInt(&hash, u64, request.expected_resource_version);
+    var result: Fingerprint = undefined;
+    hash.final(&result);
+    return result;
+}
+
+fn restoreRangeLeaseHistory(allocator: std.mem.Allocator, arena: std.mem.Allocator, state: *State, records: []const pb.RequestRecord) raft.Error!void {
+    const ordered = try arena.dupe(pb.RequestRecord, records);
+    std.mem.sort(pb.RequestRecord, ordered, {}, struct {
+        fn lessThan(_: void, a: pb.RequestRecord, b: pb.RequestRecord) bool {
+            return a.applied_revision < b.applied_revision;
+        }
+    }.lessThan);
+    var deleting: std.StringHashMapUnmanaged(void) = .empty;
+    defer deleting.deinit(arena);
+    for (ordered) |record| {
+        var reader: std.Io.Reader = .fixed(record.encoded_command);
+        const envelope = pb.CommandEnvelope.decode(&reader, arena) catch |err| return mapDecodeError(err);
+        switch (envelope.command orelse return error.PayloadParseFailed) {
+            .delete_volume => |command| {
+                var response_reader: std.Io.Reader = .fixed(record.encoded_response);
+                const response = pb.DeleteVolumeApplyResponse.decode(&response_reader, arena) catch |err| return mapDecodeError(err);
+                if (response.code == .DELETE_VOLUME_APPLY_CODE_DELETED or response.code == .DELETE_VOLUME_APPLY_CODE_DELETION_ACCEPTED) {
+                    if (state.range_leases.hasBlocking(command.volume_id)) return error.PayloadParseFailed;
+                    try deleting.put(arena, command.volume_id, {});
+                }
+            },
+            .range_lease => |command| {
+                range_leases.validate(command) catch return error.PayloadParseFailed;
+                const request = command.request.?;
+                const volume = storedVolumeById(state, request.volume_id);
+                const node = state.nodes_by_id.get(request.holder_node_id);
+                const outcome = state.range_leases.evaluate(command, .{
+                    .volume_available = if (volume) |value| value.created_revision < record.applied_revision and !deleting.contains(request.volume_id) else false,
+                    .volume_size = if (volume) |value| value.size_bytes else 0,
+                    .node_exists = if (node) |value| value.registered_revision < record.applied_revision else false,
+                }, record.applied_revision);
+                var response_reader: std.Io.Reader = .fixed(record.encoded_response);
+                const actual = pb.RangeLeaseApplyResponse.decode(&response_reader, arena) catch |err| return mapDecodeError(err);
+                const actual_wire = try encodeMessage(arena, actual);
+                const expected_wire = try encodeMessage(arena, outcome.proto());
+                if (!std.mem.eql(u8, actual_wire, expected_wire)) return error.PayloadParseFailed;
+                try state.range_leases.reserve(allocator, outcome);
+                state.range_leases.commit(outcome);
+            },
+            else => {},
+        }
+    }
+}
+
+fn testRangeLease(request_id: []const u8, lease_id: []const u8, mode: pb.RangeLeaseMode) pb.RangeLeaseRequest {
+    return .{ .request_id = request_id, .lease_id = lease_id, .volume_id = test_volume_id, .holder_node_id = test_node_id, .holder_boot_id = &test_holder_boot_id, .offset_bytes = 0, .length_bytes = 4096, .mode = mode };
+}
+
+fn applyTestRangeLease(machine: *PoolStateMachine, revision: u64, operation: pb.RangeLeaseOperation, request: pb.RangeLeaseRequest, expected: pb.RangeLeaseCode) !void {
+    const allocator = std.testing.allocator;
+    const wire = try encodeRangeLeaseCommand(allocator, .{ .request = request, .operation = operation });
+    defer allocator.free(wire);
+    var applied = try applyEncodedTestCommand(allocator, machine, revision, wire);
+    defer applied.deinit(allocator);
+    var reader: std.Io.Reader = .fixed(applied.response.?);
+    var response = try pb.RangeLeaseApplyResponse.decode(&reader, allocator);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(expected, response.code);
+}
+
+test "Raft range leases share reads exclude writes and retain revocation barriers across snapshots" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    var volume = try applyTestVolumeCommand(allocator, &machine, 3, testVolumeCommand("volume", test_volume_id, "v", "", min_volume_size_bytes, 1_753_744_000_002));
+    defer volume.deinit(allocator);
+    var first = testRangeLease("read-a", test_replica_id, .RANGE_LEASE_MODE_READ);
+    var second = testRangeLease("read-b", test_second_replica_id, .RANGE_LEASE_MODE_READ);
+    var writer = testRangeLease("writer-blocked", test_third_replica_id, .RANGE_LEASE_MODE_WRITE);
+    try applyTestRangeLease(&machine, 4, .RANGE_LEASE_OPERATION_ACQUIRE, first, .RANGE_LEASE_CODE_OK);
+    try applyTestRangeLease(&machine, 5, .RANGE_LEASE_OPERATION_ACQUIRE, second, .RANGE_LEASE_CODE_OK);
+    try applyTestRangeLease(&machine, 6, .RANGE_LEASE_OPERATION_ACQUIRE, writer, .RANGE_LEASE_CODE_CONFLICT);
+    var adjacent = testRangeLease("adjacent", test_allocation_id, .RANGE_LEASE_MODE_WRITE);
+    adjacent.offset_bytes = 4096;
+    try applyTestRangeLease(&machine, 7, .RANGE_LEASE_OPERATION_ACQUIRE, adjacent, .RANGE_LEASE_CODE_OK);
+    first.request_id = "renew-a";
+    first.expected_resource_version = 4;
+    try applyTestRangeLease(&machine, 8, .RANGE_LEASE_OPERATION_RENEW, first, .RANGE_LEASE_CODE_OK);
+    first.request_id = "stale-renew-a";
+    try applyTestRangeLease(&machine, 9, .RANGE_LEASE_OPERATION_RENEW, first, .RANGE_LEASE_CODE_VERSION_CONFLICT);
+    first.request_id = "revoke-a";
+    first.expected_resource_version = 8;
+    try applyTestRangeLease(&machine, 10, .RANGE_LEASE_OPERATION_REVOKE, first, .RANGE_LEASE_CODE_OK);
+    writer.request_id = "writer-revoking";
+    try applyTestRangeLease(&machine, 11, .RANGE_LEASE_OPERATION_ACQUIRE, writer, .RANGE_LEASE_CODE_CONFLICT);
+    first.request_id = "complete-a";
+    first.expected_resource_version = 10;
+    try applyTestRangeLease(&machine, 12, .RANGE_LEASE_OPERATION_COMPLETE_REVOKE, first, .RANGE_LEASE_CODE_OK);
+    writer.request_id = "writer-second-reader";
+    try applyTestRangeLease(&machine, 13, .RANGE_LEASE_OPERATION_ACQUIRE, writer, .RANGE_LEASE_CODE_CONFLICT);
+    second.request_id = "revoke-b";
+    second.expected_resource_version = 5;
+    try applyTestRangeLease(&machine, 14, .RANGE_LEASE_OPERATION_REVOKE, second, .RANGE_LEASE_CODE_OK);
+    second.request_id = "complete-b";
+    second.expected_resource_version = 14;
+    try applyTestRangeLease(&machine, 15, .RANGE_LEASE_OPERATION_COMPLETE_REVOKE, second, .RANGE_LEASE_CODE_OK);
+    writer.request_id = "writer-granted";
+    try applyTestRangeLease(&machine, 16, .RANGE_LEASE_OPERATION_ACQUIRE, writer, .RANGE_LEASE_CODE_OK);
+    first.request_id = "reuse-lease-id";
+    first.expected_resource_version = 0;
+    try applyTestRangeLease(&machine, 17, .RANGE_LEASE_OPERATION_ACQUIRE, first, .RANGE_LEASE_CODE_CONFLICT);
+    var blocked = try applyTestDeleteVolumeCommand(allocator, &machine, 18, testDeleteVolumeCommand("delete-with-lease", test_volume_id, 3, 1_753_744_000_003));
+    defer blocked.deinit(allocator);
+    var blocked_response = try decodeDeleteVolumeApplyResponse(allocator, blocked.response.?);
+    defer blocked_response.deinit(allocator);
+    try std.testing.expectEqual(pb.DeleteVolumeApplyCode.DELETE_VOLUME_APPLY_CODE_HAS_DEPENDENCIES, blocked_response.code);
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, 18, 1, .{});
+    defer snapshot.deinit(allocator);
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var snapshot_reader = TestSnapshotReader{ .data = snapshot.data };
+    try restored.stateMachine().restoreSnapshot(snapshot.metadata, snapshot_reader.reader());
+    try std.testing.expectEqualDeep(machine.getRangeLease(test_replica_id), restored.getRangeLease(test_replica_id));
+    try std.testing.expectEqualDeep(machine.getRangeLease(test_third_replica_id), restored.getRangeLease(test_third_replica_id));
+    var restored_snapshot = try restored.stateMachine().takeSnapshot(allocator, 18, 1, .{});
+    defer restored_snapshot.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, snapshot.data, restored_snapshot.data);
+    writer.request_id = "writer-blocked";
+    try applyTestRangeLease(&restored, 19, .RANGE_LEASE_OPERATION_ACQUIRE, writer, .RANGE_LEASE_CODE_CONFLICT);
+    writer.request_id = "writer-granted";
+    try applyTestRangeLease(&restored, 20, .RANGE_LEASE_OPERATION_ACQUIRE, writer, .RANGE_LEASE_CODE_OK);
+    writer.mode = .RANGE_LEASE_MODE_READ;
+    try applyTestRangeLease(&restored, 21, .RANGE_LEASE_OPERATION_ACQUIRE, writer, .RANGE_LEASE_CODE_REQUEST_CONFLICT);
+
+    // Even an independent final grant cannot disappear by dropping its history.
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    var wire_reader: std.Io.Reader = .fixed(snapshot.data);
+    var decoded = try pb.StateSnapshot.decode(&wire_reader, arena.allocator());
+    for (decoded.requests.items, 0..) |request, index| {
+        if (std.mem.eql(u8, request.request_id, "adjacent")) {
+            _ = decoded.requests.orderedRemove(index);
+            break;
+        }
+    }
+    const corrupt = try encodeMessage(allocator, decoded);
+    defer allocator.free(corrupt);
+    var corrupt_reader = TestSnapshotReader{ .data = corrupt };
+    try std.testing.expectError(error.PayloadParseFailed, restored.stateMachine().restoreSnapshot(snapshot.metadata, corrupt_reader.reader()));
+    try std.testing.expect(restored.getRangeLease(test_allocation_id) != null);
+}
+
+test "range leases validate bounds holder identity global request IDs and command version" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    var volume = try applyTestVolumeCommand(allocator, &machine, 3, testVolumeCommand("volume", test_volume_id, "v", "", min_volume_size_bytes, 1_753_744_000_002));
+    defer volume.deinit(allocator);
+    var request = testRangeLease("oversize", test_replica_id, .RANGE_LEASE_MODE_WRITE);
+    request.length_bytes = min_volume_size_bytes + 4096;
+    try applyTestRangeLease(&machine, 4, .RANGE_LEASE_OPERATION_ACQUIRE, request, .RANGE_LEASE_CODE_OUT_OF_RANGE);
+    request.request_id = "volume";
+    request.length_bytes = 4096;
+    try applyTestRangeLease(&machine, 5, .RANGE_LEASE_OPERATION_ACQUIRE, request, .RANGE_LEASE_CODE_REQUEST_CONFLICT);
+    request.request_id = "grant";
+    try applyTestRangeLease(&machine, 6, .RANGE_LEASE_OPERATION_ACQUIRE, request, .RANGE_LEASE_CODE_OK);
+    var cross = try applyTestVolumeCommand(allocator, &machine, 7, testVolumeCommand("grant", test_second_volume_id, "cross", "", min_volume_size_bytes, 1_753_744_000_002));
+    defer cross.deinit(allocator);
+    var cross_response = try decodeCreateVolumeApplyResponse(allocator, cross.response.?);
+    defer cross_response.deinit(allocator);
+    try std.testing.expectEqual(pb.CreateVolumeApplyCode.CREATE_VOLUME_APPLY_CODE_REQUEST_CONFLICT, cross_response.code);
+    request.request_id = "wrong-boot";
+    request.expected_resource_version = 6;
+    request.holder_boot_id = &test_lease_id;
+    try applyTestRangeLease(&machine, 8, .RANGE_LEASE_OPERATION_RENEW, request, .RANGE_LEASE_CODE_BINDING_MISMATCH);
+    request.holder_boot_id = &test_holder_boot_id;
+    request.request_id = "premature-complete";
+    try applyTestRangeLease(&machine, 9, .RANGE_LEASE_OPERATION_COMPLETE_REVOKE, request, .RANGE_LEASE_CODE_INVALID_STATE);
+    request.expected_resource_version = 0;
+    const old_wire = try encodeMessage(allocator, pb.CommandEnvelope{ .format_version = 9, .command = .{ .range_lease = .{ .request = request, .operation = .RANGE_LEASE_OPERATION_ACQUIRE } } });
+    defer allocator.free(old_wire);
+    try std.testing.expectError(error.PayloadParseFailed, applyEncodedTestCommand(allocator, &machine, 10, old_wire));
+    request.offset_bytes = 1;
+    try std.testing.expectError(error.PayloadParseFailed, encodeRangeLeaseCommand(allocator, .{ .request = request, .operation = .RANGE_LEASE_OPERATION_ACQUIRE }));
+}
+
+test "range lease acquire and snapshot restore are atomic on allocation failure" {
+    const allocator = std.testing.allocator;
+    const pool = try encodeCreatePoolCommand(allocator, testCommand("pool", test_pool_id, "pool", "", 1_753_744_000_000));
+    defer allocator.free(pool);
+    const node = try encodeRegisterNodeCommand(allocator, testNodeCommand("node", test_node_id, "node:9000", 1_753_744_000_001));
+    defer allocator.free(node);
+    const volume = try encodeCreateVolumeCommand(allocator, testVolumeCommand("volume", test_volume_id, "volume", "", min_volume_size_bytes, 1_753_744_000_002));
+    defer allocator.free(volume);
+    const lease = try encodeRangeLeaseCommand(allocator, .{ .request = testRangeLease("lease", test_replica_id, .RANGE_LEASE_MODE_WRITE), .operation = .RANGE_LEASE_OPERATION_ACQUIRE });
+    defer allocator.free(lease);
+    const commands = [_][]const u8{ pool, node, volume, lease };
+    try checkAllAllocationFailures(struct {
+        fn run(failing: std.mem.Allocator, entries: []const []const u8) !void {
+            var machine = PoolStateMachine.init(failing);
+            defer machine.deinit();
+            for (entries, 0..) |entry, index| {
+                var result = applyEncodedTestCommand(failing, &machine, index + 1, entry) catch |err| {
+                    if (index == 3) {
+                        try std.testing.expectEqual(@as(usize, 3), machine.requestCount());
+                        try std.testing.expectEqual(@as(usize, 0), machine.state.range_leases.leases.count());
+                    }
+                    return err;
+                };
+                result.deinit(failing);
+            }
+        }
+    }.run, .{&commands});
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    for (commands, 0..) |entry, index| {
+        var result = try applyEncodedTestCommand(allocator, &source, index + 1, entry);
+        result.deinit(allocator);
+    }
+    var snapshot = try source.stateMachine().takeSnapshot(allocator, 4, 1, .{});
+    defer snapshot.deinit(allocator);
+    try checkAllAllocationFailures(struct {
+        fn run(failing: std.mem.Allocator, data: []const u8, metadata: raft.SnapshotMetadata) !void {
+            var target = PoolStateMachine.init(failing);
+            defer target.deinit();
+            var reader = TestSnapshotReader{ .data = data };
+            target.stateMachine().restoreSnapshot(metadata, reader.reader()) catch |err| {
+                try std.testing.expectEqual(@as(usize, 0), target.poolCount());
+                try std.testing.expectEqual(@as(usize, 0), target.requestCount());
+                try std.testing.expectEqual(@as(usize, 0), target.state.range_leases.leases.count());
+                return err;
+            };
+            try std.testing.expect(target.getRangeLease(test_replica_id) != null);
+        }
+    }.run, .{ snapshot.data, snapshot.metadata });
+}
+
+test "fully revoked lease permits Volume deletion and remains a durable tombstone" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    var volume = try applyTestVolumeCommand(allocator, &machine, 3, testVolumeCommand("volume", test_volume_id, "v", "", min_volume_size_bytes, 1_753_744_000_002));
+    defer volume.deinit(allocator);
+    var request = testRangeLease("lease", test_replica_id, .RANGE_LEASE_MODE_WRITE);
+    try applyTestRangeLease(&machine, 4, .RANGE_LEASE_OPERATION_ACQUIRE, request, .RANGE_LEASE_CODE_OK);
+    request.request_id = "revoke";
+    request.expected_resource_version = 4;
+    try applyTestRangeLease(&machine, 5, .RANGE_LEASE_OPERATION_REVOKE, request, .RANGE_LEASE_CODE_OK);
+    request.request_id = "renew-revoking";
+    request.expected_resource_version = 5;
+    try applyTestRangeLease(&machine, 6, .RANGE_LEASE_OPERATION_RENEW, request, .RANGE_LEASE_CODE_INVALID_STATE);
+    request.request_id = "complete";
+    try applyTestRangeLease(&machine, 7, .RANGE_LEASE_OPERATION_COMPLETE_REVOKE, request, .RANGE_LEASE_CODE_OK);
+    var deleted = try applyTestDeleteVolumeCommand(allocator, &machine, 8, testDeleteVolumeCommand("delete", test_volume_id, 3, 1_753_744_000_003));
+    defer deleted.deinit(allocator);
+    var deleted_response = try decodeDeleteVolumeApplyResponse(allocator, deleted.response.?);
+    defer deleted_response.deinit(allocator);
+    try std.testing.expectEqual(pb.DeleteVolumeApplyCode.DELETE_VOLUME_APPLY_CODE_DELETED, deleted_response.code);
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, 8, 1, .{});
+    defer snapshot.deinit(allocator);
+    var reader = TestSnapshotReader{ .data = snapshot.data };
+    try machine.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
+    try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKED, machine.getRangeLease(test_replica_id).?.state);
+    request.lease_id = test_second_replica_id;
+    request.request_id = "deleted-volume";
+    request.expected_resource_version = 0;
+    try applyTestRangeLease(&machine, 9, .RANGE_LEASE_OPERATION_ACQUIRE, request, .RANGE_LEASE_CODE_NOT_FOUND);
 }

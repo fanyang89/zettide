@@ -586,6 +586,7 @@ pub const Request = struct {
 };
 
 pub const State = struct {
+    range_leases: @import("../range_leases.zig").Store = .{},
     pools_by_id: std.StringHashMapUnmanaged(Pool) = .empty,
     pool_ids_by_name: std.StringHashMapUnmanaged([]const u8) = .empty,
     pool_ids_by_revision: std.ArrayList([]const u8) = .empty,
@@ -616,6 +617,7 @@ pub const State = struct {
     max_volume_deleted_revision: u64 = 0,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.range_leases.deinit(allocator);
         var request_iterator = self.requests.valueIterator();
         while (request_iterator.next()) |request| request.deinit(allocator);
         self.requests.deinit(allocator);
