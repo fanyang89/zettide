@@ -210,3 +210,7 @@ historical retries, candidate bindings and epoch advancement. The three-voter
 runtime test covers candidate preservation and deletion protection across leader
 failover, cancellation/deletion, and former-leader catch-up. These tests do
 not validate managed filesystem activation or POSIX payload behavior.
+
+A separate [storage fence/recovery gate](filesystem-fencing.md) now provides the
+backend-neutral durable barrier foundation. It is not connected to these RPCs;
+CANDIDATE still cannot authorize any backend work or client admission.
