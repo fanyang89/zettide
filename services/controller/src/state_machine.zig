@@ -2867,7 +2867,7 @@ fn restorePrimaryAuthority(allocator: std.mem.Allocator, state: *State, source: 
         !validFixedNonzero(source.lease_id, 16) or !validFixedNonzero(source.holder_boot_id, 16) or
         source.authority_generation == 0 or source.write_epoch == 0 or source.placement_revision == 0 or
         !validFixedNonzero(source.activation_nonce, 16) or source.lease_duration_ms != primary_lease.duration_ms or !validFixedNonzero(source.authority_digest, 32) or
-        source.created_revision == 0 or source.resource_version > snapshot_index or source.resource_version < source.created_revision or
+        source.created_revision <= source.placement_revision or source.resource_version > snapshot_index or source.resource_version < source.created_revision or
         (if (candidate) state.primary_authority_candidates_by_volume.contains(source.volume_id) else state.primary_authorities_by_volume.contains(source.volume_id))) return error.PayloadParseFailed;
     switch (source.state) {
         .PRIMARY_AUTHORITY_STATE_PENDING => if (source.activated_revision != 0 or source.ready_revision != 0 or source.resource_version != source.created_revision or source.recovery_sequence != 0 or source.recovery_digest.len != 0 or source.recovery_empty_frontier) return error.PayloadParseFailed,
@@ -5355,6 +5355,31 @@ test "primary authority snapshot invariants and legacy fail closed" {
     try std.testing.expectEqual(pb.VolumeAvailabilityState.VOLUME_AVAILABILITY_STATE_UNKNOWN, legacy_volume.availability_state);
     try std.testing.expectEqual(pb.VolumeOperationPhase.VOLUME_OPERATION_PHASE_FENCING, legacy_volume.operation_phase);
     try std.testing.expectEqual(@as(usize, 0), legacy_machine.primaryAuthorityCount());
+}
+
+test "authority snapshot rejects creation before placement atomically" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try prepareReadyAuthority(allocator, &machine);
+    var baseline = try machine.stateMachine().takeSnapshot(allocator, 15, 1, .{});
+    defer baseline.deinit(allocator);
+
+    for ([_]u64{ 1, 9 }) |created_revision| {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(baseline.data);
+        var decoded = try pb.StateSnapshot.decode(&reader, arena.allocator());
+        try std.testing.expectEqual(@as(u64, 9), decoded.primary_authorities.items[0].placement_revision);
+        decoded.primary_authorities.items[0].created_revision = created_revision;
+        const malformed = try encodeMessage(allocator, decoded);
+        defer allocator.free(malformed);
+        var snapshot_reader = TestSnapshotReader{ .data = malformed };
+        try std.testing.expectError(error.PayloadParseFailed, machine.stateMachine().restoreSnapshot(baseline.metadata, snapshot_reader.reader()));
+        var after = try machine.stateMachine().takeSnapshot(allocator, 15, 1, .{});
+        defer after.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, baseline.data, after.data);
+    }
 }
 
 test "volume resource lifecycle update list and snapshot recovery" {
