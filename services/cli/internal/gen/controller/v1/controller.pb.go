@@ -1794,6 +1794,7 @@ type FilesystemAuthorityState int32
 const (
 	FilesystemAuthorityState_FILESYSTEM_AUTHORITY_STATE_NONE      FilesystemAuthorityState = 0
 	FilesystemAuthorityState_FILESYSTEM_AUTHORITY_STATE_CANDIDATE FilesystemAuthorityState = 1
+	FilesystemAuthorityState_FILESYSTEM_AUTHORITY_STATE_PREPARING FilesystemAuthorityState = 2
 )
 
 // Enum value maps for FilesystemAuthorityState.
@@ -1801,10 +1802,12 @@ var (
 	FilesystemAuthorityState_name = map[int32]string{
 		0: "FILESYSTEM_AUTHORITY_STATE_NONE",
 		1: "FILESYSTEM_AUTHORITY_STATE_CANDIDATE",
+		2: "FILESYSTEM_AUTHORITY_STATE_PREPARING",
 	}
 	FilesystemAuthorityState_value = map[string]int32{
 		"FILESYSTEM_AUTHORITY_STATE_NONE":      0,
 		"FILESYSTEM_AUTHORITY_STATE_CANDIDATE": 1,
+		"FILESYSTEM_AUTHORITY_STATE_PREPARING": 2,
 	}
 )
 
@@ -1844,6 +1847,7 @@ const (
 	FilesystemOperation_FILESYSTEM_OPERATION_DELETE            FilesystemOperation = 3
 	FilesystemOperation_FILESYSTEM_OPERATION_PROPOSE_AUTHORITY FilesystemOperation = 4
 	FilesystemOperation_FILESYSTEM_OPERATION_CANCEL_AUTHORITY  FilesystemOperation = 5
+	FilesystemOperation_FILESYSTEM_OPERATION_BEGIN_PREPARATION FilesystemOperation = 6
 )
 
 // Enum value maps for FilesystemOperation.
@@ -1855,6 +1859,7 @@ var (
 		3: "FILESYSTEM_OPERATION_DELETE",
 		4: "FILESYSTEM_OPERATION_PROPOSE_AUTHORITY",
 		5: "FILESYSTEM_OPERATION_CANCEL_AUTHORITY",
+		6: "FILESYSTEM_OPERATION_BEGIN_PREPARATION",
 	}
 	FilesystemOperation_value = map[string]int32{
 		"FILESYSTEM_OPERATION_UNSPECIFIED":       0,
@@ -1863,6 +1868,7 @@ var (
 		"FILESYSTEM_OPERATION_DELETE":            3,
 		"FILESYSTEM_OPERATION_PROPOSE_AUTHORITY": 4,
 		"FILESYSTEM_OPERATION_CANCEL_AUTHORITY":  5,
+		"FILESYSTEM_OPERATION_BEGIN_PREPARATION": 6,
 	}
 )
 
@@ -9327,8 +9333,12 @@ type Filesystem struct {
 	AuthorityEpoch  uint64 `protobuf:"varint,13,opt,name=authority_epoch,json=authorityEpoch,proto3" json:"authority_epoch,omitempty"`
 	CandidateNodeId string `protobuf:"bytes,14,opt,name=candidate_node_id,json=candidateNodeId,proto3" json:"candidate_node_id,omitempty"`
 	CandidateBootId []byte `protobuf:"bytes,15,opt,name=candidate_boot_id,json=candidateBootId,proto3" json:"candidate_boot_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Immutable once preparation begins; not proof of physical readiness.
+	BackendDigest []byte `protobuf:"bytes,16,opt,name=backend_digest,json=backendDigest,proto3" json:"backend_digest,omitempty"`
+	// Assigned from the BeginFilesystemPreparation commit index.
+	PlacementGeneration uint64 `protobuf:"varint,17,opt,name=placement_generation,json=placementGeneration,proto3" json:"placement_generation,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *Filesystem) Reset() {
@@ -9466,6 +9476,20 @@ func (x *Filesystem) GetCandidateBootId() []byte {
 	return nil
 }
 
+func (x *Filesystem) GetBackendDigest() []byte {
+	if x != nil {
+		return x.BackendDigest
+	}
+	return nil
+}
+
+func (x *Filesystem) GetPlacementGeneration() uint64 {
+	if x != nil {
+		return x.PlacementGeneration
+	}
+	return 0
+}
+
 type FilesystemMutationRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -9484,8 +9508,10 @@ type FilesystemMutationRequest struct {
 	HolderBootId []byte `protobuf:"bytes,10,opt,name=holder_boot_id,json=holderBootId,proto3" json:"holder_boot_id,omitempty"`
 	// Observed epoch (including zero before the first proposal).
 	ExpectedAuthorityEpoch uint64 `protobuf:"varint,11,opt,name=expected_authority_epoch,json=expectedAuthorityEpoch,proto3" json:"expected_authority_epoch,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// BeginFilesystemPreparation only: stable, nonzero 32-byte backend identity.
+	BackendDigest []byte `protobuf:"bytes,12,opt,name=backend_digest,json=backendDigest,proto3" json:"backend_digest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FilesystemMutationRequest) Reset() {
@@ -9593,6 +9619,13 @@ func (x *FilesystemMutationRequest) GetExpectedAuthorityEpoch() uint64 {
 		return x.ExpectedAuthorityEpoch
 	}
 	return 0
+}
+
+func (x *FilesystemMutationRequest) GetBackendDigest() []byte {
+	if x != nil {
+		return x.BackendDigest
+	}
+	return nil
 }
 
 type FilesystemResponse struct {
@@ -10561,7 +10594,7 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\toperation\x18\x02 \x01(\x0e2*.zettide.controller.v1.RangeLeaseOperationR\toperation\"\x8d\x01\n" +
 	"\x17RangeLeaseApplyResponse\x129\n" +
 	"\x04code\x18\x01 \x01(\x0e2%.zettide.controller.v1.RangeLeaseCodeR\x04code\x127\n" +
-	"\x05lease\x18\x02 \x01(\v2!.zettide.controller.v1.RangeLeaseR\x05lease\"\xea\x05\n" +
+	"\x05lease\x18\x02 \x01(\v2!.zettide.controller.v1.RangeLeaseR\x05lease\"\xc4\x06\n" +
 	"\n" +
 	"Filesystem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
@@ -10579,7 +10612,9 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x0fauthority_state\x18\f \x01(\x0e2/.zettide.controller.v1.FilesystemAuthorityStateR\x0eauthorityState\x12'\n" +
 	"\x0fauthority_epoch\x18\r \x01(\x04R\x0eauthorityEpoch\x12*\n" +
 	"\x11candidate_node_id\x18\x0e \x01(\tR\x0fcandidateNodeId\x12*\n" +
-	"\x11candidate_boot_id\x18\x0f \x01(\fR\x0fcandidateBootId\"\x92\x04\n" +
+	"\x11candidate_boot_id\x18\x0f \x01(\fR\x0fcandidateBootId\x12%\n" +
+	"\x0ebackend_digest\x18\x10 \x01(\fR\rbackendDigest\x121\n" +
+	"\x14placement_generation\x18\x11 \x01(\x04R\x13placementGeneration\"\xb9\x04\n" +
 	"\x19FilesystemMutationRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12#\n" +
@@ -10593,7 +10628,8 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x0eholder_node_id\x18\t \x01(\tR\fholderNodeId\x12$\n" +
 	"\x0eholder_boot_id\x18\n" +
 	" \x01(\fR\fholderBootId\x128\n" +
-	"\x18expected_authority_epoch\x18\v \x01(\x04R\x16expectedAuthorityEpoch\"W\n" +
+	"\x18expected_authority_epoch\x18\v \x01(\x04R\x16expectedAuthorityEpoch\x12%\n" +
+	"\x0ebackend_digest\x18\f \x01(\fR\rbackendDigest\"W\n" +
 	"\x12FilesystemResponse\x12A\n" +
 	"\n" +
 	"filesystem\x18\x01 \x01(\v2!.zettide.controller.v1.FilesystemR\n" +
@@ -10823,17 +10859,19 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x18FilesystemLifecycleState\x12*\n" +
 	"&FILESYSTEM_LIFECYCLE_STATE_UNSPECIFIED\x10\x00\x12+\n" +
 	"'FILESYSTEM_LIFECYCLE_STATE_PROVISIONING\x10\x01\x12&\n" +
-	"\"FILESYSTEM_LIFECYCLE_STATE_DELETED\x10\x02*i\n" +
+	"\"FILESYSTEM_LIFECYCLE_STATE_DELETED\x10\x02*\x93\x01\n" +
 	"\x18FilesystemAuthorityState\x12#\n" +
 	"\x1fFILESYSTEM_AUTHORITY_STATE_NONE\x10\x00\x12(\n" +
-	"$FILESYSTEM_AUTHORITY_STATE_CANDIDATE\x10\x01*\xf5\x01\n" +
+	"$FILESYSTEM_AUTHORITY_STATE_CANDIDATE\x10\x01\x12(\n" +
+	"$FILESYSTEM_AUTHORITY_STATE_PREPARING\x10\x02*\xa1\x02\n" +
 	"\x13FilesystemOperation\x12$\n" +
 	" FILESYSTEM_OPERATION_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bFILESYSTEM_OPERATION_CREATE\x10\x01\x12\x1f\n" +
 	"\x1bFILESYSTEM_OPERATION_UPDATE\x10\x02\x12\x1f\n" +
 	"\x1bFILESYSTEM_OPERATION_DELETE\x10\x03\x12*\n" +
 	"&FILESYSTEM_OPERATION_PROPOSE_AUTHORITY\x10\x04\x12)\n" +
-	"%FILESYSTEM_OPERATION_CANCEL_AUTHORITY\x10\x05*\x99\x02\n" +
+	"%FILESYSTEM_OPERATION_CANCEL_AUTHORITY\x10\x05\x12*\n" +
+	"&FILESYSTEM_OPERATION_BEGIN_PREPARATION\x10\x06*\x99\x02\n" +
 	"\x0eFilesystemCode\x12\x1f\n" +
 	"\x1bFILESYSTEM_CODE_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12FILESYSTEM_CODE_OK\x10\x01\x12\x1d\n" +
@@ -10877,13 +10915,14 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x0eCompleteRevoke\x12(.zettide.controller.v1.RangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12b\n" +
 	"\bGetLease\x12+.zettide.controller.v1.GetRangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12k\n" +
 	"\n" +
-	"ListLeases\x12-.zettide.controller.v1.ListRangeLeasesRequest\x1a..zettide.controller.v1.ListRangeLeasesResponse2\xb6\x06\n" +
+	"ListLeases\x12-.zettide.controller.v1.ListRangeLeasesRequest\x1a..zettide.controller.v1.ListRangeLeasesResponse2\xb1\a\n" +
 	"\x11FilesystemService\x12o\n" +
 	"\x10CreateFilesystem\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12o\n" +
 	"\x10UpdateFilesystem\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12o\n" +
 	"\x10DeleteFilesystem\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12y\n" +
 	"\x1aProposeFilesystemAuthority\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12x\n" +
-	"\x19CancelFilesystemAuthority\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12g\n" +
+	"\x19CancelFilesystemAuthority\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12y\n" +
+	"\x1aBeginFilesystemPreparation\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12g\n" +
 	"\rGetFilesystem\x12+.zettide.controller.v1.GetFilesystemRequest\x1a).zettide.controller.v1.FilesystemResponse\x12p\n" +
 	"\x0fListFilesystems\x12-.zettide.controller.v1.ListFilesystemsRequest\x1a..zettide.controller.v1.ListFilesystemsResponseb\x06proto3"
 
@@ -11194,41 +11233,43 @@ var file_services_controller_proto_zettide_controller_v1_controller_proto_depIdx
 	129, // 151: zettide.controller.v1.FilesystemService.DeleteFilesystem:input_type -> zettide.controller.v1.FilesystemMutationRequest
 	129, // 152: zettide.controller.v1.FilesystemService.ProposeFilesystemAuthority:input_type -> zettide.controller.v1.FilesystemMutationRequest
 	129, // 153: zettide.controller.v1.FilesystemService.CancelFilesystemAuthority:input_type -> zettide.controller.v1.FilesystemMutationRequest
-	131, // 154: zettide.controller.v1.FilesystemService.GetFilesystem:input_type -> zettide.controller.v1.GetFilesystemRequest
-	132, // 155: zettide.controller.v1.FilesystemService.ListFilesystems:input_type -> zettide.controller.v1.ListFilesystemsRequest
-	40,  // 156: zettide.controller.v1.PoolService.CreatePool:output_type -> zettide.controller.v1.CreatePoolResponse
-	42,  // 157: zettide.controller.v1.PoolService.GetPool:output_type -> zettide.controller.v1.GetPoolResponse
-	44,  // 158: zettide.controller.v1.PoolService.ListPools:output_type -> zettide.controller.v1.ListPoolsResponse
-	36,  // 159: zettide.controller.v1.PoolService.UpdatePool:output_type -> zettide.controller.v1.UpdatePoolResponse
-	38,  // 160: zettide.controller.v1.PoolService.DeletePool:output_type -> zettide.controller.v1.DeletePoolResponse
-	47,  // 161: zettide.controller.v1.NodeService.RegisterNode:output_type -> zettide.controller.v1.RegisterNodeResponse
-	49,  // 162: zettide.controller.v1.NodeService.GetNode:output_type -> zettide.controller.v1.GetNodeResponse
-	51,  // 163: zettide.controller.v1.NodeService.ListNodes:output_type -> zettide.controller.v1.ListNodesResponse
-	54,  // 164: zettide.controller.v1.MemberService.RegisterMember:output_type -> zettide.controller.v1.RegisterMemberResponse
-	56,  // 165: zettide.controller.v1.MemberService.GetMember:output_type -> zettide.controller.v1.GetMemberResponse
-	58,  // 166: zettide.controller.v1.MemberService.ListMembers:output_type -> zettide.controller.v1.ListMembersResponse
-	63,  // 167: zettide.controller.v1.HeartbeatService.ReportHeartbeat:output_type -> zettide.controller.v1.ReportHeartbeatResponse
-	65,  // 168: zettide.controller.v1.HeartbeatService.GetHeartbeat:output_type -> zettide.controller.v1.GetHeartbeatResponse
-	68,  // 169: zettide.controller.v1.VolumeService.CreateVolume:output_type -> zettide.controller.v1.CreateVolumeResponse
-	70,  // 170: zettide.controller.v1.VolumeService.GetVolume:output_type -> zettide.controller.v1.GetVolumeResponse
-	72,  // 171: zettide.controller.v1.VolumeService.UpdateVolume:output_type -> zettide.controller.v1.UpdateVolumeResponse
-	74,  // 172: zettide.controller.v1.VolumeService.ListVolumes:output_type -> zettide.controller.v1.ListVolumesResponse
-	76,  // 173: zettide.controller.v1.VolumeService.DeleteVolume:output_type -> zettide.controller.v1.DeleteVolumeResponse
-	122, // 174: zettide.controller.v1.RangeLeaseService.AcquireLease:output_type -> zettide.controller.v1.RangeLeaseResponse
-	122, // 175: zettide.controller.v1.RangeLeaseService.RenewLease:output_type -> zettide.controller.v1.RangeLeaseResponse
-	122, // 176: zettide.controller.v1.RangeLeaseService.RevokeLease:output_type -> zettide.controller.v1.RangeLeaseResponse
-	122, // 177: zettide.controller.v1.RangeLeaseService.CompleteRevoke:output_type -> zettide.controller.v1.RangeLeaseResponse
-	122, // 178: zettide.controller.v1.RangeLeaseService.GetLease:output_type -> zettide.controller.v1.RangeLeaseResponse
-	125, // 179: zettide.controller.v1.RangeLeaseService.ListLeases:output_type -> zettide.controller.v1.ListRangeLeasesResponse
-	130, // 180: zettide.controller.v1.FilesystemService.CreateFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
-	130, // 181: zettide.controller.v1.FilesystemService.UpdateFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
-	130, // 182: zettide.controller.v1.FilesystemService.DeleteFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
-	130, // 183: zettide.controller.v1.FilesystemService.ProposeFilesystemAuthority:output_type -> zettide.controller.v1.FilesystemResponse
-	130, // 184: zettide.controller.v1.FilesystemService.CancelFilesystemAuthority:output_type -> zettide.controller.v1.FilesystemResponse
-	130, // 185: zettide.controller.v1.FilesystemService.GetFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
-	133, // 186: zettide.controller.v1.FilesystemService.ListFilesystems:output_type -> zettide.controller.v1.ListFilesystemsResponse
-	156, // [156:187] is the sub-list for method output_type
-	125, // [125:156] is the sub-list for method input_type
+	129, // 154: zettide.controller.v1.FilesystemService.BeginFilesystemPreparation:input_type -> zettide.controller.v1.FilesystemMutationRequest
+	131, // 155: zettide.controller.v1.FilesystemService.GetFilesystem:input_type -> zettide.controller.v1.GetFilesystemRequest
+	132, // 156: zettide.controller.v1.FilesystemService.ListFilesystems:input_type -> zettide.controller.v1.ListFilesystemsRequest
+	40,  // 157: zettide.controller.v1.PoolService.CreatePool:output_type -> zettide.controller.v1.CreatePoolResponse
+	42,  // 158: zettide.controller.v1.PoolService.GetPool:output_type -> zettide.controller.v1.GetPoolResponse
+	44,  // 159: zettide.controller.v1.PoolService.ListPools:output_type -> zettide.controller.v1.ListPoolsResponse
+	36,  // 160: zettide.controller.v1.PoolService.UpdatePool:output_type -> zettide.controller.v1.UpdatePoolResponse
+	38,  // 161: zettide.controller.v1.PoolService.DeletePool:output_type -> zettide.controller.v1.DeletePoolResponse
+	47,  // 162: zettide.controller.v1.NodeService.RegisterNode:output_type -> zettide.controller.v1.RegisterNodeResponse
+	49,  // 163: zettide.controller.v1.NodeService.GetNode:output_type -> zettide.controller.v1.GetNodeResponse
+	51,  // 164: zettide.controller.v1.NodeService.ListNodes:output_type -> zettide.controller.v1.ListNodesResponse
+	54,  // 165: zettide.controller.v1.MemberService.RegisterMember:output_type -> zettide.controller.v1.RegisterMemberResponse
+	56,  // 166: zettide.controller.v1.MemberService.GetMember:output_type -> zettide.controller.v1.GetMemberResponse
+	58,  // 167: zettide.controller.v1.MemberService.ListMembers:output_type -> zettide.controller.v1.ListMembersResponse
+	63,  // 168: zettide.controller.v1.HeartbeatService.ReportHeartbeat:output_type -> zettide.controller.v1.ReportHeartbeatResponse
+	65,  // 169: zettide.controller.v1.HeartbeatService.GetHeartbeat:output_type -> zettide.controller.v1.GetHeartbeatResponse
+	68,  // 170: zettide.controller.v1.VolumeService.CreateVolume:output_type -> zettide.controller.v1.CreateVolumeResponse
+	70,  // 171: zettide.controller.v1.VolumeService.GetVolume:output_type -> zettide.controller.v1.GetVolumeResponse
+	72,  // 172: zettide.controller.v1.VolumeService.UpdateVolume:output_type -> zettide.controller.v1.UpdateVolumeResponse
+	74,  // 173: zettide.controller.v1.VolumeService.ListVolumes:output_type -> zettide.controller.v1.ListVolumesResponse
+	76,  // 174: zettide.controller.v1.VolumeService.DeleteVolume:output_type -> zettide.controller.v1.DeleteVolumeResponse
+	122, // 175: zettide.controller.v1.RangeLeaseService.AcquireLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	122, // 176: zettide.controller.v1.RangeLeaseService.RenewLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	122, // 177: zettide.controller.v1.RangeLeaseService.RevokeLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	122, // 178: zettide.controller.v1.RangeLeaseService.CompleteRevoke:output_type -> zettide.controller.v1.RangeLeaseResponse
+	122, // 179: zettide.controller.v1.RangeLeaseService.GetLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	125, // 180: zettide.controller.v1.RangeLeaseService.ListLeases:output_type -> zettide.controller.v1.ListRangeLeasesResponse
+	130, // 181: zettide.controller.v1.FilesystemService.CreateFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 182: zettide.controller.v1.FilesystemService.UpdateFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 183: zettide.controller.v1.FilesystemService.DeleteFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 184: zettide.controller.v1.FilesystemService.ProposeFilesystemAuthority:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 185: zettide.controller.v1.FilesystemService.CancelFilesystemAuthority:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 186: zettide.controller.v1.FilesystemService.BeginFilesystemPreparation:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 187: zettide.controller.v1.FilesystemService.GetFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
+	133, // 188: zettide.controller.v1.FilesystemService.ListFilesystems:output_type -> zettide.controller.v1.ListFilesystemsResponse
+	157, // [157:189] is the sub-list for method output_type
+	125, // [125:157] is the sub-list for method input_type
 	125, // [125:125] is the sub-list for extension type_name
 	125, // [125:125] is the sub-list for extension extendee
 	0,   // [0:125] is the sub-list for field type_name

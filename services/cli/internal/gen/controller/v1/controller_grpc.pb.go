@@ -1326,6 +1326,7 @@ const (
 	FilesystemService_DeleteFilesystem_FullMethodName           = "/zettide.controller.v1.FilesystemService/DeleteFilesystem"
 	FilesystemService_ProposeFilesystemAuthority_FullMethodName = "/zettide.controller.v1.FilesystemService/ProposeFilesystemAuthority"
 	FilesystemService_CancelFilesystemAuthority_FullMethodName  = "/zettide.controller.v1.FilesystemService/CancelFilesystemAuthority"
+	FilesystemService_BeginFilesystemPreparation_FullMethodName = "/zettide.controller.v1.FilesystemService/BeginFilesystemPreparation"
 	FilesystemService_GetFilesystem_FullMethodName              = "/zettide.controller.v1.FilesystemService/GetFilesystem"
 	FilesystemService_ListFilesystems_FullMethodName            = "/zettide.controller.v1.FilesystemService/ListFilesystems"
 )
@@ -1342,6 +1343,8 @@ type FilesystemServiceClient interface {
 	// Trusted control-plane intents only; CANDIDATE never authorizes storage I/O.
 	ProposeFilesystemAuthority(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
 	CancelFilesystemAuthority(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
+	// Pins the backend and owner; no direct cancellation or payload admission.
+	BeginFilesystemPreparation(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
 	GetFilesystem(ctx context.Context, in *GetFilesystemRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
 	ListFilesystems(ctx context.Context, in *ListFilesystemsRequest, opts ...grpc.CallOption) (*ListFilesystemsResponse, error)
 }
@@ -1404,6 +1407,16 @@ func (c *filesystemServiceClient) CancelFilesystemAuthority(ctx context.Context,
 	return out, nil
 }
 
+func (c *filesystemServiceClient) BeginFilesystemPreparation(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FilesystemResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_BeginFilesystemPreparation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *filesystemServiceClient) GetFilesystem(ctx context.Context, in *GetFilesystemRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(FilesystemResponse)
@@ -1436,6 +1449,8 @@ type FilesystemServiceServer interface {
 	// Trusted control-plane intents only; CANDIDATE never authorizes storage I/O.
 	ProposeFilesystemAuthority(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
 	CancelFilesystemAuthority(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
+	// Pins the backend and owner; no direct cancellation or payload admission.
+	BeginFilesystemPreparation(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
 	GetFilesystem(context.Context, *GetFilesystemRequest) (*FilesystemResponse, error)
 	ListFilesystems(context.Context, *ListFilesystemsRequest) (*ListFilesystemsResponse, error)
 	mustEmbedUnimplementedFilesystemServiceServer()
@@ -1462,6 +1477,9 @@ func (UnimplementedFilesystemServiceServer) ProposeFilesystemAuthority(context.C
 }
 func (UnimplementedFilesystemServiceServer) CancelFilesystemAuthority(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelFilesystemAuthority not implemented")
+}
+func (UnimplementedFilesystemServiceServer) BeginFilesystemPreparation(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BeginFilesystemPreparation not implemented")
 }
 func (UnimplementedFilesystemServiceServer) GetFilesystem(context.Context, *GetFilesystemRequest) (*FilesystemResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetFilesystem not implemented")
@@ -1580,6 +1598,24 @@ func _FilesystemService_CancelFilesystemAuthority_Handler(srv interface{}, ctx c
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FilesystemService_BeginFilesystemPreparation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FilesystemMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilesystemServiceServer).BeginFilesystemPreparation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilesystemService_BeginFilesystemPreparation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilesystemServiceServer).BeginFilesystemPreparation(ctx, req.(*FilesystemMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _FilesystemService_GetFilesystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetFilesystemRequest)
 	if err := dec(in); err != nil {
@@ -1642,6 +1678,10 @@ var FilesystemService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelFilesystemAuthority",
 			Handler:    _FilesystemService_CancelFilesystemAuthority_Handler,
+		},
+		{
+			MethodName: "BeginFilesystemPreparation",
+			Handler:    _FilesystemService_BeginFilesystemPreparation_Handler,
 		},
 		{
 			MethodName: "GetFilesystem",

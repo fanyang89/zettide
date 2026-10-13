@@ -4,14 +4,14 @@
 
 `libs/data-service-contracts/src/filesystem_fence.zig` provides a backend-neutral,
 local storage gate with a checksummed, fsync-backed epoch journal. It is **not
-wired into the controller, BlobFilesystem, NFS or FUSE**. No new controller
-command, READY transition, export, or on-media filesystem format is introduced.
+wired into the controller, BlobFilesystem, NFS or FUSE**. The gate introduces no READY transition, export or on-media filesystem format.
 
-The controller currently exposes only non-executable candidate reservations.
-They cannot authorize any operation in this gate. The future controller must
-first commit a non-cancellable preparing phase and exact backend placement;
-only then may a trusted adapter authorize preparation/recovery. An adapter must
-not convert `CANDIDATE` or a bare epoch into permission to open or modify media.
+The controller exposes non-executable candidates and a non-cancellable
+`BeginFilesystemPreparation` intent that pins backend digest, placement generation
+and owner. A trusted adapter may authorize storage preparation/recovery only
+from the committed exact PREPARING binding after physical identity verification.
+That adapter is not yet implemented. It must never convert CANDIDATE or a bare
+epoch into permission to open or modify media.
 
 ## Identity and ownership
 
@@ -102,7 +102,7 @@ foreign journals, corruption, drain/rename/directory-sync/recovery failures,
 restart repair, and an actual file write whose guard blocks a concurrent fence
 until completion and sync.
 
-Before enabling managed I/O, implement and test the non-cancellable Raft phase,
+Before enabling managed I/O, connect and test the committed PREPARING binding,
 physical identity catalog/adapter, exclusive backend ownership, complete
 all-target/old-route fencing, lease validation, real BlobFilesystem recovery and
 mandatory gate usage by every payload/replay path. Missing storage or uncertain

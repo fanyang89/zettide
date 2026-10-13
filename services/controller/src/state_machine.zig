@@ -2132,7 +2132,7 @@ pub const PoolStateMachine = struct {
 
         try restoreFilesystemHistory(self.allocator, arena.allocator(), &restored, snapshot.requests.items);
         if (restored.filesystems.records.count() != 0) {
-            const digest = try restored.filesystems.digestVersion(self.allocator, snapshot.format_version >= 15);
+            const digest = try restored.filesystems.digestVersion(self.allocator, if (snapshot.format_version >= 16) .v3 else if (snapshot.format_version >= 15) .v2 else .v1);
             if (!std.mem.eql(u8, snapshot.filesystem_digest, &digest)) return error.PayloadParseFailed;
         } else if (snapshot.filesystem_digest.len != 0) return error.PayloadParseFailed;
 
@@ -3198,6 +3198,7 @@ fn restoreRequest(
         .filesystem => |command| {
             if (snapshot_version < 14 or envelope.format_version < 11 or
                 (filesystems.authorityOperation(command.operation) and (snapshot_version < 15 or envelope.format_version < 12))) return error.PayloadParseFailed;
+            if (command.operation == .FILESYSTEM_OPERATION_BEGIN_PREPARATION and (snapshot_version < 16 or envelope.format_version < 13)) return error.PayloadParseFailed;
             filesystems.validate(command) catch return error.PayloadParseFailed;
             if (!std.mem.eql(u8, source.request_id, command.request.?.request_id)) return error.PayloadParseFailed;
             const fingerprint = filesystemFingerprint(command);
@@ -8400,6 +8401,7 @@ fn filesystemFingerprint(command: pb.FilesystemCommand) Fingerprint {
         hashField(&hash, request.holder_boot_id);
         hashInt(&hash, u64, request.expected_authority_epoch);
     }
+    if (command.operation == .FILESYSTEM_OPERATION_BEGIN_PREPARATION) hashField(&hash, request.backend_digest);
     var result: Fingerprint = undefined;
     hash.final(&result);
     return result;
@@ -8983,7 +8985,7 @@ test "Filesystem candidate is single-owner epoch-fenced metadata and blocks dele
     defer arena.deinit();
     var snapshot_reader: std.Io.Reader = .fixed(snapshot.data);
     var forged = try pb.StateSnapshot.decode(&snapshot_reader, arena.allocator());
-    const digest = try machine.state.filesystems.digestVersion(allocator, false);
+    const digest = try machine.state.filesystems.digestVersion(allocator, .v1);
     forged.format_version = 14;
     forged.filesystem_digest = &digest;
     const wire = try encodeMessage(arena.allocator(), forged);
@@ -9037,7 +9039,7 @@ test "Filesystem v14 snapshots retain CRUD fingerprints and upgrade to authority
     defer arena.deinit();
     var reader: std.Io.Reader = .fixed(snapshot.data);
     var legacy = try pb.StateSnapshot.decode(&reader, arena.allocator());
-    const digest = try source.state.filesystems.digestVersion(allocator, false);
+    const digest = try source.state.filesystems.digestVersion(allocator, .v1);
     legacy.format_version = 14;
     legacy.filesystem_digest = &digest;
     for (legacy.requests.items) |*record| {
@@ -9129,4 +9131,182 @@ test "Filesystem candidate apply and restore are atomic on allocation failure" {
         try std.testing.expectError(error.PayloadParseFailed, source.stateMachine().restoreSnapshot(snapshot.metadata, invalid_reader.reader()));
         try std.testing.expectEqual(@as(u64, 4), source.getFilesystem(test_replica_id).?.authority_epoch);
     }
+}
+
+fn testFilesystemPreparation(request_id: []const u8, version: u64, epoch: u64) pb.FilesystemMutationRequest {
+    var request = testFilesystemCandidate(request_id, version, epoch);
+    request.backend_digest = &@as([32]u8, @splat(0x55));
+    return request;
+}
+
+test "Filesystem PREPARING pins owner backend and generation across replay and rejects direct cleanup" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    try addTestPoolAndNode(allocator, &machine);
+    try expectFilesystem(&machine, 3, .FILESYSTEM_OPERATION_CREATE, testFilesystemRequest("fs", test_replica_id), .FILESYSTEM_CODE_OK);
+    try expectFilesystem(&machine, 4, .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY, testFilesystemCandidate("candidate", 3, 0), .FILESYSTEM_CODE_OK);
+    const prepare = testFilesystemPreparation("prepare", 4, 4);
+    var wrong = prepare;
+    wrong.request_id = "wrong-boot";
+    wrong.holder_boot_id = &test_lease_id;
+    try expectFilesystem(&machine, 5, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, wrong, .FILESYSTEM_CODE_INVALID_STATE);
+    try expectFilesystem(&machine, 6, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, prepare, .FILESYSTEM_CODE_OK);
+    const record = machine.getFilesystem(test_replica_id).?;
+    try std.testing.expectEqual(pb.FilesystemAuthorityState.FILESYSTEM_AUTHORITY_STATE_PREPARING, record.proto().authority_state);
+    try std.testing.expectEqual(pb.FilesystemLifecycleState.FILESYSTEM_LIFECYCLE_STATE_PROVISIONING, record.proto().lifecycle_state);
+    try std.testing.expectEqual(@as(u64, 4), record.authority_epoch);
+    try std.testing.expectEqual(@as(u64, 6), record.placement_generation);
+    try std.testing.expectEqualSlices(u8, prepare.backend_digest, &record.backend_digest);
+    try expectFilesystem(&machine, 7, .FILESYSTEM_OPERATION_CANCEL_AUTHORITY, testFilesystemCandidate("cancel-preparing", 6, 4), .FILESYSTEM_CODE_INVALID_STATE);
+    try expectFilesystem(&machine, 8, .FILESYSTEM_OPERATION_DELETE, .{ .request_id = "delete-preparing", .filesystem_id = test_replica_id, .expected_resource_version = 6 }, .FILESYSTEM_CODE_INVALID_STATE);
+    try expectFilesystem(&machine, 9, .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY, testFilesystemCandidate("replace-preparing", 6, 4), .FILESYSTEM_CODE_INVALID_STATE);
+    try expectFilesystem(&machine, 10, .FILESYSTEM_OPERATION_UPDATE, .{ .request_id = "describe-preparing", .filesystem_id = test_replica_id, .expected_resource_version = 6, .description = "pinned" }, .FILESYSTEM_CODE_OK);
+    try expectFilesystem(&machine, 11, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, prepare, .FILESYSTEM_CODE_OK);
+    wrong = prepare;
+    wrong.backend_digest = &@as([32]u8, @splat(0x66));
+    try expectFilesystem(&machine, 12, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, wrong, .FILESYSTEM_CODE_REQUEST_CONFLICT);
+    wrong.request_id = "rebind";
+    wrong.expected_resource_version = 10;
+    try expectFilesystem(&machine, 13, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, wrong, .FILESYSTEM_CODE_INVALID_STATE);
+    var other_pool = try applyTestCommand(allocator, &machine, 14, testCommand("other-pool", test_second_volume_id, "other", "", 1_753_744_000_004));
+    defer other_pool.deinit(allocator);
+    var create_other = testFilesystemRequest("other-fs", test_second_replica_id);
+    create_other.pool_id = test_second_volume_id;
+    try expectFilesystem(&machine, 15, .FILESYSTEM_OPERATION_CREATE, create_other, .FILESYSTEM_CODE_OK);
+    var other = testFilesystemCandidate("other-candidate", 15, 0);
+    other.filesystem_id = test_second_replica_id;
+    try expectFilesystem(&machine, 16, .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY, other, .FILESYSTEM_CODE_OK);
+    other.request_id = "duplicate-backend";
+    other.expected_resource_version = 16;
+    other.expected_authority_epoch = 16;
+    other.backend_digest = prepare.backend_digest;
+    try expectFilesystem(&machine, 17, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, other, .FILESYSTEM_CODE_CONFLICT);
+    other.request_id = "other-prepare";
+    other.backend_digest = &@as([32]u8, @splat(0x66));
+    try expectFilesystem(&machine, 18, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, other, .FILESYSTEM_CODE_OK);
+    try expectPoolMutation(allocator, &machine, 19, .{ .request_id = "pool-delete", .pool_id = test_pool_id, .expected_resource_version = 1 }, true, .POOL_MUTATION_APPLY_CODE_NOT_EMPTY);
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, 19, 1, .{});
+    defer snapshot.deinit(allocator);
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var reader = TestSnapshotReader{ .data = snapshot.data };
+    try restored.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
+    try std.testing.expectEqualDeep(machine.getFilesystem(test_replica_id), restored.getFilesystem(test_replica_id));
+    try std.testing.expectEqualDeep(machine.getFilesystem(test_second_replica_id), restored.getFilesystem(test_second_replica_id));
+    try expectFilesystem(&restored, 20, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, prepare, .FILESYSTEM_CODE_OK);
+    try std.testing.expectEqual(@as(u64, 10), restored.getFilesystem(test_replica_id).?.resource_version);
+    for (0..3) |corruption| {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var wire_reader: std.Io.Reader = .fixed(snapshot.data);
+        var damaged = try pb.StateSnapshot.decode(&wire_reader, arena.allocator());
+        const legacy_digest = try machine.state.filesystems.digestVersion(allocator, .v2);
+        if (corruption == 0) {
+            damaged.format_version = 15;
+            damaged.filesystem_digest = &legacy_digest;
+        } else for (damaged.requests.items) |*request| {
+            if (!std.mem.eql(u8, request.request_id, "prepare")) continue;
+            var response_reader: std.Io.Reader = .fixed(request.encoded_response);
+            var response = try pb.FilesystemApplyResponse.decode(&response_reader, arena.allocator());
+            if (corruption == 1) response.filesystem.?.backend_digest = other.backend_digest else response.filesystem.?.placement_generation += 1;
+            request.encoded_response = try encodeMessage(arena.allocator(), response);
+        }
+        const wire = try encodeMessage(arena.allocator(), damaged);
+        var broken = TestSnapshotReader{ .data = wire };
+        try std.testing.expectError(error.PayloadParseFailed, restored.stateMachine().restoreSnapshot(snapshot.metadata, broken.reader()));
+        try std.testing.expectEqualDeep(machine.getFilesystem(test_replica_id), restored.getFilesystem(test_replica_id));
+    }
+    const old_wire = try encodeMessage(allocator, pb.CommandEnvelope{ .format_version = 12, .command = .{ .filesystem = .{ .operation = .FILESYSTEM_OPERATION_BEGIN_PREPARATION, .request = prepare } } });
+    defer allocator.free(old_wire);
+    try std.testing.expectError(error.PayloadParseFailed, applyEncodedTestCommand(allocator, &machine, 21, old_wire));
+    for ([_][]const u8{ "", &@as([32]u8, @splat(0)), &@as([31]u8, @splat(1)), &@as([33]u8, @splat(1)) }) |digest| {
+        wrong = prepare;
+        wrong.backend_digest = digest;
+        try std.testing.expectError(error.InvalidWire, filesystems.validate(.{ .operation = .FILESYSTEM_OPERATION_BEGIN_PREPARATION, .request = wrong }));
+    }
+    try std.testing.expectError(error.InvalidWire, filesystems.validate(.{ .operation = .FILESYSTEM_OPERATION_CANCEL_AUTHORITY, .request = prepare }));
+}
+
+test "Filesystem v15 candidate snapshot upgrades without changing retry fingerprints" {
+    const allocator = std.testing.allocator;
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    try addTestPoolAndNode(allocator, &source);
+    try expectFilesystem(&source, 3, .FILESYSTEM_OPERATION_CREATE, testFilesystemRequest("fs", test_replica_id), .FILESYSTEM_CODE_OK);
+    const proposal = testFilesystemCandidate("candidate", 3, 0);
+    try expectFilesystem(&source, 4, .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY, proposal, .FILESYSTEM_CODE_OK);
+    var snapshot = try source.stateMachine().takeSnapshot(allocator, 4, 1, .{});
+    defer snapshot.deinit(allocator);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    var reader: std.Io.Reader = .fixed(snapshot.data);
+    var legacy = try pb.StateSnapshot.decode(&reader, arena.allocator());
+    const digest = try source.state.filesystems.digestVersion(allocator, .v2);
+    legacy.format_version = 15;
+    legacy.filesystem_digest = &digest;
+    for (legacy.requests.items) |*record| {
+        var command_reader: std.Io.Reader = .fixed(record.encoded_command);
+        var command = try pb.CommandEnvelope.decode(&command_reader, arena.allocator());
+        command.format_version = 12;
+        record.encoded_command = try encodeMessage(arena.allocator(), command);
+    }
+    const wire = try encodeMessage(arena.allocator(), legacy);
+    var snapshot_reader = TestSnapshotReader{ .data = wire };
+    try source.stateMachine().restoreSnapshot(snapshot.metadata, snapshot_reader.reader());
+    var upgraded = try source.stateMachine().takeSnapshot(allocator, 4, 1, .{});
+    defer upgraded.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, snapshot.data, upgraded.data);
+    try expectFilesystem(&source, 5, .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY, proposal, .FILESYSTEM_CODE_OK);
+    try std.testing.expectEqual(@as(u64, 0), source.getFilesystem(test_replica_id).?.placement_generation);
+    try expectFilesystem(&source, 6, .FILESYSTEM_OPERATION_BEGIN_PREPARATION, testFilesystemPreparation("prepare", 4, 4), .FILESYSTEM_CODE_OK);
+}
+
+test "Filesystem preparation and restore are atomic on allocation failure" {
+    const allocator = std.testing.allocator;
+    const commands = [_][]const u8{
+        try encodeCreatePoolCommand(allocator, testCommand("pool", test_pool_id, "pool", "", 1_753_744_000_000)),
+        try encodeRegisterNodeCommand(allocator, testNodeCommand("node", test_node_id, "node:9000", 1_753_744_000_001)),
+        try encodeFilesystemCommand(allocator, .{ .request = testFilesystemRequest("fs", test_replica_id), .operation = .FILESYSTEM_OPERATION_CREATE }),
+        try encodeFilesystemCommand(allocator, .{ .request = testFilesystemCandidate("propose", 3, 0), .operation = .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY }),
+        try encodeFilesystemCommand(allocator, .{ .request = testFilesystemPreparation("prepare", 4, 4), .operation = .FILESYSTEM_OPERATION_BEGIN_PREPARATION }),
+    };
+    defer for (commands) |command| allocator.free(command);
+    try checkAllAllocationFailures(struct {
+        fn run(failing: std.mem.Allocator, entries: []const []const u8) !void {
+            var target = PoolStateMachine.init(failing);
+            defer target.deinit();
+            for (entries, 1..) |command, revision| {
+                const before = target.getFilesystem(test_replica_id);
+                const count = target.requestCount();
+                var result = applyEncodedTestCommand(failing, &target, revision, command) catch |err| {
+                    try std.testing.expectEqualDeep(before, target.getFilesystem(test_replica_id));
+                    try std.testing.expectEqual(count, target.requestCount());
+                    return err;
+                };
+                result.deinit(failing);
+            }
+        }
+    }.run, .{&commands});
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    for (commands, 1..) |command, revision| {
+        var result = try applyEncodedTestCommand(allocator, &source, revision, command);
+        result.deinit(allocator);
+    }
+    var snapshot = try source.stateMachine().takeSnapshot(allocator, 5, 1, .{});
+    defer snapshot.deinit(allocator);
+    try checkAllAllocationFailures(struct {
+        fn run(failing: std.mem.Allocator, data: []const u8, metadata: raft.SnapshotMetadata) !void {
+            var target = PoolStateMachine.init(failing);
+            defer target.deinit();
+            var reader = TestSnapshotReader{ .data = data };
+            target.stateMachine().restoreSnapshot(metadata, reader.reader()) catch |err| {
+                try std.testing.expectEqual(@as(usize, 0), target.requestCount());
+                try std.testing.expectEqual(@as(usize, 0), target.state.filesystems.records.count());
+                return err;
+            };
+            try std.testing.expectEqual(@as(u64, 5), target.getFilesystem(test_replica_id).?.placement_generation);
+        }
+    }.run, .{ snapshot.data, snapshot.metadata });
 }

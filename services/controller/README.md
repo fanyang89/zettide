@@ -99,12 +99,12 @@ The current format limits a cluster to 25,000 Pools including tombstones, 25,000
 allocations, 25,000 Volume attachments, 10,000 Nodes, 10,000 Members,
 10,000 range lease IDs, 10,000 Filesystem IDs (including terminal records), and
 50,000 retained request records so committed input cannot grow memory and
-snapshots without bound. Snapshot format v15 reads v2–v14 snapshots and preserves
+snapshots without bound. Snapshot format v16 reads v2–v15 snapshots and preserves
 Pool mutation history/tombstones. Legacy Pools receive their creation revision
-as `resource_version`. Command format v12 reads v1–v11 commands; legacy Volume
+as `resource_version`. Command format v13 reads v1–v12 commands; legacy Volume
 update commands retain their original active-only behavior during WAL replay.
-All controller voters must be upgraded together before enabling v12 writes.
-Older binaries cannot restore v15 snapshots; do not downgrade against an upgraded
+All controller voters must be upgraded together before enabling v13 writes.
+Older binaries cannot restore v16 snapshots; do not downgrade against an upgraded
 data directory. Snapshot restore replays Pool history to verify final values,
 versions, tombstones, name reuse, and historical deletion dependencies before
 atomically replacing live state.
@@ -124,13 +124,15 @@ deinitialize the services.
 
 ## Filesystem metadata
 
-`FilesystemService` implements Raft-backed CRUD/candidate reservations and
+`FilesystemService` implements Raft-backed CRUD/candidate/preparation intents and
 ReadIndex-backed Get/List. Creation records an unmaterialized PROVISIONING
 intent; no backend is formatted, owner authorized, or export published. Updates
 replace description only. A candidate binds one registered Node/process boot
 identity to a monotonically increasing epoch, without authorizing any I/O.
-Cancellation checks the full binding and retains the epoch. Deletion requires
-no candidate, cancels the provisioning intent and retains
+Candidate cancellation checks the full binding and retains the epoch. Begin
+pins a unique backend digest and commit-index placement generation in PREPARING;
+there is no direct cancellation, rebinding or exit from that phase yet. Deletion
+requires no candidate/preparation, cancels the provisioning intent and retains
 a tombstone; live Filesystems block Pool deletion. Names are Pool-scoped and
 reusable after deletion; IDs are not reused.
 

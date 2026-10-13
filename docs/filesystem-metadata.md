@@ -3,14 +3,14 @@
 ## Implemented boundary
 
 `zettide.controller.v1.FilesystemService` implements logical Filesystem CRUD
-and single-owner candidate reservations
+and single-owner candidate/preparation intents
 under the [single-active architecture](decisions/0004-single-active-filesystem-service.md).
 Mutations are committed through Raft; queries use ReadIndex. Creation records a
 `PROVISIONING` intent only. It does not format media, attach an existing Blob,
 create a root inode, assign a service owner, grant access, or publish an export.
 
 Executable Filesystem authority, placement, fencing, recovery, and managed
-NFS/FUSE activation are not implemented. Candidate reservation is metadata only. No API in this slice can mark a filesystem ACTIVE or READY.
+NFS/FUSE activation are not implemented. Candidate reservation and preparation intent are metadata only. No API in this slice can mark a filesystem ACTIVE or READY.
 Existing standalone FUSE/NFS paths do not automatically consume these records.
 
 ## Resource and lifecycle
@@ -21,7 +21,8 @@ A Filesystem contains:
 - `backend_kind = FILESYSTEM_BACKEND_KIND_BLOB`;
 - immutable `name_profile` and desired filesystem root `format_version = 1`;
 - `lifecycle_state`, `created_revision`, `resource_version`, `deleted_revision`;
-- `authority_state`, `authority_epoch`, `candidate_node_id`, `candidate_boot_id`.
+- `authority_state`, `authority_epoch`, `candidate_node_id`, `candidate_boot_id`;
+- `backend_digest` and `placement_generation` (empty/zero until PREPARING).
 
 The root format version is not the Member format version or controller command
 version. It is desired metadata, not evidence of an initialized backend.
@@ -39,8 +40,8 @@ Supported filename profiles are explicit:
 Neither profile selection nor a metadata response is a POSIX conformance claim.
 Unspecified or unknown backend/profile values are rejected.
 
-All live records in this slice are unmaterialized provisioning intents. Delete
-requires no candidate, cancels that intent, and retains a `DELETED` tombstone. It does not erase physical
+Creation produces an unmaterialized provisioning intent. Delete requires no
+candidate or preparation, cancels that intent, and retains a `DELETED` tombstone. It does not erase physical
 data. Get/List hide deleted records; the successful delete response contains the
 tombstone and deletion revision. Names may be reused after deletion; IDs cannot.
 
@@ -65,9 +66,11 @@ operation, not a caller-supplied operation enum.
 | UpdateFilesystem | request_id, filesystem_id, expected_resource_version | description replaces the old description, including empty; omit all create-only fields |
 | DeleteFilesystem | request_id, filesystem_id, expected_resource_version | omit description and all create-only fields; no candidate may exist |
 | ProposeFilesystemAuthority | request_id, filesystem_id, expected_resource_version, holder_node_id, holder_boot_id, expected_authority_epoch | omit all creation/description fields; observed epoch is zero before the first proposal |
-| CancelFilesystemAuthority | request_id, filesystem_id, expected_resource_version, holder_node_id, holder_boot_id, expected_authority_epoch | omit all creation/description fields; epoch must be nonzero and binding must match |
+| CancelFilesystemAuthority | request_id, filesystem_id, expected_resource_version, holder_node_id, holder_boot_id, expected_authority_epoch | omit all creation/description fields; epoch must be nonzero and binding must match; CANDIDATE only |
+| BeginFilesystemPreparation | request_id, filesystem_id, expected_resource_version, holder_node_id, holder_boot_id, expected_authority_epoch, backend_digest | exact candidate binding; nonzero 32-byte backend digest; omit all creation/description fields |
 
-CRUD requests must omit the authority-only fields.
+CRUD requests must omit the authority-only fields. Only Begin accepts
+`backend_digest`; other operations must omit it.
 
 `filesystem_id` is a **caller-selected canonical UUIDv7**, unlike server-generated
 IDs in CreatePool/CreateVolume. Select one fresh ID per new resource and preserve
@@ -92,7 +95,7 @@ Status mapping:
 - `INVALID_ARGUMENT`: malformed IDs, invalid fields/profile, oversized input;
 - `NOT_FOUND`: missing/deleted resource, create against a missing/deleted Pool, or a
   proposal targeting an unregistered Node;
-- `ALREADY_EXISTS`: used Filesystem ID or conflicting live Pool-scoped name;
+- `ALREADY_EXISTS`: used Filesystem ID, conflicting live Pool-scoped name or reserved backend digest;
 - `FAILED_PRECONDITION`: stale resource version/authority epoch, candidate state or
   binding conflict, or request-ID semantic conflict;
 - `RESOURCE_EXHAUSTED`: Filesystem/history limits;
@@ -127,6 +130,7 @@ The trusted control plane can reserve exactly one prospective service process:
 ```text
 NONE -- ProposeFilesystemAuthority --> CANDIDATE
 CANDIDATE -- CancelFilesystemAuthority --> NONE
+CANDIDATE -- BeginFilesystemPreparation --> PREPARING
 ```
 
 Proposal requires a live Filesystem, an existing registered Node, the current
@@ -154,12 +158,42 @@ ReadIndex observation is a storage access capability.
 `CANDIDATE` **must not trigger any external side effect**: no media formatting,
 backend open/recovery, writes, export publication, or client admission. This is
 why cancellation needs no holder acknowledgement or storage fence in this
-slice. Before adding such work, introduce a committed non-cancellable preparing
-phase and exact backend/placement identity; then implement old-owner fencing,
-backend recovery, matching readiness and admission. Do not reuse this cancel
-operation to revoke an engine that may have touched storage. The current
-reconciler and standalone FUSE/NFS processes do not act on candidate records.
-The CLI remains CRUD-only; generated clients expose the two candidate RPCs.
+slice. Do not reuse this cancel operation to revoke an engine that may have
+touched storage. The current reconciler and standalone FUSE/NFS processes do
+not act on candidate or preparation records. The CLI remains CRUD-only;
+generated clients expose the three authority-intent RPCs.
+
+## Non-cancellable preparation
+
+`BeginFilesystemPreparation` commits PREPARING only from the exact CANDIDATE,
+checking the current resource version, node, process boot and authority epoch.
+It pins the nonzero 32-byte `backend_digest` and assigns `placement_generation`
+from the Begin commit index. The authority epoch stays unchanged. Description
+updates can still advance resource_version, but cannot change any pinned field.
+The generation, epoch and resource version are distinct, not interchangeable.
+
+A digest already reserved by any Filesystem is rejected, even across logical
+Pools. The trusted resolver must supply a canonical digest covering stable
+physical Pool/Member and root-object identity, independent of the claimant
+Filesystem, logical Pool, owner, epoch or pathname. This duplicate check is not
+physical attestation: arbitrary different hashes can alias one actual backend.
+The real catalog, physical verification and all-path ownership adapter remain
+unimplemented; see [storage gate requirements](filesystem-fencing.md).
+
+Once PREPARING, direct cancellation, deletion, re-proposal and backend rebinding
+are rejected. A retry with the original Begin request ID/fields returns its
+historical result without changing state; changing fields under that ID fails.
+A different request ID cannot repeat the transition or change the reservation.
+The live Filesystem continues to block Pool deletion.
+
+**There is currently no transition out of PREPARING**, even after owner failure.
+This is an intentional safety barrier, not a completed provisioning workflow.
+Do not interpret it as fenced storage, successful recovery, READY or permission
+for payload I/O. No backend operation is launched by the RPC. Future adapters
+must first validate the committed exact binding, then fence/drain old routes,
+recover the backend and commit matching readiness. Failed or uncertain work
+must retain the pin; unpinning, takeover and deletion require a separate durable
+fencing/cleanup protocol, not this candidate cancellation RPC.
 
 ## Query RPCs
 
@@ -176,12 +210,12 @@ Pool with no live Filesystems yields an empty list.
 
 ## Persistence, compatibility, and security
 
-Current commands use **v12** and snapshots **v15**, accepting legacy commands
-v1-v11 and snapshots v2-v14. Filesystem CRUD requires command v11/snapshot v14;
-candidate operations require command v12/snapshot v15. Legacy v14 Filesystem
-snapshots retain their original digest and CRUD fingerprints during validation,
-then upgrade to the authority-aware digest. Upgrade controller voters together;
-older binaries cannot restore v15 snapshots, even if the new API was unused.
+Current commands use **v13** and snapshots **v16**, accepting legacy commands
+v1-v12 and snapshots v2-v15. Filesystem CRUD requires command v11/snapshot v14;
+candidate operations require v12/v15; Begin requires v13/v16. Legacy v14/v15
+snapshots retain their original digest and retry fingerprints during validation,
+then upgrade to the preparation-aware digest. Upgrade controller voters together;
+older binaries cannot restore v16 snapshots, even if the new API was unused.
 
 Snapshots retain the global request history and a canonical Filesystem-view
 digest. Restore replays Filesystem mutations in revision order, using historical
@@ -202,13 +236,15 @@ client authentication, UID/GID mapping, export authorization, or usable I/O.
 State-machine tests cover create/update/delete, immutable-field validation,
 Pool-scoped names, name reuse without ID reuse, durable CAS rejections,
 cross-resource request-ID conflicts, Pool deletion guards, historical replay,
-legacy format gates, v14 upgrades, candidate exclusivity, stale boot/epoch
-rejection, retained epochs, corrupt binding rejection, and allocation-failure atomicity.
+legacy format gates, v14/v15 upgrades, candidate/backend exclusivity, stale boot/epoch
+rejection, retained epochs, preparation pins, corrupt binding rejection, and
+allocation-failure atomicity.
 
 Real RPC tests cover pagination, two WAL/snapshot restarts, tombstones, and
-historical retries, candidate bindings and epoch advancement. The three-voter
+historical retries, candidate bindings, epoch advancement and PREPARING pins. The three-voter
 runtime test covers candidate preservation and deletion protection across leader
-failover, cancellation/deletion, and former-leader catch-up. These tests do
+failover, cancellation/deletion for unprepared candidates, and persistent
+PREPARING reservations after former-leader catch-up. These tests do
 not validate managed filesystem activation or POSIX payload behavior.
 
 A separate [storage fence/recovery gate](filesystem-fencing.md) now provides the

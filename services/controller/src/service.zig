@@ -1253,7 +1253,7 @@ const FilesystemPending = struct {
                 self.completion.invoke(.{ .status = .ok, .payload = encoded });
             },
             .FILESYSTEM_CODE_NOT_FOUND => self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Filesystem, Pool or holder Node not found") }),
-            .FILESYSTEM_CODE_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.already_exists, "Filesystem ID or Pool-scoped name already exists") }),
+            .FILESYSTEM_CODE_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.already_exists, "Filesystem ID, Pool-scoped name or backend identity already exists") }),
             .FILESYSTEM_CODE_VERSION_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Filesystem resource version or authority epoch does not match") }),
             .FILESYSTEM_CODE_INVALID_STATE => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Filesystem state or candidate binding does not permit this operation") }),
             .FILESYSTEM_CODE_RESOURCE_LIMIT => self.completion.invoke(.{ .status = grpc.Status.init(.resource_exhausted, "Filesystem or request history limit reached") }),
@@ -2071,6 +2071,7 @@ pub const PoolRpc = struct {
     }
 
     pub fn register(self: *PoolRpc, server: *grpc.Server) !void {
+        try server.registerStream("/zettide.controller.v1.FilesystemService/BeginFilesystemPreparation", handler(self, .begin_filesystem_preparation));
         try server.registerStream("/zettide.controller.v1.FilesystemService/ProposeFilesystemAuthority", handler(self, .propose_filesystem_authority));
         try server.registerStream("/zettide.controller.v1.FilesystemService/CancelFilesystemAuthority", handler(self, .cancel_filesystem_authority));
         try server.registerStream("/zettide.controller.v1.FilesystemService/CreateFilesystem", handler(self, .create_filesystem));
@@ -2132,6 +2133,7 @@ pub const PoolRpc = struct {
     }
 
     const Method = enum {
+        begin_filesystem_preparation,
         propose_filesystem_authority,
         cancel_filesystem_authority,
 
@@ -2173,6 +2175,7 @@ pub const PoolRpc = struct {
             .initial_metadata_mode = .explicit,
             .on_start = onStart,
             .on_message = switch (method) {
+                .begin_filesystem_preparation => onBeginFilesystemPreparation,
                 .propose_filesystem_authority => onProposeFilesystemAuthority,
                 .cancel_filesystem_authority => onCancelFilesystemAuthority,
 
@@ -2244,6 +2247,10 @@ pub const PoolRpc = struct {
         };
         _ = self.pending_calls.fetchAdd(1, .monotonic);
         self.unlockCalls();
+    }
+
+    fn onBeginFilesystemPreparation(ctx: ?*anyopaque, stream: grpc.ServerStream, _: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        return receive(ctx, .begin_filesystem_preparation, stream, payload);
     }
 
     fn onProposeFilesystemAuthority(ctx: ?*anyopaque, stream: grpc.ServerStream, _: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
@@ -2446,6 +2453,7 @@ pub const PoolRpc = struct {
         pending.payload = null;
         defer self.allocator.free(payload);
         switch (pending.method) {
+            .begin_filesystem_preparation => self.service.mutateFilesystem(.FILESYSTEM_OPERATION_BEGIN_PREPARATION, payload, pending.completion()),
             .propose_filesystem_authority => self.service.mutateFilesystem(.FILESYSTEM_OPERATION_PROPOSE_AUTHORITY, payload, pending.completion()),
             .cancel_filesystem_authority => self.service.mutateFilesystem(.FILESYSTEM_OPERATION_CANCEL_AUTHORITY, payload, pending.completion()),
             .create_filesystem => self.service.mutateFilesystem(.FILESYSTEM_OPERATION_CREATE, payload, pending.completion()),

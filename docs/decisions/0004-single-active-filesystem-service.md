@@ -205,4 +205,7 @@ registered node, actual service-process boot identity, and monotonic epoch.
 Candidates block deletion and can only be cancelled with the exact binding.
 They must not perform backend work and are not placement or access grants.
 See [candidate semantics](../filesystem-metadata.md#candidate-reservation-not-an-io-grant).
-The committed preparing/fencing/recovery/readiness phases remain future work.
+A committed PREPARING intent now pins backend digest and placement generation
+with the exact candidate owner; cancellation, deletion and rebinding are blocked.
+Physical identity verification, fencing/recovery/readiness adapters and safe
+cleanup/takeover remain future work.

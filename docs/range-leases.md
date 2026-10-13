@@ -168,7 +168,7 @@ credentials. Exposing this service to untrusted clients is not supported.
 ## Persistence and limits
 
 Range leases were introduced in command v10 and snapshot v13. Current command
-v12 and snapshot v15 additionally support Filesystem metadata/candidates and require a
+v13 and snapshot v16 additionally support Filesystem metadata/preparation and require a
 coordinated controller upgrade. Previous command/snapshot formats remain readable. Lease transitions
 are retained in the global request history; restore replays them in applied
 revision order and compares every result with the recorded response. A

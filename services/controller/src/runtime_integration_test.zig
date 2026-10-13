@@ -644,6 +644,25 @@ test "three-voter runtime survives leader failover and restart" {
     var fs_candidate = try crudRpc(pb.FilesystemResponse, runtimes[initial_leader].?, fs_prefix ++ "ProposeFilesystemAuthority", fs_candidate_request);
     defer fs_candidate.deinit(config_allocator);
     try waitForApplied(&runtimes, fs_candidate.filesystem.?.resource_version);
+    var pinned_create = fs_request;
+    pinned_create.request_id = "failover-pinned-create";
+    pinned_create.filesystem_id = "0198f54d-5c2a-7000-8000-000000000502";
+    pinned_create.name = "pinned-files";
+    var pinned_fs = try crudRpc(pb.FilesystemResponse, runtimes[initial_leader].?, fs_prefix ++ "CreateFilesystem", pinned_create);
+    defer pinned_fs.deinit(config_allocator);
+    var pinned_request = fs_candidate_request;
+    pinned_request.request_id = "failover-pinned-candidate";
+    pinned_request.filesystem_id = pinned_create.filesystem_id;
+    pinned_request.expected_resource_version = pinned_fs.filesystem.?.resource_version;
+    var pinned_candidate = try crudRpc(pb.FilesystemResponse, runtimes[initial_leader].?, fs_prefix ++ "ProposeFilesystemAuthority", pinned_request);
+    defer pinned_candidate.deinit(config_allocator);
+    pinned_request.request_id = "failover-pinned-prepare";
+    pinned_request.expected_resource_version = pinned_candidate.filesystem.?.resource_version;
+    pinned_request.expected_authority_epoch = pinned_candidate.filesystem.?.authority_epoch;
+    pinned_request.backend_digest = &@as([32]u8, @splat(0x72));
+    var pinned = try crudRpc(pb.FilesystemResponse, runtimes[initial_leader].?, fs_prefix ++ "BeginFilesystemPreparation", pinned_request);
+    defer pinned.deinit(config_allocator);
+    try waitForApplied(&runtimes, pinned.filesystem.?.resource_version);
 
     try runtimes[initial_leader].?.shutdown();
     runtimes[initial_leader].?.deinit();
@@ -729,6 +748,18 @@ test "three-voter runtime survives leader failover and restart" {
     defer lease_completed.deinit(config_allocator);
     try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKED, lease_completed.lease.?.state);
 
+    var recovered_pinned = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = pinned_request.filesystem_id });
+    defer recovered_pinned.deinit(config_allocator);
+    try std.testing.expectEqual(pb.FilesystemAuthorityState.FILESYSTEM_AUTHORITY_STATE_PREPARING, recovered_pinned.filesystem.?.authority_state);
+    try std.testing.expectEqual(pinned.filesystem.?.placement_generation, recovered_pinned.filesystem.?.placement_generation);
+    try std.testing.expectEqualSlices(u8, pinned_request.backend_digest, recovered_pinned.filesystem.?.backend_digest);
+    var forbidden_cancel = pinned_request;
+    forbidden_cancel.request_id = "failover-pinned-cancel";
+    forbidden_cancel.expected_resource_version = recovered_pinned.filesystem.?.resource_version;
+    forbidden_cancel.backend_digest = "";
+    try crudStatus(runtimes[replacement_leader].?, fs_prefix ++ "CancelFilesystemAuthority", forbidden_cancel, .failed_precondition);
+    try crudStatus(runtimes[replacement_leader].?, fs_prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "failover-pinned-delete", .filesystem_id = pinned_request.filesystem_id, .expected_resource_version = recovered_pinned.filesystem.?.resource_version }, .failed_precondition);
+
     var recovered_fs = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = fs_request.filesystem_id });
     defer recovered_fs.deinit(config_allocator);
     try std.testing.expectEqual(fs_candidate.filesystem.?.authority_epoch, recovered_fs.filesystem.?.authority_epoch);
@@ -776,6 +807,13 @@ test "three-voter runtime survives leader failover and restart" {
     try waitForApplied(&runtimes, catch_up_revision);
     try expectVolumeNotFound(runtimes[final_leader].?, created_volume.value.id);
     try crudStatus(runtimes[final_leader].?, fs_prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = fs_request.filesystem_id }, .not_found);
+    var pinned_replay = try crudRpc(pb.FilesystemResponse, runtimes[final_leader].?, fs_prefix ++ "BeginFilesystemPreparation", pinned_request);
+    defer pinned_replay.deinit(config_allocator);
+    try std.testing.expectEqual(pinned.filesystem.?.placement_generation, pinned_replay.filesystem.?.placement_generation);
+    var still_pinned = try crudRpc(pb.FilesystemResponse, runtimes[final_leader].?, fs_prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = pinned_request.filesystem_id });
+    defer still_pinned.deinit(config_allocator);
+    try std.testing.expectEqual(pb.FilesystemAuthorityState.FILESYSTEM_AUTHORITY_STATE_PREPARING, still_pinned.filesystem.?.authority_state);
+
     for (&runtimes) |runtime| {
         try runtime.?.shutdown();
         try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKED, runtime.?.machine.getRangeLease(lease_request.lease_id).?.state);
@@ -2189,6 +2227,82 @@ test "Filesystem candidate RPC binding and epoch survive two WAL restarts" {
         try std.testing.expect(candidate.filesystem.?.authority_epoch > epoch);
         epoch = candidate.filesystem.?.authority_epoch;
         if (phase == 0) first_epoch = epoch;
+        try runtime.shutdown();
+    }
+}
+
+test "Filesystem PREPARING RPC pins backend across WAL restarts and description updates" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
+    defer config_allocator.free(root);
+    const data_dir = try std.fmt.allocPrintSentinel(config_allocator, "{s}/preparing-raft", .{root}, 0);
+    defer config_allocator.free(data_dir);
+    const ports = try reserveUniquePorts(1);
+    const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
+    defer config_allocator.free(address);
+    var config = try makeConfig(1, .{1} ++ @as([15]u8, @splat(0)), &.{address}, data_dir);
+    defer config.deinit();
+    const prefix = "/zettide.controller.v1.FilesystemService/";
+    const id = "0198f54d-5c2a-7000-8000-000000000301";
+    const node_id = "0198f54d-5c2a-7000-8000-000000000201";
+    var preparation = pb.FilesystemMutationRequest{ .request_id = "candidate", .filesystem_id = id, .holder_node_id = node_id, .holder_boot_id = &reconcile_holder_boot_id };
+    var generation: u64 = 0;
+    var version: u64 = 0;
+    for (0..3) |phase| {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        if (phase == 0) {
+            var pool = try createPool(runtime, "preparing-pool", "preparing-pool");
+            defer pool.deinit();
+            var node = try registerNode(runtime, &config, "preparing-node", node_id);
+            defer node.deinit();
+            var created = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "CreateFilesystem", pb.FilesystemMutationRequest{ .request_id = "create", .filesystem_id = id, .pool_id = pool.id, .name = "files", .backend_kind = .FILESYSTEM_BACKEND_KIND_BLOB, .name_profile = .FILESYSTEM_NAME_PROFILE_LEGACY_RAW });
+            defer created.deinit(config_allocator);
+            preparation.expected_resource_version = created.filesystem.?.resource_version;
+            var candidate = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "ProposeFilesystemAuthority", preparation);
+            defer candidate.deinit(config_allocator);
+            preparation.request_id = "prepare";
+            preparation.expected_resource_version = candidate.filesystem.?.resource_version;
+            preparation.expected_authority_epoch = candidate.filesystem.?.authority_epoch;
+            try crudStatus(runtime, prefix ++ "BeginFilesystemPreparation", preparation, .invalid_argument);
+            preparation.backend_digest = &@as([32]u8, @splat(0x77));
+            var prepared = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "BeginFilesystemPreparation", preparation);
+            defer prepared.deinit(config_allocator);
+            generation = prepared.filesystem.?.placement_generation;
+            version = prepared.filesystem.?.resource_version;
+            try std.testing.expectEqual(version, generation);
+            try std.testing.expect(generation > preparation.expected_authority_epoch);
+        } else {
+            var fetched = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = id });
+            defer fetched.deinit(config_allocator);
+            const fs = fetched.filesystem.?;
+            try std.testing.expectEqual(version, fs.resource_version);
+            try std.testing.expectEqual(generation, fs.placement_generation);
+            try std.testing.expectEqual(preparation.expected_authority_epoch, fs.authority_epoch);
+            try std.testing.expectEqual(pb.FilesystemAuthorityState.FILESYSTEM_AUTHORITY_STATE_PREPARING, fs.authority_state);
+            try std.testing.expectEqualSlices(u8, preparation.backend_digest, fs.backend_digest);
+            var replay = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "BeginFilesystemPreparation", preparation);
+            defer replay.deinit(config_allocator);
+            try std.testing.expectEqual(generation, replay.filesystem.?.resource_version);
+            if (phase == 1) {
+                var cancel = preparation;
+                cancel.request_id = "cannot-cancel";
+                cancel.expected_resource_version = version;
+                cancel.backend_digest = "";
+                try crudStatus(runtime, prefix ++ "CancelFilesystemAuthority", cancel, .failed_precondition);
+                try crudStatus(runtime, prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "cannot-delete", .filesystem_id = id, .expected_resource_version = version }, .failed_precondition);
+                var changed = preparation;
+                changed.request_id = "cannot-rebind";
+                changed.expected_resource_version = version;
+                changed.backend_digest = &@as([32]u8, @splat(0x78));
+                try crudStatus(runtime, prefix ++ "BeginFilesystemPreparation", changed, .failed_precondition);
+                var updated = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "UpdateFilesystem", pb.FilesystemMutationRequest{ .request_id = "describe", .filesystem_id = id, .description = "pinned", .expected_resource_version = version });
+                defer updated.deinit(config_allocator);
+                version = updated.filesystem.?.resource_version;
+            } else try std.testing.expectEqualStrings("pinned", fs.description);
+        }
         try runtime.shutdown();
     }
 }

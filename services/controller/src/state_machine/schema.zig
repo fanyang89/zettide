@@ -2,8 +2,8 @@ const std = @import("std");
 const uuid = @import("uuid");
 
 // Filesystem commands and replay-verified snapshots require coordinated upgrades.
-pub const command_format_version: u32 = 12;
-pub const snapshot_format_version: u32 = 15;
+pub const command_format_version: u32 = 13;
+pub const snapshot_format_version: u32 = 16;
 pub const max_name_bytes: usize = 127;
 pub const max_description_bytes: usize = 1024;
 pub const max_request_id_bytes: usize = 127;

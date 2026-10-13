@@ -1042,6 +1042,8 @@ service FilesystemService {
   // Trusted control-plane intents only; CANDIDATE never authorizes storage I/O.
   rpc ProposeFilesystemAuthority(FilesystemMutationRequest) returns (FilesystemResponse);
   rpc CancelFilesystemAuthority(FilesystemMutationRequest) returns (FilesystemResponse);
+  // Pins the backend and owner; no direct cancellation or payload admission.
+  rpc BeginFilesystemPreparation(FilesystemMutationRequest) returns (FilesystemResponse);
   rpc GetFilesystem(GetFilesystemRequest) returns (FilesystemResponse);
   rpc ListFilesystems(ListFilesystemsRequest) returns (ListFilesystemsResponse);
 }
@@ -1062,6 +1064,7 @@ enum FilesystemLifecycleState {
 enum FilesystemAuthorityState {
   FILESYSTEM_AUTHORITY_STATE_NONE = 0;
   FILESYSTEM_AUTHORITY_STATE_CANDIDATE = 1;
+  FILESYSTEM_AUTHORITY_STATE_PREPARING = 2;
 }
 message Filesystem {
   string id = 1;
@@ -1080,6 +1083,10 @@ message Filesystem {
   uint64 authority_epoch = 13;
   string candidate_node_id = 14;
   bytes candidate_boot_id = 15;
+  // Immutable once preparation begins; not proof of physical readiness.
+  bytes backend_digest = 16;
+  // Assigned from the BeginFilesystemPreparation commit index.
+  uint64 placement_generation = 17;
 }
 message FilesystemMutationRequest {
   string request_id = 1;
@@ -1098,6 +1105,8 @@ message FilesystemMutationRequest {
   bytes holder_boot_id = 10;
   // Observed epoch (including zero before the first proposal).
   uint64 expected_authority_epoch = 11;
+  // BeginFilesystemPreparation only: stable, nonzero 32-byte backend identity.
+  bytes backend_digest = 12;
 }
 message FilesystemResponse { Filesystem filesystem = 1; }
 message GetFilesystemRequest { string filesystem_id = 1; }
@@ -1117,6 +1126,7 @@ enum FilesystemOperation {
   FILESYSTEM_OPERATION_DELETE = 3;
   FILESYSTEM_OPERATION_PROPOSE_AUTHORITY = 4;
   FILESYSTEM_OPERATION_CANCEL_AUTHORITY = 5;
+  FILESYSTEM_OPERATION_BEGIN_PREPARATION = 6;
 }
 message FilesystemCommand {
   FilesystemMutationRequest request = 1;
