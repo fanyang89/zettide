@@ -42,7 +42,7 @@ flowchart TB
 | Heartbeat | `ReportHeartbeat`、`GetHeartbeat` 当前 leader-local | Replica/path/lease/repair observation |
 | Placement/Allocation | durable schema 当前、无 mutation | reserve/move/tombstone Replica extents |
 | Lease | 当前区间租约 Acquire/Renew/Revoke/CompleteRevoke/Get/List；共享读、独占写 | 数据服务 I/O 接入、可验证 fencing 后的失联接管 |
-| Filesystem | Blob identity 与 export eligibility 当前局部存在 | NFS/FUSE lifecycle；不由 block Replica schema 推导 |
+| Filesystem | 当前逻辑 Create/Update/Delete/Get/List；仅 PROVISIONING intent，live Filesystem 阻止 Pool 删除 | 单活 authority、placement/recovery、managed NFS/FUSE export 尚未实现 |
 | Publication | endpoint primitives 当前局部存在 | protocol、consumer、access generation、locator、Raft republish authority |
 | Attachment | storage-side 占位 schema，无 mutation | adapter intent、host session/device、libvirt 与 caller-directed republish |
 
@@ -126,7 +126,8 @@ qtr/PVE 属于外部仓库；本仓库只冻结上述 managed contract，不维�
 多个客户端不能各自直接打开底层介质。Controller 的 Filesystem CRUD、placement、authority 和 export
 进入 Raft；inode/dentry/data 事务由 BlobFilesystem 管理，不能把控制面 Raft 复制当作文件数据复制。
 字段、接管条件、协议状态边界与验收要求见 [ADR 0004](../../decisions/0004-single-active-filesystem-service.md)。
-该受管生命周期仍为目标，不代表现有 FUSE/NFS 已接通 controller 授权。
+逻辑 CRUD 已实现，见 [Filesystem metadata API](../../filesystem-metadata.md)；单活授权和受管导出仍为目标，
+不代表现有 FUSE/NFS 已接通 controller 授权。
 
 - NFS：Export intent 绑定 BlobFilesystem identity、client scope、read/write mode 和 export generation；NFS server/export path 是 locator。
 - FUSE：Mount intent 绑定 BlobFilesystem identity、host identity、mount mode 和 mount point；PID/fd 是 observation。
@@ -182,7 +183,7 @@ RPC、proposal、ReadIndex、heartbeat、endpoint action、migration 和 repair 
 5. 追平 committed/applied 后才提供一致性服务，并先作为 follower 加入。
 6. 成为 leader 后从空 heartbeat view 重新收集 observation 并启动 reconciliation。
 
-生产配置必须使用持久 `data_dir`。当前 v13 snapshot 保存 Pool（含删除 tombstone）、Node、Member、Volume、authority 和全局业务幂等记录，兼容读取 v2–v12；socket、heartbeat 和临时 action 不进入 snapshot。
+生产配置必须使用持久 `data_dir`。当前 v14 snapshot 保存 Pool（含删除 tombstone）、Node、Member、Volume、authority、区间租约/Filesystem 视图摘要和全局业务幂等记录，兼容读取 v2–v13；socket、heartbeat 和临时 action 不进入 snapshot。
 
 ## 当前差距
 

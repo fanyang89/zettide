@@ -32,6 +32,7 @@
 - [v3 multi-Volume Catalog 格式](v3-multivolume-format.md)
 - [v3 control rollover 格式](v3-control-rollover-format.md)
 - [文件系统语义](fs-semantics.md)
+- [Filesystem 管理元数据 API](filesystem-metadata.md)
 - [跨平台名称规范](portable-name-profile.md)
 
 格式文档中的 `current` 表示已有编码器、解码器或 reopen 路径；仅有 schema、预留字段或未来

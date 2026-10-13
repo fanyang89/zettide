@@ -167,8 +167,9 @@ credentials. Exposing this service to untrusted clients is not supported.
 
 ## Persistence and limits
 
-Command format v10 and snapshot format v13 require a coordinated controller
-upgrade. Previous command/snapshot formats remain readable. Lease transitions
+Range leases were introduced in command v10 and snapshot v13. Current command
+v11 and snapshot v14 additionally support Filesystem metadata and require a
+coordinated controller upgrade. Previous command/snapshot formats remain readable. Lease transitions
 are retained in the global request history; restore replays them in applied
 revision order and compares every result with the recorded response. A
 canonical lease-view digest detects lost or modified terminal/grant history.

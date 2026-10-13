@@ -4,6 +4,7 @@ const grpc = @import("grpc_lite");
 const pb = @import("controller_proto");
 const raft = @import("raftz");
 const uuid = @import("uuid");
+const filesystems = @import("filesystems.zig");
 const range_leases = @import("range_leases.zig");
 const heartbeat = @import("heartbeat.zig");
 const state_machine = @import("state_machine.zig");
@@ -276,6 +277,82 @@ pub const PoolService = struct {
         pending.* = .{ .owner = self, .completion = completion, .volume_id = volume_id };
         self.raftor.readIndex("get-volume", pending.callback()) catch |err| {
             pending.destroy();
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn mutateFilesystem(self: *PoolService, operation: pb.FilesystemOperation, payload: []const u8, completion: Completion) void {
+        filesystems.preflightRequest(payload) catch {
+            completion.invoke(invalidArgument("invalid filesystem request"));
+            return;
+        };
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        const request = pb.FilesystemMutationRequest.decode(&reader, arena.allocator()) catch |err| {
+            completion.invoke(decodeFailure(err, "invalid filesystem request"));
+            return;
+        };
+        const proposed = pb.FilesystemCommand{ .request = request, .operation = operation };
+        filesystems.validate(proposed) catch {
+            completion.invoke(invalidArgument("invalid filesystem binding or version"));
+            return;
+        };
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+        const command = state_machine.encodeFilesystemCommand(self.allocator, proposed) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        defer self.allocator.free(command);
+        const pending = self.allocator.create(FilesystemPending) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = .{ .owner = self, .completion = completion };
+        self.raftor.propose(command, .{ .ctx = pending, .function = FilesystemPending.complete }) catch |err| {
+            self.allocator.destroy(pending);
+            completion.invoke(raftFailure(err));
+        };
+    }
+
+    pub fn queryFilesystem(self: *PoolService, list: bool, payload: []const u8, completion: Completion) void {
+        filesystems.preflightQuery(payload, list) catch {
+            completion.invoke(invalidArgument("invalid filesystem query"));
+            return;
+        };
+        if (!self.isLeader()) {
+            completion.invoke(notLeader());
+            return;
+        }
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        var query: FilesystemQuery = .{ .owner = self, .completion = completion, .list = list, .id = undefined };
+        if (list) {
+            const request = pb.ListFilesystemsRequest.decode(&reader, arena.allocator()) catch |err| {
+                completion.invoke(decodeFailure(err, "invalid filesystem query"));
+                return;
+            };
+            query.id = request.pool_id[0..36].*;
+            if (request.after_filesystem_id.len != 0) query.after = request.after_filesystem_id[0..36].*;
+            query.limit = if (request.page_size == 0) 32 else request.page_size;
+        } else {
+            const request = pb.GetFilesystemRequest.decode(&reader, arena.allocator()) catch |err| {
+                completion.invoke(decodeFailure(err, "invalid filesystem query"));
+                return;
+            };
+            query.id = request.filesystem_id[0..36].*;
+        }
+        const pending = self.allocator.create(FilesystemQuery) catch {
+            completion.invoke(internalError());
+            return;
+        };
+        pending.* = query;
+        self.raftor.readIndex("filesystem", .{ .ctx = pending, .function = FilesystemQuery.complete }) catch |err| {
+            self.allocator.destroy(pending);
             completion.invoke(raftFailure(err));
         };
     }
@@ -1143,6 +1220,87 @@ const GetVolumePending = struct {
     }
 };
 
+const FilesystemPending = struct {
+    owner: *PoolService,
+    completion: Completion,
+    fn complete(ctx: *anyopaque, result: raft.ProposalResult) void {
+        const self: *FilesystemPending = @ptrCast(@alignCast(ctx));
+        defer self.owner.allocator.destroy(self);
+        switch (result) {
+            .ok => |payload| self.applied(payload),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+    fn applied(self: *FilesystemPending, payload: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(self.owner.allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(payload);
+        const response = pb.FilesystemApplyResponse.decode(&reader, arena.allocator()) catch {
+            self.completion.invoke(internalError());
+            return;
+        };
+        switch (response.code) {
+            .FILESYSTEM_CODE_OK => {
+                if (response.filesystem == null) {
+                    self.completion.invoke(internalError());
+                    return;
+                }
+                const encoded = encodeMessage(self.owner.allocator, pb.FilesystemResponse{ .filesystem = response.filesystem }) catch {
+                    self.completion.invoke(internalError());
+                    return;
+                };
+                defer self.owner.allocator.free(encoded);
+                self.completion.invoke(.{ .status = .ok, .payload = encoded });
+            },
+            .FILESYSTEM_CODE_NOT_FOUND => self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Filesystem or Pool not found") }),
+            .FILESYSTEM_CODE_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.already_exists, "Filesystem ID or Pool-scoped name already exists") }),
+            .FILESYSTEM_CODE_VERSION_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Filesystem resource version does not match") }),
+            .FILESYSTEM_CODE_INVALID_STATE => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "Filesystem cannot be changed in this state") }),
+            .FILESYSTEM_CODE_RESOURCE_LIMIT => self.completion.invoke(.{ .status = grpc.Status.init(.resource_exhausted, "Filesystem or request history limit reached") }),
+            .FILESYSTEM_CODE_REQUEST_CONFLICT => self.completion.invoke(.{ .status = grpc.Status.init(.failed_precondition, "request_id was reused with different fields") }),
+            else => self.completion.invoke(internalError()),
+        }
+    }
+};
+
+const FilesystemQuery = struct {
+    owner: *PoolService,
+    completion: Completion,
+    list: bool,
+    id: [36]u8,
+    after: ?[36]u8 = null,
+    limit: usize = 32,
+    fn complete(ctx: *anyopaque, result: raft.ReadIndexResult) void {
+        const self: *FilesystemQuery = @ptrCast(@alignCast(ctx));
+        defer self.owner.allocator.destroy(self);
+        switch (result) {
+            .ok => self.read() catch self.completion.invoke(internalError()),
+            .err => |err| self.completion.invoke(raftFailure(err)),
+        }
+    }
+    fn read(self: *FilesystemQuery) !void {
+        const allocator = self.owner.allocator;
+        if (!self.list) {
+            const record = self.owner.machine.getFilesystem(&self.id) orelse {
+                self.completion.invoke(.{ .status = grpc.Status.init(.not_found, "Filesystem not found") });
+                return;
+            };
+            const encoded = try encodeMessage(allocator, pb.FilesystemResponse{ .filesystem = record.proto() });
+            defer allocator.free(encoded);
+            self.completion.invoke(.{ .status = .ok, .payload = encoded });
+            return;
+        }
+        const records = try self.owner.machine.listFilesystems(allocator, &self.id, if (self.after) |*value| value else "", self.limit + 1);
+        defer allocator.free(records);
+        var values: std.ArrayList(pb.Filesystem) = .empty;
+        defer values.deinit(allocator);
+        for (records[0..@min(records.len, self.limit)]) |*record| try values.append(allocator, record.proto());
+        const encoded = try encodeMessage(allocator, pb.ListFilesystemsResponse{ .filesystems = values, .next_after_filesystem_id = if (records.len > self.limit) &records[self.limit - 1].id else "" });
+        defer allocator.free(encoded);
+        self.completion.invoke(.{ .status = .ok, .payload = encoded });
+    }
+};
+
 const RangeLeasePending = struct {
     owner: *PoolService,
     completion: Completion,
@@ -1913,6 +2071,11 @@ pub const PoolRpc = struct {
     }
 
     pub fn register(self: *PoolRpc, server: *grpc.Server) !void {
+        try server.registerStream("/zettide.controller.v1.FilesystemService/CreateFilesystem", handler(self, .create_filesystem));
+        try server.registerStream("/zettide.controller.v1.FilesystemService/UpdateFilesystem", handler(self, .update_filesystem));
+        try server.registerStream("/zettide.controller.v1.FilesystemService/DeleteFilesystem", handler(self, .delete_filesystem));
+        try server.registerStream("/zettide.controller.v1.FilesystemService/GetFilesystem", handler(self, .get_filesystem));
+        try server.registerStream("/zettide.controller.v1.FilesystemService/ListFilesystems", handler(self, .list_filesystems));
         try server.registerStream("/zettide.controller.v1.RangeLeaseService/AcquireLease", handler(self, .acquire_lease));
         try server.registerStream("/zettide.controller.v1.RangeLeaseService/RenewLease", handler(self, .renew_lease));
         try server.registerStream("/zettide.controller.v1.RangeLeaseService/RevokeLease", handler(self, .revoke_lease));
@@ -1967,6 +2130,12 @@ pub const PoolRpc = struct {
     }
 
     const Method = enum {
+        create_filesystem,
+        update_filesystem,
+        delete_filesystem,
+        get_filesystem,
+        list_filesystems,
+
         list_leases,
         get_lease,
         complete_revoke,
@@ -1999,6 +2168,12 @@ pub const PoolRpc = struct {
             .initial_metadata_mode = .explicit,
             .on_start = onStart,
             .on_message = switch (method) {
+                .create_filesystem => onCreateFilesystem,
+                .update_filesystem => onUpdateFilesystem,
+                .delete_filesystem => onDeleteFilesystem,
+                .get_filesystem => onGetFilesystem,
+                .list_filesystems => onListFilesystems,
+
                 .update_pool => onUpdatePool,
                 .delete_pool => onDeletePool,
                 .acquire_lease => onAcquireLease,
@@ -2061,6 +2236,26 @@ pub const PoolRpc = struct {
         };
         _ = self.pending_calls.fetchAdd(1, .monotonic);
         self.unlockCalls();
+    }
+
+    fn onCreateFilesystem(ctx: ?*anyopaque, stream: grpc.ServerStream, _: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        return receive(ctx, .create_filesystem, stream, payload);
+    }
+
+    fn onUpdateFilesystem(ctx: ?*anyopaque, stream: grpc.ServerStream, _: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        return receive(ctx, .update_filesystem, stream, payload);
+    }
+
+    fn onDeleteFilesystem(ctx: ?*anyopaque, stream: grpc.ServerStream, _: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        return receive(ctx, .delete_filesystem, stream, payload);
+    }
+
+    fn onGetFilesystem(ctx: ?*anyopaque, stream: grpc.ServerStream, _: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        return receive(ctx, .get_filesystem, stream, payload);
+    }
+
+    fn onListFilesystems(ctx: ?*anyopaque, stream: grpc.ServerStream, _: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
+        return receive(ctx, .list_filesystems, stream, payload);
     }
 
     fn onAcquireLease(ctx: ?*anyopaque, stream: grpc.ServerStream, context: *grpc.ServerContext, payload: []const u8, _: grpc.Compression) !grpc.StreamReceiveAction {
@@ -2235,6 +2430,11 @@ pub const PoolRpc = struct {
         pending.payload = null;
         defer self.allocator.free(payload);
         switch (pending.method) {
+            .create_filesystem => self.service.mutateFilesystem(.FILESYSTEM_OPERATION_CREATE, payload, pending.completion()),
+            .update_filesystem => self.service.mutateFilesystem(.FILESYSTEM_OPERATION_UPDATE, payload, pending.completion()),
+            .delete_filesystem => self.service.mutateFilesystem(.FILESYSTEM_OPERATION_DELETE, payload, pending.completion()),
+            .get_filesystem => self.service.queryFilesystem(false, payload, pending.completion()),
+            .list_filesystems => self.service.queryFilesystem(true, payload, pending.completion()),
             .list_leases => self.service.queryRangeLease(true, payload, pending.completion()),
             .get_lease => self.service.queryRangeLease(false, payload, pending.completion()),
             .complete_revoke => self.service.mutateRangeLease(.RANGE_LEASE_OPERATION_COMPLETE_REVOKE, payload, pending.completion()),

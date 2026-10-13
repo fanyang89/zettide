@@ -22,6 +22,7 @@ pub const DataService = data_service.Service;
 pub const reconciler = @import("reconciler.zig");
 pub const Reconciler = reconciler.Reconciler;
 pub const range_lease_reaper = @import("range_lease_reaper.zig");
+pub const filesystems = @import("filesystems.zig");
 pub const range_leases = @import("range_leases.zig");
 pub const primary_lease = @import("primary_lease.zig");
 pub const replica_fence = @import("replica_fence.zig");

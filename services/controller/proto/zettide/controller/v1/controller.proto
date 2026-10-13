@@ -530,6 +530,7 @@ message CommandEnvelope {
     PoolMutationCommand update_pool = 19;
     PoolMutationCommand delete_pool = 20;
     RangeLeaseCommand range_lease = 21;
+    FilesystemCommand filesystem = 22;
   }
 }
 
@@ -923,6 +924,8 @@ message StateSnapshot {
   repeated PrimaryFailover primary_failovers = 13;
   // Checks the lease view reconstructed from retained range-lease requests.
   bytes range_lease_digest = 14;
+  // Checks the filesystem view reconstructed from retained mutation history.
+  bytes filesystem_digest = 15;
 }
 
 message PoolMutationCommand {
@@ -1029,4 +1032,88 @@ enum RangeLeaseCode {
 message RangeLeaseApplyResponse {
   RangeLeaseCode code = 1;
   RangeLease lease = 2;
+}
+
+// Logical provisioning only: these RPCs do not format media or grant access.
+service FilesystemService {
+  rpc CreateFilesystem(FilesystemMutationRequest) returns (FilesystemResponse);
+  rpc UpdateFilesystem(FilesystemMutationRequest) returns (FilesystemResponse);
+  rpc DeleteFilesystem(FilesystemMutationRequest) returns (FilesystemResponse);
+  rpc GetFilesystem(GetFilesystemRequest) returns (FilesystemResponse);
+  rpc ListFilesystems(ListFilesystemsRequest) returns (ListFilesystemsResponse);
+}
+enum FilesystemBackendKind {
+  FILESYSTEM_BACKEND_KIND_UNSPECIFIED = 0;
+  FILESYSTEM_BACKEND_KIND_BLOB = 1;
+}
+enum FilesystemNameProfile {
+  FILESYSTEM_NAME_PROFILE_UNSPECIFIED = 0;
+  FILESYSTEM_NAME_PROFILE_LEGACY_RAW = 1;
+  FILESYSTEM_NAME_PROFILE_PORTABLE_V1 = 2;
+}
+enum FilesystemLifecycleState {
+  FILESYSTEM_LIFECYCLE_STATE_UNSPECIFIED = 0;
+  FILESYSTEM_LIFECYCLE_STATE_PROVISIONING = 1;
+  FILESYSTEM_LIFECYCLE_STATE_DELETED = 2;
+}
+message Filesystem {
+  string id = 1;
+  string pool_id = 2;
+  string name = 3;
+  string description = 4;
+  FilesystemBackendKind backend_kind = 5;
+  FilesystemNameProfile name_profile = 6;
+  uint32 format_version = 7;
+  FilesystemLifecycleState lifecycle_state = 8;
+  uint64 created_revision = 9;
+  uint64 resource_version = 10;
+  uint64 deleted_revision = 11;
+}
+message FilesystemMutationRequest {
+  string request_id = 1;
+  // Caller-selected UUIDv7; terminal IDs are never reused.
+  string filesystem_id = 2;
+  // Create-only immutable fields; omit on update/delete.
+  string pool_id = 3;
+  string name = 4;
+  string description = 5;
+  FilesystemBackendKind backend_kind = 6;
+  FilesystemNameProfile name_profile = 7;
+  // Zero on create, required on update/delete. Delete omits description.
+  uint64 expected_resource_version = 8;
+}
+message FilesystemResponse { Filesystem filesystem = 1; }
+message GetFilesystemRequest { string filesystem_id = 1; }
+message ListFilesystemsRequest {
+  string pool_id = 1;
+  string after_filesystem_id = 2;
+  uint32 page_size = 3;
+}
+message ListFilesystemsResponse {
+  repeated Filesystem filesystems = 1;
+  string next_after_filesystem_id = 2;
+}
+enum FilesystemOperation {
+  FILESYSTEM_OPERATION_UNSPECIFIED = 0;
+  FILESYSTEM_OPERATION_CREATE = 1;
+  FILESYSTEM_OPERATION_UPDATE = 2;
+  FILESYSTEM_OPERATION_DELETE = 3;
+}
+message FilesystemCommand {
+  FilesystemMutationRequest request = 1;
+  FilesystemOperation operation = 2;
+}
+enum FilesystemCode {
+  FILESYSTEM_CODE_UNSPECIFIED = 0;
+  FILESYSTEM_CODE_OK = 1;
+  FILESYSTEM_CODE_NOT_FOUND = 2;
+  FILESYSTEM_CODE_CONFLICT = 3;
+  FILESYSTEM_CODE_VERSION_CONFLICT = 4;
+  FILESYSTEM_CODE_INVALID_STATE = 5;
+  FILESYSTEM_CODE_RESOURCE_LIMIT = 6;
+  FILESYSTEM_CODE_REQUEST_CONFLICT = 7;
+}
+message FilesystemApplyResponse {
+  FilesystemCode code = 1;
+  Filesystem filesystem = 2;
 }

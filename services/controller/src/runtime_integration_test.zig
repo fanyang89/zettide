@@ -635,6 +635,12 @@ test "three-voter runtime survives leader failover and restart" {
     defer lease_revoke.deinit(config_allocator);
     try waitForApplied(&runtimes, lease_revoke.lease.?.resource_version);
 
+    const fs_prefix = "/zettide.controller.v1.FilesystemService/";
+    const fs_request = pb.FilesystemMutationRequest{ .request_id = "failover-filesystem", .filesystem_id = "0198f54d-5c2a-7000-8000-000000000501", .pool_id = created.id, .name = "files", .backend_kind = .FILESYSTEM_BACKEND_KIND_BLOB, .name_profile = .FILESYSTEM_NAME_PROFILE_LEGACY_RAW };
+    var created_fs = try crudRpc(pb.FilesystemResponse, runtimes[initial_leader].?, fs_prefix ++ "CreateFilesystem", fs_request);
+    defer created_fs.deinit(config_allocator);
+    try waitForApplied(&runtimes, created_fs.filesystem.?.resource_version);
+
     try runtimes[initial_leader].?.shutdown();
     runtimes[initial_leader].?.deinit();
     runtimes[initial_leader] = null;
@@ -719,6 +725,15 @@ test "three-voter runtime survives leader failover and restart" {
     defer lease_completed.deinit(config_allocator);
     try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKED, lease_completed.lease.?.state);
 
+    var recovered_fs = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = fs_request.filesystem_id });
+    defer recovered_fs.deinit(config_allocator);
+    try std.testing.expectEqual(created_fs.filesystem.?.resource_version, recovered_fs.filesystem.?.resource_version);
+    var fs_replay = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "CreateFilesystem", fs_request);
+    defer fs_replay.deinit(config_allocator);
+    try std.testing.expectEqual(created_fs.filesystem.?.resource_version, fs_replay.filesystem.?.resource_version);
+    var deleted_fs = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "failover-filesystem-delete", .filesystem_id = fs_request.filesystem_id, .expected_resource_version = recovered_fs.filesystem.?.resource_version });
+    defer deleted_fs.deinit(config_allocator);
+
     var deleted_volume = try deleteVolume(
         runtimes[replacement_leader].?,
         "request-delete-volume-failover",
@@ -747,6 +762,7 @@ test "three-voter runtime survives leader failover and restart" {
     const final_leader = try waitForStableLeader(&runtimes);
     try waitForApplied(&runtimes, catch_up_revision);
     try expectVolumeNotFound(runtimes[final_leader].?, created_volume.value.id);
+    try crudStatus(runtimes[final_leader].?, fs_prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = fs_request.filesystem_id }, .not_found);
     for (&runtimes) |runtime| {
         try runtime.?.shutdown();
         try std.testing.expectEqual(pb.RangeLeaseState.RANGE_LEASE_STATE_REVOKED, runtime.?.machine.getRangeLease(lease_request.lease_id).?.state);
@@ -1974,4 +1990,111 @@ test "expired lease is automatically reclaimed only after durable storage fencin
     const stored = try tmp.dir.readFileAlloc(std.testing.io, "payload", config_allocator, .limited(4097));
     defer config_allocator.free(stored);
     try std.testing.expectEqualSlices(u8, &payload, stored);
+}
+
+test "Filesystem CRUD RPC preserves provisioning CAS pagination and tombstones over WAL restarts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
+    defer config_allocator.free(root);
+    const data_dir = try std.fmt.allocPrintSentinel(config_allocator, "{s}/filesystem-raft", .{root}, 0);
+    defer config_allocator.free(data_dir);
+    const ports = try reserveUniquePorts(1);
+    const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
+    defer config_allocator.free(address);
+    var config = try makeConfig(1, .{1} ++ @as([15]u8, @splat(0)), &.{address}, data_dir);
+    defer config.deinit();
+    const prefix = "/zettide.controller.v1.FilesystemService/";
+    const first_id = "0198f54d-5c2a-7000-8000-000000000301";
+    const second_id = "0198f54d-5c2a-7000-8000-000000000302";
+    const third_id = "0198f54d-5c2a-7000-8000-000000000303";
+    var pool: CreatedPool = undefined;
+    var create: pb.FilesystemMutationRequest = undefined;
+    var first_revision: u64 = 0;
+    var second_revision: u64 = 0;
+    var updated_revision: u64 = 0;
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        pool = try createPool(runtime, "filesystem-pool", "filesystem-pool");
+        errdefer pool.deinit();
+        create = .{ .request_id = "filesystem-create-a", .filesystem_id = first_id, .pool_id = pool.id, .name = "files-a", .description = "original", .backend_kind = .FILESYSTEM_BACKEND_KIND_BLOB, .name_profile = .FILESYSTEM_NAME_PROFILE_LEGACY_RAW };
+        var first = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "CreateFilesystem", create);
+        defer first.deinit(config_allocator);
+        first_revision = first.filesystem.?.resource_version;
+        try std.testing.expectEqual(pb.FilesystemLifecycleState.FILESYSTEM_LIFECYCLE_STATE_PROVISIONING, first.filesystem.?.lifecycle_state);
+        try std.testing.expectEqual(@as(u32, 1), first.filesystem.?.format_version);
+        var other = create;
+        other.request_id = "filesystem-create-b";
+        other.filesystem_id = second_id;
+        other.name = "files-b";
+        var second = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "CreateFilesystem", other);
+        defer second.deinit(config_allocator);
+        second_revision = second.filesystem.?.resource_version;
+        var page = try crudRpc(pb.ListFilesystemsResponse, runtime, prefix ++ "ListFilesystems", pb.ListFilesystemsRequest{ .pool_id = pool.id, .page_size = 1 });
+        defer page.deinit(config_allocator);
+        try std.testing.expectEqual(@as(usize, 1), page.filesystems.items.len);
+        try std.testing.expectEqualStrings(first_id, page.next_after_filesystem_id);
+        var update = pb.FilesystemMutationRequest{ .request_id = "filesystem-update", .filesystem_id = first_id, .description = "updated", .expected_resource_version = first_revision };
+        var updated = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "UpdateFilesystem", update);
+        defer updated.deinit(config_allocator);
+        updated_revision = updated.filesystem.?.resource_version;
+        update.request_id = "filesystem-stale-update";
+        try crudStatus(runtime, prefix ++ "UpdateFilesystem", update, .failed_precondition);
+        update.pool_id = pool.id;
+        try crudStatus(runtime, prefix ++ "UpdateFilesystem", update, .invalid_argument);
+        try crudStatus(runtime, prefix ++ "ListFilesystems", pb.ListFilesystemsRequest{ .pool_id = pool.id, .page_size = 33 }, .invalid_argument);
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/DeletePool", pb.DeletePoolRequest{ .request_id = "filesystem-blocked-pool", .pool_id = pool.id, .expected_resource_version = pool.revision }, .failed_precondition);
+        try runtime.shutdown();
+    }
+    defer pool.deinit();
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        var fetched = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = first_id });
+        defer fetched.deinit(config_allocator);
+        try std.testing.expectEqualStrings("updated", fetched.filesystem.?.description);
+        try std.testing.expectEqual(updated_revision, fetched.filesystem.?.resource_version);
+        var deleted = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "filesystem-delete-a", .filesystem_id = first_id, .expected_resource_version = updated_revision });
+        defer deleted.deinit(config_allocator);
+        try std.testing.expectEqual(pb.FilesystemLifecycleState.FILESYSTEM_LIFECYCLE_STATE_DELETED, deleted.filesystem.?.lifecycle_state);
+        try crudStatus(runtime, prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = first_id }, .not_found);
+        var next = try crudRpc(pb.ListFilesystemsResponse, runtime, prefix ++ "ListFilesystems", pb.ListFilesystemsRequest{ .pool_id = pool.id, .after_filesystem_id = first_id, .page_size = 1 });
+        defer next.deinit(config_allocator);
+        try std.testing.expectEqual(@as(usize, 1), next.filesystems.items.len);
+        try std.testing.expectEqualStrings(second_id, next.filesystems.items[0].id);
+        try std.testing.expectEqualStrings("", next.next_after_filesystem_id);
+        var replacement_request = create;
+        replacement_request.request_id = "filesystem-name-reuse";
+        replacement_request.filesystem_id = third_id;
+        var replacement = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "CreateFilesystem", replacement_request);
+        defer replacement.deinit(config_allocator);
+        var deleted_b = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "filesystem-delete-b", .filesystem_id = second_id, .expected_resource_version = second_revision });
+        defer deleted_b.deinit(config_allocator);
+        var deleted_c = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "filesystem-delete-c", .filesystem_id = third_id, .expected_resource_version = replacement.filesystem.?.resource_version });
+        defer deleted_c.deinit(config_allocator);
+        var removed_pool = try crudRpc(pb.DeletePoolResponse, runtime, "/zettide.controller.v1.PoolService/DeletePool", pb.DeletePoolRequest{ .request_id = "filesystem-delete-pool", .pool_id = pool.id, .expected_resource_version = pool.revision });
+        defer removed_pool.deinit(config_allocator);
+        try runtime.shutdown();
+    }
+    {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        var replay = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "CreateFilesystem", create);
+        defer replay.deinit(config_allocator);
+        try std.testing.expectEqual(first_revision, replay.filesystem.?.resource_version);
+        try crudStatus(runtime, prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = first_id }, .not_found);
+        try crudStatus(runtime, "/zettide.controller.v1.PoolService/DeletePool", pb.DeletePoolRequest{ .request_id = "filesystem-blocked-pool", .pool_id = pool.id, .expected_resource_version = pool.revision }, .failed_precondition);
+        var list = try crudRpc(pb.ListFilesystemsResponse, runtime, prefix ++ "ListFilesystems", pb.ListFilesystemsRequest{ .pool_id = pool.id });
+        defer list.deinit(config_allocator);
+        try std.testing.expectEqual(@as(usize, 0), list.filesystems.items.len);
+        create.request_id = "filesystem-deleted-id";
+        try crudStatus(runtime, prefix ++ "CreateFilesystem", create, .already_exists);
+        create.filesystem_id = "0198f54d-5c2a-7000-8000-000000000304";
+        create.request_id = "filesystem-deleted-pool";
+        try crudStatus(runtime, prefix ++ "CreateFilesystem", create, .not_found);
+    }
 }

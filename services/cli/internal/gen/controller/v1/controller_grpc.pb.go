@@ -1319,3 +1319,261 @@ var RangeLeaseService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "services/controller/proto/zettide/controller/v1/controller.proto",
 }
+
+const (
+	FilesystemService_CreateFilesystem_FullMethodName = "/zettide.controller.v1.FilesystemService/CreateFilesystem"
+	FilesystemService_UpdateFilesystem_FullMethodName = "/zettide.controller.v1.FilesystemService/UpdateFilesystem"
+	FilesystemService_DeleteFilesystem_FullMethodName = "/zettide.controller.v1.FilesystemService/DeleteFilesystem"
+	FilesystemService_GetFilesystem_FullMethodName    = "/zettide.controller.v1.FilesystemService/GetFilesystem"
+	FilesystemService_ListFilesystems_FullMethodName  = "/zettide.controller.v1.FilesystemService/ListFilesystems"
+)
+
+// FilesystemServiceClient is the client API for FilesystemService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Logical provisioning only: these RPCs do not format media or grant access.
+type FilesystemServiceClient interface {
+	CreateFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
+	UpdateFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
+	DeleteFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
+	GetFilesystem(ctx context.Context, in *GetFilesystemRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
+	ListFilesystems(ctx context.Context, in *ListFilesystemsRequest, opts ...grpc.CallOption) (*ListFilesystemsResponse, error)
+}
+
+type filesystemServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewFilesystemServiceClient(cc grpc.ClientConnInterface) FilesystemServiceClient {
+	return &filesystemServiceClient{cc}
+}
+
+func (c *filesystemServiceClient) CreateFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FilesystemResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_CreateFilesystem_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filesystemServiceClient) UpdateFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FilesystemResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_UpdateFilesystem_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filesystemServiceClient) DeleteFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FilesystemResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_DeleteFilesystem_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filesystemServiceClient) GetFilesystem(ctx context.Context, in *GetFilesystemRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FilesystemResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_GetFilesystem_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filesystemServiceClient) ListFilesystems(ctx context.Context, in *ListFilesystemsRequest, opts ...grpc.CallOption) (*ListFilesystemsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListFilesystemsResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_ListFilesystems_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// FilesystemServiceServer is the server API for FilesystemService service.
+// All implementations must embed UnimplementedFilesystemServiceServer
+// for forward compatibility.
+//
+// Logical provisioning only: these RPCs do not format media or grant access.
+type FilesystemServiceServer interface {
+	CreateFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
+	UpdateFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
+	DeleteFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
+	GetFilesystem(context.Context, *GetFilesystemRequest) (*FilesystemResponse, error)
+	ListFilesystems(context.Context, *ListFilesystemsRequest) (*ListFilesystemsResponse, error)
+	mustEmbedUnimplementedFilesystemServiceServer()
+}
+
+// UnimplementedFilesystemServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedFilesystemServiceServer struct{}
+
+func (UnimplementedFilesystemServiceServer) CreateFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateFilesystem not implemented")
+}
+func (UnimplementedFilesystemServiceServer) UpdateFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateFilesystem not implemented")
+}
+func (UnimplementedFilesystemServiceServer) DeleteFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteFilesystem not implemented")
+}
+func (UnimplementedFilesystemServiceServer) GetFilesystem(context.Context, *GetFilesystemRequest) (*FilesystemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetFilesystem not implemented")
+}
+func (UnimplementedFilesystemServiceServer) ListFilesystems(context.Context, *ListFilesystemsRequest) (*ListFilesystemsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListFilesystems not implemented")
+}
+func (UnimplementedFilesystemServiceServer) mustEmbedUnimplementedFilesystemServiceServer() {}
+func (UnimplementedFilesystemServiceServer) testEmbeddedByValue()                           {}
+
+// UnsafeFilesystemServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to FilesystemServiceServer will
+// result in compilation errors.
+type UnsafeFilesystemServiceServer interface {
+	mustEmbedUnimplementedFilesystemServiceServer()
+}
+
+func RegisterFilesystemServiceServer(s grpc.ServiceRegistrar, srv FilesystemServiceServer) {
+	// If the following call panics, it indicates UnimplementedFilesystemServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&FilesystemService_ServiceDesc, srv)
+}
+
+func _FilesystemService_CreateFilesystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FilesystemMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilesystemServiceServer).CreateFilesystem(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilesystemService_CreateFilesystem_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilesystemServiceServer).CreateFilesystem(ctx, req.(*FilesystemMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilesystemService_UpdateFilesystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FilesystemMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilesystemServiceServer).UpdateFilesystem(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilesystemService_UpdateFilesystem_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilesystemServiceServer).UpdateFilesystem(ctx, req.(*FilesystemMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilesystemService_DeleteFilesystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FilesystemMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilesystemServiceServer).DeleteFilesystem(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilesystemService_DeleteFilesystem_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilesystemServiceServer).DeleteFilesystem(ctx, req.(*FilesystemMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilesystemService_GetFilesystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetFilesystemRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilesystemServiceServer).GetFilesystem(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilesystemService_GetFilesystem_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilesystemServiceServer).GetFilesystem(ctx, req.(*GetFilesystemRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilesystemService_ListFilesystems_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListFilesystemsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilesystemServiceServer).ListFilesystems(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilesystemService_ListFilesystems_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilesystemServiceServer).ListFilesystems(ctx, req.(*ListFilesystemsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// FilesystemService_ServiceDesc is the grpc.ServiceDesc for FilesystemService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var FilesystemService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "zettide.controller.v1.FilesystemService",
+	HandlerType: (*FilesystemServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateFilesystem",
+			Handler:    _FilesystemService_CreateFilesystem_Handler,
+		},
+		{
+			MethodName: "UpdateFilesystem",
+			Handler:    _FilesystemService_UpdateFilesystem_Handler,
+		},
+		{
+			MethodName: "DeleteFilesystem",
+			Handler:    _FilesystemService_DeleteFilesystem_Handler,
+		},
+		{
+			MethodName: "GetFilesystem",
+			Handler:    _FilesystemService_GetFilesystem_Handler,
+		},
+		{
+			MethodName: "ListFilesystems",
+			Handler:    _FilesystemService_ListFilesystems_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "services/controller/proto/zettide/controller/v1/controller.proto",
+}

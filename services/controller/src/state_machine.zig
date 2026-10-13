@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const pb = @import("controller_proto");
+const filesystems = @import("filesystems.zig");
 const range_leases = @import("range_leases.zig");
 const heartbeat = @import("heartbeat.zig");
 const primary_lease = @import("primary_lease.zig");
@@ -613,6 +614,7 @@ pub const PoolStateMachine = struct {
         defer envelope.deinit(arena.allocator());
         if (envelope.format_version < 1 or envelope.format_version > command_format_version) return error.PayloadParseFailed;
         return switch (envelope.command orelse return error.PayloadParseFailed) {
+            .filesystem => |command| self.applyFilesystem(entry.index, command),
             .range_lease => |command| self.applyRangeLease(entry.index, command),
             .create_pool => |command| self.applyCreatePool(entry.index, command),
             .update_pool => |command| self.applyPoolMutation(entry.index, command, false),
@@ -647,6 +649,15 @@ pub const PoolStateMachine = struct {
         };
     }
 
+    pub fn getFilesystem(self: *const PoolStateMachine, id: []const u8) ?filesystems.Record {
+        if (id.len != 36) return null;
+        const record = self.state.filesystems.records.get(id[0..36].*) orelse return null;
+        return if (record.deleted_revision == 0) record else null;
+    }
+    pub fn listFilesystems(self: *const PoolStateMachine, allocator: std.mem.Allocator, pool_id: []const u8, after: []const u8, limit: usize) ![]filesystems.Record {
+        return self.state.filesystems.list(allocator, pool_id, after, limit);
+    }
+
     pub fn getRangeLease(self: *const PoolStateMachine, lease_id: []const u8) ?range_leases.Lease {
         if (lease_id.len != 36) return null;
         return self.state.range_leases.leases.get(lease_id[0..36].*);
@@ -675,6 +686,32 @@ pub const PoolStateMachine = struct {
         }.lessThan);
         result.shrinkRetainingCapacity(@min(result.items.len, limit));
         return result.toOwnedSlice(allocator);
+    }
+
+    fn applyFilesystem(self: *PoolStateMachine, revision: u64, command: pb.FilesystemCommand) raft.Error!raft.ApplyResult {
+        filesystems.validate(command) catch return error.PayloadParseFailed;
+        if (revision == 0) return error.PayloadParseFailed;
+        const request = command.request.?;
+        const fingerprint = filesystemFingerprint(command);
+        if (self.state.requests.get(request.request_id)) |existing| {
+            if (existing.kind != .filesystem or !std.mem.eql(u8, &existing.fingerprint, &fingerprint)) return .{ .response = try encodeMessage(self.allocator, pb.FilesystemApplyResponse{ .code = .FILESYSTEM_CODE_REQUEST_CONFLICT }) };
+            return .{ .response = try self.allocator.dupe(u8, existing.encoded_response) };
+        }
+        if (self.state.requests.count() >= max_requests) return .{ .response = try encodeMessage(self.allocator, pb.FilesystemApplyResponse{ .code = .FILESYSTEM_CODE_RESOURCE_LIMIT }) };
+        const outcome = self.state.filesystems.evaluate(command, poolIsLive(&self.state, request.pool_id), revision);
+        const encoded_response = try encodeMessage(self.allocator, outcome.proto());
+        errdefer self.allocator.free(encoded_response);
+        const returned = try self.allocator.dupe(u8, encoded_response);
+        errdefer self.allocator.free(returned);
+        const encoded_command = try encodeFilesystemCommand(self.allocator, command);
+        errdefer self.allocator.free(encoded_command);
+        const request_id = try self.allocator.dupe(u8, request.request_id);
+        errdefer self.allocator.free(request_id);
+        try self.state.requests.ensureUnusedCapacity(self.allocator, 1);
+        try self.state.filesystems.reserve(self.allocator, outcome);
+        self.state.filesystems.commit(outcome);
+        self.state.requests.putAssumeCapacity(request_id, .{ .request_id = request_id, .kind = .filesystem, .fingerprint = fingerprint, .encoded_response = encoded_response, .encoded_command = encoded_command, .applied_revision = revision });
+        return .{ .response = returned };
     }
 
     fn applyRangeLease(self: *PoolStateMachine, revision: u64, command: pb.RangeLeaseCommand) raft.Error!raft.ApplyResult {
@@ -1948,8 +1985,10 @@ pub const PoolStateMachine = struct {
         }
         std.mem.sort(pb.RequestRecord, requests.items, {}, requestIdLessThan);
 
+        const filesystem_digest = try self.state.filesystems.digest(allocator);
         const lease_digest = try self.state.range_leases.digest(allocator);
         const data = try encodeMessage(allocator, pb.StateSnapshot{
+            .filesystem_digest = if (self.state.filesystems.records.count() == 0) "" else &filesystem_digest,
             .range_lease_digest = if (self.state.range_leases.leases.count() == 0) "" else &lease_digest,
             .format_version = snapshot_format_version,
             .pools = pools,
@@ -2090,6 +2129,12 @@ pub const PoolStateMachine = struct {
                 }
             }
         }
+
+        try restoreFilesystemHistory(self.allocator, arena.allocator(), &restored, snapshot.requests.items);
+        if (restored.filesystems.records.count() != 0) {
+            const digest = try restored.filesystems.digest(self.allocator);
+            if (!std.mem.eql(u8, snapshot.filesystem_digest, &digest)) return error.PayloadParseFailed;
+        } else if (snapshot.filesystem_digest.len != 0) return error.PayloadParseFailed;
 
         try restoreRangeLeaseHistory(self.allocator, arena.allocator(), &restored, snapshot.requests.items);
         if (restored.range_leases.leases.count() != 0) {
@@ -3149,6 +3194,19 @@ fn restoreRequest(
             errdefer allocator.free(encoded_command);
             try insertRestoredRequest(allocator, state, source, .create_pool, encoded_response, encoded_command);
             return if (created_pool_id) |id| RestoredCreation{ .pool = id } else null;
+        },
+        .filesystem => |command| {
+            if (snapshot_version < 14 or envelope.format_version < 11) return error.PayloadParseFailed;
+            filesystems.validate(command) catch return error.PayloadParseFailed;
+            if (!std.mem.eql(u8, source.request_id, command.request.?.request_id)) return error.PayloadParseFailed;
+            const fingerprint = filesystemFingerprint(command);
+            if (!std.mem.eql(u8, source.request_fingerprint, &fingerprint)) return error.PayloadParseFailed;
+            const encoded_command = try encodeFilesystemCommand(allocator, command);
+            errdefer allocator.free(encoded_command);
+            const encoded_response = try allocator.dupe(u8, source.encoded_response);
+            errdefer allocator.free(encoded_response);
+            try insertRestoredRequest(allocator, state, source, .filesystem, encoded_response, encoded_command);
+            return null;
         },
         .range_lease => |command| {
             if (snapshot_version < 13 or envelope.format_version < 10) return error.PayloadParseFailed;
@@ -8049,6 +8107,7 @@ fn encodePoolMutationResponse(allocator: std.mem.Allocator, code: pb.PoolMutatio
 
 // Use historical dependency lifetimes when validating retained request results.
 fn poolHasDependenciesAt(state: *const State, pool_id: []const u8, revision: u64) bool {
+    if (state.filesystems.blocksPoolAt(pool_id, revision)) return true;
     var members = state.members_by_id.valueIterator();
     while (members.next()) |member| {
         if (std.mem.eql(u8, member.pool_id, pool_id) and member.registered_revision < revision) return true;
@@ -8319,6 +8378,49 @@ test "Pool mutations require v9 and legacy Volume update replay preserves its ol
     defer snapshot.deinit(allocator);
     var reader = TestSnapshotReader{ .data = snapshot.data };
     try machine.stateMachine().restoreSnapshot(snapshot.metadata, reader.reader());
+}
+
+pub fn encodeFilesystemCommand(allocator: std.mem.Allocator, command: pb.FilesystemCommand) ![]u8 {
+    filesystems.validate(command) catch return error.PayloadParseFailed;
+    return encodeMessage(allocator, pb.CommandEnvelope{ .format_version = command_format_version, .command = .{ .filesystem = command } });
+}
+
+fn filesystemFingerprint(command: pb.FilesystemCommand) Fingerprint {
+    const request = command.request.?;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hashInt(&hash, i32, @intFromEnum(command.operation));
+    for ([_][]const u8{ request.filesystem_id, request.pool_id, request.name, request.description }) |value| hashField(&hash, value);
+    hashInt(&hash, i32, @intFromEnum(request.backend_kind));
+    hashInt(&hash, i32, @intFromEnum(request.name_profile));
+    hashInt(&hash, u64, request.expected_resource_version);
+    var result: Fingerprint = undefined;
+    hash.final(&result);
+    return result;
+}
+
+fn restoreFilesystemHistory(allocator: std.mem.Allocator, arena: std.mem.Allocator, state: *State, records: []const pb.RequestRecord) raft.Error!void {
+    const ordered = try arena.dupe(pb.RequestRecord, records);
+    std.mem.sort(pb.RequestRecord, ordered, {}, struct {
+        fn less(_: void, a: pb.RequestRecord, b: pb.RequestRecord) bool {
+            return a.applied_revision < b.applied_revision;
+        }
+    }.less);
+    for (ordered) |record| {
+        var reader: std.Io.Reader = .fixed(record.encoded_command);
+        const envelope = pb.CommandEnvelope.decode(&reader, arena) catch |err| return mapDecodeError(err);
+        if (envelope.command.? != .filesystem) continue;
+        const command = envelope.command.?.filesystem;
+        filesystems.validate(command) catch return error.PayloadParseFailed;
+        const pool = state.pools_by_id.get(command.request.?.pool_id);
+        const available = if (pool) |value| value.created_revision < record.applied_revision and
+            (value.deleted_revision == 0 or value.deleted_revision >= record.applied_revision) else false;
+        const outcome = state.filesystems.evaluate(command, available, record.applied_revision);
+        var response_reader: std.Io.Reader = .fixed(record.encoded_response);
+        const actual = pb.FilesystemApplyResponse.decode(&response_reader, arena) catch |err| return mapDecodeError(err);
+        if (!std.mem.eql(u8, try encodeMessage(arena, actual), try encodeMessage(arena, outcome.proto()))) return error.PayloadParseFailed;
+        try state.filesystems.reserve(allocator, outcome);
+        state.filesystems.commit(outcome);
+    }
 }
 
 pub fn encodeRangeLeaseCommand(allocator: std.mem.Allocator, command: pb.RangeLeaseCommand) ![]u8 {
@@ -8603,4 +8705,206 @@ test "fully revoked lease permits Volume deletion and remains a durable tombston
     request.request_id = "deleted-volume";
     request.expected_resource_version = 0;
     try applyTestRangeLease(&machine, 9, .RANGE_LEASE_OPERATION_ACQUIRE, request, .RANGE_LEASE_CODE_NOT_FOUND);
+}
+
+fn testFilesystemRequest(request_id: []const u8, id: []const u8) pb.FilesystemMutationRequest {
+    return .{ .request_id = request_id, .filesystem_id = id, .pool_id = test_pool_id, .name = "shared-files", .description = "original", .backend_kind = .FILESYSTEM_BACKEND_KIND_BLOB, .name_profile = .FILESYSTEM_NAME_PROFILE_LEGACY_RAW };
+}
+fn expectFilesystem(machine: *PoolStateMachine, revision: u64, operation: pb.FilesystemOperation, request: pb.FilesystemMutationRequest, code: pb.FilesystemCode) !void {
+    const allocator = std.testing.allocator;
+    const bytes = try encodeFilesystemCommand(allocator, .{ .request = request, .operation = operation });
+    defer allocator.free(bytes);
+    var result = try applyEncodedTestCommand(allocator, machine, revision, bytes);
+    defer result.deinit(allocator);
+    var reader: std.Io.Reader = .fixed(result.response.?);
+    var response = try pb.FilesystemApplyResponse.decode(&reader, allocator);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(code, response.code);
+}
+
+test "Filesystem CRUD is provisioning only with Pool-scoped names durable CAS and deletion history" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    var pool = try applyTestCommand(allocator, &machine, 1, testCommand("pool", test_pool_id, "pool", "", 1_753_744_000_000));
+    defer pool.deinit(allocator);
+    const create = testFilesystemRequest("fs-create", test_replica_id);
+    try expectFilesystem(&machine, 2, .FILESYSTEM_OPERATION_CREATE, create, .FILESYSTEM_CODE_OK);
+    var record = machine.getFilesystem(test_replica_id).?;
+    try std.testing.expectEqual(pb.FilesystemLifecycleState.FILESYSTEM_LIFECYCLE_STATE_PROVISIONING, record.proto().lifecycle_state);
+    const update = pb.FilesystemMutationRequest{ .request_id = "fs-update", .filesystem_id = test_replica_id, .description = "updated", .expected_resource_version = 2 };
+    try expectFilesystem(&machine, 3, .FILESYSTEM_OPERATION_UPDATE, update, .FILESYSTEM_CODE_OK);
+    var stale = update;
+    stale.request_id = "fs-stale";
+    try expectFilesystem(&machine, 4, .FILESYSTEM_OPERATION_UPDATE, stale, .FILESYSTEM_CODE_VERSION_CONFLICT);
+    var second = testFilesystemRequest("fs-conflict", test_second_replica_id);
+    try expectFilesystem(&machine, 5, .FILESYSTEM_OPERATION_CREATE, second, .FILESYSTEM_CODE_CONFLICT);
+    const blocked = pb.PoolMutationCommand{ .request_id = "pool-blocked", .pool_id = test_pool_id, .expected_resource_version = 1 };
+    try expectPoolMutation(allocator, &machine, 6, blocked, true, .POOL_MUTATION_APPLY_CODE_NOT_EMPTY);
+    try expectFilesystem(&machine, 7, .FILESYSTEM_OPERATION_DELETE, .{ .request_id = "fs-delete", .filesystem_id = test_replica_id, .expected_resource_version = 3 }, .FILESYSTEM_CODE_OK);
+    try std.testing.expect(machine.getFilesystem(test_replica_id) == null);
+    try expectFilesystem(&machine, 8, .FILESYSTEM_OPERATION_CREATE, second, .FILESYSTEM_CODE_CONFLICT);
+    second.request_id = "fs-name-reused";
+    try expectFilesystem(&machine, 9, .FILESYSTEM_OPERATION_CREATE, second, .FILESYSTEM_CODE_OK);
+    var reused_id = create;
+    reused_id.request_id = "fs-id-reused";
+    reused_id.name = "different";
+    try expectFilesystem(&machine, 10, .FILESYSTEM_OPERATION_CREATE, reused_id, .FILESYSTEM_CODE_CONFLICT);
+    var pool_b = try applyTestCommand(allocator, &machine, 11, testCommand("pool-b", test_second_volume_id, "pool-b", "", 1_753_744_000_001));
+    defer pool_b.deinit(allocator);
+    var third = testFilesystemRequest("fs-other-pool", test_third_replica_id);
+    third.pool_id = test_second_volume_id;
+    third.name_profile = .FILESYSTEM_NAME_PROFILE_PORTABLE_V1;
+    try expectFilesystem(&machine, 12, .FILESYSTEM_OPERATION_CREATE, third, .FILESYSTEM_CODE_OK);
+    try expectFilesystem(&machine, 13, .FILESYSTEM_OPERATION_DELETE, .{ .request_id = "fs-delete-b", .filesystem_id = test_second_replica_id, .expected_resource_version = 9 }, .FILESYSTEM_CODE_OK);
+    try expectPoolMutation(allocator, &machine, 14, .{ .request_id = "pool-deleted", .pool_id = test_pool_id, .expected_resource_version = 1 }, true, .POOL_MUTATION_APPLY_CODE_DELETED);
+    try expectFilesystem(&machine, 15, .FILESYSTEM_OPERATION_CREATE, create, .FILESYSTEM_CODE_OK);
+    try std.testing.expect(machine.getFilesystem(test_replica_id) == null);
+    try expectPoolMutation(allocator, &machine, 16, blocked, true, .POOL_MUTATION_APPLY_CODE_NOT_EMPTY);
+    var missing = testFilesystemRequest("fs-deleted-pool", test_allocation_id);
+    try expectFilesystem(&machine, 17, .FILESYSTEM_OPERATION_CREATE, missing, .FILESYSTEM_CODE_NOT_FOUND);
+    missing.request_id = "pool-b";
+    try expectFilesystem(&machine, 18, .FILESYSTEM_OPERATION_CREATE, missing, .FILESYSTEM_CODE_REQUEST_CONFLICT);
+    const page = try machine.listFilesystems(allocator, test_pool_id, "", 32);
+    defer allocator.free(page);
+    try std.testing.expectEqual(@as(usize, 0), page.len);
+    var snapshot = try machine.stateMachine().takeSnapshot(allocator, 18, 1, .{});
+    defer snapshot.deinit(allocator);
+    var restored = PoolStateMachine.init(allocator);
+    defer restored.deinit();
+    var snapshot_reader = TestSnapshotReader{ .data = snapshot.data };
+    try restored.stateMachine().restoreSnapshot(snapshot.metadata, snapshot_reader.reader());
+    try std.testing.expectEqualDeep(machine.getFilesystem(test_third_replica_id), restored.getFilesystem(test_third_replica_id));
+    try std.testing.expectEqual(@as(usize, 3), restored.state.filesystems.records.count());
+    var repeated = try restored.stateMachine().takeSnapshot(allocator, 18, 1, .{});
+    defer repeated.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, snapshot.data, repeated.data);
+    try expectFilesystem(&restored, 19, .FILESYSTEM_OPERATION_UPDATE, stale, .FILESYSTEM_CODE_VERSION_CONFLICT);
+    try expectFilesystem(&restored, 20, .FILESYSTEM_OPERATION_CREATE, create, .FILESYSTEM_CODE_OK);
+
+    for (0..3) |corruption| {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        var reader: std.Io.Reader = .fixed(snapshot.data);
+        var parsed = try pb.StateSnapshot.decode(&reader, arena.allocator());
+        if (corruption == 0) {
+            const changed = try arena.allocator().dupe(u8, parsed.filesystem_digest);
+            changed[0] ^= 1;
+            parsed.filesystem_digest = changed;
+        } else if (corruption == 1) {
+            for (parsed.requests.items, 0..) |request, index| {
+                if (std.mem.eql(u8, request.request_id, "fs-create")) {
+                    _ = parsed.requests.orderedRemove(index);
+                    break;
+                }
+            }
+        } else {
+            for (parsed.requests.items) |*request| {
+                if (!std.mem.eql(u8, request.request_id, "fs-other-pool")) continue;
+                var response_reader: std.Io.Reader = .fixed(request.encoded_response);
+                var response = try pb.FilesystemApplyResponse.decode(&response_reader, arena.allocator());
+                response.filesystem.?.description = "forged";
+                request.encoded_response = try encodeMessage(arena.allocator(), response);
+            }
+        }
+        const damaged = try encodeMessage(arena.allocator(), parsed);
+        var broken_reader = TestSnapshotReader{ .data = damaged };
+        try std.testing.expectError(error.PayloadParseFailed, restored.stateMachine().restoreSnapshot(snapshot.metadata, broken_reader.reader()));
+        try std.testing.expectEqualDeep(machine.getFilesystem(test_third_replica_id), restored.getFilesystem(test_third_replica_id));
+    }
+}
+
+test "Filesystem apply and snapshot restore are atomic on allocation failure" {
+    const allocator = std.testing.allocator;
+    const pool = try encodeCreatePoolCommand(allocator, testCommand("pool", test_pool_id, "pool", "", 1_753_744_000_000));
+    defer allocator.free(pool);
+    const create = try encodeFilesystemCommand(allocator, .{ .request = testFilesystemRequest("fs", test_replica_id), .operation = .FILESYSTEM_OPERATION_CREATE });
+    defer allocator.free(create);
+    const update = try encodeFilesystemCommand(allocator, .{ .request = .{ .request_id = "update", .filesystem_id = test_replica_id, .description = "updated", .expected_resource_version = 2 }, .operation = .FILESYSTEM_OPERATION_UPDATE });
+    defer allocator.free(update);
+    const delete = try encodeFilesystemCommand(allocator, .{ .request = .{ .request_id = "delete", .filesystem_id = test_replica_id, .expected_resource_version = 2 }, .operation = .FILESYSTEM_OPERATION_DELETE });
+    defer allocator.free(delete);
+    for ([_][]const u8{ create, update, delete }, 0..) |mutation, index| {
+        try checkAllAllocationFailures(struct {
+            fn run(failing: std.mem.Allocator, pool_wire: []const u8, create_wire: []const u8, mutation_wire: []const u8, creating: bool) !void {
+                var machine = PoolStateMachine.init(failing);
+                defer machine.deinit();
+                var result = try applyEncodedTestCommand(failing, &machine, 1, pool_wire);
+                result.deinit(failing);
+                if (!creating) {
+                    var initial = try applyEncodedTestCommand(failing, &machine, 2, create_wire);
+                    initial.deinit(failing);
+                }
+                const before = machine.getFilesystem(test_replica_id);
+                const count = machine.requestCount();
+                var changed = applyEncodedTestCommand(failing, &machine, if (creating) 2 else 3, mutation_wire) catch |err| {
+                    try std.testing.expectEqualDeep(before, machine.getFilesystem(test_replica_id));
+                    try std.testing.expectEqual(count, machine.requestCount());
+                    return err;
+                };
+                changed.deinit(failing);
+            }
+        }.run, .{ pool, create, mutation, index == 0 });
+    }
+    var source = PoolStateMachine.init(allocator);
+    defer source.deinit();
+    for ([_][]const u8{ pool, create, update }, 1..) |command, revision| {
+        var result = try applyEncodedTestCommand(allocator, &source, revision, command);
+        result.deinit(allocator);
+    }
+    var snapshot = try source.stateMachine().takeSnapshot(allocator, 3, 1, .{});
+    defer snapshot.deinit(allocator);
+    try checkAllAllocationFailures(struct {
+        fn run(failing: std.mem.Allocator, data: []const u8, metadata: raft.SnapshotMetadata) !void {
+            var target = PoolStateMachine.init(failing);
+            defer target.deinit();
+            var reader = TestSnapshotReader{ .data = data };
+            target.stateMachine().restoreSnapshot(metadata, reader.reader()) catch |err| {
+                try std.testing.expectEqual(@as(usize, 0), target.requestCount());
+                try std.testing.expectEqual(@as(usize, 0), target.state.filesystems.records.count());
+                try std.testing.expectEqual(@as(usize, 0), target.poolCount());
+                return err;
+            };
+            const record = target.getFilesystem(test_replica_id).?;
+            try std.testing.expectEqualStrings("updated", record.proto().description);
+        }
+    }.run, .{ snapshot.data, snapshot.metadata });
+}
+
+test "Filesystem validates immutable fields bounds and format gates" {
+    const allocator = std.testing.allocator;
+    var machine = PoolStateMachine.init(allocator);
+    defer machine.deinit();
+    const good = testFilesystemRequest("fs", test_replica_id);
+    var invalid = good;
+    invalid.name_profile = .FILESYSTEM_NAME_PROFILE_UNSPECIFIED;
+    try std.testing.expectError(error.InvalidWire, filesystems.validate(.{ .request = invalid, .operation = .FILESYSTEM_OPERATION_CREATE }));
+    invalid = good;
+    invalid.expected_resource_version = 1;
+    try std.testing.expectError(error.InvalidWire, filesystems.validate(.{ .request = invalid, .operation = .FILESYSTEM_OPERATION_UPDATE }));
+    const oversized: [max_description_bytes + 1]u8 = @splat('x');
+    invalid = good;
+    invalid.description = &oversized;
+    try std.testing.expectError(error.InvalidWire, filesystems.validate(.{ .request = invalid, .operation = .FILESYSTEM_OPERATION_CREATE }));
+    const old_wire = try encodeMessage(allocator, pb.CommandEnvelope{ .format_version = 10, .command = .{ .filesystem = .{ .request = good, .operation = .FILESYSTEM_OPERATION_CREATE } } });
+    defer allocator.free(old_wire);
+    try std.testing.expectError(error.PayloadParseFailed, applyEncodedTestCommand(allocator, &machine, 1, old_wire));
+    const query = try encodeMessage(allocator, pb.ListFilesystemsRequest{ .pool_id = test_pool_id, .page_size = 33 });
+    defer allocator.free(query);
+    try std.testing.expectError(error.InvalidWire, filesystems.preflightQuery(query, true));
+    try std.testing.expectError(error.InvalidWire, filesystems.preflightRequest(&.{ 0x0a, 1, 'a', 0x0a, 1, 'b' }));
+    var empty = try machine.stateMachine().takeSnapshot(allocator, 0, 1, .{});
+    defer empty.deinit(allocator);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    var reader: std.Io.Reader = .fixed(empty.data);
+    var legacy = try pb.StateSnapshot.decode(&reader, arena.allocator());
+    legacy.format_version = 13;
+    const legacy_wire = try encodeMessage(arena.allocator(), legacy);
+    var legacy_reader = TestSnapshotReader{ .data = legacy_wire };
+    try machine.stateMachine().restoreSnapshot(empty.metadata, legacy_reader.reader());
+    legacy.filesystem_digest = &@as([32]u8, @splat(1));
+    const forbidden = try encodeMessage(arena.allocator(), legacy);
+    var forbidden_reader = TestSnapshotReader{ .data = forbidden };
+    try std.testing.expectError(error.PayloadParseFailed, machine.stateMachine().restoreSnapshot(empty.metadata, forbidden_reader.reader()));
 }

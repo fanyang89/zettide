@@ -1,6 +1,7 @@
 const std = @import("std");
 const wire = @import("../protobuf_wire.zig");
 const schema = @import("schema.zig");
+const filesystems = @import("../filesystems.zig");
 const range_leases = @import("../range_leases.zig");
 
 const Fingerprint = schema.Fingerprint;
@@ -151,6 +152,11 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
             kind = .complete_primary_failover_lease_wait;
             try preflightCompletePrimaryFailoverLeaseWaitCommand(try cursor.readBytes(max_command_wire_bytes));
         },
+        22 => {
+            if (field.wire_type != 2 or kind != null) return error.InvalidWire;
+            kind = .filesystem;
+            try filesystems.preflightCommand(try cursor.readBytes(2100));
+        },
         21 => {
             if (field.wire_type != 2 or kind != null) return error.InvalidWire;
             kind = .range_lease;
@@ -165,6 +171,7 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
     };
     if (!seen_format) return error.InvalidWire;
     const result = kind orelse return error.InvalidWire;
+    if (result == .filesystem and format_version < 11) return error.InvalidWire;
     if (result == .range_lease and format_version < 10) return error.InvalidWire;
     if ((result == .update_pool or result == .delete_pool) and format_version < 9) return error.InvalidWire;
     if ((result == .create_volume or result == .delete_volume) and format_version < 2) return error.InvalidWire;
@@ -673,6 +680,7 @@ pub fn preflightSnapshot(bytes: []const u8) WireError!void {
     var authority_candidate_count: usize = 0;
     var failover_count: usize = 0;
     var seen_lease_digest = false;
+    var seen_filesystem_digest = false;
     while (try cursor.next()) |field| switch (field.number) {
         1 => {
             if (field.wire_type != 0 or seen_format) return error.InvalidWire;
@@ -741,12 +749,17 @@ pub fn preflightSnapshot(bytes: []const u8) WireError!void {
             failover_count += 1;
             _ = try cursor.readBytes(max_primary_authority_wire_bytes);
         },
+        15 => {
+            if (field.wire_type != 2 or seen_filesystem_digest or (try cursor.readBytes(32)).len != 32) return error.InvalidWire;
+            seen_filesystem_digest = true;
+        },
         14 => {
             if (field.wire_type != 2 or seen_lease_digest or (try cursor.readBytes(32)).len != 32) return error.InvalidWire;
             seen_lease_digest = true;
         },
         else => return error.InvalidWire,
     };
+    if (snapshot_version < 14 and seen_filesystem_digest) return error.InvalidWire;
     if (snapshot_version < 13 and seen_lease_digest) return error.InvalidWire;
     if (!seen_format or (snapshot_version == 2 and node_count != 0) or
         (snapshot_version < 4 and member_count != 0) or
@@ -770,7 +783,7 @@ pub fn preflightSnapshot(bytes: []const u8) WireError!void {
         11 => try preflightPrimaryAuthority(try cursor.readBytes(max_primary_authority_wire_bytes), true),
         12 => try preflightPrimaryAuthority(try cursor.readBytes(max_primary_authority_wire_bytes), true),
         13 => try preflightPrimaryFailover(try cursor.readBytes(max_primary_authority_wire_bytes)),
-        14 => _ = try cursor.readBytes(32),
+        14, 15 => _ = try cursor.readBytes(32),
         else => unreachable,
     };
 }
@@ -1151,9 +1164,11 @@ fn preflightRequest(bytes: []const u8, snapshot_version: u32) WireError!void {
         kind == .begin_primary_failover or kind == .commit_primary_authority_failover_ready or
         kind == .complete_primary_failover_lease_wait or
         (kind == .update_volume and snapshot_version < 6)) return error.InvalidWire;
+    if (kind == .filesystem and snapshot_version < 14) return error.InvalidWire;
     if (kind == .range_lease and snapshot_version < 13) return error.InvalidWire;
     if ((kind == .update_pool or kind == .delete_pool) and snapshot_version < 12) return error.InvalidWire;
     switch (kind) {
+        .filesystem => try filesystems.preflightResponse(response_bytes.?),
         .range_lease => try range_leases.preflightResponse(response_bytes.?),
         .update_pool, .delete_pool => try preflightPoolMutationResponse(response_bytes.?),
         .create_pool => try preflightApplyResponse(response_bytes.?),
