@@ -15,9 +15,12 @@ pub const Record = struct {
     created_revision: u64,
     resource_version: u64,
     deleted_revision: u64 = 0,
+    authority_epoch: u64 = 0,
+    candidate_node_id: ?[36]u8 = null,
+    candidate_boot_id: [16]u8 = @splat(0),
 
     pub fn proto(self: *const Record) pb.Filesystem {
-        return .{ .id = &self.id, .pool_id = &self.pool_id, .name = self.name_bytes[0..self.name_len], .description = self.description_bytes[0..self.description_len], .name_profile = self.name_profile, .backend_kind = .FILESYSTEM_BACKEND_KIND_BLOB, .format_version = 1, .lifecycle_state = if (self.deleted_revision == 0) .FILESYSTEM_LIFECYCLE_STATE_PROVISIONING else .FILESYSTEM_LIFECYCLE_STATE_DELETED, .created_revision = self.created_revision, .resource_version = self.resource_version, .deleted_revision = self.deleted_revision };
+        return .{ .authority_state = if (self.candidate_node_id != null) .FILESYSTEM_AUTHORITY_STATE_CANDIDATE else .FILESYSTEM_AUTHORITY_STATE_NONE, .authority_epoch = self.authority_epoch, .candidate_node_id = if (self.candidate_node_id) |*id| id else "", .candidate_boot_id = if (self.candidate_node_id != null) &self.candidate_boot_id else "", .id = &self.id, .pool_id = &self.pool_id, .name = self.name_bytes[0..self.name_len], .description = self.description_bytes[0..self.description_len], .name_profile = self.name_profile, .backend_kind = .FILESYSTEM_BACKEND_KIND_BLOB, .format_version = 1, .lifecycle_state = if (self.deleted_revision == 0) .FILESYSTEM_LIFECYCLE_STATE_PROVISIONING else .FILESYSTEM_LIFECYCLE_STATE_DELETED, .created_revision = self.created_revision, .resource_version = self.resource_version, .deleted_revision = self.deleted_revision };
     }
     fn describe(self: *Record, description: []const u8) void {
         @memset(&self.description_bytes, 0);
@@ -35,7 +38,8 @@ pub const Outcome = struct {
 };
 
 /// Logical records only. No placement, media initialization, or authority exists
-/// in this slice; deletion cancels an unmaterialized provisioning intent.
+/// in this slice. Candidates reserve one prospective owner but cannot perform
+/// external work. Deletion requires cancelling the candidate first.
 pub const Store = struct {
     records: std.AutoHashMapUnmanaged([36]u8, Record) = .empty,
     pub fn deinit(self: *Store, allocator: std.mem.Allocator) void {
@@ -49,7 +53,7 @@ pub const Store = struct {
         }
         return false;
     }
-    pub fn evaluate(self: *const Store, command: pb.FilesystemCommand, pool_available: bool, revision: u64) Outcome {
+    pub fn evaluate(self: *const Store, command: pb.FilesystemCommand, pool_available: bool, node_available: bool, revision: u64) Outcome {
         const request = command.request.?;
         const existing = self.records.get(request.filesystem_id[0..36].*);
         if (command.operation == .FILESYSTEM_OPERATION_CREATE) {
@@ -69,7 +73,31 @@ pub const Store = struct {
         var record = existing orelse return .{ .code = .FILESYSTEM_CODE_NOT_FOUND };
         if (record.deleted_revision != 0) return .{ .code = .FILESYSTEM_CODE_NOT_FOUND };
         if (record.resource_version != request.expected_resource_version) return .{ .code = .FILESYSTEM_CODE_VERSION_CONFLICT };
-        if (command.operation == .FILESYSTEM_OPERATION_UPDATE) record.describe(request.description) else record.deleted_revision = revision;
+        switch (command.operation) {
+            .FILESYSTEM_OPERATION_UPDATE => record.describe(request.description),
+            .FILESYSTEM_OPERATION_DELETE => {
+                if (record.candidate_node_id != null) return .{ .code = .FILESYSTEM_CODE_INVALID_STATE };
+                record.deleted_revision = revision;
+            },
+            .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY => {
+                if (record.candidate_node_id != null) return .{ .code = .FILESYSTEM_CODE_INVALID_STATE };
+                if (request.expected_authority_epoch != record.authority_epoch) return .{ .code = .FILESYSTEM_CODE_VERSION_CONFLICT };
+                if (!node_available) return .{ .code = .FILESYSTEM_CODE_NOT_FOUND };
+                if (revision <= record.authority_epoch) return .{ .code = .FILESYSTEM_CODE_INVALID_STATE };
+                record.authority_epoch = revision;
+                record.candidate_node_id = request.holder_node_id[0..36].*;
+                record.candidate_boot_id = request.holder_boot_id[0..16].*;
+            },
+            .FILESYSTEM_OPERATION_CANCEL_AUTHORITY => {
+                const node = record.candidate_node_id orelse return .{ .code = .FILESYSTEM_CODE_INVALID_STATE };
+                if (request.expected_authority_epoch != record.authority_epoch or
+                    !std.mem.eql(u8, &node, request.holder_node_id) or
+                    !std.mem.eql(u8, &record.candidate_boot_id, request.holder_boot_id)) return .{ .code = .FILESYSTEM_CODE_INVALID_STATE };
+                record.candidate_node_id = null;
+                record.candidate_boot_id = @splat(0);
+            },
+            else => unreachable,
+        }
         record.resource_version = revision;
         return .{ .code = .FILESYSTEM_CODE_OK, .record = record, .changed = true };
     }
@@ -96,6 +124,9 @@ pub const Store = struct {
         return result.toOwnedSlice(allocator);
     }
     pub fn digest(self: *const Store, allocator: std.mem.Allocator) ![32]u8 {
+        return self.digestVersion(allocator, true);
+    }
+    pub fn digestVersion(self: *const Store, allocator: std.mem.Allocator, with_authority: bool) ![32]u8 {
         const keys = try allocator.alloc([36]u8, self.records.count());
         defer allocator.free(keys);
         var it = self.records.keyIterator();
@@ -107,7 +138,7 @@ pub const Store = struct {
             }
         }.less);
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update("zettide/filesystem/snapshot/v1");
+        hash.update(if (with_authority) "zettide/filesystem/snapshot/v2" else "zettide/filesystem/snapshot/v1");
         for (keys) |key| {
             const record = self.records.get(key).?;
             hash.update(&record.id);
@@ -119,6 +150,16 @@ pub const Store = struct {
             }
             hash.update(record.name_bytes[0..record.name_len]);
             hash.update(record.description_bytes[0..record.description_len]);
+            if (with_authority) {
+                var epoch: [8]u8 = undefined;
+                std.mem.writeInt(u64, &epoch, record.authority_epoch, .little);
+                hash.update(&epoch);
+                hash.update(&.{@intFromBool(record.candidate_node_id != null)});
+                if (record.candidate_node_id) |node| {
+                    hash.update(&node);
+                    hash.update(&record.candidate_boot_id);
+                }
+            }
         }
         var result: [32]u8 = undefined;
         hash.final(&result);
@@ -130,7 +171,14 @@ pub fn validate(command: pb.FilesystemCommand) !void {
     const r = command.request orelse return error.InvalidWire;
     if (!schema.validText(r.request_id, schema.max_request_id_bytes, false) or !schema.validUuidV7(r.filesystem_id) or
         !schema.validText(r.description, schema.max_description_bytes, true)) return error.InvalidWire;
+    if (!authorityOperation(command.operation) and (r.holder_node_id.len != 0 or r.holder_boot_id.len != 0 or r.expected_authority_epoch != 0)) return error.InvalidWire;
     switch (command.operation) {
+        .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY, .FILESYSTEM_OPERATION_CANCEL_AUTHORITY => {
+            if (r.expected_resource_version == 0 or !schema.validUuidV7(r.holder_node_id) or
+                !schema.validFixedNonzero(r.holder_boot_id, 16) or r.pool_id.len != 0 or r.name.len != 0 or r.description.len != 0 or
+                r.backend_kind != .FILESYSTEM_BACKEND_KIND_UNSPECIFIED or r.name_profile != .FILESYSTEM_NAME_PROFILE_UNSPECIFIED or
+                (command.operation == .FILESYSTEM_OPERATION_CANCEL_AUTHORITY and r.expected_authority_epoch == 0)) return error.InvalidWire;
+        },
         .FILESYSTEM_OPERATION_CREATE => {
             if (!schema.validUuidV7(r.pool_id) or !schema.validText(r.name, schema.max_name_bytes, false) or r.expected_resource_version != 0 or
                 r.backend_kind != .FILESYSTEM_BACKEND_KIND_BLOB or
@@ -145,19 +193,24 @@ pub fn validate(command: pb.FilesystemCommand) !void {
     }
 }
 
+pub fn authorityOperation(operation: pb.FilesystemOperation) bool {
+    return operation == .FILESYSTEM_OPERATION_PROPOSE_AUTHORITY or operation == .FILESYSTEM_OPERATION_CANCEL_AUTHORITY;
+}
+
 // Bound allocation before protobuf decoding; reject duplicate/unknown fields.
 pub fn preflightRequest(bytes: []const u8) wire.Error!void {
     if (bytes.len > 2048) return error.InvalidWire;
     var cursor = wire.Cursor{ .bytes = bytes };
-    var seen: [9]bool = @splat(false);
+    var seen: [12]bool = @splat(false);
     while (try cursor.next()) |field| {
-        if (field.number > 8 or seen[field.number]) return error.InvalidWire;
+        if (field.number > 11 or seen[field.number]) return error.InvalidWire;
         seen[field.number] = true;
-        if (field.number <= 5) {
+        if (field.number <= 5 or field.number == 9 or field.number == 10) {
             if (field.wire_type != 2) return error.InvalidWire;
             const maximum: usize = switch (field.number) {
                 1 => schema.max_request_id_bytes,
-                2, 3 => 36,
+                2, 3, 9 => 36,
+                10 => 16,
                 4 => schema.max_name_bytes,
                 else => schema.max_description_bytes,
             };
@@ -169,8 +222,9 @@ pub fn preflightRequest(bytes: []const u8) wire.Error!void {
     }
     if (!seen[1] or !seen[2]) return error.InvalidWire;
 }
-pub fn preflightCommand(bytes: []const u8) wire.Error!void {
+pub fn preflightCommand(bytes: []const u8) wire.Error!u32 {
     if (bytes.len > 2100) return error.InvalidWire;
+    var minimum_version: u32 = 11;
     var cursor = wire.Cursor{ .bytes = bytes };
     var seen: [3]bool = @splat(false);
     while (try cursor.next()) |field| {
@@ -182,10 +236,12 @@ pub fn preflightCommand(bytes: []const u8) wire.Error!void {
         } else {
             if (field.wire_type != 0) return error.InvalidWire;
             const op = try cursor.readVarint();
-            if (op < 1 or op > 3) return error.InvalidWire;
+            if (op < 1 or op > 5) return error.InvalidWire;
+            if (op >= 4) minimum_version = 12;
         }
     }
     if (!seen[1] or !seen[2]) return error.InvalidWire;
+    return minimum_version;
 }
 pub fn preflightResponse(bytes: []const u8) wire.Error!void {
     if (bytes.len > 2048) return error.InvalidWire;
@@ -201,13 +257,13 @@ pub fn preflightResponse(bytes: []const u8) wire.Error!void {
         } else {
             if (field.wire_type != 2) return error.InvalidWire;
             var record = wire.Cursor{ .bytes = try cursor.readBytes(2000) };
-            var fields: [12]bool = @splat(false);
+            var fields: [16]bool = @splat(false);
             while (try record.next()) |part| {
-                if (part.number > 11 or fields[part.number]) return error.InvalidWire;
+                if (part.number > 15 or fields[part.number]) return error.InvalidWire;
                 fields[part.number] = true;
-                if (part.number <= 4) {
+                if (part.number <= 4 or part.number == 14 or part.number == 15) {
                     if (part.wire_type != 2) return error.InvalidWire;
-                    _ = try record.readBytes(if (part.number < 3) 36 else if (part.number == 3) schema.max_name_bytes else schema.max_description_bytes);
+                    _ = try record.readBytes(if (part.number == 15) 16 else if (part.number < 3 or part.number == 14) 36 else if (part.number == 3) schema.max_name_bytes else schema.max_description_bytes);
                 } else {
                     if (part.wire_type != 0) return error.InvalidWire;
                     _ = try record.readVarint();

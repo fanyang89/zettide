@@ -42,7 +42,7 @@ flowchart TB
 | Heartbeat | `ReportHeartbeat`、`GetHeartbeat` 当前 leader-local | Replica/path/lease/repair observation |
 | Placement/Allocation | durable schema 当前、无 mutation | reserve/move/tombstone Replica extents |
 | Lease | 当前区间租约 Acquire/Renew/Revoke/CompleteRevoke/Get/List；共享读、独占写 | 数据服务 I/O 接入、可验证 fencing 后的失联接管 |
-| Filesystem | 当前逻辑 Create/Update/Delete/Get/List；仅 PROVISIONING intent，live Filesystem 阻止 Pool 删除 | 单活 authority、placement/recovery、managed NFS/FUSE export 尚未实现 |
+| Filesystem | 当前逻辑 CRUD 与单活候选预留（node/进程 boot/epoch）；候选阻止 Filesystem 删除，live Filesystem 阻止 Pool 删除 | 候选不授权 I/O；存储 fencing、可执行 authority、placement/recovery、managed export 尚未实现 |
 | Publication | endpoint primitives 当前局部存在 | protocol、consumer、access generation、locator、Raft republish authority |
 | Attachment | storage-side 占位 schema，无 mutation | adapter intent、host session/device、libvirt 与 caller-directed republish |
 
@@ -183,7 +183,7 @@ RPC、proposal、ReadIndex、heartbeat、endpoint action、migration 和 repair 
 5. 追平 committed/applied 后才提供一致性服务，并先作为 follower 加入。
 6. 成为 leader 后从空 heartbeat view 重新收集 observation 并启动 reconciliation。
 
-生产配置必须使用持久 `data_dir`。当前 v14 snapshot 保存 Pool（含删除 tombstone）、Node、Member、Volume、authority、区间租约/Filesystem 视图摘要和全局业务幂等记录，兼容读取 v2–v13；socket、heartbeat 和临时 action 不进入 snapshot。
+生产配置必须使用持久 `data_dir`。当前 v15 snapshot 保存 Pool（含删除 tombstone）、Node、Member、Volume、authority、区间租约/Filesystem 视图摘要和全局业务幂等记录，兼容读取 v2–v14；socket、heartbeat 和临时 action 不进入 snapshot。
 
 ## 当前差距
 

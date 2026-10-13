@@ -1039,6 +1039,9 @@ service FilesystemService {
   rpc CreateFilesystem(FilesystemMutationRequest) returns (FilesystemResponse);
   rpc UpdateFilesystem(FilesystemMutationRequest) returns (FilesystemResponse);
   rpc DeleteFilesystem(FilesystemMutationRequest) returns (FilesystemResponse);
+  // Trusted control-plane intents only; CANDIDATE never authorizes storage I/O.
+  rpc ProposeFilesystemAuthority(FilesystemMutationRequest) returns (FilesystemResponse);
+  rpc CancelFilesystemAuthority(FilesystemMutationRequest) returns (FilesystemResponse);
   rpc GetFilesystem(GetFilesystemRequest) returns (FilesystemResponse);
   rpc ListFilesystems(ListFilesystemsRequest) returns (ListFilesystemsResponse);
 }
@@ -1056,6 +1059,10 @@ enum FilesystemLifecycleState {
   FILESYSTEM_LIFECYCLE_STATE_PROVISIONING = 1;
   FILESYSTEM_LIFECYCLE_STATE_DELETED = 2;
 }
+enum FilesystemAuthorityState {
+  FILESYSTEM_AUTHORITY_STATE_NONE = 0;
+  FILESYSTEM_AUTHORITY_STATE_CANDIDATE = 1;
+}
 message Filesystem {
   string id = 1;
   string pool_id = 2;
@@ -1068,6 +1075,11 @@ message Filesystem {
   uint64 created_revision = 9;
   uint64 resource_version = 10;
   uint64 deleted_revision = 11;
+  FilesystemAuthorityState authority_state = 12;
+  // Retained after cancellation; only proposal advances it.
+  uint64 authority_epoch = 13;
+  string candidate_node_id = 14;
+  bytes candidate_boot_id = 15;
 }
 message FilesystemMutationRequest {
   string request_id = 1;
@@ -1081,6 +1093,11 @@ message FilesystemMutationRequest {
   FilesystemNameProfile name_profile = 7;
   // Zero on create, required on update/delete. Delete omits description.
   uint64 expected_resource_version = 8;
+  // Authority operations only. Omit all create/description fields.
+  string holder_node_id = 9;
+  bytes holder_boot_id = 10;
+  // Observed epoch (including zero before the first proposal).
+  uint64 expected_authority_epoch = 11;
 }
 message FilesystemResponse { Filesystem filesystem = 1; }
 message GetFilesystemRequest { string filesystem_id = 1; }
@@ -1098,6 +1115,8 @@ enum FilesystemOperation {
   FILESYSTEM_OPERATION_CREATE = 1;
   FILESYSTEM_OPERATION_UPDATE = 2;
   FILESYSTEM_OPERATION_DELETE = 3;
+  FILESYSTEM_OPERATION_PROPOSE_AUTHORITY = 4;
+  FILESYSTEM_OPERATION_CANCEL_AUTHORITY = 5;
 }
 message FilesystemCommand {
   FilesystemMutationRequest request = 1;

@@ -3,13 +3,14 @@
 ## Implemented boundary
 
 `zettide.controller.v1.FilesystemService` implements logical Filesystem CRUD
+and single-owner candidate reservations
 under the [single-active architecture](decisions/0004-single-active-filesystem-service.md).
 Mutations are committed through Raft; queries use ReadIndex. Creation records a
 `PROVISIONING` intent only. It does not format media, attach an existing Blob,
 create a root inode, assign a service owner, grant access, or publish an export.
 
-Filesystem placement, authority, recovery, and managed NFS/FUSE activation are
-not implemented. No API in this slice can mark a filesystem ACTIVE or READY.
+Executable Filesystem authority, placement, fencing, recovery, and managed
+NFS/FUSE activation are not implemented. Candidate reservation is metadata only. No API in this slice can mark a filesystem ACTIVE or READY.
 Existing standalone FUSE/NFS paths do not automatically consume these records.
 
 ## Resource and lifecycle
@@ -19,7 +20,8 @@ A Filesystem contains:
 - `id`, `pool_id`, `name`, and `description`;
 - `backend_kind = FILESYSTEM_BACKEND_KIND_BLOB`;
 - immutable `name_profile` and desired filesystem root `format_version = 1`;
-- `lifecycle_state`, `created_revision`, `resource_version`, `deleted_revision`.
+- `lifecycle_state`, `created_revision`, `resource_version`, `deleted_revision`;
+- `authority_state`, `authority_epoch`, `candidate_node_id`, `candidate_boot_id`.
 
 The root format version is not the Member format version or controller command
 version. It is desired metadata, not evidence of an initialized backend.
@@ -38,7 +40,7 @@ Neither profile selection nor a metadata response is a POSIX conformance claim.
 Unspecified or unknown backend/profile values are rejected.
 
 All live records in this slice are unmaterialized provisioning intents. Delete
-cancels that intent and retains a `DELETED` tombstone. It does not erase physical
+requires no candidate, cancels that intent, and retains a `DELETED` tombstone. It does not erase physical
 data. Get/List hide deleted records; the successful delete response contains the
 tombstone and deletion revision. Names may be reused after deletion; IDs cannot.
 
@@ -54,14 +56,18 @@ belong to provisioning, which is not implemented here.
 
 ## Mutation RPCs
 
-Create/Update/Delete use `FilesystemMutationRequest`; their names determine the
+All mutation RPCs use `FilesystemMutationRequest`; their names determine the
 operation, not a caller-supplied operation enum.
 
 | RPC | Required fields | Other fields |
 | --- | --- | --- |
 | CreateFilesystem | request_id, filesystem_id, pool_id, name, backend_kind, name_profile | description optional; expected_resource_version must be zero |
 | UpdateFilesystem | request_id, filesystem_id, expected_resource_version | description replaces the old description, including empty; omit all create-only fields |
-| DeleteFilesystem | request_id, filesystem_id, expected_resource_version | omit description and all create-only fields |
+| DeleteFilesystem | request_id, filesystem_id, expected_resource_version | omit description and all create-only fields; no candidate may exist |
+| ProposeFilesystemAuthority | request_id, filesystem_id, expected_resource_version, holder_node_id, holder_boot_id, expected_authority_epoch | omit all creation/description fields; observed epoch is zero before the first proposal |
+| CancelFilesystemAuthority | request_id, filesystem_id, expected_resource_version, holder_node_id, holder_boot_id, expected_authority_epoch | omit all creation/description fields; epoch must be nonzero and binding must match |
+
+CRUD requests must omit the authority-only fields.
 
 `filesystem_id` is a **caller-selected canonical UUIDv7**, unlike server-generated
 IDs in CreatePool/CreateVolume. Select one fresh ID per new resource and preserve
@@ -84,9 +90,11 @@ types, fails.
 Status mapping:
 
 - `INVALID_ARGUMENT`: malformed IDs, invalid fields/profile, oversized input;
-- `NOT_FOUND`: missing/deleted resource or create against a missing/deleted Pool;
+- `NOT_FOUND`: missing/deleted resource, create against a missing/deleted Pool, or a
+  proposal targeting an unregistered Node;
 - `ALREADY_EXISTS`: used Filesystem ID or conflicting live Pool-scoped name;
-- `FAILED_PRECONDITION`: stale resource version or request-ID semantic conflict;
+- `FAILED_PRECONDITION`: stale resource version/authority epoch, candidate state or
+  binding conflict, or request-ID semantic conflict;
 - `RESOURCE_EXHAUSTED`: Filesystem/history limits;
 - leadership/quorum failures follow existing controller RPC behavior.
 
@@ -112,6 +120,47 @@ A protobuf JSON Create request is:
 
 Use an existing Pool ID and a fresh Filesystem ID, not these illustrative IDs.
 
+## Candidate reservation (not an I/O grant)
+
+The trusted control plane can reserve exactly one prospective service process:
+
+```text
+NONE -- ProposeFilesystemAuthority --> CANDIDATE
+CANDIDATE -- CancelFilesystemAuthority --> NONE
+```
+
+Proposal requires a live Filesystem, an existing registered Node, the current
+resource version and last observed authority epoch. `holder_boot_id` is an
+opaque nonzero 16-byte identity for the actual prospective engine-owning
+**process**, freshly generated on every process start, not a client session or
+host boot identity. Registration alone does not prove backend eligibility,
+process liveness, or ownership; no such attestation is implemented yet.
+
+A successful proposal sets `authority_epoch` to its Raft commit index, advancing
+it monotonically. Existing candidates cannot be overwritten, even for the same
+node/boot. Description updates leave the binding/epoch intact but advance the
+resource version. Delete is blocked while a candidate exists. Cancellation
+requires the current resource version and the exact node/boot/epoch binding;
+it clears the candidate but **retains the epoch**. A new proposal must observe
+that retained epoch, and commits a larger one. There is no candidate TTL or
+automatic replacement on node failure, timeout, or controller leader change.
+
+All outcomes use the shared durable request-ID domain. Replaying an old
+successful proposal returns its historical candidate, even after cancellation
+or replacement; this must never be treated as current authority. Get/List use
+ReadIndex to expose the current binding. No candidate response, epoch, or
+ReadIndex observation is a storage access capability.
+
+`CANDIDATE` **must not trigger any external side effect**: no media formatting,
+backend open/recovery, writes, export publication, or client admission. This is
+why cancellation needs no holder acknowledgement or storage fence in this
+slice. Before adding such work, introduce a committed non-cancellable preparing
+phase and exact backend/placement identity; then implement old-owner fencing,
+backend recovery, matching readiness and admission. Do not reuse this cancel
+operation to revoke an engine that may have touched storage. The current
+reconciler and standalone FUSE/NFS processes do not act on candidate records.
+The CLI remains CRUD-only; generated clients expose the two candidate RPCs.
+
 ## Query RPCs
 
 - `GetFilesystem(GetFilesystemRequest{filesystem_id})` returns one live record.
@@ -127,14 +176,16 @@ Pool with no live Filesystems yields an empty list.
 
 ## Persistence, compatibility, and security
 
-Current commands use **v11** and snapshots **v14**, accepting legacy commands
-v1-v10 and snapshots v2-v13. Filesystem commands require v11 and retained
-Filesystem history requires snapshot v14. Upgrade controller voters together;
-older binaries cannot restore v14 snapshots, even if the public API was unused.
+Current commands use **v12** and snapshots **v15**, accepting legacy commands
+v1-v11 and snapshots v2-v14. Filesystem CRUD requires command v11/snapshot v14;
+candidate operations require command v12/snapshot v15. Legacy v14 Filesystem
+snapshots retain their original digest and CRUD fingerprints during validation,
+then upgrade to the authority-aware digest. Upgrade controller voters together;
+older binaries cannot restore v15 snapshots, even if the new API was unused.
 
 Snapshots retain the global request history and a canonical Filesystem-view
 digest. Restore replays Filesystem mutations in revision order, using historical
-Pool availability, verifies retained outcomes and the resulting view, and
+Pool/Node availability, verifies retained outcomes and the resulting view, and
 validates Pool deletion against historical Filesystem lifetimes. Installation
 is atomic, including allocation failures. Terminal IDs remain in the digest and
 history. No filesystem data or inode tree is included in controller snapshots.
@@ -151,9 +202,11 @@ client authentication, UID/GID mapping, export authorization, or usable I/O.
 State-machine tests cover create/update/delete, immutable-field validation,
 Pool-scoped names, name reuse without ID reuse, durable CAS rejections,
 cross-resource request-ID conflicts, Pool deletion guards, historical replay,
-legacy format gates, corrupt snapshot rejection, and allocation-failure atomicity.
+legacy format gates, v14 upgrades, candidate exclusivity, stale boot/epoch
+rejection, retained epochs, corrupt binding rejection, and allocation-failure atomicity.
 
 Real RPC tests cover pagination, two WAL/snapshot restarts, tombstones, and
-historical retries. The three-voter runtime test covers creation/retry across
-leader failover and deletion followed by former-leader catch-up. These tests do
+historical retries, candidate bindings and epoch advancement. The three-voter
+runtime test covers candidate preservation and deletion protection across leader
+failover, cancellation/deletion, and former-leader catch-up. These tests do
 not validate managed filesystem activation or POSIX payload behavior.

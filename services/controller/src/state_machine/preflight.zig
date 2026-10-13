@@ -60,6 +60,7 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
     var seen_format = false;
     var format_version: u64 = 0;
     var kind: ?RequestKind = null;
+    var filesystem_min_version: u32 = 11;
     while (try cursor.next()) |field| switch (field.number) {
         1 => {
             if (field.wire_type != 0 or seen_format) return error.InvalidWire;
@@ -155,7 +156,7 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
         22 => {
             if (field.wire_type != 2 or kind != null) return error.InvalidWire;
             kind = .filesystem;
-            try filesystems.preflightCommand(try cursor.readBytes(2100));
+            filesystem_min_version = try filesystems.preflightCommand(try cursor.readBytes(2100));
         },
         21 => {
             if (field.wire_type != 2 or kind != null) return error.InvalidWire;
@@ -171,7 +172,7 @@ fn preflightCommandKind(bytes: []const u8) WireError!RequestKind {
     };
     if (!seen_format) return error.InvalidWire;
     const result = kind orelse return error.InvalidWire;
-    if (result == .filesystem and format_version < 11) return error.InvalidWire;
+    if (result == .filesystem and format_version < filesystem_min_version) return error.InvalidWire;
     if (result == .range_lease and format_version < 10) return error.InvalidWire;
     if ((result == .update_pool or result == .delete_pool) and format_version < 9) return error.InvalidWire;
     if ((result == .create_volume or result == .delete_volume) and format_version < 2) return error.InvalidWire;

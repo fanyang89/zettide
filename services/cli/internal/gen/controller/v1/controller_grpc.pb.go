@@ -1321,11 +1321,13 @@ var RangeLeaseService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	FilesystemService_CreateFilesystem_FullMethodName = "/zettide.controller.v1.FilesystemService/CreateFilesystem"
-	FilesystemService_UpdateFilesystem_FullMethodName = "/zettide.controller.v1.FilesystemService/UpdateFilesystem"
-	FilesystemService_DeleteFilesystem_FullMethodName = "/zettide.controller.v1.FilesystemService/DeleteFilesystem"
-	FilesystemService_GetFilesystem_FullMethodName    = "/zettide.controller.v1.FilesystemService/GetFilesystem"
-	FilesystemService_ListFilesystems_FullMethodName  = "/zettide.controller.v1.FilesystemService/ListFilesystems"
+	FilesystemService_CreateFilesystem_FullMethodName           = "/zettide.controller.v1.FilesystemService/CreateFilesystem"
+	FilesystemService_UpdateFilesystem_FullMethodName           = "/zettide.controller.v1.FilesystemService/UpdateFilesystem"
+	FilesystemService_DeleteFilesystem_FullMethodName           = "/zettide.controller.v1.FilesystemService/DeleteFilesystem"
+	FilesystemService_ProposeFilesystemAuthority_FullMethodName = "/zettide.controller.v1.FilesystemService/ProposeFilesystemAuthority"
+	FilesystemService_CancelFilesystemAuthority_FullMethodName  = "/zettide.controller.v1.FilesystemService/CancelFilesystemAuthority"
+	FilesystemService_GetFilesystem_FullMethodName              = "/zettide.controller.v1.FilesystemService/GetFilesystem"
+	FilesystemService_ListFilesystems_FullMethodName            = "/zettide.controller.v1.FilesystemService/ListFilesystems"
 )
 
 // FilesystemServiceClient is the client API for FilesystemService service.
@@ -1337,6 +1339,9 @@ type FilesystemServiceClient interface {
 	CreateFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
 	UpdateFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
 	DeleteFilesystem(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
+	// Trusted control-plane intents only; CANDIDATE never authorizes storage I/O.
+	ProposeFilesystemAuthority(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
+	CancelFilesystemAuthority(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
 	GetFilesystem(ctx context.Context, in *GetFilesystemRequest, opts ...grpc.CallOption) (*FilesystemResponse, error)
 	ListFilesystems(ctx context.Context, in *ListFilesystemsRequest, opts ...grpc.CallOption) (*ListFilesystemsResponse, error)
 }
@@ -1379,6 +1384,26 @@ func (c *filesystemServiceClient) DeleteFilesystem(ctx context.Context, in *File
 	return out, nil
 }
 
+func (c *filesystemServiceClient) ProposeFilesystemAuthority(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FilesystemResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_ProposeFilesystemAuthority_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *filesystemServiceClient) CancelFilesystemAuthority(ctx context.Context, in *FilesystemMutationRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FilesystemResponse)
+	err := c.cc.Invoke(ctx, FilesystemService_CancelFilesystemAuthority_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *filesystemServiceClient) GetFilesystem(ctx context.Context, in *GetFilesystemRequest, opts ...grpc.CallOption) (*FilesystemResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(FilesystemResponse)
@@ -1408,6 +1433,9 @@ type FilesystemServiceServer interface {
 	CreateFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
 	UpdateFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
 	DeleteFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
+	// Trusted control-plane intents only; CANDIDATE never authorizes storage I/O.
+	ProposeFilesystemAuthority(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
+	CancelFilesystemAuthority(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error)
 	GetFilesystem(context.Context, *GetFilesystemRequest) (*FilesystemResponse, error)
 	ListFilesystems(context.Context, *ListFilesystemsRequest) (*ListFilesystemsResponse, error)
 	mustEmbedUnimplementedFilesystemServiceServer()
@@ -1428,6 +1456,12 @@ func (UnimplementedFilesystemServiceServer) UpdateFilesystem(context.Context, *F
 }
 func (UnimplementedFilesystemServiceServer) DeleteFilesystem(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteFilesystem not implemented")
+}
+func (UnimplementedFilesystemServiceServer) ProposeFilesystemAuthority(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeFilesystemAuthority not implemented")
+}
+func (UnimplementedFilesystemServiceServer) CancelFilesystemAuthority(context.Context, *FilesystemMutationRequest) (*FilesystemResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelFilesystemAuthority not implemented")
 }
 func (UnimplementedFilesystemServiceServer) GetFilesystem(context.Context, *GetFilesystemRequest) (*FilesystemResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetFilesystem not implemented")
@@ -1510,6 +1544,42 @@ func _FilesystemService_DeleteFilesystem_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _FilesystemService_ProposeFilesystemAuthority_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FilesystemMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilesystemServiceServer).ProposeFilesystemAuthority(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilesystemService_ProposeFilesystemAuthority_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilesystemServiceServer).ProposeFilesystemAuthority(ctx, req.(*FilesystemMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _FilesystemService_CancelFilesystemAuthority_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FilesystemMutationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FilesystemServiceServer).CancelFilesystemAuthority(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: FilesystemService_CancelFilesystemAuthority_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FilesystemServiceServer).CancelFilesystemAuthority(ctx, req.(*FilesystemMutationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _FilesystemService_GetFilesystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetFilesystemRequest)
 	if err := dec(in); err != nil {
@@ -1564,6 +1634,14 @@ var FilesystemService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteFilesystem",
 			Handler:    _FilesystemService_DeleteFilesystem_Handler,
+		},
+		{
+			MethodName: "ProposeFilesystemAuthority",
+			Handler:    _FilesystemService_ProposeFilesystemAuthority_Handler,
+		},
+		{
+			MethodName: "CancelFilesystemAuthority",
+			Handler:    _FilesystemService_CancelFilesystemAuthority_Handler,
 		},
 		{
 			MethodName: "GetFilesystem",

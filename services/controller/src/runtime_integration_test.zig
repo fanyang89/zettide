@@ -640,6 +640,10 @@ test "three-voter runtime survives leader failover and restart" {
     var created_fs = try crudRpc(pb.FilesystemResponse, runtimes[initial_leader].?, fs_prefix ++ "CreateFilesystem", fs_request);
     defer created_fs.deinit(config_allocator);
     try waitForApplied(&runtimes, created_fs.filesystem.?.resource_version);
+    const fs_candidate_request = pb.FilesystemMutationRequest{ .request_id = "failover-filesystem-candidate", .filesystem_id = fs_request.filesystem_id, .expected_resource_version = created_fs.filesystem.?.resource_version, .holder_node_id = registered.id, .holder_boot_id = &reconcile_holder_boot_id };
+    var fs_candidate = try crudRpc(pb.FilesystemResponse, runtimes[initial_leader].?, fs_prefix ++ "ProposeFilesystemAuthority", fs_candidate_request);
+    defer fs_candidate.deinit(config_allocator);
+    try waitForApplied(&runtimes, fs_candidate.filesystem.?.resource_version);
 
     try runtimes[initial_leader].?.shutdown();
     runtimes[initial_leader].?.deinit();
@@ -727,11 +731,20 @@ test "three-voter runtime survives leader failover and restart" {
 
     var recovered_fs = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = fs_request.filesystem_id });
     defer recovered_fs.deinit(config_allocator);
-    try std.testing.expectEqual(created_fs.filesystem.?.resource_version, recovered_fs.filesystem.?.resource_version);
+    try std.testing.expectEqual(fs_candidate.filesystem.?.authority_epoch, recovered_fs.filesystem.?.authority_epoch);
+    try std.testing.expectEqualStrings(registered.id, recovered_fs.filesystem.?.candidate_node_id);
+    try std.testing.expectEqualSlices(u8, &reconcile_holder_boot_id, recovered_fs.filesystem.?.candidate_boot_id);
     var fs_replay = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "CreateFilesystem", fs_request);
     defer fs_replay.deinit(config_allocator);
     try std.testing.expectEqual(created_fs.filesystem.?.resource_version, fs_replay.filesystem.?.resource_version);
-    var deleted_fs = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "failover-filesystem-delete", .filesystem_id = fs_request.filesystem_id, .expected_resource_version = recovered_fs.filesystem.?.resource_version });
+    try crudStatus(runtimes[replacement_leader].?, fs_prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "failover-delete-reserved", .filesystem_id = fs_request.filesystem_id, .expected_resource_version = recovered_fs.filesystem.?.resource_version }, .failed_precondition);
+    var fs_cancel = fs_candidate_request;
+    fs_cancel.request_id = "failover-cancel-candidate";
+    fs_cancel.expected_resource_version = recovered_fs.filesystem.?.resource_version;
+    fs_cancel.expected_authority_epoch = recovered_fs.filesystem.?.authority_epoch;
+    var cancelled_fs = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "CancelFilesystemAuthority", fs_cancel);
+    defer cancelled_fs.deinit(config_allocator);
+    var deleted_fs = try crudRpc(pb.FilesystemResponse, runtimes[replacement_leader].?, fs_prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "failover-filesystem-delete", .filesystem_id = fs_request.filesystem_id, .expected_resource_version = cancelled_fs.filesystem.?.resource_version });
     defer deleted_fs.deinit(config_allocator);
 
     var deleted_volume = try deleteVolume(
@@ -2096,5 +2109,86 @@ test "Filesystem CRUD RPC preserves provisioning CAS pagination and tombstones o
         create.filesystem_id = "0198f54d-5c2a-7000-8000-000000000304";
         create.request_id = "filesystem-deleted-pool";
         try crudStatus(runtime, prefix ++ "CreateFilesystem", create, .not_found);
+    }
+}
+
+test "Filesystem candidate RPC binding and epoch survive two WAL restarts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", config_allocator);
+    defer config_allocator.free(root);
+    const data_dir = try std.fmt.allocPrintSentinel(config_allocator, "{s}/candidate-raft", .{root}, 0);
+    defer config_allocator.free(data_dir);
+    const ports = try reserveUniquePorts(1);
+    const address = try std.fmt.allocPrint(config_allocator, "127.0.0.1:{}", .{ports[0]});
+    defer config_allocator.free(address);
+    var config = try makeConfig(1, .{1} ++ @as([15]u8, @splat(0)), &.{address}, data_dir);
+    defer config.deinit();
+    const prefix = "/zettide.controller.v1.FilesystemService/";
+    const id = "0198f54d-5c2a-7000-8000-000000000301";
+    const node_id = "0198f54d-5c2a-7000-8000-000000000201";
+    const next_boot: [16]u8 = @splat(0x77);
+    var proposal = pb.FilesystemMutationRequest{ .request_id = "first-proposal", .filesystem_id = id, .holder_node_id = node_id, .holder_boot_id = &reconcile_holder_boot_id };
+    var original: pb.FilesystemMutationRequest = undefined;
+    var first_epoch: u64 = 0;
+    var epoch: u64 = 0;
+    for (0..3) |phase| {
+        const runtime = try runtime_mod.Runtime.create(runtime_allocator, std.testing.io, &config, test_options);
+        defer destroyRuntime(runtime);
+        _ = try waitForStableLeader(&.{runtime});
+        if (phase == 0) {
+            var pool = try createPool(runtime, "candidate-pool", "candidate-pool");
+            defer pool.deinit();
+            var node = try registerNode(runtime, &config, "candidate-node", node_id);
+            defer node.deinit();
+            var created = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "CreateFilesystem", pb.FilesystemMutationRequest{ .request_id = "filesystem", .filesystem_id = id, .pool_id = pool.id, .name = "files", .backend_kind = .FILESYSTEM_BACKEND_KIND_BLOB, .name_profile = .FILESYSTEM_NAME_PROFILE_LEGACY_RAW });
+            defer created.deinit(config_allocator);
+            proposal.expected_resource_version = created.filesystem.?.resource_version;
+            var invalid = proposal;
+            invalid.holder_boot_id = "";
+            try crudStatus(runtime, prefix ++ "ProposeFilesystemAuthority", invalid, .invalid_argument);
+            original = proposal;
+        } else {
+            var fetched = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "GetFilesystem", pb.GetFilesystemRequest{ .filesystem_id = id });
+            defer fetched.deinit(config_allocator);
+            try std.testing.expectEqual(epoch, fetched.filesystem.?.authority_epoch);
+            try std.testing.expectEqual(pb.FilesystemAuthorityState.FILESYSTEM_AUTHORITY_STATE_CANDIDATE, fetched.filesystem.?.authority_state);
+            try std.testing.expectEqualSlices(u8, proposal.holder_boot_id, fetched.filesystem.?.candidate_boot_id);
+            var historical = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "ProposeFilesystemAuthority", original);
+            defer historical.deinit(config_allocator);
+            try std.testing.expectEqual(first_epoch, historical.filesystem.?.authority_epoch);
+            var cancel = proposal;
+            cancel.request_id = if (phase == 1) "cancel-first" else "cancel-second";
+            cancel.expected_resource_version = fetched.filesystem.?.resource_version;
+            cancel.expected_authority_epoch = epoch;
+            if (phase == 2) {
+                var stale = original;
+                stale.request_id = "late-old-owner";
+                stale.expected_resource_version = cancel.expected_resource_version;
+                stale.expected_authority_epoch = first_epoch;
+                try crudStatus(runtime, prefix ++ "CancelFilesystemAuthority", stale, .failed_precondition);
+            }
+            var cancelled = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "CancelFilesystemAuthority", cancel);
+            defer cancelled.deinit(config_allocator);
+            try std.testing.expectEqual(epoch, cancelled.filesystem.?.authority_epoch);
+            try std.testing.expectEqual(pb.FilesystemAuthorityState.FILESYSTEM_AUTHORITY_STATE_NONE, cancelled.filesystem.?.authority_state);
+            if (phase == 2) {
+                var deleted = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "DeleteFilesystem", pb.FilesystemMutationRequest{ .request_id = "delete", .filesystem_id = id, .expected_resource_version = cancelled.filesystem.?.resource_version });
+                defer deleted.deinit(config_allocator);
+                try std.testing.expectEqual(epoch, deleted.filesystem.?.authority_epoch);
+                try runtime.shutdown();
+                continue;
+            }
+            proposal.request_id = "second-proposal";
+            proposal.expected_resource_version = cancelled.filesystem.?.resource_version;
+            proposal.expected_authority_epoch = epoch;
+            proposal.holder_boot_id = &next_boot;
+        }
+        var candidate = try crudRpc(pb.FilesystemResponse, runtime, prefix ++ "ProposeFilesystemAuthority", proposal);
+        defer candidate.deinit(config_allocator);
+        try std.testing.expect(candidate.filesystem.?.authority_epoch > epoch);
+        epoch = candidate.filesystem.?.authority_epoch;
+        if (phase == 0) first_epoch = epoch;
+        try runtime.shutdown();
     }
 }

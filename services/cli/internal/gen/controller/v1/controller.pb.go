@@ -1789,13 +1789,61 @@ func (FilesystemLifecycleState) EnumDescriptor() ([]byte, []int) {
 	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{30}
 }
 
+type FilesystemAuthorityState int32
+
+const (
+	FilesystemAuthorityState_FILESYSTEM_AUTHORITY_STATE_NONE      FilesystemAuthorityState = 0
+	FilesystemAuthorityState_FILESYSTEM_AUTHORITY_STATE_CANDIDATE FilesystemAuthorityState = 1
+)
+
+// Enum value maps for FilesystemAuthorityState.
+var (
+	FilesystemAuthorityState_name = map[int32]string{
+		0: "FILESYSTEM_AUTHORITY_STATE_NONE",
+		1: "FILESYSTEM_AUTHORITY_STATE_CANDIDATE",
+	}
+	FilesystemAuthorityState_value = map[string]int32{
+		"FILESYSTEM_AUTHORITY_STATE_NONE":      0,
+		"FILESYSTEM_AUTHORITY_STATE_CANDIDATE": 1,
+	}
+)
+
+func (x FilesystemAuthorityState) Enum() *FilesystemAuthorityState {
+	p := new(FilesystemAuthorityState)
+	*p = x
+	return p
+}
+
+func (x FilesystemAuthorityState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FilesystemAuthorityState) Descriptor() protoreflect.EnumDescriptor {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[31].Descriptor()
+}
+
+func (FilesystemAuthorityState) Type() protoreflect.EnumType {
+	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[31]
+}
+
+func (x FilesystemAuthorityState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FilesystemAuthorityState.Descriptor instead.
+func (FilesystemAuthorityState) EnumDescriptor() ([]byte, []int) {
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{31}
+}
+
 type FilesystemOperation int32
 
 const (
-	FilesystemOperation_FILESYSTEM_OPERATION_UNSPECIFIED FilesystemOperation = 0
-	FilesystemOperation_FILESYSTEM_OPERATION_CREATE      FilesystemOperation = 1
-	FilesystemOperation_FILESYSTEM_OPERATION_UPDATE      FilesystemOperation = 2
-	FilesystemOperation_FILESYSTEM_OPERATION_DELETE      FilesystemOperation = 3
+	FilesystemOperation_FILESYSTEM_OPERATION_UNSPECIFIED       FilesystemOperation = 0
+	FilesystemOperation_FILESYSTEM_OPERATION_CREATE            FilesystemOperation = 1
+	FilesystemOperation_FILESYSTEM_OPERATION_UPDATE            FilesystemOperation = 2
+	FilesystemOperation_FILESYSTEM_OPERATION_DELETE            FilesystemOperation = 3
+	FilesystemOperation_FILESYSTEM_OPERATION_PROPOSE_AUTHORITY FilesystemOperation = 4
+	FilesystemOperation_FILESYSTEM_OPERATION_CANCEL_AUTHORITY  FilesystemOperation = 5
 )
 
 // Enum value maps for FilesystemOperation.
@@ -1805,12 +1853,16 @@ var (
 		1: "FILESYSTEM_OPERATION_CREATE",
 		2: "FILESYSTEM_OPERATION_UPDATE",
 		3: "FILESYSTEM_OPERATION_DELETE",
+		4: "FILESYSTEM_OPERATION_PROPOSE_AUTHORITY",
+		5: "FILESYSTEM_OPERATION_CANCEL_AUTHORITY",
 	}
 	FilesystemOperation_value = map[string]int32{
-		"FILESYSTEM_OPERATION_UNSPECIFIED": 0,
-		"FILESYSTEM_OPERATION_CREATE":      1,
-		"FILESYSTEM_OPERATION_UPDATE":      2,
-		"FILESYSTEM_OPERATION_DELETE":      3,
+		"FILESYSTEM_OPERATION_UNSPECIFIED":       0,
+		"FILESYSTEM_OPERATION_CREATE":            1,
+		"FILESYSTEM_OPERATION_UPDATE":            2,
+		"FILESYSTEM_OPERATION_DELETE":            3,
+		"FILESYSTEM_OPERATION_PROPOSE_AUTHORITY": 4,
+		"FILESYSTEM_OPERATION_CANCEL_AUTHORITY":  5,
 	}
 )
 
@@ -1825,11 +1877,11 @@ func (x FilesystemOperation) String() string {
 }
 
 func (FilesystemOperation) Descriptor() protoreflect.EnumDescriptor {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[31].Descriptor()
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[32].Descriptor()
 }
 
 func (FilesystemOperation) Type() protoreflect.EnumType {
-	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[31]
+	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[32]
 }
 
 func (x FilesystemOperation) Number() protoreflect.EnumNumber {
@@ -1838,7 +1890,7 @@ func (x FilesystemOperation) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FilesystemOperation.Descriptor instead.
 func (FilesystemOperation) EnumDescriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{31}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{32}
 }
 
 type FilesystemCode int32
@@ -1889,11 +1941,11 @@ func (x FilesystemCode) String() string {
 }
 
 func (FilesystemCode) Descriptor() protoreflect.EnumDescriptor {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[32].Descriptor()
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[33].Descriptor()
 }
 
 func (FilesystemCode) Type() protoreflect.EnumType {
-	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[32]
+	return &file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes[33]
 }
 
 func (x FilesystemCode) Number() protoreflect.EnumNumber {
@@ -1902,7 +1954,7 @@ func (x FilesystemCode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FilesystemCode.Descriptor instead.
 func (FilesystemCode) EnumDescriptor() ([]byte, []int) {
-	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{32}
+	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescGZIP(), []int{33}
 }
 
 type Pool struct {
@@ -9270,6 +9322,11 @@ type Filesystem struct {
 	CreatedRevision uint64                   `protobuf:"varint,9,opt,name=created_revision,json=createdRevision,proto3" json:"created_revision,omitempty"`
 	ResourceVersion uint64                   `protobuf:"varint,10,opt,name=resource_version,json=resourceVersion,proto3" json:"resource_version,omitempty"`
 	DeletedRevision uint64                   `protobuf:"varint,11,opt,name=deleted_revision,json=deletedRevision,proto3" json:"deleted_revision,omitempty"`
+	AuthorityState  FilesystemAuthorityState `protobuf:"varint,12,opt,name=authority_state,json=authorityState,proto3,enum=zettide.controller.v1.FilesystemAuthorityState" json:"authority_state,omitempty"`
+	// Retained after cancellation; only proposal advances it.
+	AuthorityEpoch  uint64 `protobuf:"varint,13,opt,name=authority_epoch,json=authorityEpoch,proto3" json:"authority_epoch,omitempty"`
+	CandidateNodeId string `protobuf:"bytes,14,opt,name=candidate_node_id,json=candidateNodeId,proto3" json:"candidate_node_id,omitempty"`
+	CandidateBootId []byte `protobuf:"bytes,15,opt,name=candidate_boot_id,json=candidateBootId,proto3" json:"candidate_boot_id,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -9381,6 +9438,34 @@ func (x *Filesystem) GetDeletedRevision() uint64 {
 	return 0
 }
 
+func (x *Filesystem) GetAuthorityState() FilesystemAuthorityState {
+	if x != nil {
+		return x.AuthorityState
+	}
+	return FilesystemAuthorityState_FILESYSTEM_AUTHORITY_STATE_NONE
+}
+
+func (x *Filesystem) GetAuthorityEpoch() uint64 {
+	if x != nil {
+		return x.AuthorityEpoch
+	}
+	return 0
+}
+
+func (x *Filesystem) GetCandidateNodeId() string {
+	if x != nil {
+		return x.CandidateNodeId
+	}
+	return ""
+}
+
+func (x *Filesystem) GetCandidateBootId() []byte {
+	if x != nil {
+		return x.CandidateBootId
+	}
+	return nil
+}
+
 type FilesystemMutationRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -9394,8 +9479,13 @@ type FilesystemMutationRequest struct {
 	NameProfile FilesystemNameProfile `protobuf:"varint,7,opt,name=name_profile,json=nameProfile,proto3,enum=zettide.controller.v1.FilesystemNameProfile" json:"name_profile,omitempty"`
 	// Zero on create, required on update/delete. Delete omits description.
 	ExpectedResourceVersion uint64 `protobuf:"varint,8,opt,name=expected_resource_version,json=expectedResourceVersion,proto3" json:"expected_resource_version,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	// Authority operations only. Omit all create/description fields.
+	HolderNodeId string `protobuf:"bytes,9,opt,name=holder_node_id,json=holderNodeId,proto3" json:"holder_node_id,omitempty"`
+	HolderBootId []byte `protobuf:"bytes,10,opt,name=holder_boot_id,json=holderBootId,proto3" json:"holder_boot_id,omitempty"`
+	// Observed epoch (including zero before the first proposal).
+	ExpectedAuthorityEpoch uint64 `protobuf:"varint,11,opt,name=expected_authority_epoch,json=expectedAuthorityEpoch,proto3" json:"expected_authority_epoch,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *FilesystemMutationRequest) Reset() {
@@ -9480,6 +9570,27 @@ func (x *FilesystemMutationRequest) GetNameProfile() FilesystemNameProfile {
 func (x *FilesystemMutationRequest) GetExpectedResourceVersion() uint64 {
 	if x != nil {
 		return x.ExpectedResourceVersion
+	}
+	return 0
+}
+
+func (x *FilesystemMutationRequest) GetHolderNodeId() string {
+	if x != nil {
+		return x.HolderNodeId
+	}
+	return ""
+}
+
+func (x *FilesystemMutationRequest) GetHolderBootId() []byte {
+	if x != nil {
+		return x.HolderBootId
+	}
+	return nil
+}
+
+func (x *FilesystemMutationRequest) GetExpectedAuthorityEpoch() uint64 {
+	if x != nil {
+		return x.ExpectedAuthorityEpoch
 	}
 	return 0
 }
@@ -10450,7 +10561,7 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\toperation\x18\x02 \x01(\x0e2*.zettide.controller.v1.RangeLeaseOperationR\toperation\"\x8d\x01\n" +
 	"\x17RangeLeaseApplyResponse\x129\n" +
 	"\x04code\x18\x01 \x01(\x0e2%.zettide.controller.v1.RangeLeaseCodeR\x04code\x127\n" +
-	"\x05lease\x18\x02 \x01(\v2!.zettide.controller.v1.RangeLeaseR\x05lease\"\x8f\x04\n" +
+	"\x05lease\x18\x02 \x01(\v2!.zettide.controller.v1.RangeLeaseR\x05lease\"\xea\x05\n" +
 	"\n" +
 	"Filesystem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
@@ -10464,7 +10575,11 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x10created_revision\x18\t \x01(\x04R\x0fcreatedRevision\x12)\n" +
 	"\x10resource_version\x18\n" +
 	" \x01(\x04R\x0fresourceVersion\x12)\n" +
-	"\x10deleted_revision\x18\v \x01(\x04R\x0fdeletedRevision\"\x8c\x03\n" +
+	"\x10deleted_revision\x18\v \x01(\x04R\x0fdeletedRevision\x12X\n" +
+	"\x0fauthority_state\x18\f \x01(\x0e2/.zettide.controller.v1.FilesystemAuthorityStateR\x0eauthorityState\x12'\n" +
+	"\x0fauthority_epoch\x18\r \x01(\x04R\x0eauthorityEpoch\x12*\n" +
+	"\x11candidate_node_id\x18\x0e \x01(\tR\x0fcandidateNodeId\x12*\n" +
+	"\x11candidate_boot_id\x18\x0f \x01(\fR\x0fcandidateBootId\"\x92\x04\n" +
 	"\x19FilesystemMutationRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12#\n" +
@@ -10474,7 +10589,11 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\vdescription\x18\x05 \x01(\tR\vdescription\x12O\n" +
 	"\fbackend_kind\x18\x06 \x01(\x0e2,.zettide.controller.v1.FilesystemBackendKindR\vbackendKind\x12O\n" +
 	"\fname_profile\x18\a \x01(\x0e2,.zettide.controller.v1.FilesystemNameProfileR\vnameProfile\x12:\n" +
-	"\x19expected_resource_version\x18\b \x01(\x04R\x17expectedResourceVersion\"W\n" +
+	"\x19expected_resource_version\x18\b \x01(\x04R\x17expectedResourceVersion\x12$\n" +
+	"\x0eholder_node_id\x18\t \x01(\tR\fholderNodeId\x12$\n" +
+	"\x0eholder_boot_id\x18\n" +
+	" \x01(\fR\fholderBootId\x128\n" +
+	"\x18expected_authority_epoch\x18\v \x01(\x04R\x16expectedAuthorityEpoch\"W\n" +
 	"\x12FilesystemResponse\x12A\n" +
 	"\n" +
 	"filesystem\x18\x01 \x01(\v2!.zettide.controller.v1.FilesystemR\n" +
@@ -10704,12 +10823,17 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x18FilesystemLifecycleState\x12*\n" +
 	"&FILESYSTEM_LIFECYCLE_STATE_UNSPECIFIED\x10\x00\x12+\n" +
 	"'FILESYSTEM_LIFECYCLE_STATE_PROVISIONING\x10\x01\x12&\n" +
-	"\"FILESYSTEM_LIFECYCLE_STATE_DELETED\x10\x02*\x9e\x01\n" +
+	"\"FILESYSTEM_LIFECYCLE_STATE_DELETED\x10\x02*i\n" +
+	"\x18FilesystemAuthorityState\x12#\n" +
+	"\x1fFILESYSTEM_AUTHORITY_STATE_NONE\x10\x00\x12(\n" +
+	"$FILESYSTEM_AUTHORITY_STATE_CANDIDATE\x10\x01*\xf5\x01\n" +
 	"\x13FilesystemOperation\x12$\n" +
 	" FILESYSTEM_OPERATION_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bFILESYSTEM_OPERATION_CREATE\x10\x01\x12\x1f\n" +
 	"\x1bFILESYSTEM_OPERATION_UPDATE\x10\x02\x12\x1f\n" +
-	"\x1bFILESYSTEM_OPERATION_DELETE\x10\x03*\x99\x02\n" +
+	"\x1bFILESYSTEM_OPERATION_DELETE\x10\x03\x12*\n" +
+	"&FILESYSTEM_OPERATION_PROPOSE_AUTHORITY\x10\x04\x12)\n" +
+	"%FILESYSTEM_OPERATION_CANCEL_AUTHORITY\x10\x05*\x99\x02\n" +
 	"\x0eFilesystemCode\x12\x1f\n" +
 	"\x1bFILESYSTEM_CODE_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12FILESYSTEM_CODE_OK\x10\x01\x12\x1d\n" +
@@ -10753,11 +10877,13 @@ const file_services_controller_proto_zettide_controller_v1_controller_proto_rawD
 	"\x0eCompleteRevoke\x12(.zettide.controller.v1.RangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12b\n" +
 	"\bGetLease\x12+.zettide.controller.v1.GetRangeLeaseRequest\x1a).zettide.controller.v1.RangeLeaseResponse\x12k\n" +
 	"\n" +
-	"ListLeases\x12-.zettide.controller.v1.ListRangeLeasesRequest\x1a..zettide.controller.v1.ListRangeLeasesResponse2\xc1\x04\n" +
+	"ListLeases\x12-.zettide.controller.v1.ListRangeLeasesRequest\x1a..zettide.controller.v1.ListRangeLeasesResponse2\xb6\x06\n" +
 	"\x11FilesystemService\x12o\n" +
 	"\x10CreateFilesystem\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12o\n" +
 	"\x10UpdateFilesystem\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12o\n" +
-	"\x10DeleteFilesystem\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12g\n" +
+	"\x10DeleteFilesystem\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12y\n" +
+	"\x1aProposeFilesystemAuthority\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12x\n" +
+	"\x19CancelFilesystemAuthority\x120.zettide.controller.v1.FilesystemMutationRequest\x1a).zettide.controller.v1.FilesystemResponse\x12g\n" +
 	"\rGetFilesystem\x12+.zettide.controller.v1.GetFilesystemRequest\x1a).zettide.controller.v1.FilesystemResponse\x12p\n" +
 	"\x0fListFilesystems\x12-.zettide.controller.v1.ListFilesystemsRequest\x1a..zettide.controller.v1.ListFilesystemsResponseb\x06proto3"
 
@@ -10773,7 +10899,7 @@ func file_services_controller_proto_zettide_controller_v1_controller_proto_rawDe
 	return file_services_controller_proto_zettide_controller_v1_controller_proto_rawDescData
 }
 
-var file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes = make([]protoimpl.EnumInfo, 33)
+var file_services_controller_proto_zettide_controller_v1_controller_proto_enumTypes = make([]protoimpl.EnumInfo, 34)
 var file_services_controller_proto_zettide_controller_v1_controller_proto_msgTypes = make([]protoimpl.MessageInfo, 102)
 var file_services_controller_proto_zettide_controller_v1_controller_proto_goTypes = []any{
 	(MemberHeartbeatState)(0),                          // 0: zettide.controller.v1.MemberHeartbeatState
@@ -10807,299 +10933,305 @@ var file_services_controller_proto_zettide_controller_v1_controller_proto_goType
 	(FilesystemBackendKind)(0),                         // 28: zettide.controller.v1.FilesystemBackendKind
 	(FilesystemNameProfile)(0),                         // 29: zettide.controller.v1.FilesystemNameProfile
 	(FilesystemLifecycleState)(0),                      // 30: zettide.controller.v1.FilesystemLifecycleState
-	(FilesystemOperation)(0),                           // 31: zettide.controller.v1.FilesystemOperation
-	(FilesystemCode)(0),                                // 32: zettide.controller.v1.FilesystemCode
-	(*Pool)(nil),                                       // 33: zettide.controller.v1.Pool
-	(*UpdatePoolRequest)(nil),                          // 34: zettide.controller.v1.UpdatePoolRequest
-	(*UpdatePoolResponse)(nil),                         // 35: zettide.controller.v1.UpdatePoolResponse
-	(*DeletePoolRequest)(nil),                          // 36: zettide.controller.v1.DeletePoolRequest
-	(*DeletePoolResponse)(nil),                         // 37: zettide.controller.v1.DeletePoolResponse
-	(*CreatePoolRequest)(nil),                          // 38: zettide.controller.v1.CreatePoolRequest
-	(*CreatePoolResponse)(nil),                         // 39: zettide.controller.v1.CreatePoolResponse
-	(*GetPoolRequest)(nil),                             // 40: zettide.controller.v1.GetPoolRequest
-	(*GetPoolResponse)(nil),                            // 41: zettide.controller.v1.GetPoolResponse
-	(*ListPoolsRequest)(nil),                           // 42: zettide.controller.v1.ListPoolsRequest
-	(*ListPoolsResponse)(nil),                          // 43: zettide.controller.v1.ListPoolsResponse
-	(*Node)(nil),                                       // 44: zettide.controller.v1.Node
-	(*RegisterNodeRequest)(nil),                        // 45: zettide.controller.v1.RegisterNodeRequest
-	(*RegisterNodeResponse)(nil),                       // 46: zettide.controller.v1.RegisterNodeResponse
-	(*GetNodeRequest)(nil),                             // 47: zettide.controller.v1.GetNodeRequest
-	(*GetNodeResponse)(nil),                            // 48: zettide.controller.v1.GetNodeResponse
-	(*ListNodesRequest)(nil),                           // 49: zettide.controller.v1.ListNodesRequest
-	(*ListNodesResponse)(nil),                          // 50: zettide.controller.v1.ListNodesResponse
-	(*Member)(nil),                                     // 51: zettide.controller.v1.Member
-	(*RegisterMemberRequest)(nil),                      // 52: zettide.controller.v1.RegisterMemberRequest
-	(*RegisterMemberResponse)(nil),                     // 53: zettide.controller.v1.RegisterMemberResponse
-	(*GetMemberRequest)(nil),                           // 54: zettide.controller.v1.GetMemberRequest
-	(*GetMemberResponse)(nil),                          // 55: zettide.controller.v1.GetMemberResponse
-	(*ListMembersRequest)(nil),                         // 56: zettide.controller.v1.ListMembersRequest
-	(*ListMembersResponse)(nil),                        // 57: zettide.controller.v1.ListMembersResponse
-	(*MemberCapacity)(nil),                             // 58: zettide.controller.v1.MemberCapacity
-	(*MemberHeartbeat)(nil),                            // 59: zettide.controller.v1.MemberHeartbeat
-	(*ReportHeartbeatRequest)(nil),                     // 60: zettide.controller.v1.ReportHeartbeatRequest
-	(*NodeHeartbeat)(nil),                              // 61: zettide.controller.v1.NodeHeartbeat
-	(*ReportHeartbeatResponse)(nil),                    // 62: zettide.controller.v1.ReportHeartbeatResponse
-	(*GetHeartbeatRequest)(nil),                        // 63: zettide.controller.v1.GetHeartbeatRequest
-	(*GetHeartbeatResponse)(nil),                       // 64: zettide.controller.v1.GetHeartbeatResponse
-	(*Volume)(nil),                                     // 65: zettide.controller.v1.Volume
-	(*CreateVolumeRequest)(nil),                        // 66: zettide.controller.v1.CreateVolumeRequest
-	(*CreateVolumeResponse)(nil),                       // 67: zettide.controller.v1.CreateVolumeResponse
-	(*GetVolumeRequest)(nil),                           // 68: zettide.controller.v1.GetVolumeRequest
-	(*GetVolumeResponse)(nil),                          // 69: zettide.controller.v1.GetVolumeResponse
-	(*UpdateVolumeRequest)(nil),                        // 70: zettide.controller.v1.UpdateVolumeRequest
-	(*UpdateVolumeResponse)(nil),                       // 71: zettide.controller.v1.UpdateVolumeResponse
-	(*ListVolumesRequest)(nil),                         // 72: zettide.controller.v1.ListVolumesRequest
-	(*ListVolumesResponse)(nil),                        // 73: zettide.controller.v1.ListVolumesResponse
-	(*DeleteVolumeRequest)(nil),                        // 74: zettide.controller.v1.DeleteVolumeRequest
-	(*DeleteVolumeResponse)(nil),                       // 75: zettide.controller.v1.DeleteVolumeResponse
-	(*ReplicaAttestation)(nil),                         // 76: zettide.controller.v1.ReplicaAttestation
-	(*ReplicaPlacement)(nil),                           // 77: zettide.controller.v1.ReplicaPlacement
-	(*ReplicaAllocation)(nil),                          // 78: zettide.controller.v1.ReplicaAllocation
-	(*VolumeAttachment)(nil),                           // 79: zettide.controller.v1.VolumeAttachment
-	(*PrimaryAuthority)(nil),                           // 80: zettide.controller.v1.PrimaryAuthority
-	(*PrimaryFailover)(nil),                            // 81: zettide.controller.v1.PrimaryFailover
-	(*ReplicaFenceEvidence)(nil),                       // 82: zettide.controller.v1.ReplicaFenceEvidence
-	(*RecoveryEvidence)(nil),                           // 83: zettide.controller.v1.RecoveryEvidence
-	(*VolumeTombstone)(nil),                            // 84: zettide.controller.v1.VolumeTombstone
-	(*CommandEnvelope)(nil),                            // 85: zettide.controller.v1.CommandEnvelope
-	(*CreatePoolCommand)(nil),                          // 86: zettide.controller.v1.CreatePoolCommand
-	(*RegisterNodeCommand)(nil),                        // 87: zettide.controller.v1.RegisterNodeCommand
-	(*RegisterMemberCommand)(nil),                      // 88: zettide.controller.v1.RegisterMemberCommand
-	(*CreateVolumeCommand)(nil),                        // 89: zettide.controller.v1.CreateVolumeCommand
-	(*DeleteVolumeCommand)(nil),                        // 90: zettide.controller.v1.DeleteVolumeCommand
-	(*UpdateVolumeCommand)(nil),                        // 91: zettide.controller.v1.UpdateVolumeCommand
-	(*ReplicaReservation)(nil),                         // 92: zettide.controller.v1.ReplicaReservation
-	(*ReserveVolumeResourcesCommand)(nil),              // 93: zettide.controller.v1.ReserveVolumeResourcesCommand
-	(*ActivateReplicaCommand)(nil),                     // 94: zettide.controller.v1.ActivateReplicaCommand
-	(*FinalizeVolumeDeletionCommand)(nil),              // 95: zettide.controller.v1.FinalizeVolumeDeletionCommand
-	(*ProposePrimaryAuthorityCommand)(nil),             // 96: zettide.controller.v1.ProposePrimaryAuthorityCommand
-	(*ActivatePrimaryAuthorityCommand)(nil),            // 97: zettide.controller.v1.ActivatePrimaryAuthorityCommand
-	(*CommitPrimaryAuthorityReadyCommand)(nil),         // 98: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
-	(*CommitPrimaryAuthorityRenewalReadyCommand)(nil),  // 99: zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
-	(*AbortPrimaryAuthorityCandidateCommand)(nil),      // 100: zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
-	(*BeginPrimaryFailoverCommand)(nil),                // 101: zettide.controller.v1.BeginPrimaryFailoverCommand
-	(*CompletePrimaryFailoverLeaseWaitCommand)(nil),    // 102: zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
-	(*CommitPrimaryAuthorityFailoverReadyCommand)(nil), // 103: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
-	(*ApplyResponse)(nil),                              // 104: zettide.controller.v1.ApplyResponse
-	(*RegisterNodeApplyResponse)(nil),                  // 105: zettide.controller.v1.RegisterNodeApplyResponse
-	(*RegisterMemberApplyResponse)(nil),                // 106: zettide.controller.v1.RegisterMemberApplyResponse
-	(*CreateVolumeApplyResponse)(nil),                  // 107: zettide.controller.v1.CreateVolumeApplyResponse
-	(*DeleteVolumeApplyResponse)(nil),                  // 108: zettide.controller.v1.DeleteVolumeApplyResponse
-	(*UpdateVolumeApplyResponse)(nil),                  // 109: zettide.controller.v1.UpdateVolumeApplyResponse
-	(*ReserveVolumeResourcesApplyResponse)(nil),        // 110: zettide.controller.v1.ReserveVolumeResourcesApplyResponse
-	(*ActivateReplicaApplyResponse)(nil),               // 111: zettide.controller.v1.ActivateReplicaApplyResponse
-	(*FinalizeVolumeDeletionApplyResponse)(nil),        // 112: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse
-	(*PrimaryAuthorityApplyResponse)(nil),              // 113: zettide.controller.v1.PrimaryAuthorityApplyResponse
-	(*PrimaryFailoverApplyResponse)(nil),               // 114: zettide.controller.v1.PrimaryFailoverApplyResponse
-	(*RequestRecord)(nil),                              // 115: zettide.controller.v1.RequestRecord
-	(*StateSnapshot)(nil),                              // 116: zettide.controller.v1.StateSnapshot
-	(*PoolMutationCommand)(nil),                        // 117: zettide.controller.v1.PoolMutationCommand
-	(*PoolMutationApplyResponse)(nil),                  // 118: zettide.controller.v1.PoolMutationApplyResponse
-	(*RangeLeaseRequest)(nil),                          // 119: zettide.controller.v1.RangeLeaseRequest
-	(*RangeLease)(nil),                                 // 120: zettide.controller.v1.RangeLease
-	(*RangeLeaseResponse)(nil),                         // 121: zettide.controller.v1.RangeLeaseResponse
-	(*GetRangeLeaseRequest)(nil),                       // 122: zettide.controller.v1.GetRangeLeaseRequest
-	(*ListRangeLeasesRequest)(nil),                     // 123: zettide.controller.v1.ListRangeLeasesRequest
-	(*ListRangeLeasesResponse)(nil),                    // 124: zettide.controller.v1.ListRangeLeasesResponse
-	(*RangeLeaseCommand)(nil),                          // 125: zettide.controller.v1.RangeLeaseCommand
-	(*RangeLeaseApplyResponse)(nil),                    // 126: zettide.controller.v1.RangeLeaseApplyResponse
-	(*Filesystem)(nil),                                 // 127: zettide.controller.v1.Filesystem
-	(*FilesystemMutationRequest)(nil),                  // 128: zettide.controller.v1.FilesystemMutationRequest
-	(*FilesystemResponse)(nil),                         // 129: zettide.controller.v1.FilesystemResponse
-	(*GetFilesystemRequest)(nil),                       // 130: zettide.controller.v1.GetFilesystemRequest
-	(*ListFilesystemsRequest)(nil),                     // 131: zettide.controller.v1.ListFilesystemsRequest
-	(*ListFilesystemsResponse)(nil),                    // 132: zettide.controller.v1.ListFilesystemsResponse
-	(*FilesystemCommand)(nil),                          // 133: zettide.controller.v1.FilesystemCommand
-	(*FilesystemApplyResponse)(nil),                    // 134: zettide.controller.v1.FilesystemApplyResponse
+	(FilesystemAuthorityState)(0),                      // 31: zettide.controller.v1.FilesystemAuthorityState
+	(FilesystemOperation)(0),                           // 32: zettide.controller.v1.FilesystemOperation
+	(FilesystemCode)(0),                                // 33: zettide.controller.v1.FilesystemCode
+	(*Pool)(nil),                                       // 34: zettide.controller.v1.Pool
+	(*UpdatePoolRequest)(nil),                          // 35: zettide.controller.v1.UpdatePoolRequest
+	(*UpdatePoolResponse)(nil),                         // 36: zettide.controller.v1.UpdatePoolResponse
+	(*DeletePoolRequest)(nil),                          // 37: zettide.controller.v1.DeletePoolRequest
+	(*DeletePoolResponse)(nil),                         // 38: zettide.controller.v1.DeletePoolResponse
+	(*CreatePoolRequest)(nil),                          // 39: zettide.controller.v1.CreatePoolRequest
+	(*CreatePoolResponse)(nil),                         // 40: zettide.controller.v1.CreatePoolResponse
+	(*GetPoolRequest)(nil),                             // 41: zettide.controller.v1.GetPoolRequest
+	(*GetPoolResponse)(nil),                            // 42: zettide.controller.v1.GetPoolResponse
+	(*ListPoolsRequest)(nil),                           // 43: zettide.controller.v1.ListPoolsRequest
+	(*ListPoolsResponse)(nil),                          // 44: zettide.controller.v1.ListPoolsResponse
+	(*Node)(nil),                                       // 45: zettide.controller.v1.Node
+	(*RegisterNodeRequest)(nil),                        // 46: zettide.controller.v1.RegisterNodeRequest
+	(*RegisterNodeResponse)(nil),                       // 47: zettide.controller.v1.RegisterNodeResponse
+	(*GetNodeRequest)(nil),                             // 48: zettide.controller.v1.GetNodeRequest
+	(*GetNodeResponse)(nil),                            // 49: zettide.controller.v1.GetNodeResponse
+	(*ListNodesRequest)(nil),                           // 50: zettide.controller.v1.ListNodesRequest
+	(*ListNodesResponse)(nil),                          // 51: zettide.controller.v1.ListNodesResponse
+	(*Member)(nil),                                     // 52: zettide.controller.v1.Member
+	(*RegisterMemberRequest)(nil),                      // 53: zettide.controller.v1.RegisterMemberRequest
+	(*RegisterMemberResponse)(nil),                     // 54: zettide.controller.v1.RegisterMemberResponse
+	(*GetMemberRequest)(nil),                           // 55: zettide.controller.v1.GetMemberRequest
+	(*GetMemberResponse)(nil),                          // 56: zettide.controller.v1.GetMemberResponse
+	(*ListMembersRequest)(nil),                         // 57: zettide.controller.v1.ListMembersRequest
+	(*ListMembersResponse)(nil),                        // 58: zettide.controller.v1.ListMembersResponse
+	(*MemberCapacity)(nil),                             // 59: zettide.controller.v1.MemberCapacity
+	(*MemberHeartbeat)(nil),                            // 60: zettide.controller.v1.MemberHeartbeat
+	(*ReportHeartbeatRequest)(nil),                     // 61: zettide.controller.v1.ReportHeartbeatRequest
+	(*NodeHeartbeat)(nil),                              // 62: zettide.controller.v1.NodeHeartbeat
+	(*ReportHeartbeatResponse)(nil),                    // 63: zettide.controller.v1.ReportHeartbeatResponse
+	(*GetHeartbeatRequest)(nil),                        // 64: zettide.controller.v1.GetHeartbeatRequest
+	(*GetHeartbeatResponse)(nil),                       // 65: zettide.controller.v1.GetHeartbeatResponse
+	(*Volume)(nil),                                     // 66: zettide.controller.v1.Volume
+	(*CreateVolumeRequest)(nil),                        // 67: zettide.controller.v1.CreateVolumeRequest
+	(*CreateVolumeResponse)(nil),                       // 68: zettide.controller.v1.CreateVolumeResponse
+	(*GetVolumeRequest)(nil),                           // 69: zettide.controller.v1.GetVolumeRequest
+	(*GetVolumeResponse)(nil),                          // 70: zettide.controller.v1.GetVolumeResponse
+	(*UpdateVolumeRequest)(nil),                        // 71: zettide.controller.v1.UpdateVolumeRequest
+	(*UpdateVolumeResponse)(nil),                       // 72: zettide.controller.v1.UpdateVolumeResponse
+	(*ListVolumesRequest)(nil),                         // 73: zettide.controller.v1.ListVolumesRequest
+	(*ListVolumesResponse)(nil),                        // 74: zettide.controller.v1.ListVolumesResponse
+	(*DeleteVolumeRequest)(nil),                        // 75: zettide.controller.v1.DeleteVolumeRequest
+	(*DeleteVolumeResponse)(nil),                       // 76: zettide.controller.v1.DeleteVolumeResponse
+	(*ReplicaAttestation)(nil),                         // 77: zettide.controller.v1.ReplicaAttestation
+	(*ReplicaPlacement)(nil),                           // 78: zettide.controller.v1.ReplicaPlacement
+	(*ReplicaAllocation)(nil),                          // 79: zettide.controller.v1.ReplicaAllocation
+	(*VolumeAttachment)(nil),                           // 80: zettide.controller.v1.VolumeAttachment
+	(*PrimaryAuthority)(nil),                           // 81: zettide.controller.v1.PrimaryAuthority
+	(*PrimaryFailover)(nil),                            // 82: zettide.controller.v1.PrimaryFailover
+	(*ReplicaFenceEvidence)(nil),                       // 83: zettide.controller.v1.ReplicaFenceEvidence
+	(*RecoveryEvidence)(nil),                           // 84: zettide.controller.v1.RecoveryEvidence
+	(*VolumeTombstone)(nil),                            // 85: zettide.controller.v1.VolumeTombstone
+	(*CommandEnvelope)(nil),                            // 86: zettide.controller.v1.CommandEnvelope
+	(*CreatePoolCommand)(nil),                          // 87: zettide.controller.v1.CreatePoolCommand
+	(*RegisterNodeCommand)(nil),                        // 88: zettide.controller.v1.RegisterNodeCommand
+	(*RegisterMemberCommand)(nil),                      // 89: zettide.controller.v1.RegisterMemberCommand
+	(*CreateVolumeCommand)(nil),                        // 90: zettide.controller.v1.CreateVolumeCommand
+	(*DeleteVolumeCommand)(nil),                        // 91: zettide.controller.v1.DeleteVolumeCommand
+	(*UpdateVolumeCommand)(nil),                        // 92: zettide.controller.v1.UpdateVolumeCommand
+	(*ReplicaReservation)(nil),                         // 93: zettide.controller.v1.ReplicaReservation
+	(*ReserveVolumeResourcesCommand)(nil),              // 94: zettide.controller.v1.ReserveVolumeResourcesCommand
+	(*ActivateReplicaCommand)(nil),                     // 95: zettide.controller.v1.ActivateReplicaCommand
+	(*FinalizeVolumeDeletionCommand)(nil),              // 96: zettide.controller.v1.FinalizeVolumeDeletionCommand
+	(*ProposePrimaryAuthorityCommand)(nil),             // 97: zettide.controller.v1.ProposePrimaryAuthorityCommand
+	(*ActivatePrimaryAuthorityCommand)(nil),            // 98: zettide.controller.v1.ActivatePrimaryAuthorityCommand
+	(*CommitPrimaryAuthorityReadyCommand)(nil),         // 99: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
+	(*CommitPrimaryAuthorityRenewalReadyCommand)(nil),  // 100: zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
+	(*AbortPrimaryAuthorityCandidateCommand)(nil),      // 101: zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
+	(*BeginPrimaryFailoverCommand)(nil),                // 102: zettide.controller.v1.BeginPrimaryFailoverCommand
+	(*CompletePrimaryFailoverLeaseWaitCommand)(nil),    // 103: zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
+	(*CommitPrimaryAuthorityFailoverReadyCommand)(nil), // 104: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
+	(*ApplyResponse)(nil),                              // 105: zettide.controller.v1.ApplyResponse
+	(*RegisterNodeApplyResponse)(nil),                  // 106: zettide.controller.v1.RegisterNodeApplyResponse
+	(*RegisterMemberApplyResponse)(nil),                // 107: zettide.controller.v1.RegisterMemberApplyResponse
+	(*CreateVolumeApplyResponse)(nil),                  // 108: zettide.controller.v1.CreateVolumeApplyResponse
+	(*DeleteVolumeApplyResponse)(nil),                  // 109: zettide.controller.v1.DeleteVolumeApplyResponse
+	(*UpdateVolumeApplyResponse)(nil),                  // 110: zettide.controller.v1.UpdateVolumeApplyResponse
+	(*ReserveVolumeResourcesApplyResponse)(nil),        // 111: zettide.controller.v1.ReserveVolumeResourcesApplyResponse
+	(*ActivateReplicaApplyResponse)(nil),               // 112: zettide.controller.v1.ActivateReplicaApplyResponse
+	(*FinalizeVolumeDeletionApplyResponse)(nil),        // 113: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse
+	(*PrimaryAuthorityApplyResponse)(nil),              // 114: zettide.controller.v1.PrimaryAuthorityApplyResponse
+	(*PrimaryFailoverApplyResponse)(nil),               // 115: zettide.controller.v1.PrimaryFailoverApplyResponse
+	(*RequestRecord)(nil),                              // 116: zettide.controller.v1.RequestRecord
+	(*StateSnapshot)(nil),                              // 117: zettide.controller.v1.StateSnapshot
+	(*PoolMutationCommand)(nil),                        // 118: zettide.controller.v1.PoolMutationCommand
+	(*PoolMutationApplyResponse)(nil),                  // 119: zettide.controller.v1.PoolMutationApplyResponse
+	(*RangeLeaseRequest)(nil),                          // 120: zettide.controller.v1.RangeLeaseRequest
+	(*RangeLease)(nil),                                 // 121: zettide.controller.v1.RangeLease
+	(*RangeLeaseResponse)(nil),                         // 122: zettide.controller.v1.RangeLeaseResponse
+	(*GetRangeLeaseRequest)(nil),                       // 123: zettide.controller.v1.GetRangeLeaseRequest
+	(*ListRangeLeasesRequest)(nil),                     // 124: zettide.controller.v1.ListRangeLeasesRequest
+	(*ListRangeLeasesResponse)(nil),                    // 125: zettide.controller.v1.ListRangeLeasesResponse
+	(*RangeLeaseCommand)(nil),                          // 126: zettide.controller.v1.RangeLeaseCommand
+	(*RangeLeaseApplyResponse)(nil),                    // 127: zettide.controller.v1.RangeLeaseApplyResponse
+	(*Filesystem)(nil),                                 // 128: zettide.controller.v1.Filesystem
+	(*FilesystemMutationRequest)(nil),                  // 129: zettide.controller.v1.FilesystemMutationRequest
+	(*FilesystemResponse)(nil),                         // 130: zettide.controller.v1.FilesystemResponse
+	(*GetFilesystemRequest)(nil),                       // 131: zettide.controller.v1.GetFilesystemRequest
+	(*ListFilesystemsRequest)(nil),                     // 132: zettide.controller.v1.ListFilesystemsRequest
+	(*ListFilesystemsResponse)(nil),                    // 133: zettide.controller.v1.ListFilesystemsResponse
+	(*FilesystemCommand)(nil),                          // 134: zettide.controller.v1.FilesystemCommand
+	(*FilesystemApplyResponse)(nil),                    // 135: zettide.controller.v1.FilesystemApplyResponse
 }
 var file_services_controller_proto_zettide_controller_v1_controller_proto_depIdxs = []int32{
-	33,  // 0: zettide.controller.v1.UpdatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	33,  // 1: zettide.controller.v1.DeletePoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	33,  // 2: zettide.controller.v1.CreatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	33,  // 3: zettide.controller.v1.GetPoolResponse.pool:type_name -> zettide.controller.v1.Pool
-	33,  // 4: zettide.controller.v1.ListPoolsResponse.pools:type_name -> zettide.controller.v1.Pool
-	44,  // 5: zettide.controller.v1.RegisterNodeResponse.node:type_name -> zettide.controller.v1.Node
-	44,  // 6: zettide.controller.v1.GetNodeResponse.node:type_name -> zettide.controller.v1.Node
-	44,  // 7: zettide.controller.v1.ListNodesResponse.nodes:type_name -> zettide.controller.v1.Node
-	51,  // 8: zettide.controller.v1.RegisterMemberResponse.member:type_name -> zettide.controller.v1.Member
-	51,  // 9: zettide.controller.v1.GetMemberResponse.member:type_name -> zettide.controller.v1.Member
-	51,  // 10: zettide.controller.v1.ListMembersResponse.members:type_name -> zettide.controller.v1.Member
+	34,  // 0: zettide.controller.v1.UpdatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	34,  // 1: zettide.controller.v1.DeletePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	34,  // 2: zettide.controller.v1.CreatePoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	34,  // 3: zettide.controller.v1.GetPoolResponse.pool:type_name -> zettide.controller.v1.Pool
+	34,  // 4: zettide.controller.v1.ListPoolsResponse.pools:type_name -> zettide.controller.v1.Pool
+	45,  // 5: zettide.controller.v1.RegisterNodeResponse.node:type_name -> zettide.controller.v1.Node
+	45,  // 6: zettide.controller.v1.GetNodeResponse.node:type_name -> zettide.controller.v1.Node
+	45,  // 7: zettide.controller.v1.ListNodesResponse.nodes:type_name -> zettide.controller.v1.Node
+	52,  // 8: zettide.controller.v1.RegisterMemberResponse.member:type_name -> zettide.controller.v1.Member
+	52,  // 9: zettide.controller.v1.GetMemberResponse.member:type_name -> zettide.controller.v1.Member
+	52,  // 10: zettide.controller.v1.ListMembersResponse.members:type_name -> zettide.controller.v1.Member
 	0,   // 11: zettide.controller.v1.MemberHeartbeat.state:type_name -> zettide.controller.v1.MemberHeartbeatState
-	58,  // 12: zettide.controller.v1.MemberHeartbeat.capacity:type_name -> zettide.controller.v1.MemberCapacity
-	59,  // 13: zettide.controller.v1.ReportHeartbeatRequest.members:type_name -> zettide.controller.v1.MemberHeartbeat
-	59,  // 14: zettide.controller.v1.NodeHeartbeat.members:type_name -> zettide.controller.v1.MemberHeartbeat
-	61,  // 15: zettide.controller.v1.ReportHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
-	61,  // 16: zettide.controller.v1.GetHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
+	59,  // 12: zettide.controller.v1.MemberHeartbeat.capacity:type_name -> zettide.controller.v1.MemberCapacity
+	60,  // 13: zettide.controller.v1.ReportHeartbeatRequest.members:type_name -> zettide.controller.v1.MemberHeartbeat
+	60,  // 14: zettide.controller.v1.NodeHeartbeat.members:type_name -> zettide.controller.v1.MemberHeartbeat
+	62,  // 15: zettide.controller.v1.ReportHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
+	62,  // 16: zettide.controller.v1.GetHeartbeatResponse.observation:type_name -> zettide.controller.v1.NodeHeartbeat
 	1,   // 17: zettide.controller.v1.GetHeartbeatResponse.freshness:type_name -> zettide.controller.v1.HeartbeatFreshness
 	5,   // 18: zettide.controller.v1.Volume.protection_kind:type_name -> zettide.controller.v1.VolumeProtectionKind
 	2,   // 19: zettide.controller.v1.Volume.lifecycle_state:type_name -> zettide.controller.v1.VolumeLifecycleState
 	3,   // 20: zettide.controller.v1.Volume.availability_state:type_name -> zettide.controller.v1.VolumeAvailabilityState
 	4,   // 21: zettide.controller.v1.Volume.operation_phase:type_name -> zettide.controller.v1.VolumeOperationPhase
-	65,  // 22: zettide.controller.v1.CreateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	65,  // 23: zettide.controller.v1.GetVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	65,  // 24: zettide.controller.v1.UpdateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
-	65,  // 25: zettide.controller.v1.ListVolumesResponse.volumes:type_name -> zettide.controller.v1.Volume
-	65,  // 26: zettide.controller.v1.DeleteVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	66,  // 22: zettide.controller.v1.CreateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	66,  // 23: zettide.controller.v1.GetVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	66,  // 24: zettide.controller.v1.UpdateVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
+	66,  // 25: zettide.controller.v1.ListVolumesResponse.volumes:type_name -> zettide.controller.v1.Volume
+	66,  // 26: zettide.controller.v1.DeleteVolumeResponse.volume:type_name -> zettide.controller.v1.Volume
 	6,   // 27: zettide.controller.v1.ReplicaPlacement.state:type_name -> zettide.controller.v1.ReplicaPlacementState
 	7,   // 28: zettide.controller.v1.ReplicaAllocation.state:type_name -> zettide.controller.v1.ReplicaAllocationState
 	8,   // 29: zettide.controller.v1.VolumeAttachment.access_mode:type_name -> zettide.controller.v1.VolumeAccessMode
 	9,   // 30: zettide.controller.v1.VolumeAttachment.state:type_name -> zettide.controller.v1.VolumeAttachmentState
 	10,  // 31: zettide.controller.v1.PrimaryAuthority.state:type_name -> zettide.controller.v1.PrimaryAuthorityState
 	11,  // 32: zettide.controller.v1.PrimaryFailover.state:type_name -> zettide.controller.v1.PrimaryFailoverState
-	65,  // 33: zettide.controller.v1.VolumeTombstone.volume:type_name -> zettide.controller.v1.Volume
-	86,  // 34: zettide.controller.v1.CommandEnvelope.create_pool:type_name -> zettide.controller.v1.CreatePoolCommand
-	87,  // 35: zettide.controller.v1.CommandEnvelope.register_node:type_name -> zettide.controller.v1.RegisterNodeCommand
-	88,  // 36: zettide.controller.v1.CommandEnvelope.register_member:type_name -> zettide.controller.v1.RegisterMemberCommand
-	89,  // 37: zettide.controller.v1.CommandEnvelope.create_volume:type_name -> zettide.controller.v1.CreateVolumeCommand
-	90,  // 38: zettide.controller.v1.CommandEnvelope.delete_volume:type_name -> zettide.controller.v1.DeleteVolumeCommand
-	91,  // 39: zettide.controller.v1.CommandEnvelope.update_volume:type_name -> zettide.controller.v1.UpdateVolumeCommand
-	93,  // 40: zettide.controller.v1.CommandEnvelope.reserve_volume_resources:type_name -> zettide.controller.v1.ReserveVolumeResourcesCommand
-	94,  // 41: zettide.controller.v1.CommandEnvelope.activate_replica:type_name -> zettide.controller.v1.ActivateReplicaCommand
-	95,  // 42: zettide.controller.v1.CommandEnvelope.finalize_volume_deletion:type_name -> zettide.controller.v1.FinalizeVolumeDeletionCommand
-	96,  // 43: zettide.controller.v1.CommandEnvelope.propose_primary_authority:type_name -> zettide.controller.v1.ProposePrimaryAuthorityCommand
-	97,  // 44: zettide.controller.v1.CommandEnvelope.activate_primary_authority:type_name -> zettide.controller.v1.ActivatePrimaryAuthorityCommand
-	98,  // 45: zettide.controller.v1.CommandEnvelope.commit_primary_authority_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
-	99,  // 46: zettide.controller.v1.CommandEnvelope.commit_primary_authority_renewal_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
-	100, // 47: zettide.controller.v1.CommandEnvelope.abort_primary_authority_candidate:type_name -> zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
-	101, // 48: zettide.controller.v1.CommandEnvelope.begin_primary_failover:type_name -> zettide.controller.v1.BeginPrimaryFailoverCommand
-	103, // 49: zettide.controller.v1.CommandEnvelope.commit_primary_authority_failover_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
-	102, // 50: zettide.controller.v1.CommandEnvelope.complete_primary_failover_lease_wait:type_name -> zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
-	117, // 51: zettide.controller.v1.CommandEnvelope.update_pool:type_name -> zettide.controller.v1.PoolMutationCommand
-	117, // 52: zettide.controller.v1.CommandEnvelope.delete_pool:type_name -> zettide.controller.v1.PoolMutationCommand
-	125, // 53: zettide.controller.v1.CommandEnvelope.range_lease:type_name -> zettide.controller.v1.RangeLeaseCommand
-	133, // 54: zettide.controller.v1.CommandEnvelope.filesystem:type_name -> zettide.controller.v1.FilesystemCommand
-	77,  // 55: zettide.controller.v1.ReplicaReservation.placement:type_name -> zettide.controller.v1.ReplicaPlacement
-	78,  // 56: zettide.controller.v1.ReplicaReservation.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
-	92,  // 57: zettide.controller.v1.ReserveVolumeResourcesCommand.reservations:type_name -> zettide.controller.v1.ReplicaReservation
-	76,  // 58: zettide.controller.v1.ActivateReplicaCommand.attestation:type_name -> zettide.controller.v1.ReplicaAttestation
-	80,  // 59: zettide.controller.v1.ProposePrimaryAuthorityCommand.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	82,  // 60: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
-	83,  // 61: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
-	82,  // 62: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
-	83,  // 63: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
+	66,  // 33: zettide.controller.v1.VolumeTombstone.volume:type_name -> zettide.controller.v1.Volume
+	87,  // 34: zettide.controller.v1.CommandEnvelope.create_pool:type_name -> zettide.controller.v1.CreatePoolCommand
+	88,  // 35: zettide.controller.v1.CommandEnvelope.register_node:type_name -> zettide.controller.v1.RegisterNodeCommand
+	89,  // 36: zettide.controller.v1.CommandEnvelope.register_member:type_name -> zettide.controller.v1.RegisterMemberCommand
+	90,  // 37: zettide.controller.v1.CommandEnvelope.create_volume:type_name -> zettide.controller.v1.CreateVolumeCommand
+	91,  // 38: zettide.controller.v1.CommandEnvelope.delete_volume:type_name -> zettide.controller.v1.DeleteVolumeCommand
+	92,  // 39: zettide.controller.v1.CommandEnvelope.update_volume:type_name -> zettide.controller.v1.UpdateVolumeCommand
+	94,  // 40: zettide.controller.v1.CommandEnvelope.reserve_volume_resources:type_name -> zettide.controller.v1.ReserveVolumeResourcesCommand
+	95,  // 41: zettide.controller.v1.CommandEnvelope.activate_replica:type_name -> zettide.controller.v1.ActivateReplicaCommand
+	96,  // 42: zettide.controller.v1.CommandEnvelope.finalize_volume_deletion:type_name -> zettide.controller.v1.FinalizeVolumeDeletionCommand
+	97,  // 43: zettide.controller.v1.CommandEnvelope.propose_primary_authority:type_name -> zettide.controller.v1.ProposePrimaryAuthorityCommand
+	98,  // 44: zettide.controller.v1.CommandEnvelope.activate_primary_authority:type_name -> zettide.controller.v1.ActivatePrimaryAuthorityCommand
+	99,  // 45: zettide.controller.v1.CommandEnvelope.commit_primary_authority_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityReadyCommand
+	100, // 46: zettide.controller.v1.CommandEnvelope.commit_primary_authority_renewal_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityRenewalReadyCommand
+	101, // 47: zettide.controller.v1.CommandEnvelope.abort_primary_authority_candidate:type_name -> zettide.controller.v1.AbortPrimaryAuthorityCandidateCommand
+	102, // 48: zettide.controller.v1.CommandEnvelope.begin_primary_failover:type_name -> zettide.controller.v1.BeginPrimaryFailoverCommand
+	104, // 49: zettide.controller.v1.CommandEnvelope.commit_primary_authority_failover_ready:type_name -> zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand
+	103, // 50: zettide.controller.v1.CommandEnvelope.complete_primary_failover_lease_wait:type_name -> zettide.controller.v1.CompletePrimaryFailoverLeaseWaitCommand
+	118, // 51: zettide.controller.v1.CommandEnvelope.update_pool:type_name -> zettide.controller.v1.PoolMutationCommand
+	118, // 52: zettide.controller.v1.CommandEnvelope.delete_pool:type_name -> zettide.controller.v1.PoolMutationCommand
+	126, // 53: zettide.controller.v1.CommandEnvelope.range_lease:type_name -> zettide.controller.v1.RangeLeaseCommand
+	134, // 54: zettide.controller.v1.CommandEnvelope.filesystem:type_name -> zettide.controller.v1.FilesystemCommand
+	78,  // 55: zettide.controller.v1.ReplicaReservation.placement:type_name -> zettide.controller.v1.ReplicaPlacement
+	79,  // 56: zettide.controller.v1.ReplicaReservation.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
+	93,  // 57: zettide.controller.v1.ReserveVolumeResourcesCommand.reservations:type_name -> zettide.controller.v1.ReplicaReservation
+	77,  // 58: zettide.controller.v1.ActivateReplicaCommand.attestation:type_name -> zettide.controller.v1.ReplicaAttestation
+	81,  // 59: zettide.controller.v1.ProposePrimaryAuthorityCommand.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	83,  // 60: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
+	84,  // 61: zettide.controller.v1.CommitPrimaryAuthorityReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
+	83,  // 62: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.fence_evidence:type_name -> zettide.controller.v1.ReplicaFenceEvidence
+	84,  // 63: zettide.controller.v1.CommitPrimaryAuthorityFailoverReadyCommand.recovery_evidence:type_name -> zettide.controller.v1.RecoveryEvidence
 	12,  // 64: zettide.controller.v1.ApplyResponse.code:type_name -> zettide.controller.v1.ApplyCode
-	33,  // 65: zettide.controller.v1.ApplyResponse.pool:type_name -> zettide.controller.v1.Pool
+	34,  // 65: zettide.controller.v1.ApplyResponse.pool:type_name -> zettide.controller.v1.Pool
 	13,  // 66: zettide.controller.v1.RegisterNodeApplyResponse.code:type_name -> zettide.controller.v1.RegisterNodeApplyCode
-	44,  // 67: zettide.controller.v1.RegisterNodeApplyResponse.node:type_name -> zettide.controller.v1.Node
+	45,  // 67: zettide.controller.v1.RegisterNodeApplyResponse.node:type_name -> zettide.controller.v1.Node
 	14,  // 68: zettide.controller.v1.RegisterMemberApplyResponse.code:type_name -> zettide.controller.v1.RegisterMemberApplyCode
-	51,  // 69: zettide.controller.v1.RegisterMemberApplyResponse.member:type_name -> zettide.controller.v1.Member
+	52,  // 69: zettide.controller.v1.RegisterMemberApplyResponse.member:type_name -> zettide.controller.v1.Member
 	15,  // 70: zettide.controller.v1.CreateVolumeApplyResponse.code:type_name -> zettide.controller.v1.CreateVolumeApplyCode
-	65,  // 71: zettide.controller.v1.CreateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	66,  // 71: zettide.controller.v1.CreateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
 	16,  // 72: zettide.controller.v1.DeleteVolumeApplyResponse.code:type_name -> zettide.controller.v1.DeleteVolumeApplyCode
-	65,  // 73: zettide.controller.v1.DeleteVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	66,  // 73: zettide.controller.v1.DeleteVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
 	17,  // 74: zettide.controller.v1.UpdateVolumeApplyResponse.code:type_name -> zettide.controller.v1.UpdateVolumeApplyCode
-	65,  // 75: zettide.controller.v1.UpdateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	66,  // 75: zettide.controller.v1.UpdateVolumeApplyResponse.volume:type_name -> zettide.controller.v1.Volume
 	18,  // 76: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.code:type_name -> zettide.controller.v1.ReserveVolumeResourcesApplyCode
-	65,  // 77: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	66,  // 77: zettide.controller.v1.ReserveVolumeResourcesApplyResponse.volume:type_name -> zettide.controller.v1.Volume
 	19,  // 78: zettide.controller.v1.ActivateReplicaApplyResponse.code:type_name -> zettide.controller.v1.ActivateReplicaApplyCode
-	65,  // 79: zettide.controller.v1.ActivateReplicaApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	77,  // 80: zettide.controller.v1.ActivateReplicaApplyResponse.placement:type_name -> zettide.controller.v1.ReplicaPlacement
-	78,  // 81: zettide.controller.v1.ActivateReplicaApplyResponse.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
+	66,  // 79: zettide.controller.v1.ActivateReplicaApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	78,  // 80: zettide.controller.v1.ActivateReplicaApplyResponse.placement:type_name -> zettide.controller.v1.ReplicaPlacement
+	79,  // 81: zettide.controller.v1.ActivateReplicaApplyResponse.allocation:type_name -> zettide.controller.v1.ReplicaAllocation
 	20,  // 82: zettide.controller.v1.FinalizeVolumeDeletionApplyResponse.code:type_name -> zettide.controller.v1.FinalizeVolumeDeletionApplyCode
 	21,  // 83: zettide.controller.v1.PrimaryAuthorityApplyResponse.code:type_name -> zettide.controller.v1.PrimaryAuthorityApplyCode
-	80,  // 84: zettide.controller.v1.PrimaryAuthorityApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	65,  // 85: zettide.controller.v1.PrimaryAuthorityApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	81,  // 84: zettide.controller.v1.PrimaryAuthorityApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	66,  // 85: zettide.controller.v1.PrimaryAuthorityApplyResponse.volume:type_name -> zettide.controller.v1.Volume
 	22,  // 86: zettide.controller.v1.PrimaryFailoverApplyResponse.code:type_name -> zettide.controller.v1.PrimaryFailoverApplyCode
-	81,  // 87: zettide.controller.v1.PrimaryFailoverApplyResponse.failover:type_name -> zettide.controller.v1.PrimaryFailover
-	80,  // 88: zettide.controller.v1.PrimaryFailoverApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
-	65,  // 89: zettide.controller.v1.PrimaryFailoverApplyResponse.volume:type_name -> zettide.controller.v1.Volume
-	33,  // 90: zettide.controller.v1.StateSnapshot.pools:type_name -> zettide.controller.v1.Pool
-	115, // 91: zettide.controller.v1.StateSnapshot.requests:type_name -> zettide.controller.v1.RequestRecord
-	44,  // 92: zettide.controller.v1.StateSnapshot.nodes:type_name -> zettide.controller.v1.Node
-	51,  // 93: zettide.controller.v1.StateSnapshot.members:type_name -> zettide.controller.v1.Member
-	65,  // 94: zettide.controller.v1.StateSnapshot.volumes:type_name -> zettide.controller.v1.Volume
-	84,  // 95: zettide.controller.v1.StateSnapshot.volume_tombstones:type_name -> zettide.controller.v1.VolumeTombstone
-	77,  // 96: zettide.controller.v1.StateSnapshot.replica_placements:type_name -> zettide.controller.v1.ReplicaPlacement
-	78,  // 97: zettide.controller.v1.StateSnapshot.replica_allocations:type_name -> zettide.controller.v1.ReplicaAllocation
-	79,  // 98: zettide.controller.v1.StateSnapshot.volume_attachments:type_name -> zettide.controller.v1.VolumeAttachment
-	80,  // 99: zettide.controller.v1.StateSnapshot.primary_authorities:type_name -> zettide.controller.v1.PrimaryAuthority
-	80,  // 100: zettide.controller.v1.StateSnapshot.primary_authority_candidates:type_name -> zettide.controller.v1.PrimaryAuthority
-	81,  // 101: zettide.controller.v1.StateSnapshot.primary_failovers:type_name -> zettide.controller.v1.PrimaryFailover
+	82,  // 87: zettide.controller.v1.PrimaryFailoverApplyResponse.failover:type_name -> zettide.controller.v1.PrimaryFailover
+	81,  // 88: zettide.controller.v1.PrimaryFailoverApplyResponse.authority:type_name -> zettide.controller.v1.PrimaryAuthority
+	66,  // 89: zettide.controller.v1.PrimaryFailoverApplyResponse.volume:type_name -> zettide.controller.v1.Volume
+	34,  // 90: zettide.controller.v1.StateSnapshot.pools:type_name -> zettide.controller.v1.Pool
+	116, // 91: zettide.controller.v1.StateSnapshot.requests:type_name -> zettide.controller.v1.RequestRecord
+	45,  // 92: zettide.controller.v1.StateSnapshot.nodes:type_name -> zettide.controller.v1.Node
+	52,  // 93: zettide.controller.v1.StateSnapshot.members:type_name -> zettide.controller.v1.Member
+	66,  // 94: zettide.controller.v1.StateSnapshot.volumes:type_name -> zettide.controller.v1.Volume
+	85,  // 95: zettide.controller.v1.StateSnapshot.volume_tombstones:type_name -> zettide.controller.v1.VolumeTombstone
+	78,  // 96: zettide.controller.v1.StateSnapshot.replica_placements:type_name -> zettide.controller.v1.ReplicaPlacement
+	79,  // 97: zettide.controller.v1.StateSnapshot.replica_allocations:type_name -> zettide.controller.v1.ReplicaAllocation
+	80,  // 98: zettide.controller.v1.StateSnapshot.volume_attachments:type_name -> zettide.controller.v1.VolumeAttachment
+	81,  // 99: zettide.controller.v1.StateSnapshot.primary_authorities:type_name -> zettide.controller.v1.PrimaryAuthority
+	81,  // 100: zettide.controller.v1.StateSnapshot.primary_authority_candidates:type_name -> zettide.controller.v1.PrimaryAuthority
+	82,  // 101: zettide.controller.v1.StateSnapshot.primary_failovers:type_name -> zettide.controller.v1.PrimaryFailover
 	23,  // 102: zettide.controller.v1.PoolMutationApplyResponse.code:type_name -> zettide.controller.v1.PoolMutationApplyCode
-	33,  // 103: zettide.controller.v1.PoolMutationApplyResponse.pool:type_name -> zettide.controller.v1.Pool
+	34,  // 103: zettide.controller.v1.PoolMutationApplyResponse.pool:type_name -> zettide.controller.v1.Pool
 	24,  // 104: zettide.controller.v1.RangeLeaseRequest.mode:type_name -> zettide.controller.v1.RangeLeaseMode
 	24,  // 105: zettide.controller.v1.RangeLease.mode:type_name -> zettide.controller.v1.RangeLeaseMode
 	25,  // 106: zettide.controller.v1.RangeLease.state:type_name -> zettide.controller.v1.RangeLeaseState
-	120, // 107: zettide.controller.v1.RangeLeaseResponse.lease:type_name -> zettide.controller.v1.RangeLease
-	120, // 108: zettide.controller.v1.ListRangeLeasesResponse.leases:type_name -> zettide.controller.v1.RangeLease
-	119, // 109: zettide.controller.v1.RangeLeaseCommand.request:type_name -> zettide.controller.v1.RangeLeaseRequest
+	121, // 107: zettide.controller.v1.RangeLeaseResponse.lease:type_name -> zettide.controller.v1.RangeLease
+	121, // 108: zettide.controller.v1.ListRangeLeasesResponse.leases:type_name -> zettide.controller.v1.RangeLease
+	120, // 109: zettide.controller.v1.RangeLeaseCommand.request:type_name -> zettide.controller.v1.RangeLeaseRequest
 	26,  // 110: zettide.controller.v1.RangeLeaseCommand.operation:type_name -> zettide.controller.v1.RangeLeaseOperation
 	27,  // 111: zettide.controller.v1.RangeLeaseApplyResponse.code:type_name -> zettide.controller.v1.RangeLeaseCode
-	120, // 112: zettide.controller.v1.RangeLeaseApplyResponse.lease:type_name -> zettide.controller.v1.RangeLease
+	121, // 112: zettide.controller.v1.RangeLeaseApplyResponse.lease:type_name -> zettide.controller.v1.RangeLease
 	28,  // 113: zettide.controller.v1.Filesystem.backend_kind:type_name -> zettide.controller.v1.FilesystemBackendKind
 	29,  // 114: zettide.controller.v1.Filesystem.name_profile:type_name -> zettide.controller.v1.FilesystemNameProfile
 	30,  // 115: zettide.controller.v1.Filesystem.lifecycle_state:type_name -> zettide.controller.v1.FilesystemLifecycleState
-	28,  // 116: zettide.controller.v1.FilesystemMutationRequest.backend_kind:type_name -> zettide.controller.v1.FilesystemBackendKind
-	29,  // 117: zettide.controller.v1.FilesystemMutationRequest.name_profile:type_name -> zettide.controller.v1.FilesystemNameProfile
-	127, // 118: zettide.controller.v1.FilesystemResponse.filesystem:type_name -> zettide.controller.v1.Filesystem
-	127, // 119: zettide.controller.v1.ListFilesystemsResponse.filesystems:type_name -> zettide.controller.v1.Filesystem
-	128, // 120: zettide.controller.v1.FilesystemCommand.request:type_name -> zettide.controller.v1.FilesystemMutationRequest
-	31,  // 121: zettide.controller.v1.FilesystemCommand.operation:type_name -> zettide.controller.v1.FilesystemOperation
-	32,  // 122: zettide.controller.v1.FilesystemApplyResponse.code:type_name -> zettide.controller.v1.FilesystemCode
-	127, // 123: zettide.controller.v1.FilesystemApplyResponse.filesystem:type_name -> zettide.controller.v1.Filesystem
-	38,  // 124: zettide.controller.v1.PoolService.CreatePool:input_type -> zettide.controller.v1.CreatePoolRequest
-	40,  // 125: zettide.controller.v1.PoolService.GetPool:input_type -> zettide.controller.v1.GetPoolRequest
-	42,  // 126: zettide.controller.v1.PoolService.ListPools:input_type -> zettide.controller.v1.ListPoolsRequest
-	34,  // 127: zettide.controller.v1.PoolService.UpdatePool:input_type -> zettide.controller.v1.UpdatePoolRequest
-	36,  // 128: zettide.controller.v1.PoolService.DeletePool:input_type -> zettide.controller.v1.DeletePoolRequest
-	45,  // 129: zettide.controller.v1.NodeService.RegisterNode:input_type -> zettide.controller.v1.RegisterNodeRequest
-	47,  // 130: zettide.controller.v1.NodeService.GetNode:input_type -> zettide.controller.v1.GetNodeRequest
-	49,  // 131: zettide.controller.v1.NodeService.ListNodes:input_type -> zettide.controller.v1.ListNodesRequest
-	52,  // 132: zettide.controller.v1.MemberService.RegisterMember:input_type -> zettide.controller.v1.RegisterMemberRequest
-	54,  // 133: zettide.controller.v1.MemberService.GetMember:input_type -> zettide.controller.v1.GetMemberRequest
-	56,  // 134: zettide.controller.v1.MemberService.ListMembers:input_type -> zettide.controller.v1.ListMembersRequest
-	60,  // 135: zettide.controller.v1.HeartbeatService.ReportHeartbeat:input_type -> zettide.controller.v1.ReportHeartbeatRequest
-	63,  // 136: zettide.controller.v1.HeartbeatService.GetHeartbeat:input_type -> zettide.controller.v1.GetHeartbeatRequest
-	66,  // 137: zettide.controller.v1.VolumeService.CreateVolume:input_type -> zettide.controller.v1.CreateVolumeRequest
-	68,  // 138: zettide.controller.v1.VolumeService.GetVolume:input_type -> zettide.controller.v1.GetVolumeRequest
-	70,  // 139: zettide.controller.v1.VolumeService.UpdateVolume:input_type -> zettide.controller.v1.UpdateVolumeRequest
-	72,  // 140: zettide.controller.v1.VolumeService.ListVolumes:input_type -> zettide.controller.v1.ListVolumesRequest
-	74,  // 141: zettide.controller.v1.VolumeService.DeleteVolume:input_type -> zettide.controller.v1.DeleteVolumeRequest
-	119, // 142: zettide.controller.v1.RangeLeaseService.AcquireLease:input_type -> zettide.controller.v1.RangeLeaseRequest
-	119, // 143: zettide.controller.v1.RangeLeaseService.RenewLease:input_type -> zettide.controller.v1.RangeLeaseRequest
-	119, // 144: zettide.controller.v1.RangeLeaseService.RevokeLease:input_type -> zettide.controller.v1.RangeLeaseRequest
-	119, // 145: zettide.controller.v1.RangeLeaseService.CompleteRevoke:input_type -> zettide.controller.v1.RangeLeaseRequest
-	122, // 146: zettide.controller.v1.RangeLeaseService.GetLease:input_type -> zettide.controller.v1.GetRangeLeaseRequest
-	123, // 147: zettide.controller.v1.RangeLeaseService.ListLeases:input_type -> zettide.controller.v1.ListRangeLeasesRequest
-	128, // 148: zettide.controller.v1.FilesystemService.CreateFilesystem:input_type -> zettide.controller.v1.FilesystemMutationRequest
-	128, // 149: zettide.controller.v1.FilesystemService.UpdateFilesystem:input_type -> zettide.controller.v1.FilesystemMutationRequest
-	128, // 150: zettide.controller.v1.FilesystemService.DeleteFilesystem:input_type -> zettide.controller.v1.FilesystemMutationRequest
-	130, // 151: zettide.controller.v1.FilesystemService.GetFilesystem:input_type -> zettide.controller.v1.GetFilesystemRequest
-	131, // 152: zettide.controller.v1.FilesystemService.ListFilesystems:input_type -> zettide.controller.v1.ListFilesystemsRequest
-	39,  // 153: zettide.controller.v1.PoolService.CreatePool:output_type -> zettide.controller.v1.CreatePoolResponse
-	41,  // 154: zettide.controller.v1.PoolService.GetPool:output_type -> zettide.controller.v1.GetPoolResponse
-	43,  // 155: zettide.controller.v1.PoolService.ListPools:output_type -> zettide.controller.v1.ListPoolsResponse
-	35,  // 156: zettide.controller.v1.PoolService.UpdatePool:output_type -> zettide.controller.v1.UpdatePoolResponse
-	37,  // 157: zettide.controller.v1.PoolService.DeletePool:output_type -> zettide.controller.v1.DeletePoolResponse
-	46,  // 158: zettide.controller.v1.NodeService.RegisterNode:output_type -> zettide.controller.v1.RegisterNodeResponse
-	48,  // 159: zettide.controller.v1.NodeService.GetNode:output_type -> zettide.controller.v1.GetNodeResponse
-	50,  // 160: zettide.controller.v1.NodeService.ListNodes:output_type -> zettide.controller.v1.ListNodesResponse
-	53,  // 161: zettide.controller.v1.MemberService.RegisterMember:output_type -> zettide.controller.v1.RegisterMemberResponse
-	55,  // 162: zettide.controller.v1.MemberService.GetMember:output_type -> zettide.controller.v1.GetMemberResponse
-	57,  // 163: zettide.controller.v1.MemberService.ListMembers:output_type -> zettide.controller.v1.ListMembersResponse
-	62,  // 164: zettide.controller.v1.HeartbeatService.ReportHeartbeat:output_type -> zettide.controller.v1.ReportHeartbeatResponse
-	64,  // 165: zettide.controller.v1.HeartbeatService.GetHeartbeat:output_type -> zettide.controller.v1.GetHeartbeatResponse
-	67,  // 166: zettide.controller.v1.VolumeService.CreateVolume:output_type -> zettide.controller.v1.CreateVolumeResponse
-	69,  // 167: zettide.controller.v1.VolumeService.GetVolume:output_type -> zettide.controller.v1.GetVolumeResponse
-	71,  // 168: zettide.controller.v1.VolumeService.UpdateVolume:output_type -> zettide.controller.v1.UpdateVolumeResponse
-	73,  // 169: zettide.controller.v1.VolumeService.ListVolumes:output_type -> zettide.controller.v1.ListVolumesResponse
-	75,  // 170: zettide.controller.v1.VolumeService.DeleteVolume:output_type -> zettide.controller.v1.DeleteVolumeResponse
-	121, // 171: zettide.controller.v1.RangeLeaseService.AcquireLease:output_type -> zettide.controller.v1.RangeLeaseResponse
-	121, // 172: zettide.controller.v1.RangeLeaseService.RenewLease:output_type -> zettide.controller.v1.RangeLeaseResponse
-	121, // 173: zettide.controller.v1.RangeLeaseService.RevokeLease:output_type -> zettide.controller.v1.RangeLeaseResponse
-	121, // 174: zettide.controller.v1.RangeLeaseService.CompleteRevoke:output_type -> zettide.controller.v1.RangeLeaseResponse
-	121, // 175: zettide.controller.v1.RangeLeaseService.GetLease:output_type -> zettide.controller.v1.RangeLeaseResponse
-	124, // 176: zettide.controller.v1.RangeLeaseService.ListLeases:output_type -> zettide.controller.v1.ListRangeLeasesResponse
-	129, // 177: zettide.controller.v1.FilesystemService.CreateFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
-	129, // 178: zettide.controller.v1.FilesystemService.UpdateFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
-	129, // 179: zettide.controller.v1.FilesystemService.DeleteFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
-	129, // 180: zettide.controller.v1.FilesystemService.GetFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
-	132, // 181: zettide.controller.v1.FilesystemService.ListFilesystems:output_type -> zettide.controller.v1.ListFilesystemsResponse
-	153, // [153:182] is the sub-list for method output_type
-	124, // [124:153] is the sub-list for method input_type
-	124, // [124:124] is the sub-list for extension type_name
-	124, // [124:124] is the sub-list for extension extendee
-	0,   // [0:124] is the sub-list for field type_name
+	31,  // 116: zettide.controller.v1.Filesystem.authority_state:type_name -> zettide.controller.v1.FilesystemAuthorityState
+	28,  // 117: zettide.controller.v1.FilesystemMutationRequest.backend_kind:type_name -> zettide.controller.v1.FilesystemBackendKind
+	29,  // 118: zettide.controller.v1.FilesystemMutationRequest.name_profile:type_name -> zettide.controller.v1.FilesystemNameProfile
+	128, // 119: zettide.controller.v1.FilesystemResponse.filesystem:type_name -> zettide.controller.v1.Filesystem
+	128, // 120: zettide.controller.v1.ListFilesystemsResponse.filesystems:type_name -> zettide.controller.v1.Filesystem
+	129, // 121: zettide.controller.v1.FilesystemCommand.request:type_name -> zettide.controller.v1.FilesystemMutationRequest
+	32,  // 122: zettide.controller.v1.FilesystemCommand.operation:type_name -> zettide.controller.v1.FilesystemOperation
+	33,  // 123: zettide.controller.v1.FilesystemApplyResponse.code:type_name -> zettide.controller.v1.FilesystemCode
+	128, // 124: zettide.controller.v1.FilesystemApplyResponse.filesystem:type_name -> zettide.controller.v1.Filesystem
+	39,  // 125: zettide.controller.v1.PoolService.CreatePool:input_type -> zettide.controller.v1.CreatePoolRequest
+	41,  // 126: zettide.controller.v1.PoolService.GetPool:input_type -> zettide.controller.v1.GetPoolRequest
+	43,  // 127: zettide.controller.v1.PoolService.ListPools:input_type -> zettide.controller.v1.ListPoolsRequest
+	35,  // 128: zettide.controller.v1.PoolService.UpdatePool:input_type -> zettide.controller.v1.UpdatePoolRequest
+	37,  // 129: zettide.controller.v1.PoolService.DeletePool:input_type -> zettide.controller.v1.DeletePoolRequest
+	46,  // 130: zettide.controller.v1.NodeService.RegisterNode:input_type -> zettide.controller.v1.RegisterNodeRequest
+	48,  // 131: zettide.controller.v1.NodeService.GetNode:input_type -> zettide.controller.v1.GetNodeRequest
+	50,  // 132: zettide.controller.v1.NodeService.ListNodes:input_type -> zettide.controller.v1.ListNodesRequest
+	53,  // 133: zettide.controller.v1.MemberService.RegisterMember:input_type -> zettide.controller.v1.RegisterMemberRequest
+	55,  // 134: zettide.controller.v1.MemberService.GetMember:input_type -> zettide.controller.v1.GetMemberRequest
+	57,  // 135: zettide.controller.v1.MemberService.ListMembers:input_type -> zettide.controller.v1.ListMembersRequest
+	61,  // 136: zettide.controller.v1.HeartbeatService.ReportHeartbeat:input_type -> zettide.controller.v1.ReportHeartbeatRequest
+	64,  // 137: zettide.controller.v1.HeartbeatService.GetHeartbeat:input_type -> zettide.controller.v1.GetHeartbeatRequest
+	67,  // 138: zettide.controller.v1.VolumeService.CreateVolume:input_type -> zettide.controller.v1.CreateVolumeRequest
+	69,  // 139: zettide.controller.v1.VolumeService.GetVolume:input_type -> zettide.controller.v1.GetVolumeRequest
+	71,  // 140: zettide.controller.v1.VolumeService.UpdateVolume:input_type -> zettide.controller.v1.UpdateVolumeRequest
+	73,  // 141: zettide.controller.v1.VolumeService.ListVolumes:input_type -> zettide.controller.v1.ListVolumesRequest
+	75,  // 142: zettide.controller.v1.VolumeService.DeleteVolume:input_type -> zettide.controller.v1.DeleteVolumeRequest
+	120, // 143: zettide.controller.v1.RangeLeaseService.AcquireLease:input_type -> zettide.controller.v1.RangeLeaseRequest
+	120, // 144: zettide.controller.v1.RangeLeaseService.RenewLease:input_type -> zettide.controller.v1.RangeLeaseRequest
+	120, // 145: zettide.controller.v1.RangeLeaseService.RevokeLease:input_type -> zettide.controller.v1.RangeLeaseRequest
+	120, // 146: zettide.controller.v1.RangeLeaseService.CompleteRevoke:input_type -> zettide.controller.v1.RangeLeaseRequest
+	123, // 147: zettide.controller.v1.RangeLeaseService.GetLease:input_type -> zettide.controller.v1.GetRangeLeaseRequest
+	124, // 148: zettide.controller.v1.RangeLeaseService.ListLeases:input_type -> zettide.controller.v1.ListRangeLeasesRequest
+	129, // 149: zettide.controller.v1.FilesystemService.CreateFilesystem:input_type -> zettide.controller.v1.FilesystemMutationRequest
+	129, // 150: zettide.controller.v1.FilesystemService.UpdateFilesystem:input_type -> zettide.controller.v1.FilesystemMutationRequest
+	129, // 151: zettide.controller.v1.FilesystemService.DeleteFilesystem:input_type -> zettide.controller.v1.FilesystemMutationRequest
+	129, // 152: zettide.controller.v1.FilesystemService.ProposeFilesystemAuthority:input_type -> zettide.controller.v1.FilesystemMutationRequest
+	129, // 153: zettide.controller.v1.FilesystemService.CancelFilesystemAuthority:input_type -> zettide.controller.v1.FilesystemMutationRequest
+	131, // 154: zettide.controller.v1.FilesystemService.GetFilesystem:input_type -> zettide.controller.v1.GetFilesystemRequest
+	132, // 155: zettide.controller.v1.FilesystemService.ListFilesystems:input_type -> zettide.controller.v1.ListFilesystemsRequest
+	40,  // 156: zettide.controller.v1.PoolService.CreatePool:output_type -> zettide.controller.v1.CreatePoolResponse
+	42,  // 157: zettide.controller.v1.PoolService.GetPool:output_type -> zettide.controller.v1.GetPoolResponse
+	44,  // 158: zettide.controller.v1.PoolService.ListPools:output_type -> zettide.controller.v1.ListPoolsResponse
+	36,  // 159: zettide.controller.v1.PoolService.UpdatePool:output_type -> zettide.controller.v1.UpdatePoolResponse
+	38,  // 160: zettide.controller.v1.PoolService.DeletePool:output_type -> zettide.controller.v1.DeletePoolResponse
+	47,  // 161: zettide.controller.v1.NodeService.RegisterNode:output_type -> zettide.controller.v1.RegisterNodeResponse
+	49,  // 162: zettide.controller.v1.NodeService.GetNode:output_type -> zettide.controller.v1.GetNodeResponse
+	51,  // 163: zettide.controller.v1.NodeService.ListNodes:output_type -> zettide.controller.v1.ListNodesResponse
+	54,  // 164: zettide.controller.v1.MemberService.RegisterMember:output_type -> zettide.controller.v1.RegisterMemberResponse
+	56,  // 165: zettide.controller.v1.MemberService.GetMember:output_type -> zettide.controller.v1.GetMemberResponse
+	58,  // 166: zettide.controller.v1.MemberService.ListMembers:output_type -> zettide.controller.v1.ListMembersResponse
+	63,  // 167: zettide.controller.v1.HeartbeatService.ReportHeartbeat:output_type -> zettide.controller.v1.ReportHeartbeatResponse
+	65,  // 168: zettide.controller.v1.HeartbeatService.GetHeartbeat:output_type -> zettide.controller.v1.GetHeartbeatResponse
+	68,  // 169: zettide.controller.v1.VolumeService.CreateVolume:output_type -> zettide.controller.v1.CreateVolumeResponse
+	70,  // 170: zettide.controller.v1.VolumeService.GetVolume:output_type -> zettide.controller.v1.GetVolumeResponse
+	72,  // 171: zettide.controller.v1.VolumeService.UpdateVolume:output_type -> zettide.controller.v1.UpdateVolumeResponse
+	74,  // 172: zettide.controller.v1.VolumeService.ListVolumes:output_type -> zettide.controller.v1.ListVolumesResponse
+	76,  // 173: zettide.controller.v1.VolumeService.DeleteVolume:output_type -> zettide.controller.v1.DeleteVolumeResponse
+	122, // 174: zettide.controller.v1.RangeLeaseService.AcquireLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	122, // 175: zettide.controller.v1.RangeLeaseService.RenewLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	122, // 176: zettide.controller.v1.RangeLeaseService.RevokeLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	122, // 177: zettide.controller.v1.RangeLeaseService.CompleteRevoke:output_type -> zettide.controller.v1.RangeLeaseResponse
+	122, // 178: zettide.controller.v1.RangeLeaseService.GetLease:output_type -> zettide.controller.v1.RangeLeaseResponse
+	125, // 179: zettide.controller.v1.RangeLeaseService.ListLeases:output_type -> zettide.controller.v1.ListRangeLeasesResponse
+	130, // 180: zettide.controller.v1.FilesystemService.CreateFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 181: zettide.controller.v1.FilesystemService.UpdateFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 182: zettide.controller.v1.FilesystemService.DeleteFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 183: zettide.controller.v1.FilesystemService.ProposeFilesystemAuthority:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 184: zettide.controller.v1.FilesystemService.CancelFilesystemAuthority:output_type -> zettide.controller.v1.FilesystemResponse
+	130, // 185: zettide.controller.v1.FilesystemService.GetFilesystem:output_type -> zettide.controller.v1.FilesystemResponse
+	133, // 186: zettide.controller.v1.FilesystemService.ListFilesystems:output_type -> zettide.controller.v1.ListFilesystemsResponse
+	156, // [156:187] is the sub-list for method output_type
+	125, // [125:156] is the sub-list for method input_type
+	125, // [125:125] is the sub-list for extension type_name
+	125, // [125:125] is the sub-list for extension extendee
+	0,   // [0:125] is the sub-list for field type_name
 }
 
 func init() { file_services_controller_proto_zettide_controller_v1_controller_proto_init() }
@@ -11139,7 +11271,7 @@ func file_services_controller_proto_zettide_controller_v1_controller_proto_init(
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_services_controller_proto_zettide_controller_v1_controller_proto_rawDesc), len(file_services_controller_proto_zettide_controller_v1_controller_proto_rawDesc)),
-			NumEnums:      33,
+			NumEnums:      34,
 			NumMessages:   102,
 			NumExtensions: 0,
 			NumServices:   7,

@@ -199,3 +199,10 @@ profile. It is not an NFS conformance claim. The
 - Replacing the existing on-media filesystem format merely to add management.
 - Claiming transparent open/lock failover or multi-host POSIX compliance without
   protocol-specific recovery and real mounted-client tests.
+
+The controller also supports a non-executable single-owner candidate reservation:
+registered node, actual service-process boot identity, and monotonic epoch.
+Candidates block deletion and can only be cancelled with the exact binding.
+They must not perform backend work and are not placement or access grants.
+See [candidate semantics](../filesystem-metadata.md#candidate-reservation-not-an-io-grant).
+The committed preparing/fencing/recovery/readiness phases remain future work.
