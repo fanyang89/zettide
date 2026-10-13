@@ -182,6 +182,18 @@ pub const Filesystem = struct {
         blobs: blob_store.Store,
         writable: bool,
     ) !Filesystem {
+        return openExpectedProfile(allocator, io, blobs, writable, null);
+    }
+
+    /// Verify the selected root's profile before any writable orphan recovery.
+    /// Takes ownership of blobs, including on mismatch or recovery failure.
+    pub fn openExpectedProfile(
+        allocator: std.mem.Allocator,
+        io: Io,
+        blobs: blob_store.Store,
+        writable: bool,
+        expected_profile: ?name_profile.Profile,
+    ) !Filesystem {
         var owned_blobs = blobs;
         var owns_blobs = true;
         errdefer if (owns_blobs) owned_blobs.close(io) catch {};
@@ -200,9 +212,12 @@ pub const Filesystem = struct {
                 if (first_error == null) first_error = err;
                 continue;
             };
+            if (expected_profile) |expected| {
+                if (root.name_profile != expected) return error.FilesystemProfileMismatch;
+            }
             var result = init(allocator, owned_blobs, authority_ref, root, writable);
             owns_blobs = false;
-            errdefer result.close(io) catch {};
+            errdefer result.abort(io) catch {};
             if (writable) try result.recoverOrphans(io);
             return result;
         }
@@ -210,8 +225,18 @@ pub const Filesystem = struct {
     }
 
     pub fn close(self: *Filesystem, io: Io) !void {
+        return self.finishClose(io, true);
+    }
+
+    /// Join all operations first. Release without committing dirty state; already
+    /// committed mutations are not rolled back. Used by fenced/failed owners.
+    pub fn abort(self: *Filesystem, io: Io) !void {
+        return self.finishClose(io, false);
+    }
+
+    fn finishClose(self: *Filesystem, io: Io, commit_dirty: bool) !void {
         var first_error: ?anyerror = null;
-        if (self.writable and self.dirty) self.sync(io) catch |err| {
+        if (commit_dirty and self.writable and self.dirty) self.sync(io) catch |err| {
             first_error = err;
         };
         const allocator = self.allocator;

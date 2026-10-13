@@ -177,8 +177,10 @@ Pools. The trusted resolver must supply a canonical digest covering stable
 physical Pool/Member and root-object identity, independent of the claimant
 Filesystem, logical Pool, owner, epoch or pathname. This duplicate check is not
 physical attestation: arbitrary different hashes can alias one actual backend.
-The real catalog, physical verification and all-path ownership adapter remain
-unimplemented; see [storage gate requirements](filesystem-fencing.md).
+The production catalog, raw-Pool verification and all-path ownership adapter
+remain unimplemented. A [local-file owner prototype](local-blob-filesystem-owner.md)
+validates Blob headers and runs real recovery, but is not connected to these
+RPCs; see [storage gate requirements](filesystem-fencing.md).
 
 Once PREPARING, direct cancellation, deletion, re-proposal and backend rebinding
 are rejected. A retry with the original Begin request ID/fields returns its

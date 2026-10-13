@@ -62,6 +62,11 @@ pub const Gate = struct {
 
     pub const Guard = struct {
         gate: *Gate,
+        /// After actual I/O completion, fail admission closed on an uncertain
+        /// payload error. The guard remains held and must still be ended.
+        pub fn failClosed(self: *Guard) void {
+            self.gate.poison();
+        }
         pub fn end(self: *Guard) void {
             self.gate.mutex.unlock(self.gate.ledger.io);
             self.* = undefined;

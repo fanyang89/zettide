@@ -97,6 +97,7 @@ the trusted storage adapter; do not use a holder-local gate as a fence proof.
 `filesystem_fence` adds a separately journaled, backend-neutral Filesystem epoch
 barrier and guarded recovery/admission sequence. It binds stable backend identity,
 placement generation and process boot; reopening never restores readiness.
-It is not connected to managed storage or the controller's preparation intents.
+A local-file BlobFilesystem owner prototype consumes this gate; production
+storage and the controller authorizer are still not connected.
 See [Filesystem fencing](../../docs/filesystem-fencing.md) for adapter obligations,
 process ownership, failure behavior and the remaining integration boundary.

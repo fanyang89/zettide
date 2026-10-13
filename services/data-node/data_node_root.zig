@@ -1,3 +1,5 @@
+pub const filesystem_blob_owner = @import("filesystem_blob_owner.zig");
+
 pub const storage = @import("zettide_storage");
 
 pub const data_service = @import("data_node_service.zig");
@@ -30,3 +32,7 @@ pub const spdk_provider_bdev = if (@import("builtin").os.tag == .linux) @import(
 pub const spdk_runtime = if (@import("builtin").os.tag == .linux) @import("spdk/runtime.zig") else struct {};
 pub const spdk_storage = if (@import("builtin").os.tag == .linux) @import("spdk/storage.zig") else struct {};
 pub const spdk_vhost_block_export = if (@import("builtin").os.tag == .linux) @import("spdk/vhost_block_export.zig") else struct {};
+
+test {
+    _ = filesystem_blob_owner;
+}

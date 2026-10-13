@@ -3,8 +3,9 @@
 ## Implemented boundary
 
 `libs/data-service-contracts/src/filesystem_fence.zig` provides a backend-neutral,
-local storage gate with a checksummed, fsync-backed epoch journal. It is **not
-wired into the controller, BlobFilesystem, NFS or FUSE**. The gate introduces no READY transition, export or on-media filesystem format.
+local storage gate with a checksummed, fsync-backed epoch journal. A
+[local regular-file prototype](local-blob-filesystem-owner.md) now connects it to
+BlobFilesystem, but it is **not wired into the controller, NFS or FUSE**. The gate introduces no READY transition, export or on-media filesystem format.
 
 The controller exposes non-executable candidates and a non-cancellable
 `BeginFilesystemPreparation` intent that pins backend digest, placement generation
@@ -19,7 +20,8 @@ An immutable `Identity` binds controller cluster, logical Pool, Filesystem,
 backend digest, root format and filename profile. The backend digest must cover
 stable physical Pool/Member identities and the root Blob object's durable
 identity/locator, **not** its changing tree checksum, a pathname or mountpoint.
-The production derivation/catalog and verification adapter remain unimplemented.
+The production raw-Pool derivation/catalog and verification adapter remain
+unimplemented; the local-file prototype uses a separate digest domain.
 `verify_identity` must check the actual opened backend, not echo caller input.
 
 A `Binding` additionally binds placement generation, authority epoch, holder
