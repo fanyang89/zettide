@@ -959,7 +959,7 @@ fn regularFileExists(io: std.Io, parent: std.Io.Dir, basename: []const u8) !bool
 fn openLock(io: std.Io, parent: std.Io.Dir) !std.Io.File {
     while (true) {
         const file = parent.openFile(io, lock_basename, .{ .mode = .read_write, .allow_directory = false, .follow_symlinks = false }) catch |open_error| switch (open_error) {
-            error.FileNotFound => parent.createFile(io, lock_basename, .{ .read = true, .truncate = false, .exclusive = true, .permissions = @enumFromInt(0o600) }) catch |create_error| switch (create_error) {
+            error.FileNotFound => parent.createFile(io, lock_basename, .{ .read = true, .truncate = false, .exclusive = true, .permissions = @fromBackingInt(@intCast(0o600)) }) catch |create_error| switch (create_error) {
                 error.PathAlreadyExists => continue,
                 else => return create_error,
             },
@@ -1149,7 +1149,7 @@ fn encodeCatalog(allocator: std.mem.Allocator, records: []const CatalogRecord) !
     std.mem.writeInt(u16, bytes[10..12], record_encoded_size, .little);
     std.mem.writeInt(u32, bytes[12..16], @intCast(records.len), .little);
     for (records, 0..) |record, index| encodeRecord(bytes[header_size + index * record_encoded_size ..][0..record_encoded_size], record);
-    std.mem.writeInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size]), .little);
+    std.mem.writeInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - checksum_size]), .little);
     return bytes;
 }
 
@@ -1160,7 +1160,7 @@ fn decodeCatalog(allocator: std.mem.Allocator, bytes: []const u8) ![]CatalogReco
         return error.StoreCorrupt;
     const count = std.mem.readInt(u32, bytes[12..16], .little);
     if (count > max_records or bytes.len != header_size + @as(usize, count) * record_encoded_size + checksum_size or
-        std.mem.readInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], .little) != std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size]))
+        std.mem.readInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], .little) != std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - checksum_size]))
         return error.StoreCorrupt;
     const records = try allocator.alloc(CatalogRecord, count);
     errdefer allocator.free(records);
@@ -1323,7 +1323,7 @@ test "coordinator catalog round trips canonical topology and arm bit" {
     var corrupted = try std.testing.allocator.dupe(u8, bytes);
     defer std.testing.allocator.free(corrupted);
     corrupted[header_size + 16] = 2;
-    std.mem.writeInt(u32, corrupted[corrupted.len - checksum_size ..][0..checksum_size], std.hash.crc.Crc32Iscsi.hash(corrupted[0 .. corrupted.len - checksum_size]), .little);
+    std.mem.writeInt(u32, corrupted[corrupted.len - checksum_size ..][0..checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(corrupted[0 .. corrupted.len - checksum_size]), .little);
     try std.testing.expectError(error.StoreCorrupt, decodeCatalog(std.testing.allocator, corrupted));
 }
 
@@ -1618,7 +1618,7 @@ fn managerTestWriteCatalog(parent: std.Io.Dir, records: []const CatalogRecord) !
     try parent.writeFile(std.testing.io, .{
         .sub_path = catalog_basename,
         .data = bytes,
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
 }
 
@@ -1800,7 +1800,7 @@ test "invalid coordinate request creates no durable intent" {
     defer manager.deinit();
     try manager.configure(environment.topology);
     const local = localRoute(environment.topology).?;
-    const payload = [_]u8{0x44} ** 4096;
+    const payload = @as([4096]u8, @splat(0x44));
     var authority = managerTestAuthority(local.binding.replica.volume_id);
     authority.primary_placement_id = local.binding.replica.placement_id;
     authority.primary_node_id = identity.node_id;
@@ -1855,7 +1855,7 @@ test "pending missing prepare revalidates exact primary admission" {
     defer manager.deinit();
     try manager.configure(environment.topology);
     const local = localRoute(environment.topology).?;
-    const payload = [_]u8{0x33} ** 4096;
+    const payload = @as([4096]u8, @splat(0x33));
     const authority = environment.validator.expected;
     const entry = manager.entries.get(key(
         local.binding.replica.placement_id,
@@ -2134,7 +2134,7 @@ test "coordinator startup rejects malformed catalog and journal" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = &name,
         .data = "malformed coordinator journal",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.StoreCorrupt,
@@ -2146,7 +2146,7 @@ test "coordinator startup rejects malformed catalog and journal" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = catalog_basename,
         .data = "malformed coordinator catalog",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.StoreCorrupt,
@@ -2168,7 +2168,7 @@ test "coordinator startup rejects orphan and noncanonical journal names" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "coordinator-orphan.state",
         .data = "orphan",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.OrphanCoordinatorState,
@@ -2192,7 +2192,7 @@ test "coordinator startup rejects orphan and noncanonical journal names" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = &alias,
         .data = "noncanonical alias",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.OrphanCoordinatorState,
@@ -2404,7 +2404,7 @@ test "durable coordinator presence detection rejects suspicious downgrade state"
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "coordinator-not-canonical.state",
         .data = "suspicious",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.SuspiciousCoordinatorState,
@@ -2414,7 +2414,7 @@ test "durable coordinator presence detection rejects suspicious downgrade state"
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "catalog-target",
         .data = "not a catalog",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try tmp.dir.symLink(std.testing.io, "catalog-target", catalog_basename, .{});
     try std.testing.expectError(
@@ -2425,7 +2425,7 @@ test "durable coordinator presence detection rejects suspicious downgrade state"
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = catalog_basename,
         .data = "malformed catalog",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.StoreCorrupt,

@@ -341,7 +341,7 @@ pub const Reconciler = struct {
         const encoded = try state_machine.encodeReserveVolumeResourcesCommand(allocator, .{
             .volume_id = volume.id,
             .expected_resource_version = volume.resource_version,
-            .reservations = .{ .items = reservations, .capacity = reservations.len },
+            .reservations = .{ .items = reservations, .capacity = reservations.len, .pointer_stability = .{} },
         });
         action.kind = .{ .reserve = encoded };
         return action;
@@ -962,7 +962,7 @@ pub const Action = struct {
                     .placement_revision = ready.binding.placement_revision,
                     .expected_volume_resource_version = ready.expected_volume_resource_version,
                     .expected_authority_resource_version = ready.expected_authority_resource_version,
-                    .fence_evidence = .{ .items = evidence, .capacity = evidence.len },
+                    .fence_evidence = .{ .items = evidence, .capacity = evidence.len, .pointer_stability = .{} },
                     .recovery_evidence = .{
                         .volume_id = ready.volume_id_text,
                         .write_epoch = ready.binding.write_epoch,
@@ -1106,7 +1106,7 @@ pub const Action = struct {
                     .expected_candidate_resource_version = ready.expected_candidate_resource_version,
                     .expected_current_resource_version = ready.expected_current_resource_version,
                     .expected_failover_resource_version = ready.expected_failover_resource_version,
-                    .fence_evidence = .{ .items = evidence, .capacity = evidence.len },
+                    .fence_evidence = .{ .items = evidence, .capacity = evidence.len, .pointer_stability = .{} },
                     .recovery_evidence = .{
                         .volume_id = ready.volume_id_text,
                         .write_epoch = binding.write_epoch,

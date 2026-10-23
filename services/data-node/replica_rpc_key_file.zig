@@ -125,7 +125,7 @@ test "loads bounded receiver-scoped pairwise key file" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "replica.keys",
         .data = contents,
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     var loaded = try load(std.testing.allocator, std.testing.io, tmp.dir, "replica.keys");
     defer loaded.deinit();
@@ -140,7 +140,7 @@ test "rejects malformed empty and oversized key files" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "empty",
         .data = "\n",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.InvalidReplicaKeyFile,
@@ -149,7 +149,7 @@ test "rejects malformed empty and oversized key files" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "malformed",
         .data = "not-a-node not-a-key\n",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.InvalidReplicaKeyFile,
@@ -161,7 +161,7 @@ test "rejects malformed empty and oversized key files" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "oversized",
         .data = oversized,
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try std.testing.expectError(
         error.InvalidReplicaKeyFile,
@@ -177,11 +177,11 @@ test "rejects group or world accessible key file" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "replica.keys",
         .data = contents,
-        .flags = .{ .permissions = @enumFromInt(0o640) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o640)) },
     });
     const file = try tmp.dir.openFile(std.testing.io, "replica.keys", .{});
     defer file.close(std.testing.io);
-    try file.setPermissions(std.testing.io, @enumFromInt(0o640));
+    try file.setPermissions(std.testing.io, @fromBackingInt(@intCast(0o640)));
     try std.testing.expectError(
         error.InsecureReplicaKeyFile,
         load(std.testing.allocator, std.testing.io, tmp.dir, "replica.keys"),
@@ -196,7 +196,7 @@ test "rejects key-file symlinks" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "target.keys",
         .data = contents,
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try tmp.dir.symLink(std.testing.io, "target.keys", "replica.keys", .{});
     try std.testing.expectError(

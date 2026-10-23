@@ -1010,7 +1010,7 @@ const FileStoreInner = struct {
         } else offset += participant_binding_encoded_size;
         if (offset > metadata_size) return error.StoreEncodingOverflow;
         @memcpy(bytes[metadata_size..][0..payload.len], payload);
-        std.mem.writeInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size]), .little);
+        std.mem.writeInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - checksum_size]), .little);
         return bytes;
     }
 
@@ -1026,7 +1026,7 @@ const FileStoreInner = struct {
         if (payload_len > max_payload_size or bytes.len != metadata_size + @as(usize, payload_len) + checksum_size)
             return error.StoreCorrupt;
         if (std.mem.readInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], .little) !=
-            std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size])) return error.StoreCorrupt;
+            std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - checksum_size])) return error.StoreCorrupt;
 
         var offset: usize = 24;
         var state: State = .{ .frontier = getFrontier(bytes, &offset) };
@@ -1090,7 +1090,7 @@ const FileStoreInner = struct {
         if (payload_len > max_payload_size or
             bytes.len != legacy_metadata_size + @as(usize, payload_len) + checksum_size or
             std.mem.readInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], .little) !=
-                std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size])) return error.StoreCorrupt;
+                std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - checksum_size])) return error.StoreCorrupt;
 
         var offset: usize = 24;
         const frontier = getFrontier(bytes, &offset);
@@ -1749,7 +1749,7 @@ fn writeLegacyV1(
     putReplica(bytes, &offset, binding.replica);
     for (binding.replica_members) |member| putBytes(bytes, &offset, &member);
     @memcpy(bytes[FileStoreInner.legacy_metadata_size..][0..payload.len], payload);
-    std.mem.writeInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]), .little);
+    std.mem.writeInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]), .little);
     try dir.writeFile(std.testing.io, .{ .sub_path = basename, .data = bytes });
 }
 
@@ -1757,7 +1757,7 @@ fn rewriteSnapshotChecksum(bytes: []u8) void {
     std.mem.writeInt(
         u32,
         bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size],
-        std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]),
+        std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]),
         .little,
     );
 }
@@ -2050,7 +2050,7 @@ test "v2 reopen rejects mutated persisted signed certificate" {
     const first_signature = completed_start + replica_encoded_size + write_encoded_size + attestation_encoded_size +
         attestation_encoded_size + 16 + 32;
     bytes[first_signature] ^= 1;
-    std.mem.writeInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]), .little);
+    std.mem.writeInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]), .little);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mutated.state", .data = bytes });
     try std.testing.expectError(
         error.StoreCorrupt,

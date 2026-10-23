@@ -4291,7 +4291,7 @@ test "reservation planner is deterministic and avoids durable allocations" {
     const reserve = try encodeReserveVolumeResourcesCommand(allocator, .{
         .volume_id = test_volume_id,
         .expected_resource_version = 8,
-        .reservations = .{ .items = first, .capacity = first.len },
+        .reservations = .{ .items = first, .capacity = first.len, .pointer_stability = .{} },
     });
     defer allocator.free(reserve);
     var applied = try applyEncodedTestCommand(allocator, &machine, 9, reserve);
@@ -4335,7 +4335,7 @@ test "reservation planner distinguishes failure domains from fragmented capacity
     const encoded = try encodeReserveVolumeResourcesCommand(allocator, .{
         .volume_id = test_volume_id,
         .expected_resource_version = 8,
-        .reservations = .{ .items = &fragmented, .capacity = fragmented.len },
+        .reservations = .{ .items = &fragmented, .capacity = fragmented.len, .pointer_stability = .{} },
     });
     defer allocator.free(encoded);
     var reserved = try applyEncodedTestCommand(allocator, &capacity_machine, 9, encoded);
@@ -4438,7 +4438,7 @@ fn prepareFencingVolume(allocator: std.mem.Allocator, machine: *PoolStateMachine
     var created = try applyTestVolumeCommand(allocator, machine, 8, testVolumeCommand("authority-volume", test_volume_id, "authority", "", min_volume_size_bytes, 1_753_744_000_010));
     defer created.deinit(allocator);
     var reservations = testReservations(min_volume_size_bytes);
-    const reserve = try encodeReserveVolumeResourcesCommand(allocator, .{ .volume_id = test_volume_id, .expected_resource_version = 8, .reservations = .{ .items = &reservations, .capacity = reservations.len } });
+    const reserve = try encodeReserveVolumeResourcesCommand(allocator, .{ .volume_id = test_volume_id, .expected_resource_version = 8, .reservations = .{ .items = &reservations, .capacity = reservations.len, .pointer_stability = .{} } });
     defer allocator.free(reserve);
     var reserved = try applyEncodedTestCommand(allocator, machine, 9, reserve);
     defer reserved.deinit(allocator);
@@ -4492,7 +4492,7 @@ fn prepareReadyAuthority(allocator: std.mem.Allocator, machine: *PoolStateMachin
         .placement_revision = 9,
         .expected_volume_resource_version = 14,
         .expected_authority_resource_version = 14,
-        .fence_evidence = .{ .items = &fences, .capacity = fences.len },
+        .fence_evidence = .{ .items = &fences, .capacity = fences.len, .pointer_stability = .{} },
         .recovery_evidence = testRecoveryEvidence(),
     });
     defer allocator.free(ready);
@@ -4549,7 +4549,7 @@ test "primary authority lifecycle snapshot and deletion" {
         .placement_revision = 9,
         .expected_volume_resource_version = 14,
         .expected_authority_resource_version = 14,
-        .fence_evidence = .{ .items = &fences, .capacity = fences.len },
+        .fence_evidence = .{ .items = &fences, .capacity = fences.len, .pointer_stability = .{} },
         .recovery_evidence = testRecoveryEvidence(),
     });
     defer allocator.free(ready_command);
@@ -4584,8 +4584,8 @@ test "primary authority lifecycle snapshot and deletion" {
     const finalize = try encodeFinalizeVolumeDeletionCommand(allocator, .{
         .volume_id = test_volume_id,
         .expected_resource_version = 16,
-        .placement_ids = .{ .items = @constCast(&placement_ids), .capacity = placement_ids.len },
-        .allocation_ids = .{ .items = @constCast(&allocation_ids), .capacity = allocation_ids.len },
+        .placement_ids = .{ .items = @constCast(&placement_ids), .capacity = placement_ids.len, .pointer_stability = .{} },
+        .allocation_ids = .{ .items = @constCast(&allocation_ids), .capacity = allocation_ids.len, .pointer_stability = .{} },
         .proposed_deleted_at_unix_ms = 1_753_744_000_021,
     });
     defer allocator.free(finalize);
@@ -5015,7 +5015,7 @@ test "primary failover revokes waits advances epoch and atomically switches read
         .expected_candidate_resource_version = 22,
         .expected_current_resource_version = 15,
         .expected_failover_resource_version = 21,
-        .fence_evidence = .{ .items = &fences, .capacity = fences.len },
+        .fence_evidence = .{ .items = &fences, .capacity = fences.len, .pointer_stability = .{} },
         .recovery_evidence = recovery,
     });
     defer allocator.free(ready);
@@ -5096,8 +5096,8 @@ test "volume deletion cleans current candidate and primary failover" {
     const finalize = try encodeFinalizeVolumeDeletionCommand(allocator, .{
         .volume_id = test_volume_id,
         .expected_resource_version = 17,
-        .placement_ids = .{ .items = @constCast(&placement_ids), .capacity = placement_ids.len },
-        .allocation_ids = .{ .items = @constCast(&allocation_ids), .capacity = allocation_ids.len },
+        .placement_ids = .{ .items = @constCast(&placement_ids), .capacity = placement_ids.len, .pointer_stability = .{} },
+        .allocation_ids = .{ .items = @constCast(&allocation_ids), .capacity = allocation_ids.len, .pointer_stability = .{} },
         .proposed_deleted_at_unix_ms = 1_753_744_000_021,
     });
     defer allocator.free(finalize);
@@ -5143,7 +5143,7 @@ test "primary authority rejects stale activation and invalid ready evidence" {
         .placement_revision = 9,
         .expected_volume_resource_version = 13,
         .expected_authority_resource_version = 13,
-        .fence_evidence = .{ .items = &fences, .capacity = fences.len },
+        .fence_evidence = .{ .items = &fences, .capacity = fences.len, .pointer_stability = .{} },
         .recovery_evidence = testRecoveryEvidence(),
     });
     defer allocator.free(before_activation);
@@ -5212,7 +5212,7 @@ test "primary authority rejects stale activation and invalid ready evidence" {
         .placement_revision = 9,
         .expected_volume_resource_version = 17,
         .expected_authority_resource_version = 17,
-        .fence_evidence = .{ .items = &fences, .capacity = fences.len },
+        .fence_evidence = .{ .items = &fences, .capacity = fences.len, .pointer_stability = .{} },
         .recovery_evidence = testRecoveryEvidence(),
     });
     defer allocator.free(duplicate);
@@ -5233,7 +5233,7 @@ test "primary authority rejects stale activation and invalid ready evidence" {
         .placement_revision = 9,
         .expected_volume_resource_version = 17,
         .expected_authority_resource_version = 17,
-        .fence_evidence = .{ .items = &fences, .capacity = fences.len },
+        .fence_evidence = .{ .items = &fences, .capacity = fences.len, .pointer_stability = .{} },
         .recovery_evidence = testRecoveryEvidence(),
     });
     defer allocator.free(mismatched);
@@ -5255,7 +5255,7 @@ test "primary authority rejects stale activation and invalid ready evidence" {
         .placement_revision = 9,
         .expected_volume_resource_version = 17,
         .expected_authority_resource_version = 17,
-        .fence_evidence = .{ .items = &fences, .capacity = fences.len },
+        .fence_evidence = .{ .items = &fences, .capacity = fences.len, .pointer_stability = .{} },
         .recovery_evidence = bad_recovery,
     });
     defer allocator.free(bad_recovery_command);
@@ -5276,7 +5276,7 @@ test "primary authority rejects stale activation and invalid ready evidence" {
         .placement_revision = 9,
         .expected_volume_resource_version = 17,
         .expected_authority_resource_version = 17,
-        .fence_evidence = .{ .items = &fences, .capacity = fences.len },
+        .fence_evidence = .{ .items = &fences, .capacity = fences.len, .pointer_stability = .{} },
         .recovery_evidence = invalid_recovery,
     }));
 }
@@ -5391,7 +5391,7 @@ test "volume resource lifecycle update list and snapshot recovery" {
     defer created.deinit(allocator);
 
     var invalid_reservations = testReservations(min_volume_size_bytes - volume_block_size_bytes);
-    const invalid_encoded = try encodeReserveVolumeResourcesCommand(allocator, .{ .volume_id = test_volume_id, .expected_resource_version = 8, .reservations = .{ .items = &invalid_reservations, .capacity = invalid_reservations.len } });
+    const invalid_encoded = try encodeReserveVolumeResourcesCommand(allocator, .{ .volume_id = test_volume_id, .expected_resource_version = 8, .reservations = .{ .items = &invalid_reservations, .capacity = invalid_reservations.len, .pointer_stability = .{} } });
     defer allocator.free(invalid_encoded);
     var invalid = try applyEncodedTestCommand(allocator, &machine, 9, invalid_encoded);
     defer invalid.deinit(allocator);
@@ -5405,7 +5405,7 @@ test "volume resource lifecycle update list and snapshot recovery" {
     try std.testing.expectEqual(@as(u64, 8), unchanged.resource_version);
 
     var reservations = testReservations(min_volume_size_bytes);
-    const reserve_encoded = try encodeReserveVolumeResourcesCommand(allocator, .{ .volume_id = test_volume_id, .expected_resource_version = 8, .reservations = .{ .items = &reservations, .capacity = reservations.len } });
+    const reserve_encoded = try encodeReserveVolumeResourcesCommand(allocator, .{ .volume_id = test_volume_id, .expected_resource_version = 8, .reservations = .{ .items = &reservations, .capacity = reservations.len, .pointer_stability = .{} } });
     defer allocator.free(reserve_encoded);
     var reserved = try applyEncodedTestCommand(allocator, &machine, 10, reserve_encoded);
     defer reserved.deinit(allocator);
@@ -5492,8 +5492,8 @@ test "volume resource lifecycle update list and snapshot recovery" {
     const finalize_encoded = try encodeFinalizeVolumeDeletionCommand(allocator, .{
         .volume_id = test_volume_id,
         .expected_resource_version = 16,
-        .placement_ids = .{ .items = @constCast(&placement_ids), .capacity = placement_ids.len },
-        .allocation_ids = .{ .items = @constCast(&allocation_ids), .capacity = allocation_ids.len },
+        .placement_ids = .{ .items = @constCast(&placement_ids), .capacity = placement_ids.len, .pointer_stability = .{} },
+        .allocation_ids = .{ .items = @constCast(&allocation_ids), .capacity = allocation_ids.len, .pointer_stability = .{} },
         .proposed_deleted_at_unix_ms = 1_753_744_000_020,
     });
     defer allocator.free(finalize_encoded);
@@ -6026,7 +6026,7 @@ fn testHeartbeatRequest(
         .node_id = node_id,
         .incarnation = 1,
         .sequence = 1,
-        .members = .{ .items = members, .capacity = members.len },
+        .members = .{ .items = members, .capacity = members.len, .pointer_stability = .{} },
     };
 }
 
@@ -7462,7 +7462,7 @@ const ActivateReplicaAllocationCheck = struct {
         const reserve_command = try encodeReserveVolumeResourcesCommand(allocator, .{
             .volume_id = test_volume_id,
             .expected_resource_version = 8,
-            .reservations = .{ .items = &reservations, .capacity = reservations.len },
+            .reservations = .{ .items = &reservations, .capacity = reservations.len, .pointer_stability = .{} },
         });
         defer allocator.free(reserve_command);
         var reserved = try applyEncodedTestCommand(allocator, &machine, 9, reserve_command);
@@ -7522,7 +7522,7 @@ test "version 3 activation replays fail closed without attestation" {
     const reserve_command = try encodeReserveVolumeResourcesCommand(allocator, .{
         .volume_id = test_volume_id,
         .expected_resource_version = 8,
-        .reservations = .{ .items = &reservations, .capacity = reservations.len },
+        .reservations = .{ .items = &reservations, .capacity = reservations.len, .pointer_stability = .{} },
     });
     defer allocator.free(reserve_command);
     var reserved = try applyEncodedTestCommand(allocator, &machine, 9, reserve_command);

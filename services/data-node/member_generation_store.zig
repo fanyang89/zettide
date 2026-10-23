@@ -16,7 +16,7 @@ pub fn loadOrCreate(io: std.Io, parent: std.Io.Dir, basename: []const u8) ![gene
     defer std.heap.page_allocator.free(bytes);
     if (bytes.len != encoded_size or
         std.mem.readInt(u32, bytes[generation_size..encoded_size], .little) !=
-            std.hash.crc.Crc32Iscsi.hash(bytes[0..generation_size]))
+            std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0..generation_size]))
         return error.StoreCorrupt;
     const generation = bytes[0..generation_size].*;
     if (isZero(&generation)) return error.StoreCorrupt;
@@ -34,7 +34,7 @@ fn create(io: std.Io, parent: std.Io.Dir, basename: []const u8) ![generation_siz
     std.mem.writeInt(
         u32,
         bytes[generation_size..encoded_size],
-        std.hash.crc.Crc32Iscsi.hash(&generation),
+        std.hash.crc.@"CRC-32/ISCSI".hash(&generation),
         .little,
     );
     var atomic_file = try parent.createFileAtomic(io, basename, .{ .replace = false });

@@ -27,7 +27,7 @@ fn openStateLock(io: std.Io, parent: std.Io.Dir, basename: []const u8) !std.Io.F
                 .read = true,
                 .truncate = false,
                 .exclusive = true,
-                .permissions = @enumFromInt(0o600),
+                .permissions = @fromBackingInt(@intCast(0o600)),
             }) catch |create_error| switch (create_error) {
                 error.PathAlreadyExists => continue,
                 else => return create_error,
@@ -128,7 +128,7 @@ pub const FileStore = struct {
             binding.authority_generation == current.binding.authority_generation)
         {
             if (!std.meta.eql(binding, current.binding)) return error.AuthorityConflict;
-            if (@intFromEnum(phase) <= @intFromEnum(current.phase)) return current;
+            if (@backingInt(phase) <= @backingInt(current.phase)) return current;
             return null;
         }
         if (phase != .staged) return error.AuthorityNotStaged;
@@ -220,7 +220,7 @@ pub const FileStore = struct {
         std.mem.writeInt(u16, bytes[10..12], record_size, .little);
         std.mem.writeInt(u32, bytes[12..16], @intCast(records.len), .little);
         for (records, 0..) |record, index| encodeRecord(bytes[header_size + index * record_size ..][0..record_size], record);
-        std.mem.writeInt(u32, bytes[16..20], std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]), .little);
+        std.mem.writeInt(u32, bytes[16..20], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[header_size..]), .little);
         return bytes;
     }
 
@@ -231,7 +231,7 @@ pub const FileStore = struct {
             !allZero(bytes[20..24])) return error.StoreCorrupt;
         const count = std.mem.readInt(u32, bytes[12..16], .little);
         if (count > max_records or bytes.len != header_size + @as(usize, count) * record_size or
-            std.mem.readInt(u32, bytes[16..20], .little) != std.hash.crc.Crc32Iscsi.hash(bytes[header_size..]))
+            std.mem.readInt(u32, bytes[16..20], .little) != std.hash.crc.@"CRC-32/ISCSI".hash(bytes[header_size..]))
             return error.StoreCorrupt;
         const records = try allocator.alloc(Record, count);
         errdefer allocator.free(records);
@@ -265,7 +265,7 @@ pub const FileStore = struct {
         std.mem.writeInt(u64, bytes[96..104], binding.placement_revision, .little);
         @memcpy(bytes[104..120], &binding.activation_nonce);
         @memcpy(bytes[120..152], &binding.authority_digest);
-        bytes[152] = @intFromEnum(record.phase);
+        bytes[152] = @backingInt(record.phase);
         std.mem.writeInt(u64, bytes[160..168], record.certified_sequence, .little);
         @memcpy(bytes[168..200], &record.history_digest);
         bytes[200] = @intFromBool(record.empty_frontier);

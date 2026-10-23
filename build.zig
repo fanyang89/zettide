@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
     const pool_data_benchmark_modules = storage_engine_build.createPrivateModules(
         b,
         target,
-        .ReleaseSafe,
+        .safe,
         "libs/storage-engine",
         "vendor/utf8proc",
     );
@@ -71,14 +71,14 @@ pub fn build(b: *std.Build) void {
     const pool_data_benchmark_data_node = support.createDataNodePrivateModule(
         b,
         target,
-        .ReleaseSafe,
+        .safe,
         pool_data_benchmark_storage,
         pool_data_benchmark_crc32c,
     );
     const pool_data_nvmf_args_test_module = b.createModule(.{
         .root_source_file = b.path("tests/spdk_pool_data_nvmf_args.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
     });
     const pool_data_nvmf_args_tests = b.addTest(.{
         .root_module = pool_data_nvmf_args_test_module,
@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
     const pool_data_synthetic_storage_test_module = b.createModule(.{
         .root_source_file = b.path("tests/spdk_pool_data_synthetic_storage.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = .safe,
         .link_libc = true,
         .imports = &.{.{ .name = "zettide_storage", .module = pool_data_benchmark_storage }},
     });
@@ -125,12 +125,12 @@ pub fn build(b: *std.Build) void {
         const pool_data_nvmf_benchmark_module = b.createModule(.{
             .root_source_file = b.path("tests/spdk_pool_data_nvmf_benchmark.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = .safe,
             .link_libc = true,
             .imports = &.{
                 .{ .name = "zettide_storage", .module = pool_data_benchmark_storage },
                 .{ .name = "zettide_data_node", .module = pool_data_benchmark_data_node },
-                .{ .name = "spdk_c", .module = support.createSpdkCModule(b, target, .ReleaseSafe, true) },
+                .{ .name = "spdk_c", .module = support.createSpdkCModule(b, target, .safe, true) },
             },
         });
         pool_data_nvmf_benchmark_module.addIncludePath(b.path("services/data-node"));
@@ -180,7 +180,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run zettide");
     run_step.dependOn(&run_cmd.step);
 
@@ -278,25 +278,25 @@ pub fn build(b: *std.Build) void {
 
     const fmt = b.addFmt(.{
         .paths = &.{
-            "build.zig",
-            "build.zig.zon",
-            "build",
-            "services/data-node",
-            "tests",
-            "benchmarks",
-            "services/controller/build.zig",
-            "services/controller/build.zig.zon",
-            "services/controller/src",
-            "libs/storage-engine/build.zig",
-            "libs/storage-engine/build.zig.zon",
-            "libs/storage-engine/src",
-            "libs/txfs/build.zig",
-            "libs/txfs/build.zig.zon",
-            "libs/txfs/src",
-            "libs/txfs/tests",
-            "libs/data-service-contracts/build.zig",
-            "libs/data-service-contracts/build.zig.zon",
-            "libs/data-service-contracts/src",
+            b.path("build.zig"),
+            b.path("build.zig.zon"),
+            b.path("build"),
+            b.path("services/data-node"),
+            b.path("tests"),
+            b.path("benchmarks"),
+            b.path("services/controller/build.zig"),
+            b.path("services/controller/build.zig.zon"),
+            b.path("services/controller/src"),
+            b.path("libs/storage-engine/build.zig"),
+            b.path("libs/storage-engine/build.zig.zon"),
+            b.path("libs/storage-engine/src"),
+            b.path("libs/txfs/build.zig"),
+            b.path("libs/txfs/build.zig.zon"),
+            b.path("libs/txfs/src"),
+            b.path("libs/txfs/tests"),
+            b.path("libs/data-service-contracts/build.zig"),
+            b.path("libs/data-service-contracts/build.zig.zon"),
+            b.path("libs/data-service-contracts/src"),
         },
         .check = true,
     });

@@ -904,7 +904,7 @@ const ListPending = struct {
         };
         defer result.deinit(self.owner.allocator);
         const page_items = result.pools;
-        const page: std.ArrayList(pb.Pool) = .{ .items = page_items, .capacity = page_items.len };
+        const page: std.ArrayList(pb.Pool) = .{ .items = page_items, .capacity = page_items.len, .pointer_stability = .{} };
         const next_token: []const u8 = if (result.has_more) page_items[page_items.len - 1].id else &.{};
         const encoded = encodeMessage(self.owner.allocator, pb.ListPoolsResponse{
             .pools = page,
@@ -1121,7 +1121,7 @@ const ListVolumesPending = struct {
         };
         defer result.deinit(self.owner.allocator);
         const page_items = result.volumes;
-        const page: std.ArrayList(pb.Volume) = .{ .items = page_items, .capacity = page_items.len };
+        const page: std.ArrayList(pb.Volume) = .{ .items = page_items, .capacity = page_items.len, .pointer_stability = .{} };
         const next_token: []const u8 = if (result.has_more) page_items[page_items.len - 1].id else &.{};
         const encoded = encodeMessage(self.owner.allocator, pb.ListVolumesResponse{
             .volumes = page,
@@ -1337,7 +1337,7 @@ const ListNodesPending = struct {
         };
         defer result.deinit(self.owner.allocator);
         const page_items = result.nodes;
-        const page: std.ArrayList(pb.Node) = .{ .items = page_items, .capacity = page_items.len };
+        const page: std.ArrayList(pb.Node) = .{ .items = page_items, .capacity = page_items.len, .pointer_stability = .{} };
         const next_token: []const u8 = if (result.has_more) page_items[page_items.len - 1].id else &.{};
         const encoded = encodeMessage(self.owner.allocator, pb.ListNodesResponse{
             .nodes = page,
@@ -1502,7 +1502,7 @@ const ListMembersPending = struct {
         };
         defer result.deinit(self.owner.allocator);
         const page_items = result.members;
-        const page: std.ArrayList(pb.Member) = .{ .items = page_items, .capacity = page_items.len };
+        const page: std.ArrayList(pb.Member) = .{ .items = page_items, .capacity = page_items.len, .pointer_stability = .{} };
         const next_token: []const u8 = if (result.has_more) page_items[page_items.len - 1].id else &.{};
         const encoded = encodeMessage(self.owner.allocator, pb.ListMembersResponse{
             .members = page,
@@ -2249,7 +2249,7 @@ test "response command failures abort retained calls" {
         }
 
         fn id(_: *anyopaque) grpc.ServerCallId {
-            return @enumFromInt(1);
+            return @fromBackingInt(@intCast(1));
         }
 
         fn isCancelled(_: *anyopaque) bool {
@@ -3405,7 +3405,7 @@ test "heartbeat preflight enforces report bounds and canonical wire" {
         .node_id = node_id,
         .incarnation = 1,
         .sequence = 1,
-        .members = .{ .items = &members, .capacity = members.len },
+        .members = .{ .items = &members, .capacity = members.len, .pointer_stability = .{} },
     };
     const payload = try encodeMessage(allocator, request);
     defer allocator.free(payload);
@@ -3549,7 +3549,7 @@ const RaftDriver = struct {
 
 const StreamProbe = struct {
     completed: std.atomic.Value(bool) = .init(false),
-    code: std.atomic.Value(u8) = .init(@intFromEnum(grpc.StatusCode.unknown)),
+    code: std.atomic.Value(u8) = .init(@backingInt(grpc.StatusCode.unknown)),
 
     fn onMessage(_: ?*anyopaque, _: grpc.ClientStream, _: []const u8, _: grpc.Compression) grpc.StreamReceiveAction {
         return .continue_receiving;
@@ -3562,7 +3562,7 @@ const StreamProbe = struct {
         _: *const grpc.Metadata,
     ) void {
         const self: *StreamProbe = @ptrCast(@alignCast(ctx.?));
-        self.code.store(@intFromEnum(status.code), .release);
+        self.code.store(@backingInt(status.code), .release);
         self.completed.store(true, .release);
     }
 };

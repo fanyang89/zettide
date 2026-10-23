@@ -207,7 +207,7 @@ fn putMember(bytes: []u8, offset: usize, member: Member) void {
     @memcpy(bytes[offset..][0..16], &member.member_id);
     codec.putInt(u16, bytes, offset + 16, member.slot);
     bytes[offset + 18] = member.control_role;
-    bytes[offset + 19] = @intFromEnum(member.state);
+    bytes[offset + 19] = @backingInt(member.state);
     codec.putInt(u32, bytes, offset + 20, member.role_flags);
 }
 

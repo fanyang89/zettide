@@ -33,7 +33,7 @@ pub fn add(
         .root_module = fs_ops_benchmark_module,
     });
     const run_fs_ops_benchmark = b.addRunArtifact(fs_ops_benchmark);
-    if (b.args) |args| run_fs_ops_benchmark.addArgs(args);
+    run_fs_ops_benchmark.addPassthruArgs();
     const fs_ops_benchmark_step = b.step("bench-fs-ops", "Benchmark direct Blob filesystem operations");
     fs_ops_benchmark_step.dependOn(&run_fs_ops_benchmark.step);
     const install_fs_ops_benchmark = b.addInstallArtifact(fs_ops_benchmark, .{});
@@ -68,7 +68,7 @@ pub fn add(
         .root_module = blob_device_benchmark_module,
     });
     const run_blob_device_benchmark = b.addRunArtifact(blob_device_benchmark);
-    if (b.args) |args| run_blob_device_benchmark.addArgs(args);
+    run_blob_device_benchmark.addPassthruArgs();
     const blob_device_benchmark_step = b.step("bench-blob-device", "Benchmark sequential BlobDevice IO");
     blob_device_benchmark_step.dependOn(&run_blob_device_benchmark.step);
     const install_blob_device_benchmark = b.addInstallArtifact(blob_device_benchmark, .{});
@@ -91,7 +91,7 @@ pub fn add(
         .root_module = blob_store_benchmark_module,
     });
     const run_blob_store_benchmark = b.addRunArtifact(blob_store_benchmark);
-    if (b.args) |args| run_blob_store_benchmark.addArgs(args);
+    run_blob_store_benchmark.addPassthruArgs();
     const blob_store_benchmark_step = b.step("bench-blob-store", "Benchmark immutable BlobStore IO");
     blob_store_benchmark_step.dependOn(&run_blob_store_benchmark.step);
     const install_blob_store_benchmark = b.addInstallArtifact(blob_store_benchmark, .{});
@@ -114,7 +114,7 @@ pub fn add(
         .root_module = blob_metadata_map_benchmark_module,
     });
     const run_blob_metadata_map_benchmark = b.addRunArtifact(blob_metadata_map_benchmark);
-    if (b.args) |args| run_blob_metadata_map_benchmark.addArgs(args);
+    run_blob_metadata_map_benchmark.addPassthruArgs();
     const blob_metadata_map_benchmark_step = b.step(
         "bench-blob-metadata-map",
         "Benchmark incremental Blob metadata updates",
@@ -143,7 +143,7 @@ pub fn add(
         .root_module = blob_object_benchmark_module,
     });
     const run_blob_object_benchmark = b.addRunArtifact(blob_object_benchmark);
-    if (b.args) |args| run_blob_object_benchmark.addArgs(args);
+    run_blob_object_benchmark.addPassthruArgs();
     const blob_object_benchmark_step = b.step("bench-blob-object", "Benchmark sequential BlobObject IO");
     blob_object_benchmark_step.dependOn(&run_blob_object_benchmark.step);
     const install_blob_object_benchmark = b.addInstallArtifact(blob_object_benchmark, .{});

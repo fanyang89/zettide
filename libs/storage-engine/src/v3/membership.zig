@@ -45,7 +45,7 @@ pub fn encodeProposal(proposal: Proposal) ![proposal_size]u8 {
     var bytes: [proposal_size]u8 = @splat(0);
     @memcpy(bytes[0x00..0x08], &proposal_magic);
     codec.putInt(u16, &bytes, 0x08, format_version);
-    codec.putInt(u16, &bytes, 0x0a, @intFromEnum(proposal.mode));
+    codec.putInt(u16, &bytes, 0x0a, @backingInt(proposal.mode));
     codec.putInt(u32, &bytes, 0x0c, proposal_size);
     @memcpy(bytes[proposal_topology_offset..proposal_checksum_offset], &topology_bytes);
     codec.putInt(u32, &bytes, proposal_checksum_offset, codec.crc32c(bytes[0..proposal_checksum_offset]));

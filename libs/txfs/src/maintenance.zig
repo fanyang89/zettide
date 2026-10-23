@@ -114,8 +114,8 @@ pub fn encode(record: Record) Encoded {
     std.mem.writeInt(u64, encoded[generation_start..generation_end], record.generation, .big);
     std.mem.writeInt(u64, encoded[mode_epoch_start..mode_epoch_end], record.mode_epoch, .big);
     @memcpy(encoded[operation_id_start..operation_id_end], &record.operation_id);
-    encoded[previous_mode_start] = @intFromEnum(record.previous_mode);
-    encoded[mode_start] = @intFromEnum(record.mode);
+    encoded[previous_mode_start] = @backingInt(record.previous_mode);
+    encoded[mode_start] = @backingInt(record.mode);
     if (record.parent) |parent| {
         std.mem.writeInt(u16, encoded[flags_start..flags_end], has_parent, .big);
         @memcpy(encoded[parent_start..parent_end], &parent.bytes);
@@ -582,8 +582,8 @@ test "maintenance record encoding matches the golden vector" {
     expected[27] = 9;
     expected[35] = 3;
     @memcpy(expected[36..52], &operation_id);
-    expected[52] = @intFromEnum(anchor.Mode.quiescing);
-    expected[53] = @intFromEnum(anchor.Mode.maintenance);
+    expected[52] = @backingInt(anchor.Mode.quiescing);
+    expected[53] = @backingInt(anchor.Mode.maintenance);
     @memcpy(expected[56..120], &parent.bytes);
     @memcpy(expected[120..152], &[_]u8{
         0x8e, 0x4f, 0x27, 0x99, 0x5b, 0xce, 0xb4, 0x69,

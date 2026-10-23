@@ -16,7 +16,7 @@ pub fn next(io: std.Io, parent: std.Io.Dir, basename: []const u8) !u64 {
     @memcpy(bytes[0..8], &magic);
     std.mem.writeInt(u16, bytes[8..10], version, .little);
     std.mem.writeInt(u64, bytes[16..24], value, .little);
-    std.mem.writeInt(u32, bytes[24..28], std.hash.crc.Crc32Iscsi.hash(bytes[0..24]), .little);
+    std.mem.writeInt(u32, bytes[24..28], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0..24]), .little);
 
     var atomic_file = try parent.createFileAtomic(io, basename, .{ .replace = true });
     defer atomic_file.deinit(io);
@@ -35,7 +35,7 @@ fn read(io: std.Io, parent: std.Io.Dir, basename: []const u8) !u64 {
     if (bytes.len != encoded_size or !std.mem.eql(u8, bytes[0..8], &magic) or
         std.mem.readInt(u16, bytes[8..10], .little) != version or
         !allZero(bytes[10..16]) or !allZero(bytes[28..32]) or
-        std.mem.readInt(u32, bytes[24..28], .little) != std.hash.crc.Crc32Iscsi.hash(bytes[0..24]))
+        std.mem.readInt(u32, bytes[24..28], .little) != std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0..24]))
         return error.IncarnationStoreCorrupt;
     const value = std.mem.readInt(u64, bytes[16..24], .little);
     if (value == 0) return error.IncarnationStoreCorrupt;
