@@ -1,7 +1,7 @@
 .{
     .name = .zettide_controller,
     .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .fingerprint = 0xa4c499ee5b0c9281,
     .dependencies = .{
         .clap = .{
