@@ -2,6 +2,6 @@
 task.output = "prefix"
 
 [tools]
-zig = "0.16.0"
+zig = "0.17.0"
 cmake = "4.3.4"
 ninja = "1.13.2"

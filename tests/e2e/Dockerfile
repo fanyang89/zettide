@@ -8,7 +8,7 @@ RUN sed -i \
 
 FROM apt-base AS builder
 
-ARG ZIG_VERSION=0.16.0
+ARG ZIG_VERSION=0.17.0
 ARG ZIG_SHA256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates cmake curl libfuse3-dev ninja-build \
