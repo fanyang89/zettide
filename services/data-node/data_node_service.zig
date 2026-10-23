@@ -701,7 +701,7 @@ const State = struct {
             verified.challenge,
             method_path,
             request_bytes,
-            @intFromEnum(response.status.code),
+            @backingInt(response.status.code),
             response.status.message,
             response.payload,
         );
@@ -1885,8 +1885,8 @@ test "data-node service persists Replica lifecycle through gRPC" {
         .offset_bytes = replica_binding.offset_bytes,
         .length_bytes = replica_binding.length_bytes,
         .backend_digest = ensured.replica.?.attestation.?.backend_digest,
-        .replica_member_ids = .{ .items = &participant_member_views, .capacity = participant_member_views.len },
-        .witness_identities = .{ .items = &participant_identity_views, .capacity = participant_identity_views.len },
+        .replica_member_ids = .{ .items = &participant_member_views, .capacity = participant_member_views.len, .pointer_stability = .{} },
+        .witness_identities = .{ .items = &participant_identity_views, .capacity = participant_identity_views.len, .pointer_stability = .{} },
     } };
     var configure_result = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &configure_request);
     defer configure_result.deinit();
@@ -1896,7 +1896,7 @@ test "data-node service persists Replica lifecycle through gRPC" {
     try std.testing.expect(configure_retry.status.isOk());
 
     var keyless_request = configure_request;
-    keyless_request.binding.?.witness_identities = .{ .items = participant_identity_views[0..0], .capacity = 0 };
+    keyless_request.binding.?.witness_identities = .{ .items = participant_identity_views[0..0], .capacity = 0, .pointer_stability = .{} };
     var keyless_configuration = try testCallUnary(&channel, methodPath("ConfigureWriteParticipant"), &keyless_request);
     defer keyless_configuration.deinit();
     try std.testing.expectEqual(grpc.StatusCode.invalid_argument, keyless_configuration.status.code);
@@ -3020,7 +3020,7 @@ test "internal coordinator performs real signed two-of-three Replica RPC commit"
         ),
     );
 
-    const payload = [_]u8{0x5a} ** 4096;
+    const payload = @as([4096]u8, @splat(0x5a));
     const request: write_coordinator_manager.CoordinateRequest = .{
         .authority = authority,
         .transaction_id = serviceTestId(240),
@@ -3353,7 +3353,7 @@ test "excluded third unavailable fails all-route arm before coordinator intent" 
     // reject the request as NotStarted.
     nodes[2].server.shutdownGracefully(0);
     nodes[2].server.wait();
-    const payload = [_]u8{0x6b} ** 4096;
+    const payload = @as([4096]u8, @splat(0x6b));
     try std.testing.expectError(error.WriteNotStarted, nodes[0].server.coordinateWrite(.{
         .authority = authority,
         .transaction_id = serviceTestId(240),

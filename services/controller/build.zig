@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
     const test_step = addComponent(b, target, optimize, "", .{});
 
     const fmt = b.addFmt(.{
-        .paths = &.{ "build.zig", "build.zig.zon", "src" },
+        .paths = &.{ b.path("build.zig"), b.path("build.zig.zon"), b.path("src") },
         .check = true,
     });
     const fmt_step = b.step("fmt-check", "Check Zig formatting");
@@ -37,7 +37,11 @@ pub fn addComponent(
     });
     const grpc_dependency = raft_build.grpcLiteDependency(raft_dependency, target, optimize);
     const grpc_module = grpc_dependency.module("grpc_lite");
-    const protobuf_module = grpc_module.import_table.get("protobuf").?;
+    const protobuf_dependency = grpc_dependency.builder.lazyDependency("protobuf", .{
+        .target = target,
+        .optimize = optimize,
+    }) orelse return b.step(step_names.tests, "Run controller unit tests");
+    const protobuf_module = protobuf_dependency.module("protobuf");
     const clap_dependency = b.dependency("clap", .{
         .target = target,
         .optimize = optimize,
@@ -56,33 +60,33 @@ pub fn addComponent(
         .destination_directory = generated_controller_dir,
         .source_files = &.{componentPath(b, base_dir, "proto/zettide/controller/v1/controller.proto")},
         .include_directories = &.{componentPath(b, base_dir, "proto")},
-    });
-    generated_controller_dir.addStepDependencies(&generate_proto.step);
+    }) orelse return b.step(step_names.tests, "Run controller unit tests");
+    generated_controller_dir.addStepDependencies(generate_proto.step);
 
     const generated_data_node_dir = createGeneratedDirectory(b, ".zettide-data-node-proto");
     const generate_data_node_proto = raft_build.createProtocStep(raft_dependency, target, optimize, .{
         .destination_directory = generated_data_node_dir,
         .source_files = &.{data_service_contracts_dependency.path("proto/zettide/controller/v1/data_service.proto")},
         .include_directories = &.{data_service_contracts_dependency.path("proto")},
-    });
-    generated_data_node_dir.addStepDependencies(&generate_data_node_proto.step);
+    }) orelse return b.step(step_names.tests, "Run controller unit tests");
+    generated_data_node_dir.addStepDependencies(generate_data_node_proto.step);
 
     const controller_proto_output = ProtoOutput.create(
         b,
-        &generate_proto.step,
+        generate_proto.step,
         generated_controller_dir,
         "zettide/controller/v1.pb.zig",
     );
     const data_node_proto_output = ProtoOutput.create(
         b,
-        &generate_data_node_proto.step,
+        generate_data_node_proto.step,
         generated_data_node_dir,
         "zettide/controller/v1.pb.zig",
     );
 
     const generate_proto_step = b.step(step_names.generate, "Generate controller and data-node Zig protobuf sources");
-    generate_proto_step.dependOn(&controller_proto_output.step);
-    generate_proto_step.dependOn(&data_node_proto_output.step);
+    generate_proto_step.dependOn(controller_proto_output.step);
+    generate_proto_step.dependOn(data_node_proto_output.step);
 
     const controller_proto = b.createModule(.{
         .root_source_file = controller_proto_output.getOutput(),
@@ -189,7 +193,7 @@ pub fn addComponent(
     }
 
     const run_executable = b.addRunArtifact(executable);
-    if (b.args) |args| run_executable.addArgs(args);
+    run_executable.addPassthruArgs();
     const run_step = b.step(step_names.run, "Run the metadata controller");
     run_step.dependOn(&run_executable.step);
 
@@ -216,10 +220,8 @@ fn createGeneratedDirectory(b: *std.Build, marker_name: []const u8) std.Build.La
 }
 
 const ProtoOutput = struct {
-    step: std.Build.Step,
-    generated_file: std.Build.GeneratedFile,
-    directory: std.Build.LazyPath,
-    relative_path: []const u8,
+    step: *std.Build.Step,
+    path: std.Build.LazyPath,
 
     fn create(
         b: *std.Build,
@@ -227,32 +229,17 @@ const ProtoOutput = struct {
         directory: std.Build.LazyPath,
         relative_path: []const u8,
     ) *ProtoOutput {
+        const files = b.addWriteFiles();
+        files.step.dependOn(producer);
         const output = b.allocator.create(ProtoOutput) catch @panic("OOM");
         output.* = .{
-            .step = std.Build.Step.init(.{
-                .id = .custom,
-                .name = b.fmt("expose generated protobuf {s}", .{relative_path}),
-                .owner = b,
-                .makeFn = make,
-            }),
-            .generated_file = undefined,
-            .directory = directory.dupe(b),
-            .relative_path = b.dupe(relative_path),
+            .step = &files.step,
+            .path = files.addCopyFile(directory.path(b, relative_path), relative_path),
         };
-        output.generated_file = .{ .step = &output.step };
-        output.step.dependOn(producer);
-        directory.addStepDependencies(&output.step);
         return output;
     }
 
     fn getOutput(output: *const ProtoOutput) std.Build.LazyPath {
-        return .{ .generated = .{ .file = &output.generated_file } };
-    }
-
-    fn make(step: *std.Build.Step, make_options: std.Build.Step.MakeOptions) anyerror!void {
-        _ = make_options;
-        const output: *ProtoOutput = @fieldParentPtr("step", step);
-        const directory = output.directory.getPath2(step.owner, step);
-        output.generated_file.path = step.owner.pathJoin(&.{ directory, output.relative_path });
+        return output.path;
     }
 };

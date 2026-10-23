@@ -418,7 +418,7 @@ fn beginPage(
     var bytes: [encoded_size]u8 = @splat(0);
     @memcpy(bytes[0x000..0x008], &magic);
     codec.putInt(u16, &bytes, 0x008, format_version);
-    codec.putInt(u16, &bytes, 0x00a, @intFromEnum(kind));
+    codec.putInt(u16, &bytes, 0x00a, @backingInt(kind));
     codec.putInt(u16, &bytes, 0x00c, 0);
     codec.putInt(u16, &bytes, 0x00e, @intCast(entry_count));
     codec.putInt(u16, &bytes, 0x010, @intCast(entry_size));
@@ -548,7 +548,7 @@ fn validateMetadataOrder(previous: MetadataInterval, current: MetadataInterval) 
 fn encodeMetadataInterval(bytes: []u8, interval: MetadataInterval) void {
     codec.putInt(u64, bytes, 0x000, interval.page_start);
     codec.putInt(u32, bytes, 0x008, interval.page_count);
-    codec.putInt(u16, bytes, 0x00c, @intFromEnum(interval.state));
+    codec.putInt(u16, bytes, 0x00c, @backingInt(interval.state));
     codec.putInt(u64, bytes, 0x010, interval.retired_generation);
 }
 

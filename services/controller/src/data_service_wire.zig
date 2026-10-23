@@ -85,8 +85,8 @@ pub fn configureWriteParticipantRequest(
         .offset_bytes = replica.offset_bytes,
         .length_bytes = replica.length_bytes,
         .backend_digest = &configuration.backend_digest,
-        .replica_member_ids = .{ .items = member_views, .capacity = member_views.len },
-        .witness_identities = .{ .items = identity_views, .capacity = identity_views.len },
+        .replica_member_ids = .{ .items = member_views, .capacity = member_views.len, .pointer_stability = .{} },
+        .witness_identities = .{ .items = identity_views, .capacity = identity_views.len, .pointer_stability = .{} },
     } };
 }
 
@@ -116,7 +116,7 @@ pub fn configureWriteCoordinatorRequest(
     }
     return .{ .topology = .{
         .local_member_id = &configuration.local_member_id,
-        .routes = .{ .items = &views.route_views, .capacity = views.route_views.len },
+        .routes = .{ .items = &views.route_views, .capacity = views.route_views.len, .pointer_stability = .{} },
     } };
 }
 

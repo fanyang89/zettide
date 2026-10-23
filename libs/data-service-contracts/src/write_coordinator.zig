@@ -758,7 +758,7 @@ const FileStoreInner = struct {
         if (state.last_completed) |completed| putCompleted(bytes, &offset, completed) else offset += completed_encoded_size;
         if (offset > metadata_size) return error.StoreEncodingOverflow;
         @memcpy(bytes[metadata_size..][0..payload.len], payload);
-        std.mem.writeInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size]), .little);
+        std.mem.writeInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - checksum_size]), .little);
         return bytes;
     }
 
@@ -775,7 +775,7 @@ const FileStoreInner = struct {
             (has_intent == 0 and payload_len != 0))
             return error.StoreCorrupt;
         if (std.mem.readInt(u32, bytes[bytes.len - checksum_size ..][0..checksum_size], .little) !=
-            std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - checksum_size])) return error.StoreCorrupt;
+            std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - checksum_size])) return error.StoreCorrupt;
         var offset: usize = 24;
         var state: State = .{
             .identities = .{ getIdentity(bytes, &offset), getIdentity(bytes, &offset), getIdentity(bytes, &offset) },
@@ -1076,7 +1076,7 @@ fn decodeLegacyV1(bytes: []const u8) !DecodedLegacyV1 {
     if (payload_len > write_service.max_payload_size or
         bytes.len != FileStoreInner.legacy_metadata_size + payload_len + FileStoreInner.checksum_size) return error.StoreCorrupt;
     if (std.mem.readInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], .little) !=
-        std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size])) return error.StoreCorrupt;
+        std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size])) return error.StoreCorrupt;
 
     var offset: usize = 24;
     const replica_members: [3]Id = .{ getArray(16, bytes, &offset), getArray(16, bytes, &offset), getArray(16, bytes, &offset) };
@@ -1370,13 +1370,13 @@ const MutationStage = enum { intent, first_prepare, second_prepare, decision, pa
 const FaultKind = enum { write, file_sync, directory_sync };
 
 fn setupBeforeMutation(harness: *TestHarness, request: BeginRequest, stage: MutationStage) !void {
-    if (@intFromEnum(stage) > @intFromEnum(MutationStage.intent)) _ = try harness.coordinator.begin(request);
-    if (@intFromEnum(stage) > @intFromEnum(MutationStage.first_prepare))
+    if (@backingInt(stage) > @backingInt(MutationStage.intent)) _ = try harness.coordinator.begin(request);
+    if (@backingInt(stage) > @backingInt(MutationStage.first_prepare))
         try harness.coordinator.recordPrepared(try harness.signers.prepare(0, request.write, 1));
-    if (@intFromEnum(stage) > @intFromEnum(MutationStage.second_prepare))
+    if (@backingInt(stage) > @backingInt(MutationStage.second_prepare))
         try harness.coordinator.recordPrepared(try harness.signers.prepare(1, request.write, 2));
-    if (@intFromEnum(stage) > @intFromEnum(MutationStage.decision)) _ = try harness.coordinator.decide();
-    if (@intFromEnum(stage) > @intFromEnum(MutationStage.partial_commit)) {
+    if (@backingInt(stage) > @backingInt(MutationStage.decision)) _ = try harness.coordinator.decide();
+    if (@backingInt(stage) > @backingInt(MutationStage.partial_commit)) {
         const certificate = (try harness.coordinator.inspect()).pending.?.signed_certificate.?;
         _ = try harness.coordinator.recordCommitted(try harness.signers.commit(0, request.write, certificate));
     }
@@ -1414,7 +1414,7 @@ fn mutationReached(coordinator: *Coordinator, stage: MutationStage) !bool {
 test "canonical signed identities and fixed witnesses are validated" {
     var harness = try TestHarness.init();
     defer harness.deinit();
-    const data = [_]u8{1} ** 4096;
+    const data = @as([4096]u8, @splat(1));
     var invalid = testBegin(1, @splat(0), 20, &data, .{ testId(1), testId(1) });
     try std.testing.expectError(error.InvalidWitnessSet, harness.coordinator.begin(invalid));
     invalid.witnesses = .{ testId(1), testId(4) };
@@ -1451,7 +1451,7 @@ test "one FileStore permits only one live Coordinator attachment" {
 test "signed intent evidence decision and completion persist exact retries" {
     var harness = try TestHarness.init();
     defer harness.deinit();
-    var data = [_]u8{2} ** 4096;
+    var data = @as([4096]u8, @splat(2));
     const expected = data;
     var request = testBegin(1, @splat(0), 21, &data, .{ testId(2), testId(1) });
     request.write.authority.write_epoch = 2;
@@ -1508,7 +1508,7 @@ test "signed intent evidence decision and completion persist exact retries" {
         .data = &expected,
         .witnesses = request.witnesses,
     }));
-    const next_data = [_]u8{6} ** 4096;
+    const next_data = @as([4096]u8, @splat(6));
     var wrong_volume = testBegin(2, completed.result.history_digest, 25, &next_data, .{ testId(1), testId(2) });
     wrong_volume.write.authority.volume_id = testId(99);
     try std.testing.expectError(error.VolumeMismatch, harness.coordinator.begin(wrong_volume));
@@ -1526,7 +1526,7 @@ test "signed intent evidence decision and completion persist exact retries" {
 test "last completed signed evidence is replaced by the latest transaction" {
     var harness = try TestHarness.init();
     defer harness.deinit();
-    const first_data = [_]u8{0x31} ** 4096;
+    const first_data = @as([4096]u8, @splat(0x31));
     const first = testBegin(1, @splat(0), 70, &first_data, .{ testId(1), testId(2) });
     _ = try harness.coordinator.begin(first);
     try harness.coordinator.recordPrepared(try harness.signers.prepare(0, first.write, 1));
@@ -1536,7 +1536,7 @@ test "last completed signed evidence is replaced by the latest transaction" {
     _ = try harness.coordinator.recordCommitted(try harness.signers.commit(1, first.write, first_certificate));
     const first_result = (try harness.coordinator.inspect()).last_completed.?.result;
 
-    const second_data = [_]u8{0x32} ** 4096;
+    const second_data = @as([4096]u8, @splat(0x32));
     const second = testBegin(2, first_result.history_digest, 71, &second_data, .{ testId(1), testId(2) });
     _ = try harness.coordinator.begin(second);
     try harness.coordinator.recordPrepared(try harness.signers.prepare(0, second.write, 3));
@@ -1553,7 +1553,7 @@ test "last completed signed evidence is replaced by the latest transaction" {
 test "wrong signed witness write and certificate fail closed" {
     var harness = try TestHarness.init();
     defer harness.deinit();
-    const data = [_]u8{3} ** 4096;
+    const data = @as([4096]u8, @splat(3));
     const request = testBegin(1, @splat(0), 22, &data, .{ testId(1), testId(2) });
     _ = try harness.coordinator.begin(request);
     try std.testing.expectError(
@@ -1582,7 +1582,7 @@ test "wrong signed witness write and certificate fail closed" {
 test "coordinator v2 completed snapshot binary golden" {
     var harness = try TestHarness.init();
     defer harness.deinit();
-    const data = [_]u8{0x6d} ** 4096;
+    const data = @as([4096]u8, @splat(0x6d));
     const request = testBegin(1, @splat(0), 29, &data, .{ testId(1), testId(2) });
     _ = try harness.coordinator.begin(request);
     try harness.coordinator.recordPrepared(try harness.signers.prepare(0, request.write, 1));
@@ -1607,7 +1607,7 @@ test "coordinator v2 completed snapshot binary golden" {
 test "v2 reopen preserves every signed phase" {
     var harness = try TestHarness.init();
     defer harness.deinit();
-    const data = [_]u8{7} ** 4096;
+    const data = @as([4096]u8, @splat(7));
     const request = testBegin(1, @splat(0), 26, &data, .{ testId(1), testId(2) });
     _ = try harness.coordinator.begin(request);
     try harness.reopen();
@@ -1626,7 +1626,7 @@ test "v2 reopen preserves every signed phase" {
 const LegacyPhase = enum { pristine, intent, first_prepare, second_prepare, decision, partial_commit, completed_frontier };
 
 fn writeLegacyV1(dir: std.Io.Dir, phase: LegacyPhase) !void {
-    const data = [_]u8{0x4a} ** 4096;
+    const data = @as([4096]u8, @splat(0x4a));
     const has_intent = switch (phase) {
         .intent, .first_prepare, .second_prepare, .decision, .partial_commit => true,
         .pristine, .completed_frontier => false,
@@ -1698,7 +1698,7 @@ fn writeLegacyV1(dir: std.Io.Dir, phase: LegacyPhase) !void {
     }
     try std.testing.expect(offset <= metadata_size);
     @memcpy(bytes[metadata_size..][0..payload_len], data[0..payload_len]);
-    std.mem.writeInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]), .little);
+    std.mem.writeInt(u32, bytes[bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - FileStoreInner.checksum_size]), .little);
     try dir.writeFile(std.testing.io, .{ .sub_path = "legacy.state", .data = bytes });
 }
 
@@ -1755,7 +1755,7 @@ test "only pristine unsigned v1 coordinator state migrates" {
             .truncated => {},
         }
         if (corruption != .checksum and corruption != .truncated)
-            std.mem.writeInt(u32, legacy_bytes[legacy_bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.Crc32Iscsi.hash(legacy_bytes[0 .. legacy_bytes.len - FileStoreInner.checksum_size]), .little);
+            std.mem.writeInt(u32, legacy_bytes[legacy_bytes.len - FileStoreInner.checksum_size ..][0..FileStoreInner.checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(legacy_bytes[0 .. legacy_bytes.len - FileStoreInner.checksum_size]), .little);
         const contents = if (corruption == .truncated) legacy_bytes[0 .. legacy_bytes.len - 1] else legacy_bytes;
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "legacy.state", .data = contents });
         try std.testing.expectError(error.StoreCorrupt, FileStore.init(std.testing.allocator, std.testing.io, tmp.dir, "legacy.state"));
@@ -1764,7 +1764,7 @@ test "only pristine unsigned v1 coordinator state migrates" {
 
 test "corrupt v2 identity and signed prepare with recomputed checksum fail reopen" {
     var harness = try TestHarness.init();
-    const data = [_]u8{8} ** 4096;
+    const data = @as([4096]u8, @splat(8));
     const request = testBegin(1, @splat(0), 27, &data, .{ testId(1), testId(2) });
     _ = try harness.coordinator.begin(request);
     try harness.coordinator.recordPrepared(try harness.signers.prepare(0, request.write, 1));
@@ -1773,13 +1773,13 @@ test "corrupt v2 identity and signed prepare with recomputed checksum fail reope
     var bytes = try harness.tmp.dir.readFileAlloc(std.testing.io, "coordinator.state", std.testing.allocator, .limited(FileStoreInner.max_file_size));
     defer std.testing.allocator.free(bytes);
     bytes[24 + 16 + 16] ^= 1;
-    std.mem.writeInt(u32, bytes[bytes.len - 4 ..][0..4], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - 4]), .little);
+    std.mem.writeInt(u32, bytes[bytes.len - 4 ..][0..4], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - 4]), .little);
     try harness.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad-identity.state", .data = bytes });
     try std.testing.expectError(error.StoreCorrupt, FileStore.init(std.testing.allocator, std.testing.io, harness.tmp.dir, "bad-identity.state"));
     bytes[24 + 16 + 16] ^= 1;
     const signature_offset = 24 + identities_encoded_size + 40 + write_encoded_size + 2 * @sizeOf(Id) + 2 + attestation_encoded_size + 16 + 32;
     bytes[signature_offset] ^= 1;
-    std.mem.writeInt(u32, bytes[bytes.len - 4 ..][0..4], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - 4]), .little);
+    std.mem.writeInt(u32, bytes[bytes.len - 4 ..][0..4], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - 4]), .little);
     try harness.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "bad-signature.state", .data = bytes });
     try std.testing.expectError(error.StoreCorrupt, FileStore.init(std.testing.allocator, std.testing.io, harness.tmp.dir, "bad-signature.state"));
     harness.signers.deinit();
@@ -1811,7 +1811,7 @@ test "durability faults preserve or poison every signed mutation boundary" {
     for (fault_kinds) |fault_kind| for (stages) |stage| {
         var harness = try TestHarness.init();
         defer harness.deinit();
-        const data = [_]u8{9} ** 4096;
+        const data = @as([4096]u8, @splat(9));
         const request = testBegin(1, @splat(0), 28, &data, .{ testId(1), testId(2) });
         try setupBeforeMutation(&harness, request, stage);
         try std.testing.expect(!try mutationReached(harness.coordinator, stage));

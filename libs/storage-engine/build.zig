@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     );
 
     const fmt = b.addFmt(.{
-        .paths = &.{ "build.zig", "build.zig.zon", "src" },
+        .paths = &.{ b.path("build.zig"), b.path("build.zig.zon"), b.path("src") },
         .check = true,
     });
     const fmt_step = b.step("fmt-check", "Check storage-engine formatting");

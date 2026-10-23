@@ -409,8 +409,8 @@ pub fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
             4 => {
                 if (field.wire_type != 0) return error.InvalidWire;
                 state = try cursor.readVarint();
-                if (state != @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_PRESENT) and
-                    state != @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE))
+                if (state != @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_PRESENT) and
+                    state != @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE))
                 {
                     return error.InvalidWire;
                 }
@@ -424,7 +424,7 @@ pub fn preflightMemberHeartbeat(payload: []const u8) wire.Error![]const u8 {
     }
     if (!seen[1] or !seen[2] or !seen[4] or
         std.mem.eql(u8, member_id, local_set_id) or
-        (state == @intFromEnum(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE) and seen[5]))
+        (state == @backingInt(pb.MemberHeartbeatState.MEMBER_HEARTBEAT_STATE_UNAVAILABLE) and seen[5]))
     {
         return error.InvalidWire;
     }

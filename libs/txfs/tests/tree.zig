@@ -145,7 +145,7 @@ test "tree splits leaves and internal pages" {
     var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
-    const value = "v" ** 900;
+    const value = &@as([900]u8, @splat('v'));
     var key_buffer: [16]u8 = undefined;
     for (0..240) |index| {
         const key = try std.fmt.bufPrint(&key_buffer, "k{d:0>4}", .{index});
@@ -219,7 +219,7 @@ test "tree splits correctly under randomized insertion order" {
     for (&order, 0..) |*item, index| item.* = @intCast(index);
     var random = std.Random.DefaultPrng.init(0x71_7d_ba5e);
     random.random().shuffle(u16, &order);
-    const value = "r" ** 900;
+    const value = &@as([900]u8, @splat('r'));
     var key_buffer: [16]u8 = undefined;
     for (order) |key_index| {
         const key = try std.fmt.bufPrint(&key_buffer, "r{d:0>4}", .{key_index});
@@ -298,7 +298,7 @@ test "tree delete retains an empty internal structure" {
     var initial_mutator = txfs.tree.Mutator.init(&initial_transaction);
     defer initial_mutator.deinit();
     var historical_root = try initial_mutator.createEmpty();
-    const value = "d" ** 900;
+    const value = &@as([900]u8, @splat('d'));
     var key_buffer: [16]u8 = undefined;
     for (0..80) |index| {
         const key = try std.fmt.bufPrint(&key_buffer, "d{d:0>3}", .{index});
@@ -366,7 +366,7 @@ test "tree cursor is invalid after a cross-leaf load failure" {
     var mutator = txfs.tree.Mutator.init(&transaction);
     defer mutator.deinit();
     var root = try mutator.createEmpty();
-    const value = "f" ** 900;
+    const value = &@as([900]u8, @splat('f'));
     var key_buffer: [16]u8 = undefined;
     for (0..20) |index| {
         const key = try std.fmt.bufPrint(&key_buffer, "f{d:0>3}", .{index});
@@ -495,11 +495,11 @@ test "tree enforces key and inline entry limits" {
 
     try std.testing.expectError(
         error.KeyTooLarge,
-        mutator.put(root, "k" ** (txfs.tree.max_key_size + 1), "value"),
+        mutator.put(root, &@as([(txfs.tree.max_key_size + 1)]u8, @splat('k')), "value"),
     );
     try std.testing.expectError(
         error.EntryTooLarge,
-        mutator.put(root, "key", "v" ** txfs.tree.max_entry_payload),
+        mutator.put(root, "key", &@as([txfs.tree.max_entry_payload]u8, @splat('v'))),
     );
 }
 

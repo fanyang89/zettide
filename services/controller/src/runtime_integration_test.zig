@@ -1270,7 +1270,7 @@ fn reportHeartbeat(
         .node_id = node.id,
         .incarnation = incarnation,
         .sequence = sequence,
-        .members = .{ .items = &members, .capacity = members.len },
+        .members = .{ .items = &members, .capacity = members.len, .pointer_stability = .{} },
     });
     defer runtime_allocator.free(request);
     var result = try call(runtime, "/zettide.controller.v1.HeartbeatService/ReportHeartbeat", request);

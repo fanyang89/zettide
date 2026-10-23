@@ -63,7 +63,7 @@ fn writeSecure(dir: std.Io.Dir, name: []const u8, data: []const u8) !void {
     try dir.writeFile(std.testing.io, .{
         .sub_path = name,
         .data = data,
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
 }
 
@@ -103,7 +103,7 @@ test "accepts owner-only signing seed permission variants" {
         const name = try std.fmt.bufPrint(&name_buffer, "seed-{d}", .{index});
         try writeSecure(tmp.dir, name, valid_seed);
         const file = try tmp.dir.openFile(std.testing.io, name, .{});
-        try file.setPermissions(std.testing.io, @enumFromInt(mode));
+        try file.setPermissions(std.testing.io, @fromBackingInt(@intCast(mode)));
         file.close(std.testing.io);
         var loaded = try load(std.testing.io, tmp.dir, name);
         loaded.deinit();
@@ -116,7 +116,7 @@ test "rejects group accessible signing seed" {
     try writeSecure(tmp.dir, "seed", valid_seed);
     const file = try tmp.dir.openFile(std.testing.io, "seed", .{});
     defer file.close(std.testing.io);
-    try file.setPermissions(std.testing.io, @enumFromInt(0o640));
+    try file.setPermissions(std.testing.io, @fromBackingInt(@intCast(0o640)));
     try std.testing.expectError(error.InsecureSigningSeedFile, load(std.testing.io, tmp.dir, "seed"));
 }
 

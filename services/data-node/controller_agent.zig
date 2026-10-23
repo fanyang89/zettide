@@ -210,7 +210,7 @@ pub const HeartbeatWorker = struct {
             .node_id = self.config.node_id,
             .incarnation = self.incarnation,
             .sequence = sequence,
-            .members = .{ .items = &members, .capacity = members.len },
+            .members = .{ .items = &members, .capacity = members.len, .pointer_stability = .{} },
         };
         var response = try unary(
             self.allocator,

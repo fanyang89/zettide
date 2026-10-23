@@ -42,7 +42,7 @@ pub const Metadata = struct {
     pub fn encode(metadata: Metadata) [encoded_size]u8 {
         var bytes: [encoded_size]u8 = @splat(0);
         bytes[0] = version;
-        bytes[1] = @intFromEnum(metadata.kind);
+        bytes[1] = @backingInt(metadata.kind);
         putInt(u32, &bytes, 4, metadata.mode);
         putInt(u32, &bytes, 8, metadata.uid);
         putInt(u32, &bytes, 12, metadata.gid);

@@ -55,7 +55,7 @@ pub fn testCommitRequestDigest(
         .transaction_id = &write.transaction_id,
         .sequence = write.sequence,
         .signed_certificate = .{
-            .prepare_evidence = .{ .items = &evidence_views, .capacity = evidence_views.len },
+            .prepare_evidence = .{ .items = &evidence_views, .capacity = evidence_views.len, .pointer_stability = .{} },
         },
     });
 }
@@ -190,7 +190,7 @@ pub const Client = struct {
                 .transaction_id = &write.transaction_id,
                 .sequence = write.sequence,
                 .signed_certificate = .{
-                    .prepare_evidence = .{ .items = &evidence_views, .capacity = evidence_views.len },
+                    .prepare_evidence = .{ .items = &evidence_views, .capacity = evidence_views.len, .pointer_stability = .{} },
                 },
             },
             pb.ReplicaCommitResponse,
@@ -295,7 +295,7 @@ pub const Client = struct {
             result.trailing_metadata.items(),
             path,
             writer.written(),
-            @intFromEnum(result.status.code),
+            @backingInt(result.status.code),
             result.status.message,
             result.payload,
         ) catch return error.ResponseAuthenticationFailed;
@@ -331,8 +331,8 @@ fn bindingProto(binding: *const Binding, views: *BindingProtoViews) pb.DataWrite
         .offset_bytes = replica.offset_bytes,
         .length_bytes = replica.length_bytes,
         .backend_digest = &binding.backend_digest,
-        .replica_member_ids = .{ .items = &views.members, .capacity = views.members.len },
-        .witness_identities = .{ .items = &views.identities, .capacity = views.identities.len },
+        .replica_member_ids = .{ .items = &views.members, .capacity = views.members.len, .pointer_stability = .{} },
+        .witness_identities = .{ .items = &views.identities, .capacity = views.identities.len, .pointer_stability = .{} },
     };
 }
 
@@ -340,7 +340,7 @@ fn writeProto(write: *const write_service.WriteRequest, member_views: *[3][]cons
     for (&write.replica_members, 0..) |*member_id, index| member_views[index] = member_id;
     return .{
         .authority = authorityProto(&write.authority),
-        .replica_member_ids = .{ .items = member_views, .capacity = member_views.len },
+        .replica_member_ids = .{ .items = member_views, .capacity = member_views.len, .pointer_stability = .{} },
         .sequence = write.sequence,
         .transaction_id = &write.transaction_id,
         .previous_history_digest = &write.previous_history_digest,

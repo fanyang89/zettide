@@ -34,7 +34,7 @@ fn openCatalogLock(io: std.Io, parent: std.Io.Dir) !std.Io.File {
                 .read = true,
                 .truncate = false,
                 .exclusive = true,
-                .permissions = @enumFromInt(0o600),
+                .permissions = @fromBackingInt(@intCast(0o600)),
             }) catch |create_error| switch (create_error) {
                 error.PathAlreadyExists => continue,
                 else => return create_error,
@@ -671,7 +671,7 @@ fn encodeCatalog(
     std.mem.writeInt(
         u32,
         bytes[bytes.len - catalog_checksum_size ..][0..catalog_checksum_size],
-        std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - catalog_checksum_size]),
+        std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - catalog_checksum_size]),
         .little,
     );
     return bytes;
@@ -711,7 +711,7 @@ fn decodeCatalog(
     if (count > max_participants or
         bytes.len != catalog_header_size + @as(usize, count) * record_size + catalog_checksum_size or
         std.mem.readInt(u32, bytes[bytes.len - catalog_checksum_size ..][0..catalog_checksum_size], .little) !=
-            std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - catalog_checksum_size])) return error.StoreCorrupt;
+            std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - catalog_checksum_size])) return error.StoreCorrupt;
     // A non-empty v2 catalog has no signer identities. Decode and validate
     // every fixed-width record before classifying valid history as unsigned;
     // byte or semantic corruption must remain distinguishable.
@@ -1160,7 +1160,7 @@ fn legacyCatalogBytes(allocator: std.mem.Allocator, count: u32) ![]u8 {
         catalogPutU64(bytes, &offset, binding.replica.length_bytes);
         for (binding.replica_members) |member| catalogPutBytes(bytes, &offset, &member);
     }
-    std.mem.writeInt(u32, bytes[bytes.len - catalog_checksum_size ..][0..catalog_checksum_size], std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - catalog_checksum_size]), .little);
+    std.mem.writeInt(u32, bytes[bytes.len - catalog_checksum_size ..][0..catalog_checksum_size], std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - catalog_checksum_size]), .little);
     return bytes;
 }
 
@@ -1168,7 +1168,7 @@ fn rewriteCatalogChecksum(bytes: []u8) void {
     std.mem.writeInt(
         u32,
         bytes[bytes.len - catalog_checksum_size ..][0..catalog_checksum_size],
-        std.hash.crc.Crc32Iscsi.hash(bytes[0 .. bytes.len - catalog_checksum_size]),
+        std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0 .. bytes.len - catalog_checksum_size]),
         .little,
     );
 }
@@ -1179,7 +1179,7 @@ test "catalog lock rejects symlinks" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lock-target",
         .data = "not a lock alias",
-        .flags = .{ .permissions = @enumFromInt(0o600) },
+        .flags = .{ .permissions = @fromBackingInt(@intCast(0o600)) },
     });
     try tmp.dir.symLink(std.testing.io, "lock-target", catalog_lock_basename, .{});
     try std.testing.expectError(error.SymLinkLoop, openCatalogLock(std.testing.io, tmp.dir));

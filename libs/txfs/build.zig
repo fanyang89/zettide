@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     const test_step = addComponent(b, target, optimize, sanitize_thread, "", "test");
 
     const fmt = b.addFmt(.{
-        .paths = &.{ "build.zig", "build.zig.zon", "src", "tests" },
+        .paths = &.{ b.path("build.zig"), b.path("build.zig.zon"), b.path("src"), b.path("tests") },
         .check = true,
     });
     const fmt_step = b.step("fmt-check", "Check Zig formatting");

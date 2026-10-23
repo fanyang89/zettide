@@ -9,8 +9,8 @@
             .hash = "N-V-__8AAPSAAQAtvOlJae6eMS2dtyeTGalfGt9JsXB9mYZj",
         },
         .clap = .{
-            .url = "https://codeload.github.com/fanyang89/zig-clap/tar.gz/1ea8261153755a1318a5df0a4449a073b179a0ff",
-            .hash = "clap-0.12.0-oBajB67pAQDvufv-xm4AULd-TnpkQs8GkvisZg4DkjgQ",
+            .url = "https://codeload.github.com/Hejsil/zig-clap/tar.gz/05faf3905e8548f5cc269a8836e154065e70128d",
+            .hash = "clap-0.12.0-oBajB4XpAQCF1WRKnD5KOKPsnwwT_NNdAJ7Ww3irYJac",
         },
         .raftz = .{
             .path = "vendor/raftz",
