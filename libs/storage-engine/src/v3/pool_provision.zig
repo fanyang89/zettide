@@ -1,10 +1,8 @@
 const std = @import("std");
-const data_mode_geometry = @import("../data_mode_geometry.zig");
 const codec = @import("codec.zig");
 const member_api = @import("member.zig");
 const member_format = @import("member_format.zig");
 const pool_genesis = @import("pool_genesis_payload.zig");
-const pool_blob_schedule = @import("pool_blob_schedule.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_member_set = @import("pool_member_set.zig");
 const pool_policy = @import("pool_policy.zig");
@@ -19,25 +17,28 @@ const region_alignment: u64 = 1024 * 1024;
 
 pub const Options = struct {
     protection: pool_policy.Protection = .replicated,
-    data_mode: member_format.PoolDataMode = .blob,
+    // Retired modes remain expressible only so callers receive an explicit error.
+    data_mode: member_format.PoolDataMode = .catalog,
     label: []const u8 = "Zettide",
     chunk_size: u32 = default_chunk_size,
     control_bytes: u64 = default_control_bytes,
     metadata_bytes: u64 = default_metadata_bytes,
+    // Rejection-only compatibility selector; no scheduled Blob creation remains.
     scheduled_blob: bool = false,
     member_create_options: []const member_api.CreateOptions = &.{},
 };
 
 pub fn minimumMemberBytes(options: Options) !u64 {
+    try validateDataMode(options);
     const data_offset = try dataOffset(options);
-    const minimum_logical_capacity: u64 = switch (options.data_mode) {
-        .catalog => 1,
-        .blob => data_mode_geometry.blob.minimum_device_size,
-        .legacy_unsupported => return error.InvalidPoolDataMode,
-    };
-    const required_bytes = std.math.add(u64, data_offset, minimum_logical_capacity) catch
+    const required_bytes = std.math.add(u64, data_offset, 1) catch
         return error.InvalidGeometry;
     return codec.alignForward(required_bytes, options.chunk_size);
+}
+
+fn validateDataMode(options: Options) !void {
+    if (options.scheduled_blob) return error.ScheduledBlobUnsupported;
+    if (options.data_mode != .catalog) return error.UnsupportedPoolDataMode;
 }
 
 fn dataOffset(options: Options) !u64 {
@@ -108,14 +109,7 @@ pub fn create(
     errdefer storage_api.closeAll(storages[consumed_count..], io) catch {};
     if (storages.len == 0 or storages.len > pool_topology.max_member_count)
         return error.InvalidMemberCount;
-    if (options.data_mode == .legacy_unsupported) return error.InvalidPoolDataMode;
-    if (options.scheduled_blob and (options.data_mode != .blob or
-        options.protection != .replicated or
-        storages.len < pool_blob_schedule.replica_count or
-        storages.len > pool_blob_schedule.max_member_count))
-        return error.InvalidScheduledBlobOptions;
-    if (options.scheduled_blob and options.chunk_size != data_mode_geometry.blob.chunk_size)
-        return error.InvalidScheduledBlobChunkSize;
+    try validateDataMode(options);
     if (options.member_create_options.len != 0 and options.member_create_options.len != storages.len)
         return error.InvalidCreateOptions;
     if (options.protection == .erasure_coded)
@@ -153,17 +147,8 @@ pub fn create(
             return error.UnexpectedMemberLength;
         if (member_bytes[index] < minimum_member_bytes)
             return error.StorageTooSmall;
-        if (!options.scheduled_blob)
-            minimum_data_bytes = @min(minimum_data_bytes, member_bytes[index] - data_offset);
+        minimum_data_bytes = @min(minimum_data_bytes, member_bytes[index] - data_offset);
     }
-    var logical_capacity: u64 = if (options.scheduled_blob) 0 else switch (options.data_mode) {
-        .catalog => minimum_data_bytes,
-        .blob => minimum_data_bytes / data_mode_geometry.blob.chunk_size * data_mode_geometry.blob.chunk_size,
-        .legacy_unsupported => unreachable,
-    };
-    if (!options.scheduled_blob and options.data_mode == .blob and
-        logical_capacity < data_mode_geometry.blob.minimum_device_size)
-        return error.StorageTooSmall;
 
     var set_id: [16]u8 = undefined;
     try randomNonZeroId(io, &set_id);
@@ -183,38 +168,9 @@ pub fn create(
             .role_flags = if (voter) member_format.known_role_flags else member_format.data_role,
         };
     }
-    var placement_page: pool_blob_schedule.PlacementPage align(pool_blob_schedule.placement_page_size) = undefined;
-    const layout = if (options.scheduled_blob) scheduled: {
-        var geometries: [pool_blob_schedule.max_member_count]pool_blob_schedule.Geometry = undefined;
-        for (geometries[0..storages.len], descriptors[0..storages.len], member_bytes[0..storages.len]) |
-            *geometry,
-            descriptor,
-            bytes,
-        | {
-            const data_length = bytes - data_offset;
-            geometry.* = .{
-                .slot = descriptor.slot,
-                .available_stripes = data_length / options.chunk_size,
-            };
-        }
-        var seed_bytes: [@sizeOf(u64)]u8 = undefined;
-        try io.randomSecure(&seed_bytes);
-        const plan = try pool_blob_schedule.build(
-            options.chunk_size,
-            geometries[0..storages.len],
-            std.mem.readInt(u64, &seed_bytes, .little),
-        );
-        placement_page = try pool_blob_schedule.encodePage(plan);
-        const value = try pool_layout.Layout.initScheduledBlob(plan, 1, 1);
-        logical_capacity = value.scheduled_blob.?.logical_capacity;
-        if (logical_capacity < data_mode_geometry.blob.minimum_device_size or
-            logical_capacity % data_mode_geometry.blob.chunk_size != 0)
-            return error.StorageTooSmall;
-        break :scheduled value;
-    } else try pool_layout.Layout.init(options.protection, 1, 1, options.chunk_size);
     const genesis: pool_genesis.GenesisPayload = .{
         .topology = try pool_topology.Topology.init(set_id, 1, @splat(0), descriptors[0..storages.len]),
-        .layout = layout,
+        .layout = try pool_layout.Layout.init(options.protection, 1, 1, options.chunk_size),
     };
     const topology_digest = try pool_topology.digest(genesis.topology);
     const created_ns: i64 = @intCast(std.Io.Clock.real.now(io).nanoseconds);
@@ -225,12 +181,7 @@ pub fn create(
         header.* = .{
             .header_sequence = 1,
             .incompat_features = member_format.dynamic_pool_incompat_feature |
-                (switch (options.data_mode) {
-                    .blob => member_format.blob_filesystem_incompat_feature,
-                    .catalog => member_format.catalog_intent_incompat_feature,
-                    .legacy_unsupported => unreachable,
-                }) |
-                (if (options.scheduled_blob) member_format.scheduled_blob_data_incompat_feature else 0),
+                member_format.catalog_intent_incompat_feature,
             .set_id = set_id,
             .member_id = descriptor.member_id,
             .member_slot = descriptor.slot,
@@ -238,7 +189,7 @@ pub fn create(
             .role_flags = descriptor.role_flags,
             .created_ns = created_ns,
             .member_bytes = member_bytes[index],
-            .logical_capacity = logical_capacity,
+            .logical_capacity = minimum_data_bytes,
             .control = control,
             .metadata = metadata,
             .data = .{ .offset = data_offset, .length = member_bytes[index] - data_offset },
@@ -248,10 +199,7 @@ pub fn create(
             .chunk_size = options.chunk_size,
             .metadata_format_version = member_format.supported_metadata_format_version,
             .object_format_version = member_format.supported_object_format_version,
-            .layout_format_version = if (options.scheduled_blob)
-                member_format.scheduled_layout_format_version
-            else
-                member_format.dynamic_layout_format_version,
+            .layout_format_version = member_format.dynamic_layout_format_version,
             .control_record_format_version = member_format.supported_control_record_format_version,
             .label = label,
             .genesis_topology_digest = topology_digest,
@@ -259,9 +207,6 @@ pub fn create(
         try member_api.validateCreatePoolStorage(header.*, genesis);
     }
 
-    if (options.scheduled_blob) {
-        for (storages) |*storage| try storage.writeAllAt(io, &placement_page, metadata.offset);
-    }
     for (storages) |*storage| try storage.sync(io);
 
     const members = try allocator.alloc(member_api.Member, storages.len);
@@ -303,39 +248,76 @@ fn containsMemberId(members: []const pool_topology.Member, id: [16]u8) bool {
     return false;
 }
 
-fn expectScheduledRejected(options: Options, member_count: usize, expected: anyerror) !void {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storages: [pool_blob_schedule.max_member_count + 1]storage_api.Storage = undefined;
-    var names: [pool_blob_schedule.max_member_count + 1][16]u8 = @splat(@splat(0));
-    for (storages[0..member_count], names[0..member_count], 0..) |*storage, *name, index| {
-        const basename = try std.fmt.bufPrint(name, "member-{d}", .{index});
-        storage.* = try storage_api.Storage.createFile(
-            std.testing.io,
-            tmp.dir,
-            basename,
-            8 * 1024 * 1024,
-        );
-    }
-    try std.testing.expectError(
-        expected,
-        create(std.testing.io, std.testing.allocator, storages[0..member_count], options),
-    );
+const RejectedStorageProbe = struct {
+    reads: usize = 0,
+    writes: usize = 0,
+    syncs: usize = 0,
+    closes: usize = 0,
+    fail_close: bool = false,
 
-    for (names[0..member_count]) |*name| {
-        const basename = std.mem.sliceTo(name, 0);
-        const file = try tmp.dir.openFile(std.testing.io, basename, .{ .mode = .read_only });
-        defer file.close(std.testing.io);
-        for ([_]u64{ 0, member_format.encoded_size, 64 * 1024 }) |offset| {
-            var bytes: [member_format.encoded_size]u8 = undefined;
-            _ = try file.readPositionalAll(std.testing.io, &bytes, offset);
-            try std.testing.expect(codec.isZero(&bytes));
+    const vtable: storage_api.Storage.VTable = .{
+        .same_identity = sameIdentity,
+        .read_at = readAt,
+        .write_all_at = writeAt,
+        .sync = sync,
+        .close = close,
+    };
+
+    fn from(context: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(context));
+    }
+
+    fn sameIdentity(a: *anyopaque, b: *anyopaque) bool {
+        return a == b;
+    }
+
+    fn readAt(context: *anyopaque, _: std.Io, _: []u8, _: u64) !usize {
+        from(context).reads += 1;
+        return error.UnexpectedStorageAccess;
+    }
+
+    fn writeAt(context: *anyopaque, _: std.Io, _: []const u8, _: u64) !void {
+        from(context).writes += 1;
+        return error.UnexpectedStorageAccess;
+    }
+
+    fn sync(context: *anyopaque, _: std.Io) !void {
+        from(context).syncs += 1;
+        return error.UnexpectedStorageAccess;
+    }
+
+    fn close(context: *anyopaque, _: std.Io) !void {
+        const self = from(context);
+        self.closes += 1;
+        if (self.fail_close) return error.InjectedCloseFault;
+    }
+};
+
+test "retired provisioning options reject before IO and consume every storage" {
+    inline for (.{
+        .{ .options = Options{ .data_mode = .blob }, .expected = error.UnsupportedPoolDataMode },
+        .{ .options = Options{ .data_mode = .legacy_unsupported }, .expected = error.UnsupportedPoolDataMode },
+        .{ .options = Options{ .scheduled_blob = true }, .expected = error.ScheduledBlobUnsupported },
+        .{ .options = Options{ .data_mode = .blob, .scheduled_blob = true }, .expected = error.ScheduledBlobUnsupported },
+    }) |case| {
+        try std.testing.expectError(case.expected, minimumMemberBytes(case.options));
+        var probes: [3]RejectedStorageProbe = @splat(.{});
+        probes[0].fail_close = true;
+        var storages: [3]storage_api.Storage = undefined;
+        for (&probes, &storages) |*probe, *storage|
+            storage.* = storage_api.Storage.initBackend(probe, &RejectedStorageProbe.vtable, 8 * 1024 * 1024, .regular_file, 1);
+        try std.testing.expectError(case.expected, create(std.testing.io, std.testing.allocator, &storages, case.options));
+        for (probes) |probe| {
+            try std.testing.expectEqual(@as(usize, 0), probe.reads);
+            try std.testing.expectEqual(@as(usize, 0), probe.writes);
+            try std.testing.expectEqual(@as(usize, 0), probe.syncs);
+            try std.testing.expectEqual(@as(usize, 1), probe.closes);
         }
     }
 }
 
 test "provisioning validates all file storages then creates a reopenable pool" {
-    try std.testing.expectEqual(member_format.PoolDataMode.blob, (Options{}).data_mode);
+    try std.testing.expectEqual(member_format.PoolDataMode.catalog, (Options{}).data_mode);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const names = [_][]const u8{ "a", "b", "c" };
@@ -349,7 +331,7 @@ test "provisioning validates all file storages then creates a reopenable pool" {
         .partial => return error.UnexpectedPartialCreation,
     };
     try std.testing.expectEqual(@as(usize, 3), provisioned.members.len);
-    try std.testing.expectEqual(member_format.PoolDataMode.blob, member_format.poolDataMode(provisioned.members[0].header()));
+    try std.testing.expectEqual(member_format.PoolDataMode.catalog, member_format.poolDataMode(provisioned.members[0].header()));
     try std.testing.expectEqual(pool_layout.Kind.replicated, provisioned.genesis.layout.kind);
     try std.testing.expectEqual(@as(u64, 240 * 4096), provisioned.members[0].header().control.length);
     try std.testing.expectEqual(@as(u64, 1024 * 1024), provisioned.members[0].header().metadata.offset);
@@ -369,7 +351,7 @@ test "provisioning validates all file storages then creates a reopenable pool" {
     try std.testing.expectEqual(pool_policy.DataAccess.read_write, reopened.dataAccess());
 }
 
-test "provisioning marks every Blob Pool member" {
+test "provisioning marks every Catalog Pool member without initializing a root" {
     inline for (.{
         .{ .protection = pool_policy.Protection.unprotected, .member_count = 1 },
         .{ .protection = pool_policy.Protection.replicated, .member_count = 3 },
@@ -383,15 +365,21 @@ test "provisioning marks every Blob Pool member" {
 
         const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
             .protection = case.protection,
-            .data_mode = .blob,
         });
         var provisioned = switch (outcome) {
             .complete => |value| value,
             .partial => return error.UnexpectedPartialCreation,
         };
         defer provisioned.deinit();
-        for (provisioned.members) |*member|
-            try std.testing.expectEqual(member_format.PoolDataMode.blob, member_format.poolDataMode(member.header()));
+        for (provisioned.members) |*member| {
+            try std.testing.expectEqual(member_format.PoolDataMode.catalog, member_format.poolDataMode(member.header()));
+            try std.testing.expect(!member_format.hasCatalogData(member.header()));
+            var bytes: [4096]u8 = undefined;
+            for ([_]u64{ 0, 4096 }) |offset| {
+                try member.read(.metadata, offset, &bytes);
+                try std.testing.expect(codec.isZero(&bytes));
+            }
+        }
         try provisioned.close();
 
         for (names[0..case.member_count]) |name| {
@@ -401,7 +389,11 @@ test "provisioning marks every Blob Pool member" {
                 var bytes: [member_format.encoded_size]u8 = undefined;
                 _ = try file.readPositionalAll(std.testing.io, &bytes, offset);
                 const header = try member_format.decode(&bytes);
-                try std.testing.expectEqual(member_format.PoolDataMode.blob, member_format.poolDataMode(header));
+                try std.testing.expectEqual(member_format.PoolDataMode.catalog, member_format.poolDataMode(header));
+                try std.testing.expectEqual(
+                    member_format.dynamic_pool_incompat_feature | member_format.catalog_intent_incompat_feature,
+                    header.incompat_features,
+                );
             }
         }
     }
@@ -415,7 +407,6 @@ test "provisioned members transfer into a set only on success" {
     };
     const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
         .protection = .unprotected,
-        .data_mode = .blob,
     });
     var provisioned = switch (outcome) {
         .complete => |value| value,
@@ -437,26 +428,33 @@ test "provisioned members transfer into a set only on success" {
     try std.testing.expect(set.controlWriteReady() != null);
 }
 
-test "Blob Pool provisioning requires minimum Blob logical capacity" {
-    try std.testing.expectEqual(@as(u64, 4 * 1024 * 1024), try minimumMemberBytes(.{}));
+test "Catalog provisioning requires at least one data chunk" {
+    try std.testing.expectEqual(@as(u64, 3 * 1024 * 1024), try minimumMemberBytes(.{}));
     try std.testing.expectEqual(@as(u64, 3 * 1024 * 1024), try minimumMemberBytes(.{ .data_mode = .catalog }));
-    try std.testing.expectEqual(@as(u64, 4 * 1024 * 1024), try minimumMemberBytes(.{ .data_mode = .blob }));
+    try std.testing.expectEqual(@as(u64, 2 * 1024 * 1024 + 4096), try minimumMemberBytes(.{ .chunk_size = 4096 }));
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storages = [_]storage_api.Storage{
-        try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 3 * 1024 * 1024),
+        try storage_api.Storage.createFile(std.testing.io, tmp.dir, "member", 2 * 1024 * 1024),
     };
     try std.testing.expectError(
         error.StorageTooSmall,
         create(std.testing.io, std.testing.allocator, &storages, .{
             .protection = .unprotected,
-            .data_mode = .blob,
         }),
     );
+    storages[0] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, "minimum", 3 * 1024 * 1024);
+    const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{ .protection = .unprotected });
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => return error.UnexpectedPartialCreation,
+    };
+    defer provisioned.deinit();
+    try std.testing.expectEqual(@as(u64, 1024 * 1024), provisioned.members[0].header().logical_capacity);
 }
 
-test "Blob Pool logical capacity is common and Blob-aligned with 4KiB chunks" {
+test "Catalog logical capacity uses the smallest member without Blob alignment" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const names = [_][]const u8{ "a", "b", "c" };
@@ -465,12 +463,15 @@ test "Blob Pool logical capacity is common and Blob-aligned with 4KiB chunks" {
         5 * 1024 * 1024 + 2 * 4096,
         6 * 1024 * 1024 + 3 * 4096,
     };
+    const sentinel: [4096]u8 = @splat(0xa5);
     var storages: [names.len]storage_api.Storage = undefined;
-    for (names, sizes, 0..) |name, size, index|
+    for (names, sizes, 0..) |name, size, index| {
         storages[index] = try storage_api.Storage.createFile(std.testing.io, tmp.dir, name, size);
+        try storages[index].writeAllAt(std.testing.io, &sentinel, 2 * 1024 * 1024 + 4096);
+        try storages[index].sync(std.testing.io);
+    }
 
     const outcome = try create(std.testing.io, std.testing.allocator, &storages, .{
-        .data_mode = .blob,
         .chunk_size = 4096,
     });
     var provisioned = switch (outcome) {
@@ -480,96 +481,16 @@ test "Blob Pool logical capacity is common and Blob-aligned with 4KiB chunks" {
     defer provisioned.deinit();
     for (provisioned.members, sizes) |*member, size| {
         try std.testing.expectEqual(size, member.header().member_bytes);
-        try std.testing.expectEqual(data_mode_geometry.blob.minimum_device_size, member.header().logical_capacity);
-        try std.testing.expectEqual(@as(u64, 0), member.header().logical_capacity % data_mode_geometry.blob.chunk_size);
+        try std.testing.expectEqual(sizes[0] - 2 * 1024 * 1024, member.header().logical_capacity);
+        try std.testing.expectEqual(@as(u64, 0), member.header().logical_capacity % 4096);
+        var actual: [sentinel.len]u8 = undefined;
+        try member.read(.data, 4096, &actual);
+        try std.testing.expectEqualSlices(u8, &sentinel, &actual);
     }
 }
 
-test "scheduled Blob Pool provisions heterogeneous members and persists placement" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const member_count = pool_blob_schedule.max_member_count;
-    var storages: [member_count]storage_api.Storage = undefined;
-    var names: [member_count][16]u8 = undefined;
-    var sizes: [member_count]u64 = undefined;
-    const options: Options = .{ .data_mode = .blob, .scheduled_blob = true };
-    const data_offset = try dataOffset(options);
-    for (&storages, &names, &sizes, 0..) |*storage, *name, *size, index| {
-        const basename = try std.fmt.bufPrint(name, "member-{d}", .{index});
-        size.* = @as(u64, @intCast(index + 4)) * 1024 * 1024;
-        storage.* = try storage_api.Storage.createFile(std.testing.io, tmp.dir, basename, size.*);
-    }
-
-    const sentinel: [4096]u8 = @splat(0xa5);
-    try storages[0].writeAllAt(std.testing.io, &sentinel, data_offset + 4096);
-    try storages[0].sync(std.testing.io);
-
-    const outcome = try create(std.testing.io, std.testing.allocator, &storages, options);
-    var provisioned = switch (outcome) {
-        .complete => |value| value,
-        .partial => return error.UnexpectedPartialCreation,
-    };
-    defer provisioned.deinit();
-
-    const scheduled = provisioned.genesis.layout.scheduled_blob.?;
-    try std.testing.expectEqual(@as(u16, member_count), scheduled.member_count);
-    try std.testing.expect(scheduled.logical_capacity >= data_mode_geometry.blob.minimum_device_size);
-    try std.testing.expectEqual(@as(u64, 0), scheduled.logical_capacity % data_mode_geometry.blob.chunk_size);
-    try std.testing.expect(scheduled.logical_capacity != sizes[0] - data_offset);
-
-    var canonical_page: pool_blob_schedule.PlacementPage align(pool_blob_schedule.placement_page_size) = undefined;
-    for (provisioned.members, sizes, 0..) |*member, size, index| {
-        const header = member.header();
-        try std.testing.expect(member_format.hasScheduledBlobData(header));
-        try std.testing.expectEqual(member_format.scheduled_layout_format_version, header.layout_format_version);
-        try std.testing.expectEqual(scheduled.logical_capacity, header.logical_capacity);
-        try std.testing.expectEqual(size - data_offset, header.data.length);
-
-        var page: pool_blob_schedule.PlacementPage align(pool_blob_schedule.placement_page_size) = undefined;
-        try member.read(.metadata, 0, &page);
-        if (index == 0)
-            canonical_page = page
-        else
-            try std.testing.expectEqualSlices(u8, &canonical_page, &page);
-    }
-    const plan = try pool_blob_schedule.decodePage(&canonical_page);
-    try std.testing.expectEqualSlices(u8, &scheduled.placement_digest, &(try pool_blob_schedule.digest(plan)));
-    for (plan.memberSlice()) |entry| {
-        const header = provisioned.members[entry.slot].header();
-        try std.testing.expectEqual(entry.slot, header.member_slot);
-        try std.testing.expect(entry.assigned_stripes <= header.data.length / header.chunk_size);
-    }
-
-    var actual_sentinel: [sentinel.len]u8 = undefined;
-    try provisioned.members[0].read(.data, 4096, &actual_sentinel);
-    try std.testing.expectEqualSlices(u8, &sentinel, &actual_sentinel);
-}
-
-test "scheduled Blob Pool rejects unsupported options before identity publication" {
-    try expectScheduledRejected(.{ .data_mode = .catalog, .scheduled_blob = true }, 3, error.InvalidScheduledBlobOptions);
-    try expectScheduledRejected(.{
-        .data_mode = .blob,
-        .protection = .unprotected,
-        .scheduled_blob = true,
-    }, 3, error.InvalidScheduledBlobOptions);
-    try expectScheduledRejected(.{
-        .data_mode = .blob,
-        .scheduled_blob = true,
-    }, 2, error.InvalidScheduledBlobOptions);
-    try expectScheduledRejected(.{
-        .data_mode = .blob,
-        .scheduled_blob = true,
-    }, 13, error.InvalidScheduledBlobOptions);
-    try expectScheduledRejected(.{
-        .data_mode = .blob,
-        .scheduled_blob = true,
-        .chunk_size = 4096,
-    }, 3, error.InvalidScheduledBlobChunkSize);
-}
-
-test "Blob minimum member geometry reports overflow" {
+test "Catalog minimum member geometry reports overflow" {
     try std.testing.expectError(error.RegionOverflow, minimumMemberBytes(.{
-        .data_mode = .blob,
         .control_bytes = std.math.maxInt(u64) - 4095,
     }));
 }

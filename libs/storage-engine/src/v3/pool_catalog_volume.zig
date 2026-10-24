@@ -474,31 +474,104 @@ fn testCatalog(
     return catalog;
 }
 
-test "Catalog data access rejects retired Blob media without changing its mode" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(std.testing.io, "blob-member", .{ .read = true });
-    var file_owned = true;
-    defer if (file_owned) file.close(std.testing.io);
-    try file.setLength(std.testing.io, 8 * 1024 * 1024);
-    var storages = [_]member_api.Storage{member_api.Storage.initOwned(file, 8 * 1024 * 1024, .regular_file, 1, false)};
-    file_owned = false;
-    const outcome = try @import("pool_provision.zig").create(std.testing.io, std.testing.allocator, &storages, .{
-        .protection = .unprotected,
-        .data_mode = .blob,
-    });
-    var provisioned = switch (outcome) {
-        .complete => |value| value,
-        .partial => |partial| return partial.cause,
+// Build retired media directly from retained codecs, never through provisioning.
+fn createRetiredBlobTestSet(dir: std.Io.Dir, count: usize, scheduled: bool) !pool_member_set.PoolMemberSet {
+    const format = @import("member_format.zig");
+    const schedule = @import("pool_blob_schedule.zig");
+    const layout = @import("pool_layout.zig");
+    const names = [_][]const u8{ "a", "b", "c" };
+    var descriptors: [3]pool_topology.Member = undefined;
+    var locations: [3]pool_member_set.Location = undefined;
+    var plan: schedule.PlacementPlan = .{
+        .stripe_size = 1024 * 1024,
+        .logical_stripe_count = 6,
+        .multiplier = 1,
+        .addend = 0,
+        .member_count = 3,
     };
-    defer provisioned.deinit();
-    var set = try provisioned.intoMemberSet();
-    defer set.deinit();
-    try std.testing.expectError(error.PoolDataRequiresCatalogMode, CatalogVolumeBackend.open(std.testing.allocator, &set, @splat(1)));
-    try std.testing.expectError(error.PoolDataRequiresCatalogMode, CatalogDataLease.acquire(&set));
-    try std.testing.expectEqual(.blob, try set.dataMode());
-    try std.testing.expect(set.controlWriteReady() != null);
-    try std.testing.expectEqual(.read_write, set.dataAccess());
+    for (descriptors[0..count], 0..) |*descriptor, index| descriptor.* = .{
+        .member_id = @splat(@intCast(index + 2)),
+        .slot = @intCast(index),
+        .control_role = pool_topology.voter_role,
+        .role_flags = format.known_role_flags,
+    };
+    for (plan.entries[0..3], 0..) |*entry, index|
+        entry.* = .{ .slot = @intCast(index), .assigned_stripes = 6 };
+    const genesis: @import("pool_genesis_payload.zig").GenesisPayload = .{
+        .topology = try pool_topology.Topology.init(@splat(1), 1, @splat(0), descriptors[0..count]),
+        .layout = if (scheduled) try layout.Layout.initScheduledBlob(plan, 1, 1) else try layout.Layout.init(if (count == 1) .unprotected else .replicated, 1, 1, 1024 * 1024),
+    };
+    for (descriptors[0..count], names[0..count], locations[0..count]) |descriptor, name, *location| {
+        const header: format.Header = .{
+            .header_sequence = 1,
+            .incompat_features = format.dynamic_pool_incompat_feature | format.blob_filesystem_incompat_feature |
+                (if (scheduled) format.scheduled_blob_data_incompat_feature else 0),
+            .set_id = genesis.topology.set_id,
+            .member_id = descriptor.member_id,
+            .member_slot = descriptor.slot,
+            .member_count = @intCast(count),
+            .created_ns = 1,
+            .member_bytes = 8 * 1024 * 1024,
+            .logical_capacity = 6 * 1024 * 1024,
+            .control = .{ .offset = 64 * 1024, .length = 5 * 4096 },
+            .metadata = .{ .offset = 1024 * 1024, .length = 1024 * 1024 },
+            .data = .{ .offset = 2 * 1024 * 1024, .length = 6 * 1024 * 1024 },
+            .metadata_block_size = 4096,
+            .metadata_read_size = 512,
+            .metadata_program_size = 512,
+            .chunk_size = 1024 * 1024,
+            .metadata_format_version = 1,
+            .object_format_version = 1,
+            .layout_format_version = if (scheduled) format.scheduled_layout_format_version else format.dynamic_layout_format_version,
+            .control_record_format_version = 1,
+            .label = try format.Label.init("retired-Blob-fixture"),
+            .genesis_topology_digest = try pool_topology.digest(genesis.topology),
+        };
+        var member = try member_api.createPoolAt(std.testing.io, dir, name, header, genesis, .{});
+        defer member.deinit();
+        if (scheduled) try member.writeDurable(.metadata, 0, &(try schedule.encodePage(plan)));
+        try member.close();
+        location.* = .{ .parent = dir, .basename = name };
+    }
+    return pool_member_set.open(std.testing.io, std.testing.allocator, locations[0..count], .writable);
+}
+
+test "Catalog rejects fixed and scheduled Blob media without writes or claims" {
+    inline for (.{
+        .{ .count = 1, .scheduled = false },
+        .{ .count = 3, .scheduled = false },
+        .{ .count = 3, .scheduled = true },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var set = try createRetiredBlobTestSet(tmp.dir, case.count, case.scheduled);
+        defer set.deinit();
+        var faults: [case.count]member_api.FaultController = @splat(.{});
+        defer for (0..case.count) |index| ((set.memberAt(index) catch unreachable).?).setFaultController(null);
+        for (&faults, 0..) |*fault, index| ((try set.memberAt(index)).?).setFaultController(fault);
+        try std.testing.expectError(error.PoolDataRequiresCatalogMode, CatalogVolumeBackend.open(std.testing.allocator, &set, @splat(1)));
+        try std.testing.expectError(error.PoolDataRequiresCatalogMode, CatalogDataLease.acquire(&set));
+        try std.testing.expectEqual(.blob, try set.dataMode());
+        try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
+        try std.testing.expectEqual(case.scheduled, set.authority().?.layout.scheduled_blob != null);
+        try std.testing.expect(set.controlWriteReady() != null);
+        try std.testing.expectEqual(.read_write, set.dataAccess());
+        for (faults, 0..) |fault, index| {
+            try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+            try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
+            var claim = try ((try set.memberAt(index)).?).claimData();
+            try claim.release();
+            if (case.scheduled) {
+                const schedule = @import("pool_blob_schedule.zig");
+                var page: schedule.PlacementPage = undefined;
+                try ((try set.memberAt(index)).?).read(.metadata, 0, &page);
+                try std.testing.expectEqualDeep(
+                    set.authority().?.layout.scheduled_blob.?.placement_digest,
+                    try schedule.digest(try schedule.decodePage(&page)),
+                );
+            }
+        }
+    }
 }
 
 test "volume map resolves holes mapped extents and logical bounds" {

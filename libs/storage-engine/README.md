@@ -30,6 +30,9 @@ compatibility and validation. The fixed and scheduled raw Blob data-plane
 adapters are removed; they are not an alternative to Catalog Volume I/O.
 Catalog replica reads, data leases, journal durability, and recovery remain.
 Retired format recognition never authorizes reinterpreting Blob media as Volumes.
+High-level provisioning defaults to Catalog and rejects Blob/scheduled Blob
+options before I/O. Retired-media regression fixtures use the retained low-level
+Member and format APIs, not a hidden provisioning mode.
 
 The legacy fixed-three MemberSet/coordinator and ReplicaEndpoint abstraction are
 also removed. The current PoolMemberSet and Catalog coordinator retain local

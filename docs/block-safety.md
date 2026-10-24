@@ -46,6 +46,10 @@ confirmation or identity checks.
 Creation provisions a Catalog-mode Pool, not an initialized Catalog or Volume.
 Do not advertise an uninitialized Pool as a usable VM disk. Plan tokens now use
 a new versioned domain; tokens from the retired filesystem CLI are invalid.
+Library provisioning now has the same Catalog-only boundary: retired data modes
+and scheduled Blob requests fail before any storage read, write, or sync. The
+creation API still consumes every supplied storage handle on rejection; callers
+must not close or reuse those handles. It creates no Catalog root or Volume.
 
 Blob files cannot be mounted, reformatted, or converted by a filesystem CLI;
 those commands are gone. Retained Member feature bits and layout/geometry

@@ -389,18 +389,20 @@ test "acquire rejects a retired data mode before accessing devices" {
     try std.testing.expectError(error.UnsupportedPoolDataMode, acquire(&plan, std.testing.io, std.testing.allocator));
 }
 
-test "Blob device readiness enforces Blob logical capacity" {
+test "retired data modes are never ready regardless of device capacity" {
     var device: linux_block.DeviceInfo = .{
         .id = .{ .major = 8, .minor = 0 },
         .disk_sequence = 10,
-        .capacity_bytes = try pool_provision.minimumMemberBytes(.{ .data_mode = .blob }),
+        .capacity_bytes = 8 * 1024 * 1024,
         .logical_sector_size = 512,
         .sysfs_path = undefined,
         .sysfs_path_len = 0,
         .eligibility = .{},
     };
-    try std.testing.expect(deviceReadyForDataMode(device, .blob));
-    device.capacity_bytes -= 1;
     try std.testing.expect(!deviceReadyForDataMode(device, .blob));
+    try std.testing.expect(!deviceReadyForDataMode(device, .legacy_unsupported));
+    device.capacity_bytes = std.math.maxInt(u64);
+    try std.testing.expect(!deviceReadyForDataMode(device, .blob));
+    try std.testing.expect(!deviceReadyForDataMode(device, .legacy_unsupported));
     try std.testing.expect(deviceReadyForDataMode(device, .catalog));
 }

@@ -35,6 +35,8 @@ does not trigger automatic storage failover.
 - iSCSI, RDMA/RXE, and vhost block adapters and protocol automation profiles.
 - Fixed and scheduled raw Blob data-plane adapters; SPDK storage integration now
   uses an authenticated Catalog Volume rather than a raw Blob Pool.
+- Library Blob/scheduled Blob provisioning. Catalog is the creation default;
+  retired option values are rejected before storage I/O, not silently converted.
 - The legacy fixed-three MemberSet and generation coordinator, plus the unused
   ReplicaEndpoint adapter. Current Catalog Pool coordination is retained.
 
@@ -55,6 +57,8 @@ Members into dynamic Pool voters or data placements.
 reads, write/flush failures on every replica, whole-lease freeze, and Linux
 worker ordering/drain. The fixture initializes a test Volume through the real
 journal; it is not a new operator Volume-management command.
+Retired Blob media rejection is covered by the storage-engine suite using
+low-level format fixtures, without a product Blob creation path.
 
 The raw-disk creation planner now accepts only Catalog mode and fixed one- or
 three-device profiles. Its versioned confirmation-token domain has changed;

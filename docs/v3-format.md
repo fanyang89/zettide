@@ -271,11 +271,17 @@ write readiness and data access. The SPDK Catalog worker serializes writes and
 flushes and drains queued requests before releasing ownership. None of these
 rules implies degraded writes, online rebuild, or a retired Blob mount path.
 
-Dynamic pool provisioning accepts one owned storage per initial member. It rejects erasure coding and
-profiles wider than the supplied storage set, derives a common logical capacity from the smallest
+Dynamic pool provisioning defaults to Catalog mode and accepts one owned storage per initial member.
+Both creation and minimum-capacity planning reject `blob` and `legacy_unsupported`
+with `UnsupportedPoolDataMode`, and `scheduled_blob=true` with
+`ScheduledBlobUnsupported`, before storage reads, writes, or syncs. Creation
+consumes and closes all supplied handles even on rejection. Retired selectors
+remain rejection-only; no placement page is generated or written.
+It rejects erasure coding and profiles wider than the supplied storage set,
+derives a common logical capacity from the smallest
 member, assigns at most three control voters, and validates every generated header before mutation.
-High-level dynamic Pool provisioning requires at least three control records for genesis plus one
-prepare/commit transaction. The default 960 KiB control region contains 240 records and still ends at
+High-level dynamic Pool provisioning requires a control region of at least five records.
+The default 960 KiB control region contains 240 records and still ends at
 the 1 MiB metadata boundary. Lower-level member format APIs retain the one-record structural minimum.
 All storage handles receive a non-mutating sync preflight before the first genesis write. Storage
 alignment must be a power of two no larger than 4096 bytes; metadata read and program sizes use the

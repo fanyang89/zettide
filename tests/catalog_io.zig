@@ -6,47 +6,6 @@ const volume_api = engine.pool_catalog_volume;
 const allocator = std.testing.allocator;
 const io = std.testing.io;
 
-test "Catalog rejects fixed and scheduled Blob Pools without writes or claims" {
-    inline for ([_]bool{ false, true }) |scheduled| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var storages: [3]engine.storage.Storage = undefined;
-        var opened: usize = 0;
-        errdefer engine.storage.closeAll(storages[0..opened], io) catch {};
-        for (fixture.member_names, &storages) |name, *storage| {
-            storage.* = try engine.storage.Storage.createFile(io, tmp.dir, name, 8 * 1024 * 1024);
-            opened += 1;
-        }
-        opened = 0;
-        const outcome = try engine.pool_provision.create(io, allocator, &storages, .{
-            .data_mode = .blob,
-            .scheduled_blob = scheduled,
-        });
-        var provisioned = switch (outcome) {
-            .complete => |value| value,
-            .partial => |partial| return partial.cause,
-        };
-        defer provisioned.deinit();
-        var set = try provisioned.intoMemberSet();
-        defer set.deinit();
-        var faults: [3]engine.member.FaultController = @splat(.{});
-        defer for (0..3) |index| ((set.memberAt(index) catch unreachable).?).setFaultController(null);
-        for (&faults, 0..) |*fault, index| ((try set.memberAt(index)).?).setFaultController(fault);
-        try std.testing.expectError(error.PoolDataRequiresCatalogMode, volume_api.CatalogVolumeBackend.open(allocator, &set, @splat(1)));
-        try std.testing.expectError(error.PoolDataRequiresCatalogMode, volume_api.CatalogDataLease.acquire(&set));
-        try std.testing.expectEqual(.blob, try set.dataMode());
-        try std.testing.expectEqual(@as(u64, 0), set.authority().?.generation);
-        try std.testing.expectEqual(scheduled, set.authority().?.layout.scheduled_blob != null);
-        for (faults, 0..) |fault, index| {
-            try std.testing.expectEqual(@as(u64, 0), fault.write_count);
-            try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
-            // Rejection must leave all Member ownership available to diagnostics.
-            var claim = try ((try set.memberAt(index)).?).claimData();
-            try claim.release();
-        }
-    }
-}
-
 test "Catalog Volume preserves one- and three-member data through read-only reopen" {
     inline for ([_]usize{ 1, 3 }) |count| {
         var tmp = std.testing.tmpDir(.{});
