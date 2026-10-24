@@ -1,97 +1,33 @@
-# Zettide 存储架构
+# Zettide architecture
 
-本文档描述 Zettide 从单节点多物理盘接管，到在线服务治理，再到跨节点高可用存储的当前实现、目标架构与关键不变量。
+Zettide is scoped to single-node VM block storage with its own engine and local
+multi-disk protection. [ADR 0005](../../decisions/0005-single-node-vm-block-storage.md)
+replaces the former filesystem/distributed product architecture.
 
-> Zettide 仍处于主动开发阶段。本文使用“当前”“部分”“目标”和“非目标”区分成熟度；目标设计不表示已端到端交付，更不表示生产可用。
+```text
+External virtualization consumer
+    -> host-facing block export
+    -> services/data-node (SPDK, endpoint owner, local management)
+    -> libs/storage-engine (Catalog Volume, extent map, Pool/Member)
+    -> local physical disks
+```
 
-本文遵循[文档规范层级](../../README.md)。存储引擎、data-node service、CLI 与运行进程的目标边界见
-[架构决策 0001](../../decisions/0001-data-node-naming-and-process-model.md)；首轮提取后暂不继续拆分
-Pool/Catalog/Blob package 的评估见
-[架构决策 0002](../../decisions/0002-keep-storage-engine-cohesive.md)；数据模型、Tier、frontend、组件 ownership
-和外部消费者边界见
-[架构决策 0003](../../decisions/0003-storage-product-architecture.md)。package、module root 与源码目录迁移
-已经完成；完整 `zettide-data-node` daemon/DataNodeContext wiring 尚未完成。
+One process owns a writable Pool. The engine does not start sockets, own SPDK
+runtime state, or depend on product management services. Local Pool authority
+and journal recovery are retained; they are not a cluster controller.
 
-## 架构主线
+The current endpoint daemon is the starting point for local block service
+composition. No replacement distributed controller or metadata service is
+required. Multiple hosts may use distinct Volumes, but the baseline does not
+permit concurrent writers to one Volume or provide storage-node HA.
 
-- Tier 1：一个 Zettide 节点接管由多个独立物理磁盘组成的 Pool，并向虚拟化与文件系统消费者提供基线前端。
-- Tier 2：在 Tier 1 上增加动态 Pool、在线容量/保护迁移、multi-Volume 服务治理，以及更完整的 publication/attachment 生命周期。
-- Tier 3：增加跨 data node 同步复制、fencing、storage failover、repair 和 republish。
+See [scope and implementation status](00-scope-and-status.md) for current limits,
+including the one-endpoint-per-Pool restriction. Format contracts are documented
+in [Member/Pool](../../v3-format.md),
+[Catalog](../../v3-multivolume-format.md), and
+[control rollover](../../v3-control-rollover-format.md).
 
-Tier 1 支持同机和独立单节点两种部署。虚拟化是一等消费者：qtr 原生 managed backend 是 Tier 1 完成门槛；PVE 和其他虚拟化平台是一等后续集成目标，优先于完整 CSI，但不阻塞 Tier 1。CSI 是次级、非阻塞集成；当前静态 FUSE Node service 是局部实现。
-
-## 基线前端
-
-| 前端 | 数据模型 | 角色 | 当前状态 |
-| --- | --- | --- | --- |
-| 标准 NVMf TCP/RDMA | Catalog Volume | 首选 host-facing block publication | 部分：endpoint daemon 与 export 已存在；无 qtr managed E2E 和真实多物理盘完整准入 |
-| iSCSI | Catalog Volume | fallback/compatibility block protocol | 部分：SPDK target/export、endpoint lifecycle 和 Catalog fio profile 已存在；无 managed consumer 与真实多盘总 gate |
-| NFS | BlobFilesystem | network filesystem | 部分：NFSv3 backend/FSAL 已存在，当前只打开单成员 |
-| FUSE | BlobFilesystem | local filesystem | 当前：多成员 Blob Pool 路径已存在 |
-
-Catalog 与 Blob 是不同 Pool data mode。NVMf/iSCSI 不与 NFS/FUSE 并发访问同一数据对象。单文件、loop/synthetic member 和单盘仍可用于开发与专项验证，但不能单独满足 Tier 1。
-
-标准 host-facing NVMf publication 与 Tier 3 内部 vendor-specific Replica NVMf transport 是两套协议语义。前者当前已有部分实现；后者尚未实现，不能因共享 SPDK/NVMf transport 而混为一谈。
-
-## 范围
-
-- `zettide_storage`：进程内 Pool/Catalog/Blob/BlobFilesystem storage engine 与持久格式。
-- `zettide`：兼容 CLI、foreground FUSE/dufs 与 endpoint compatibility command。
-- `zettide-data-node`：目标 data-node daemon；endpoint/SPDK module surface 已存在，完整 DataService/DataNodeContext wiring 待完成。
-- `zettide-controller`：Tier 3 权威元数据与协调基础。
-- `raftz` 与 `grpc-lite`：共识、恢复和控制 RPC。
-- `services/csi`：当前静态 FUSE CSI Node service，以及目标 block/NFS/Controller lifecycle。
-- qtr/PVE：仓库外消费者的 publication、attachment 与 mount 契约；其实现状态不由本仓库维护。
-- `zettide-txfs`：独立 shared qcow2 文件路径，不替代 Catalog block publication。
-
-本书覆盖存储系统、仓库内 CSI adapter，以及与 qtr/PVE 等外部消费者的直接 publication、attachment、export 和 mount 边界。除这些存储接入外，计算调度、VM 生命周期、自动 VM 重启、覆盖网络、Web UI、计费和完整发行版生命周期不在本书范围内。Tier 3 可以把 Volume republish 到调用方指定的 host，但不负责选择该 host 或重启 workload。
-
-## 目录
-
-1. [范围与状态](00-scope-and-status.md)
-2. [目标与原则](01-goals-and-principles.md)
-3. [系统架构](02-system-architecture.md)
-4. [领域模型](03-domain-model.md)
-5. [控制面](04-control-plane.md)
-6. [数据面](05-data-plane.md)
-7. [I/O 与控制流程](06-io-and-control-flows.md)
-8. [一致性与 Fencing](07-consistency-and-fencing.md)
-9. [故障与恢复](08-failure-and-recovery.md)
-10. [部署与网络](09-deployment-and-networking.md)
-11. [安全边界](10-security.md)
-12. [演进路线图](11-evolution-roadmap.md)
-13. [TxFS 共享 qcow2 接入](12-txfs-shared-qcow2.md)
-14. [虚拟化与 CSI](13-virtualization-and-csi.md)
-15. [术语表](glossary.md)
-16. [源码映射](source-map.md)
-17. [组件依赖与分层规则](component-dependencies.md)
-18. [存储抽象与持久格式归属](storage-foundation-map.md)
-19. [Pool、Member 与 Catalog 归属](pool-member-catalog-map.md)
-20. [Blob 与 BlobFilesystem 归属](blob-filesystem-map.md)
-21. [Backend-neutral Filesystem API 归属](filesystem-api-map.md)
-22. [FUSE、NFS 与 dufs Frontend 归属](frontend-map.md)
-23. [SPDK Backend 与 Export 归属](spdk-adapter-export-map.md)
-24. [Endpoint Lifecycle 与 Daemon 归属](endpoint-lifecycle-map.md)
-25. [CLI 与 Data Node 产品 Composition 归属](cli-data-node-composition-map.md)
-
-## 状态标记
-
-| 标记 | 含义 |
-| --- | --- |
-| 当前 | 已存在实现，并有测试或可执行构建路径 |
-| 部分 | 类型或局部机制已实现，但端到端能力尚未形成 |
-| 目标 | 已选择的架构方向，尚未完成实现 |
-| 非目标 | 当前阶段明确不处理 |
-
-## 文档约定
-
-- Pool Member topology 表示容量和故障边界；Volume protection policy 表示数据副本目标。
-- 控制面 Pool 是跨节点资源、策略和 Volume 的逻辑边界；`zettide` 本地 v3 Pool 是由本地 Member、topology、layout 和 control journal 构成的持久集合。二者必须通过稳定 ID 和显式注册关系绑定，不能按名称或设备路径隐式等同。
-- `Raft leader`、Volume `primary` 与 publication target 是不同角色。
-- Volume write epoch、publication access generation、Replica generation、Raft term 和本地 Pool membership epoch 是不同版本域。
-- NVMf NQN/NSID/controller、iSCSI portal/IQN/LUN/session、NFS export path、FUSE mount path 和 `/dev/...` 都是可重建 locator/runtime state，不是资源身份。
-- “持久确认”要求满足底层已经验证的 flush/FUA 语义；进入内存、发送队列、NVMf queue 或设备易失缓存都不构成持久确认。
-- 当前安全模型是可信隔离网络，不是零信任网络。
-- 已接受 ADR 决定冻结的架构约束；只有后续 ADR 可以取代。源码、协议和测试用于核实
-  “当前/部分/目标”状态，发现偏差时更新[范围与状态](00-scope-and-status.md)或修复实现，不能
-  静默改变架构。实现证据入口见[源码映射](source-map.md)。
+Other chapters in this directory describe the pre-convergence implementation.
+They do not override ADR 0005 and are not a future product roadmap. In
+particular, references to the removed controller, TxFS, CSI, and distributed
+Replica protocol are historical only.

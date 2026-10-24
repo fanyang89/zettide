@@ -1,6 +1,6 @@
 # 0004: Single-active filesystem service with multiple clients
 
-- Status: Accepted (architecture choice; managed implementation is a target)
+- Status: Superseded by [ADR 0005](0005-single-node-vm-block-storage.md); the managed filesystem product is retired
 - Scope: First controller-managed POSIX/filesystem service
 - Prerequisite: [0003: Storage product architecture](0003-storage-product-architecture.md)
 

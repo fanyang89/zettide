@@ -1,8 +1,6 @@
 const std = @import("std");
 const benchmarks = @import("build/benchmarks.zig");
 const storage_engine_build = @import("libs/storage-engine/build.zig");
-const txfs_build = @import("libs/txfs/build.zig");
-const controller_build = @import("services/controller/build.zig");
 const support = @import("build/support.zig");
 const tests = @import("build/tests.zig");
 
@@ -15,7 +13,6 @@ pub fn build(b: *std.Build) void {
         "benchmark-cpu-profiler",
         "Link the gperftools CPU profiler into the scheduled Pool benchmark",
     ) orelse false;
-    const sanitize_thread = b.option(bool, "sanitize-thread", "Enable ThreadSanitizer for TxFS tests");
     const storage_component = storage_engine_build.addComponent(
         b,
         target,
@@ -256,25 +253,9 @@ pub fn build(b: *std.Build) void {
 
     const test_suites = tests.add(b, target, optimize, storage_engine, data_node_module, exe);
 
-    const controller_test_step = controller_build.addComponent(b, target, optimize, "services/controller", .{
-        .generate = "gen-controller-proto",
-        .run = "run-controller",
-        .tests = "test-controller",
-    });
-    const txfs_test_step = txfs_build.addComponent(
-        b,
-        target,
-        optimize,
-        sanitize_thread,
-        "libs/txfs",
-        "test-txfs",
-    );
-
-    const test_step = b.step("test", "Run unit, CLI, controller, and TxFS tests");
+    const test_step = b.step("test", "Run storage-engine, data-node, and local CLI tests");
     test_step.dependOn(unit_step);
     test_step.dependOn(test_suites.cli);
-    test_step.dependOn(controller_test_step);
-    test_step.dependOn(txfs_test_step);
 
     const fmt = b.addFmt(.{
         .paths = &.{
@@ -284,26 +265,14 @@ pub fn build(b: *std.Build) void {
             b.path("services/data-node"),
             b.path("tests"),
             b.path("benchmarks"),
-            b.path("services/controller/build.zig"),
-            b.path("services/controller/build.zig.zon"),
-            b.path("services/controller/src"),
             b.path("libs/storage-engine/build.zig"),
             b.path("libs/storage-engine/build.zig.zon"),
             b.path("libs/storage-engine/src"),
-            b.path("libs/txfs/build.zig"),
-            b.path("libs/txfs/build.zig.zon"),
-            b.path("libs/txfs/src"),
-            b.path("libs/txfs/tests"),
-            b.path("libs/data-service-contracts/build.zig"),
-            b.path("libs/data-service-contracts/build.zig.zon"),
-            b.path("libs/data-service-contracts/src"),
         },
         .check = true,
     });
     const fmt_step = b.step("fmt-check", "Check all Zig formatting");
     fmt_step.dependOn(&fmt.step);
-    const txfs_fmt_step = b.step("fmt-check-txfs", "Check TxFS Zig formatting");
-    txfs_fmt_step.dependOn(fmt_step);
 
     const ci_step = b.step("ci", "Run formatting, default tests, and cross-compilation checks");
     ci_step.dependOn(fmt_step);

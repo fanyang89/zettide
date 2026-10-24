@@ -4,6 +4,10 @@
 `qtr` 和 `etz` 是独立项目；本文档可以描述它们与存储系统的集成边界，但不维护其实现状态、
 构建命令或源码映射。`vendor/` 下的文档属于固定版本的第三方依赖，不纳入本目录的规范层级。
 
+当前产品范围由 [ADR 0005](decisions/0005-single-node-vm-block-storage.md) 定义：
+单节点虚拟机块存储，自研块引擎与本地多盘保护。此前的文件系统、集群控制面、
+跨节点复制、TxFS 和 CSI 目标不再构成产品承诺。旧架构章节仅供历史参考。
+
 ## 规范层级
 
 发生冲突时按以下顺序处理：
@@ -32,7 +36,6 @@
 - [v3 multi-Volume Catalog 格式](v3-multivolume-format.md)
 - [v3 control rollover 格式](v3-control-rollover-format.md)
 - [文件系统语义](fs-semantics.md)
-- [Filesystem 管理元数据 API](filesystem-metadata.md)
 - [跨平台名称规范](portable-name-profile.md)
 
 格式文档中的 `current` 表示已有编码器、解码器或 reopen 路径；仅有 schema、预留字段或未来
@@ -44,9 +47,9 @@
 - [POSIX nightly](posix-nightly.md)
 - [SMB3 profile](smb3-profile.md)
 
-组件自身的运行与构建说明位于对应目录的 `README.md`，包括
-`libs/storage-engine/`、`services/data-node/`、`services/controller/`、`services/csi/`、
-`services/nfs-fsal/` 和 `libs/txfs/`。
+组件自身的运行与构建说明位于 `libs/storage-engine/` 和 `services/data-node/`
+的 `README.md`。尚存的文件系统 profile 和 `services/nfs-fsal/` 属于待移除的兼容路径，
+不是继续发展的产品方向。
 
 ### 报告与历史
 

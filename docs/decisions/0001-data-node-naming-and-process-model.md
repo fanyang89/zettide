@@ -1,6 +1,6 @@
 # 0001：Data Node 命名与进程模型
 
-- 状态：Accepted；package/module/目录迁移已实施，完整 `zettide-data-node` daemon composition 待完成
+- 状态：Partially superseded by [ADR 0005](0005-single-node-vm-block-storage.md); only the storage-engine/data-node separation and ownership invariants remain current
 - 范围：`services/data-node/` 重构以及后续数据节点演进
 
 ## 背景

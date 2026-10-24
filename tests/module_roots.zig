@@ -5,6 +5,8 @@ const data_node = @import("zettide_data_node");
 test "storage module exposes engine contracts without product adapters" {
     _ = storage_engine.v3.storage.Storage;
     _ = storage_engine.v3.pool_member_set.PoolMemberSet;
+    _ = storage_engine.v3.pool_catalog_volume.CatalogVolumeBackend;
+    _ = storage_engine.v3.pool_catalog_volume.CatalogDataLease;
     _ = storage_engine.blob_filesystem.Filesystem;
     _ = storage_engine.filesystem_backend.Filesystem;
     _ = storage_engine.nfs_filesystem.Filesystem;
@@ -31,4 +33,7 @@ test "data-node module owns product lifecycle and borrows the storage module" {
     try std.testing.expect(!@hasDecl(data_node, "linux_fuse"));
     try std.testing.expect(!@hasDecl(data_node, "dufs_server"));
     try std.testing.expect(!@hasDecl(data_node, "nfs_backend"));
+    try std.testing.expect(!@hasDecl(data_node, "data_service"));
+    try std.testing.expect(!@hasDecl(data_node, "replica_rpc_client"));
+    try std.testing.expect(!@hasDecl(data_node, "write_coordinator_manager"));
 }

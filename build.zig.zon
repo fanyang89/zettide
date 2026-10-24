@@ -12,15 +12,9 @@
             .url = "https://codeload.github.com/Hejsil/zig-clap/tar.gz/05faf3905e8548f5cc269a8836e154065e70128d",
             .hash = "clap-0.12.0-oBajB4XpAQCF1WRKnD5KOKPsnwwT_NNdAJ7Ww3irYJac",
         },
-        .raftz = .{
-            .path = "vendor/raftz",
-        },
         .uuid = .{
             .url = "https://codeberg.org/r4gus/uuid-zig/archive/0.7.0.tar.gz",
             .hash = "uuid-0.7.0-oOieIcagAABw5U255XPVd__vLuCZetL_ZN18vPM86Yk4",
-        },
-        .zettide_data_service_contracts = .{
-            .path = "libs/data-service-contracts",
         },
         .zbench = .{
             .url = "https://codeload.github.com/hendriknielaender/zBench/tar.gz/f12a2262bcd9d300207890555c577da5e29de453",
@@ -43,7 +37,6 @@
         "services",
         "tests",
         "docs",
-        "vendor/raftz",
         "vendor/utf8proc",
         "vendor/libfuse-tests",
         "vendor/xfstests",

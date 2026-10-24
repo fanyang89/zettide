@@ -1,16 +1,5 @@
-pub const filesystem_blob_owner = @import("filesystem_blob_owner.zig");
-
 pub const storage = @import("zettide_storage");
 
-pub const data_service = @import("data_node_service.zig");
-pub const replica_io_gate = @import("replica_io_gate.zig");
-pub const replica_rpc_auth = @import("replica_rpc_auth.zig");
-pub const replica_rpc_client = @import("replica_rpc_client.zig");
-pub const replica_outbound_key_file = @import("replica_outbound_key_file.zig");
-pub const replica_signing_seed_file = @import("replica_signing_seed_file.zig");
-pub const write_participant_manager = @import("write_participant_manager.zig");
-pub const write_coordinator_manager = @import("write_coordinator_manager.zig");
-pub const member_generation_store = @import("member_generation_store.zig");
 pub const endpoint_registry = @import("endpoint_registry.zig");
 pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("endpoint_control.zig") else struct {};
 pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("endpoint_daemon.zig") else struct {};
@@ -34,5 +23,21 @@ pub const spdk_storage = if (@import("builtin").os.tag == .linux) @import("spdk/
 pub const spdk_vhost_block_export = if (@import("builtin").os.tag == .linux) @import("spdk/vhost_block_export.zig") else struct {};
 
 test {
-    _ = filesystem_blob_owner;
+    _ = endpoint_registry;
+    _ = endpoint_control;
+    _ = endpoint_daemon;
+    _ = size;
+    _ = file_storage;
+    _ = linux_block_device;
+    _ = spdk_catalog_endpoint_backend;
+    _ = spdk_catalog_iscsi_export;
+    _ = spdk_catalog_nvmf_export;
+    _ = spdk_catalog_volume_backend;
+    _ = spdk_catalog_vhost_export;
+    _ = spdk_iscsi_export;
+    _ = spdk_nvme_controller;
+    _ = spdk_nvmf_tcp_export;
+    _ = spdk_provider_bdev;
+    _ = spdk_storage;
+    _ = spdk_vhost_block_export;
 }

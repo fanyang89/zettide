@@ -31,7 +31,6 @@ pub fn createDataNodePrivateModule(
         .link_libc = true,
     });
     module.addImport("zettide_storage", storage_engine);
-    module.addImport("zettide_data_service_contracts", b.dependency("zettide_data_service_contracts", .{ .target = target, .optimize = optimize }).module("zettide_data_service_contracts"));
     module.addImport("crc32c", crc32c);
     module.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
     module.addIncludePath(b.path("services/data-node"));
@@ -52,7 +51,6 @@ pub fn createDataNodeModule(
         .link_libc = true,
     });
     module.addImport("zettide_storage", storage_engine);
-    module.addImport("zettide_data_service_contracts", b.dependency("zettide_data_service_contracts", .{ .target = target, .optimize = optimize }).module("zettide_data_service_contracts"));
     module.addImport("crc32c", crc32c);
     module.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
     module.addIncludePath(b.path("services/data-node"));

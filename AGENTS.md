@@ -2,10 +2,13 @@
 
 ## Repository Scope
 
-This repository contains the complete Zettide storage project. Storage-owned
-components live in `libs/storage-engine/`, `services/data-node/`, `services/controller/`,
-`services/csi/`, `services/nfs-fsal/`, `libs/txfs/`, and `libs/data-service-contracts/`. Tests live under
-`tests/`. External source dependencies are pinned as submodules under `vendor/`.
+Zettide is single-node VM block storage with an in-house engine and local
+multi-disk protection; see ADR 0005. Core components live in
+`libs/storage-engine/` and `services/data-node/`. Tests live under `tests/`.
+External source dependencies are pinned as submodules under `vendor/`.
+Filesystem code and `services/nfs-fsal/` are transitional removal candidates,
+not active product directions. Do not reintroduce a cluster controller,
+cross-node replication, TxFS, or CSI.
 
 `qtr` and `etz` are separate projects and are not part of this repository's
 build or test lifecycle.

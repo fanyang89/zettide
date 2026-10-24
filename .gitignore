@@ -6,3 +6,4 @@ tests/external/.prepared/
 test-results/
 tests/automation/inventory.ini
 .pi/
+.tools/

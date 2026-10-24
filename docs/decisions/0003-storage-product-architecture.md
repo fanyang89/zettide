@@ -1,6 +1,6 @@
 # 0003：存储产品架构与能力边界
 
-- 状态：Accepted
+- 状态：Superseded by [ADR 0005](0005-single-node-vm-block-storage.md); retained for historical context only
 - 范围：Zettide storage repository 的数据模型、frontend、Tier、组件 ownership 与外部消费者边界
 - 前置决策：[0001：Data Node 命名与进程模型](0001-data-node-naming-and-process-model.md)、
   [0002：首轮提取后保持单一 Storage Engine Package](0002-keep-storage-engine-cohesive.md)
