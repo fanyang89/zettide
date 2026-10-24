@@ -17,8 +17,8 @@ and a narrow host-facing block interface. NVMe/TCP is the intended primary
 frontend.
 
 The cluster controller, distributed Replica protocol, TxFS, CSI, `zettidectl`,
-and the BlobFilesystem/FUSE/NFS/dufs product line have been removed. Additional
-block frontends still present during the transition are not a product commitment. See
+and the BlobFilesystem/FUSE/NFS/dufs product line have been removed. The only
+block frontend is NVMe/TCP; iSCSI, RDMA, and vhost adapters are removed. See
 [scope and implementation status](docs/architecture/zh-CN/00-scope-and-status.md).
 
 ## Repository

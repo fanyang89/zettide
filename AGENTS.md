@@ -9,6 +9,8 @@ External source dependencies are pinned as submodules under `vendor/`.
 Do not reintroduce a filesystem service, FUSE/NFS/CSI, a cluster controller,
 cross-node replication, or TxFS. Preserve retired on-disk feature identities
 for safe decoding and rejection, not as new product capabilities.
+NVMe/TCP is the sole block frontend; reject retired endpoint protocols rather
+than translating or discarding their persisted state.
 
 `qtr` and `etz` are separate projects and are not part of this repository's
 build or test lifecycle.

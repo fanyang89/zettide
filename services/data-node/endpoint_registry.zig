@@ -8,10 +8,8 @@ pub const max_endpoint_count = 1024;
 pub const max_locator_component_len = 256;
 
 pub const Frontend = enum(u8) {
-    vhost_user_blk = 1,
-    iscsi = 2,
+    // Persisted identities 1, 2, and 4 are retired and must not be reused.
     nvme_of_tcp = 3,
-    nvme_of_rdma = 4,
 };
 
 pub const Spec = struct {
@@ -29,16 +27,7 @@ pub const NvmeOfLocator = struct {
 };
 
 pub const Locator = union(Frontend) {
-    vhost_user_blk: struct {
-        socket_path: []const u8,
-    },
-    iscsi: struct {
-        portal: []const u8,
-        target_name: []const u8,
-        lun: u64,
-    },
     nvme_of_tcp: NvmeOfLocator,
-    nvme_of_rdma: NvmeOfLocator,
 };
 
 pub const DesiredStore = struct {
@@ -338,7 +327,6 @@ pub const FileStore = struct {
     const magic = "ZETENDP1".*;
     const version: u16 = 2;
     const header_size = 20;
-    const legacy_record_size = 48;
     const record_size = 52;
     const max_state_bytes = header_size + max_endpoint_count * record_size;
 
@@ -410,10 +398,7 @@ pub const FileStore = struct {
         const encoded_version = std.mem.readInt(u16, bytes[8..10], .little);
         const encoded_record_size = std.mem.readInt(u16, bytes[10..12], .little);
         const actual_record_size: usize = switch (encoded_version) {
-            1 => if (encoded_record_size == legacy_record_size)
-                legacy_record_size
-            else
-                return error.InvalidDesiredState,
+            1 => return error.RetiredEndpointFrontend,
             version => if (encoded_record_size == record_size) record_size else return error.InvalidDesiredState,
             else => return error.InvalidDesiredState,
         };
@@ -427,10 +412,10 @@ pub const FileStore = struct {
         errdefer allocator.free(specs);
         for (specs, 0..) |*spec, index| {
             const record = bytes[header_size + index * actual_record_size ..][0..actual_record_size];
-            const frontend: Frontend = if (encoded_version == 1)
-                .vhost_user_blk
-            else blk: {
+            const frontend: Frontend = blk: {
                 if (!isZero(record[49..52])) return error.InvalidDesiredState;
+                if (record[48] == 1 or record[48] == 2 or record[48] == 4)
+                    return error.RetiredEndpointFrontend;
                 break :blk std.enums.fromInt(Frontend, record[48]) orelse
                     return error.InvalidDesiredState;
             };
@@ -452,12 +437,7 @@ fn validateSpec(spec: Spec) !void {
 
 fn validateLocator(locator: Locator) !void {
     switch (locator) {
-        .vhost_user_blk => |vhost| try validateLocatorString(vhost.socket_path),
-        .iscsi => |iscsi| {
-            try validateLocatorString(iscsi.portal);
-            try validateLocatorString(iscsi.target_name);
-        },
-        .nvme_of_tcp, .nvme_of_rdma => |nvme| {
+        .nvme_of_tcp => |nvme| {
             try validateLocatorString(nvme.traddr);
             try validateLocatorString(nvme.trsvcid);
             try validateLocatorString(nvme.nqn);
@@ -515,56 +495,29 @@ const FakeBackend = struct {
     stops: usize = 0,
     fail_start: bool = false,
     fail_stop: bool = false,
-    mismatch_frontend: bool = false,
     invalid_locator: bool = false,
 
     const Slot = struct {
         active: bool = false,
-        socket_path: [64]u8 = @splat(0),
-        socket_path_len: usize = 0,
     };
 
     fn backend(self: *FakeBackend) Backend {
         return .{ .context = self, .vtable = &vtable };
     }
 
-    fn start(context: *anyopaque, spec: Spec) !Backend.Instance {
+    fn start(context: *anyopaque, _: Spec) !Backend.Instance {
         const self: *FakeBackend = @ptrCast(@alignCast(context));
         if (self.fail_start) return error.StartFailed;
         for (&self.slots) |*slot| {
             if (slot.active) continue;
             slot.active = true;
-            const path = try std.fmt.bufPrint(&slot.socket_path, "/run/zettide/{x}", .{spec.endpoint_id});
-            slot.socket_path_len = path.len;
             self.starts += 1;
-            const locator_frontend: Frontend = if (self.mismatch_frontend) switch (spec.frontend) {
-                .vhost_user_blk => .iscsi,
-                .iscsi => .vhost_user_blk,
-                .nvme_of_tcp => .vhost_user_blk,
-                .nvme_of_rdma => .vhost_user_blk,
-            } else spec.frontend;
-            const locator: Locator = switch (locator_frontend) {
-                .vhost_user_blk => .{ .vhost_user_blk = .{
-                    .socket_path = if (self.invalid_locator) "" else slot.socket_path[0..slot.socket_path_len],
-                } },
-                .iscsi => .{ .iscsi = .{
-                    .portal = "127.0.0.1:3260",
-                    .target_name = "iqn.2026-08.io.zettide:test",
-                    .lun = 0,
-                } },
-                .nvme_of_tcp => .{ .nvme_of_tcp = .{
-                    .traddr = "127.0.0.1",
-                    .trsvcid = "4420",
-                    .nqn = "nqn.2026-08.io.zettide:test",
-                    .nsid = 1,
-                } },
-                .nvme_of_rdma => .{ .nvme_of_rdma = .{
-                    .traddr = "192.0.2.2",
-                    .trsvcid = "4420",
-                    .nqn = "nqn.2026-08.io.zettide:test",
-                    .nsid = 1,
-                } },
-            };
+            const locator: Locator = .{ .nvme_of_tcp = .{
+                .traddr = if (self.invalid_locator) "" else "127.0.0.1",
+                .trsvcid = "4420",
+                .nqn = "nqn.2026-08.io.zettide:test",
+                .nsid = 1,
+            } };
             return .{ .handle = slot, .locator = locator };
         }
         return error.NoBackendSlots;
@@ -593,7 +546,7 @@ fn testSpec(endpoint: u8, pool: u8, volume: u8) Spec {
         .endpoint_id = testId(endpoint),
         .pool_id = testId(pool),
         .volume_id = testId(volume),
-        .frontend = .vhost_user_blk,
+        .frontend = .nvme_of_tcp,
     };
 }
 
@@ -617,8 +570,8 @@ test "ensure is durable idempotent and limited to one endpoint per pool" {
     try std.testing.expectEqual(@as(usize, 1), listed.len);
     try std.testing.expect(std.meta.eql(spec, listed[0].spec));
     try std.testing.expectEqualStrings(
-        created.locator.?.vhost_user_blk.socket_path,
-        listed[0].locator.?.vhost_user_blk.socket_path,
+        created.locator.?.nvme_of_tcp.nqn,
+        listed[0].locator.?.nvme_of_tcp.nqn,
     );
 
     _ = try registry.ensure(spec);
@@ -646,24 +599,6 @@ test "ensure persists before start and retains failed desired state" {
     try std.testing.expectEqual(State.active, (try registry.ensure(spec)).state);
 }
 
-test "registry returns a typed iSCSI locator" {
-    var store = MemoryStore.init(std.testing.allocator);
-    defer store.deinit();
-    var backend: FakeBackend = .{};
-    var registry = try Registry.init(std.testing.allocator, store.desiredStore(), backend.backend());
-    defer {
-        registry.shutdown() catch unreachable;
-        registry.deinit();
-    }
-
-    var spec = testSpec(1, 2, 3);
-    spec.frontend = .iscsi;
-    const view = try registry.ensure(spec);
-    try std.testing.expectEqual(Frontend.iscsi, std.meta.activeTag(view.locator.?));
-    try std.testing.expectEqualStrings("127.0.0.1:3260", view.locator.?.iscsi.portal);
-    try std.testing.expectEqual(@as(u64, 0), view.locator.?.iscsi.lun);
-}
-
 test "registry returns a typed NVMe over TCP locator" {
     var store = MemoryStore.init(std.testing.allocator);
     defer store.deinit();
@@ -684,30 +619,10 @@ test "registry returns a typed NVMe over TCP locator" {
     try std.testing.expectEqual(@as(u32, 1), view.locator.?.nvme_of_tcp.nsid);
 }
 
-test "registry returns a typed NVMe over RDMA locator" {
+test "registry rolls back an invalid backend locator" {
     var store = MemoryStore.init(std.testing.allocator);
     defer store.deinit();
-    var backend: FakeBackend = .{};
-    var registry = try Registry.init(std.testing.allocator, store.desiredStore(), backend.backend());
-    defer {
-        registry.shutdown() catch unreachable;
-        registry.deinit();
-    }
-
-    var spec = testSpec(1, 2, 3);
-    spec.frontend = .nvme_of_rdma;
-    const view = try registry.ensure(spec);
-    try std.testing.expectEqual(Frontend.nvme_of_rdma, std.meta.activeTag(view.locator.?));
-    try std.testing.expectEqualStrings("192.0.2.2", view.locator.?.nvme_of_rdma.traddr);
-    try std.testing.expectEqualStrings("4420", view.locator.?.nvme_of_rdma.trsvcid);
-    try std.testing.expectEqualStrings("nqn.2026-08.io.zettide:test", view.locator.?.nvme_of_rdma.nqn);
-    try std.testing.expectEqual(@as(u32, 1), view.locator.?.nvme_of_rdma.nsid);
-}
-
-test "registry rolls back a mismatched backend locator" {
-    var store = MemoryStore.init(std.testing.allocator);
-    defer store.deinit();
-    var backend: FakeBackend = .{ .mismatch_frontend = true };
+    var backend: FakeBackend = .{ .invalid_locator = true };
     var registry = try Registry.init(std.testing.allocator, store.desiredStore(), backend.backend());
     defer {
         registry.shutdown() catch unreachable;
@@ -715,15 +630,11 @@ test "registry rolls back a mismatched backend locator" {
     }
 
     const spec = testSpec(1, 2, 3);
-    try std.testing.expectError(error.FrontendMismatch, registry.ensure(spec));
+    try std.testing.expectError(error.InvalidLocator, registry.ensure(spec));
     try std.testing.expectEqual(@as(usize, 1), backend.starts);
     try std.testing.expectEqual(@as(usize, 1), backend.stops);
     try std.testing.expectEqual(State.failed, (try registry.inspect(spec.endpoint_id)).state);
 
-    backend.mismatch_frontend = false;
-    backend.invalid_locator = true;
-    try std.testing.expectError(error.InvalidLocator, registry.ensure(spec));
-    try std.testing.expectEqual(@as(usize, 2), backend.stops);
     backend.invalid_locator = false;
     try std.testing.expectEqual(State.active, (try registry.ensure(spec)).state);
 }
@@ -732,15 +643,16 @@ test "registry rejects oversized and invalid UTF-8 locators" {
     var oversized: [max_locator_component_len + 1]u8 = @splat('a');
     try std.testing.expectError(
         error.InvalidLocator,
-        validateLocator(.{ .vhost_user_blk = .{ .socket_path = &oversized } }),
+        validateLocator(.{ .nvme_of_tcp = .{ .traddr = &oversized, .trsvcid = "4420", .nqn = "test", .nsid = 1 } }),
     );
     const invalid_utf8 = [_]u8{0xff};
     try std.testing.expectError(
         error.InvalidLocator,
-        validateLocator(.{ .iscsi = .{
-            .portal = &invalid_utf8,
-            .target_name = "iqn.2026-08.io.zettide:test",
-            .lun = 0,
+        validateLocator(.{ .nvme_of_tcp = .{
+            .traddr = &invalid_utf8,
+            .trsvcid = "4420",
+            .nqn = "test",
+            .nsid = 1,
         } }),
     );
     try std.testing.expectError(
@@ -866,20 +778,13 @@ test "file store atomically replaces and validates desired state" {
     defer tmp.cleanup();
     var file_store = FileStore.init(std.testing.io, tmp.dir, "endpoints.state");
     const desired_store = file_store.desiredStore();
-    var iscsi_spec = testSpec(4, 5, 6);
-    iscsi_spec.frontend = .iscsi;
-    var nvme_spec = testSpec(7, 8, 9);
-    nvme_spec.frontend = .nvme_of_tcp;
-    var rdma_spec = testSpec(10, 11, 12);
-    rdma_spec.frontend = .nvme_of_rdma;
-    const specs = [_]Spec{ testSpec(1, 2, 3), iscsi_spec, nvme_spec, rdma_spec };
+    const specs = [_]Spec{ testSpec(1, 2, 3), testSpec(4, 5, 6) };
 
     try desired_store.replace(&specs);
     const loaded = try desired_store.load(std.testing.allocator);
     defer std.testing.allocator.free(loaded);
     try std.testing.expectEqualSlices(Spec, &specs, loaded);
     try std.testing.expectEqual(@as(u8, 3), @backingInt(Frontend.nvme_of_tcp));
-    try std.testing.expectEqual(@as(u8, 4), @backingInt(Frontend.nvme_of_rdma));
 
     const file = try tmp.dir.openFile(std.testing.io, "endpoints.state", .{ .mode = .read_write });
     defer file.close(std.testing.io);
@@ -887,17 +792,17 @@ test "file store atomically replaces and validates desired state" {
     try std.testing.expectError(error.InvalidDesiredState, desired_store.load(std.testing.allocator));
 }
 
-test "file store reads v1 state as vhost and rejects unknown frontend" {
+test "file store rejects retired and unknown frontends without rewriting state" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var file_store = FileStore.init(std.testing.io, tmp.dir, "endpoints.state");
     const desired_store = file_store.desiredStore();
     const spec = testSpec(1, 2, 3);
 
-    var v1_bytes: [FileStore.header_size + FileStore.legacy_record_size]u8 = @splat(0);
+    var v1_bytes: [FileStore.header_size + 48]u8 = @splat(0);
     @memcpy(v1_bytes[0..FileStore.magic.len], &FileStore.magic);
     std.mem.writeInt(u16, v1_bytes[8..10], 1, .little);
-    std.mem.writeInt(u16, v1_bytes[10..12], FileStore.legacy_record_size, .little);
+    std.mem.writeInt(u16, v1_bytes[10..12], 48, .little);
     std.mem.writeInt(u32, v1_bytes[12..16], 1, .little);
     @memcpy(v1_bytes[20..36], &spec.endpoint_id);
     @memcpy(v1_bytes[36..52], &spec.pool_id);
@@ -905,22 +810,31 @@ test "file store reads v1 state as vhost and rejects unknown frontend" {
     std.mem.writeInt(u32, v1_bytes[16..20], google_crc32c.value(v1_bytes[20..]), .little);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "endpoints.state", .data = &v1_bytes });
 
-    const migrated = try desired_store.load(std.testing.allocator);
-    defer std.testing.allocator.free(migrated);
-    try std.testing.expectEqual(@as(usize, 1), migrated.len);
-    try std.testing.expectEqual(Frontend.vhost_user_blk, migrated[0].frontend);
-    try desired_store.replace(migrated);
-
-    const bytes = try tmp.dir.readFileAlloc(
+    try std.testing.expectError(error.RetiredEndpointFrontend, desired_store.load(std.testing.allocator));
+    const original = try tmp.dir.readFileAlloc(
         std.testing.io,
         "endpoints.state",
         std.testing.allocator,
         .limited(FileStore.max_state_bytes),
     );
+    defer std.testing.allocator.free(original);
+    try std.testing.expectEqualSlices(u8, &v1_bytes, original);
+
+    const bytes = try FileStore.encode(std.testing.allocator, &.{ spec, testSpec(4, 5, 6) });
     defer std.testing.allocator.free(bytes);
-    try std.testing.expectEqual(FileStore.version, std.mem.readInt(u16, bytes[8..10], .little));
-    bytes[FileStore.header_size + 48] = 99;
-    std.mem.writeInt(u32, bytes[16..20], google_crc32c.value(bytes[FileStore.header_size..]), .little);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "endpoints.state", .data = bytes });
-    try std.testing.expectError(error.InvalidDesiredState, desired_store.load(std.testing.allocator));
+    for ([_]u8{ 1, 2, 4, 99 }) |frontend| {
+        // A valid TCP entry preceding a retired one must not start either.
+        bytes[FileStore.header_size + FileStore.record_size + 48] = frontend;
+        std.mem.writeInt(u32, bytes[16..20], google_crc32c.value(bytes[FileStore.header_size..]), .little);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "endpoints.state", .data = bytes });
+        var backend: FakeBackend = .{};
+        try std.testing.expectError(
+            if (frontend == 99) error.InvalidDesiredState else error.RetiredEndpointFrontend,
+            Registry.init(std.testing.allocator, desired_store, backend.backend()),
+        );
+        try std.testing.expectEqual(@as(usize, 0), backend.starts);
+        const unchanged = try tmp.dir.readFileAlloc(std.testing.io, "endpoints.state", std.testing.allocator, .limited(FileStore.max_state_bytes));
+        defer std.testing.allocator.free(unchanged);
+        try std.testing.expectEqualSlices(u8, bytes, unchanged);
+    }
 }

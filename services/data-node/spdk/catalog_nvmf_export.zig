@@ -16,7 +16,6 @@ pub const Options = struct {
     trsvcid: []const u8 = "4420",
     nsid: u32 = 1,
     allow_any_host: bool = false,
-    transport: nvmf_tcp_export.Transport = .tcp,
     target_name: ?[]const u8 = null,
     block_size: u32 = 4096,
     write_unit_blocks: u32 = 1,
@@ -24,7 +23,7 @@ pub const Options = struct {
 };
 
 /// Owns the complete Catalog Volume to NVMe-oF data path. The runtime JSON
-/// configuration must create the named target and selected transport first.
+/// configuration must create the named target and TCP transport first.
 pub const CatalogNvmfExport = struct {
     worker: ?*catalog_volume_backend.Worker,
     bdev: provider_bdev.ProviderBdev,
@@ -77,7 +76,6 @@ pub const CatalogNvmfExport = struct {
                     .trsvcid = options.trsvcid,
                     .nsid = options.nsid,
                     .allow_any_host = options.allow_any_host,
-                    .transport = options.transport,
                 },
             ),
         };

@@ -6,11 +6,6 @@ const c = @import("spdk_c");
 pub const Controller = struct {
     handle: ?*c.struct_zettide_spdk_nvme_controller,
 
-    pub const Transport = enum {
-        tcp,
-        rdma,
-    };
-
     pub const AddressFamily = enum {
         unspecified,
         ipv4,
@@ -19,7 +14,6 @@ pub const Controller = struct {
 
     pub const Options = struct {
         name: []const u8,
-        transport: Transport = .tcp,
         address_family: AddressFamily = .ipv4,
         transport_address: []const u8,
         transport_service_id: []const u8 = "4420",
@@ -49,10 +43,7 @@ pub const Controller = struct {
         var c_options: c.struct_zettide_spdk_nvme_controller_opts = undefined;
         c.zettide_spdk_nvme_controller_opts_init(&c_options, @sizeOf(@TypeOf(c_options)));
         c_options.name = name_z.ptr;
-        c_options.transport = switch (options.transport) {
-            .tcp => c.ZETTIDE_SPDK_NVME_TRANSPORT_TCP,
-            .rdma => c.ZETTIDE_SPDK_NVME_TRANSPORT_RDMA,
-        };
+        c_options.transport = c.ZETTIDE_SPDK_NVME_TRANSPORT_TCP;
         c_options.address_family = switch (options.address_family) {
             .unspecified => c.ZETTIDE_SPDK_NVME_ADDRESS_FAMILY_UNSPECIFIED,
             .ipv4 => c.ZETTIDE_SPDK_NVME_ADDRESS_FAMILY_IPV4,

@@ -18,14 +18,12 @@ expected_size=${ZETTIDE_NVMF_EXPECTED_SIZE-68719476736}
 nqn=nqn.2026-08.io.zettide:benchmark
 serial=ZETTIDEBENCH000001
 transport=${ZETTIDE_NVMF_TRANSPORT:-tcp}
+[[ $transport == tcp ]] || { echo "only NVMe/TCP is supported" >&2; exit 2; }
+[[ ${ZETTIDE_SPDK_FRONTEND:-nvmf} == nvmf ]] || { echo "retired SPDK frontend" >&2; exit 2; }
 target_addr=${ZETTIDE_NVMF_TARGET_ADDR:-127.0.0.1}
 target_port=${ZETTIDE_NVMF_TARGET_PORT:-44220}
 target_pid=""
 device=""
-rxe_target_if=ztnvmft0
-rxe_target_device=ztnvmf_t
-rxe_target_link_created=false
-rxe_target_device_created=false
 target_arguments=("$@")
 case $fio_case in
     "" | seq-read-1m-qd32-j1 | seq-read-128k-qd1-j1 | randread-4k-qd1-j1 | randread-4k-qd32-j1 | randread-4k-qd32-j4 | randread-4k-qd32-j16) ;;
@@ -54,17 +52,6 @@ for command in blockdev fio jq lsblk modprobe nvme; do
         exit 2
     }
 done
-if [[ $transport == rdma ]]; then
-    for command in ip prlimit rdma; do
-        command -v "$command" >/dev/null || {
-            echo "$command is required for RXE" >&2
-            exit 2
-        }
-    done
-elif [[ $transport != tcp ]]; then
-    echo "unsupported NVMe-oF transport: $transport" >&2
-    exit 2
-fi
 
 cleanup() {
     local result=$?
@@ -102,18 +89,6 @@ cleanup() {
             result=1
         fi
     fi
-    if [[ $rxe_target_device_created == true ]]; then
-        if ! rdma link delete "$rxe_target_device"; then
-            echo "failed to delete RDMA device: $rxe_target_device" >&2
-            result=1
-        fi
-    fi
-    if [[ $rxe_target_link_created == true ]]; then
-        if [[ -e /sys/class/net/$rxe_target_if ]] && ! ip link delete "$rxe_target_if"; then
-            echo "failed to delete network interface: $rxe_target_if" >&2
-            result=1
-        fi
-    fi
     exit "$result"
 }
 trap cleanup EXIT
@@ -122,36 +97,8 @@ trap 'exit 130' INT TERM
 mkdir -p "$log_dir"
 rm -f "$ready_file"
 nvme disconnect -n "$nqn" >/dev/null 2>&1 || true
-if [[ $transport == rdma ]]; then
-    [[ ! -e /sys/class/net/$rxe_target_if ]] || {
-        echo "network interface already exists: $rxe_target_if" >&2
-        exit 1
-    }
-    [[ ! -e /sys/class/infiniband/$rxe_target_device ]] || {
-        echo "RDMA device already exists: $rxe_target_device" >&2
-        exit 1
-    }
-
-    modprobe rdma_rxe
-    modprobe nvme-rdma
-    ip link add "$rxe_target_if" type dummy
-    rxe_target_link_created=true
-    ip addr add "$target_addr"/32 dev "$rxe_target_if"
-    ip link set "$rxe_target_if" up
-    rdma link add "$rxe_target_device" type rxe netdev "$rxe_target_if"
-    rxe_target_device_created=true
-
-    rdma link show >"$log_dir/rdma-link-target.txt"
-    ip addr show dev "$rxe_target_if" >"$log_dir/ip-link-target.txt"
-    # shellcheck disable=SC2016 # Expand positional parameters in the child shell.
-    prlimit --memlock=unlimited:unlimited -- \
-        bash -c 'memlock_file=$1; shift; prlimit --pid $$ --memlock >"$memlock_file"; exec "$@"' \
-        bash "$log_dir/memlock.txt" "$target" "$ready_file" "${target_arguments[@]}" \
-        >"$log_dir/target.log" 2>&1 &
-else
-    modprobe nvme-tcp
-    "$target" "$ready_file" "${target_arguments[@]}" >"$log_dir/target.log" 2>&1 &
-fi
+modprobe nvme-tcp
+"$target" "$ready_file" "${target_arguments[@]}" >"$log_dir/target.log" 2>&1 &
 target_pid=$!
 for ((attempt = 0; attempt < 1000; attempt++)); do
     [[ -f $ready_file ]] && break

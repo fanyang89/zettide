@@ -5,7 +5,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 cd "$root/vendor/spdk"
-options="--with-shared --with-rdma --with-uring --with-vhost --disable-tests --disable-unit-tests --disable-examples --disable-apps --without-nvme-cuse --without-virtio --without-fsdev"
+options="--with-shared --without-rdma --with-uring --without-vhost --without-iscsi-initiator --disable-tests --disable-unit-tests --disable-examples --disable-apps --without-nvme-cuse --without-virtio --without-fsdev"
 build_path="$(pwd)/build"
 source_revision=$(git rev-parse HEAD)
 revision_file="$build_path/.zettide-source-revision"

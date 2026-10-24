@@ -28,7 +28,6 @@ trap cleanup EXIT
 packages=(
 	spdk_event
 	spdk_event_bdev
-	spdk_vhost
 	spdk_event_nvmf
 	spdk_bdev_modules
 	spdk_env_dpdk
@@ -56,6 +55,17 @@ if [[ -z $spdk_source ]]; then
 	printf '%s\n' "SPDK source directory was not found" >&2
 	exit 1
 fi
+
+# No runtime or disk access: retired ABI options must fail during validation.
+# shellcheck disable=SC2046
+"${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/data-node \
+	-I"$spdk_source/module/bdev/nvme" \
+	services/data-node/spdk/runtime.c services/data-node/spdk/nvmf_tcp_export.c \
+	services/data-node/spdk/nvme_controller.c tests/spdk_protocol_options.c \
+	-o "$build_dir/zettide-spdk-protocol-options-test" -pthread -Wl,--no-as-needed \
+	$(pkg-config --cflags --libs "${packages[@]}") -Wl,--as-needed
+LD_LIBRARY_PATH="${library_path}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+	"$build_dir/zettide-spdk-protocol-options-test"
 
 # shellcheck disable=SC2046
 "${CC:-cc}" -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter -Iservices/data-node -Itest \

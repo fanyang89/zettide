@@ -209,16 +209,7 @@ initialize_controller(struct zettide_spdk_nvme_controller *controller,
 	controller->bdev_options.multipath = false;
 	controller->driver_options.fabrics_connect_timeout_us = opts->connect_timeout_us;
 
-	switch (opts->transport) {
-	case ZETTIDE_SPDK_NVME_TRANSPORT_TCP:
-		transport_id->trtype = SPDK_NVME_TRANSPORT_TCP;
-		break;
-	case ZETTIDE_SPDK_NVME_TRANSPORT_RDMA:
-		transport_id->trtype = SPDK_NVME_TRANSPORT_RDMA;
-		break;
-	default:
-		return -EINVAL;
-	}
+	transport_id->trtype = SPDK_NVME_TRANSPORT_TCP;
 	switch (opts->address_family) {
 	case ZETTIDE_SPDK_NVME_ADDRESS_FAMILY_UNSPECIFIED:
 		transport_id->adrfam = SPDK_NVMF_ADRFAM_NOT_SPECIFIED;
@@ -296,6 +287,7 @@ zettide_spdk_nvme_controller_attach(struct zettide_spdk_runtime *runtime,
 
 	if (runtime == NULL || opts == NULL || controller_out == NULL ||
 		opts->opts_size != sizeof(*opts) || opts->name == NULL ||
+		opts->transport != ZETTIDE_SPDK_NVME_TRANSPORT_TCP ||
 		opts->namespace_name_capacity == 0) {
 		return -EINVAL;
 	}

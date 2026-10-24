@@ -15,7 +15,6 @@ struct zettide_spdk_nvme_controller;
 
 enum zettide_spdk_nvme_transport {
 	ZETTIDE_SPDK_NVME_TRANSPORT_TCP,
-	ZETTIDE_SPDK_NVME_TRANSPORT_RDMA,
 };
 
 enum zettide_spdk_nvme_address_family {
@@ -27,6 +26,7 @@ enum zettide_spdk_nvme_address_family {
 struct zettide_spdk_nvme_controller_opts {
 	size_t opts_size;
 	const char *name;
+	/* Retired transport value 1 must be rejected, not treated as TCP. */
 	enum zettide_spdk_nvme_transport transport;
 	enum zettide_spdk_nvme_address_family address_family;
 	const char *transport_address;

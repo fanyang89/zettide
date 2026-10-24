@@ -33,9 +33,9 @@ Remove the cluster controller and Raft integration, remote Replica protocol,
 cross-node authority and lease coordination, TxFS, and CSI. Retire the
 BlobFilesystem/FUSE/NFS/dufs product line and its conformance matrix.
 
-NVMe/TCP is the intended primary block frontend. Existing iSCSI, RDMA, and vhost
-paths are transitional, not mandatory parallel delivery gates; their removal
-must account for persisted endpoint state. Snapshot, clone, online expansion,
+NVMe/TCP is the sole block frontend. iSCSI, RDMA, and vhost paths are retired;
+persisted endpoints using those protocols are explicitly rejected, never
+converted to TCP. Snapshot, clone, online expansion,
 protection migration, and erasure coding are not baseline delivery requirements.
 
 ### Safety and compatibility

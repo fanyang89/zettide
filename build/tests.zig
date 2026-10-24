@@ -48,12 +48,6 @@ pub fn add(
     const spdk_provider_step = b.step("test-spdk-provider", "Run the asynchronous SPDK bdev provider test");
     spdk_provider_step.dependOn(&spdk_provider_cmd.step);
 
-    const spdk_vhost_test = support.createSpdkVhostExportTest(b, target, optimize, storage_engine, data_node_module);
-    const spdk_vhost_cmd = b.addSystemCommand(&.{ "bash", "tests/spdk-vhost-blk-controller.sh" });
-    spdk_vhost_cmd.addArtifactArg(spdk_vhost_test);
-    const spdk_vhost_step = b.step("test-spdk-vhost-blk-controller", "Run the SPDK vhost-blk controller test");
-    spdk_vhost_step.dependOn(&spdk_vhost_cmd.step);
-
     const spdk_daemon_cmd = b.addSystemCommand(&.{ "bash", "tests/spdk-daemon.sh" });
     spdk_daemon_cmd.addArtifactArg(exe);
     const spdk_daemon_step = b.step("test-spdk-daemon", "Run the SPDK endpoint daemon lifecycle test");
@@ -70,7 +64,6 @@ pub fn add(
     const spdk_compile_step = b.step("build-spdk-tests", "Compile SPDK adapter test libraries without a runtime");
     spdk_compile_step.dependOn(&spdk_storage_test.step);
     spdk_compile_step.dependOn(&spdk_nvmf_test.step);
-    spdk_compile_step.dependOn(&spdk_vhost_test.step);
 
     const cross_step = b.step("test-cross", "Compile portable block boundaries for Windows and macOS");
     const windows_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu });

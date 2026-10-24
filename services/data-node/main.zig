@@ -70,7 +70,7 @@ fn usage(writer: *Io.Writer) !void {
         \\  zettide pool inspect --device <device>...
         \\  zettide pool plan-create --device <device>... [--profile replicated|unprotected] [--label <label>]
         \\  zettide pool create --device <device>... [--profile replicated|unprotected] [--label <label>] --confirm <token>
-        \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]... [--nvmf-traddr <address> [--nvmf-trsvcid <port>] (--nvmf-host-nqn <nqn>|--nvmf-allow-any-host)] [--nvmf-rdma-traddr <address> [--nvmf-rdma-trsvcid <port>] (--nvmf-rdma-host-nqn <nqn>|--nvmf-rdma-allow-any-host)] [--iscsi-traddr <address> [--iscsi-trsvcid <port>] --iscsi-netmask <cidr> (--iscsi-initiator-name <iqn>|--iscsi-allow-any-initiator)]
+        \\  zettide endpoint serve --runtime-dir <dir> [--reactor-mask <mask>] [--pool-member <pool-id> <path>]... [--nvmf-traddr <address> [--nvmf-trsvcid <port>] (--nvmf-host-nqn <nqn>|--nvmf-allow-any-host)]
         \\
         \\Pool creation uses Catalog data mode: replicated requires three devices;
         \\unprotected requires one. Creating a Pool does not initialize a Volume.

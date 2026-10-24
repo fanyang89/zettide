@@ -10,10 +10,28 @@ trap 'rm -rf "$tmp"' EXIT
 help=$("$exe" --help)
 [[ "$help" == *"zettide pool plan-create"* ]]
 [[ "$help" == *"Catalog data mode"* ]]
+if grep -Eq -- '--iscsi-|--nvmf-rdma-|vhost' <<<"$help"; then
+    echo "help advertises a retired block protocol" >&2
+    exit 1
+fi
 if grep -Eq 'zettide (format|info|check|mount|unmount|serve)|pool mount|name-profile|scheduled-replicated' <<<"$help"; then
     echo "help advertises a retired filesystem operation" >&2
     exit 1
 fi
+
+# Reject retired benchmark settings before root checks, device access, or target
+# startup, even when the old profile is invoked directly.
+if ZETTIDE_NVMF_TRANSPORT=rdma bash tests/spdk-nvmf-fio.sh "$tmp/must-not-run" "$tmp/ready" "$tmp/logs" >"$tmp/out" 2>"$tmp/err"; then
+    echo "retired benchmark transport was accepted" >&2
+    exit 1
+fi
+grep -q 'only NVMe/TCP is supported' "$tmp/err"
+if ZETTIDE_NVMF_TRANSPORT=tcp ZETTIDE_SPDK_FRONTEND=iscsi bash tests/spdk-nvmf-fio.sh "$tmp/must-not-run" "$tmp/ready" "$tmp/logs" >"$tmp/out" 2>"$tmp/err"; then
+    echo "retired benchmark frontend was accepted" >&2
+    exit 1
+fi
+grep -q 'retired SPDK frontend' "$tmp/err"
+[[ ! -e $tmp/ready && ! -e $tmp/logs ]]
 
 # Removed commands must fail without touching an existing image or creating paths.
 image="$tmp/image with spaces.blob"

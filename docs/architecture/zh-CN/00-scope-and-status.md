@@ -16,7 +16,7 @@ does not trigger automatic storage failover.
 | Catalog block engine | Multi-Volume metadata, extent mapping, writable backend, and data lease retained |
 | Local Pool CLI | Plans and provisions Catalog-mode Pool metadata with confirmation; initializes no Catalog root or Volume |
 | Local protection | Existing local protection and conservative write/flush failure behavior retained; degraded writes and rebuild are not implied |
-| SPDK exports | Existing Catalog NVMe-oF, iSCSI, and vhost adapters retained during protocol convergence; NVMe/TCP is the primary direction |
+| SPDK exports | Catalog NVMe/TCP only; retired protocol state and options are rejected without automatic conversion |
 | Endpoint lifecycle | Registry, durable desired state, owner-only Unix control API, and endpoint daemon retained |
 | Concurrent publication | Incomplete: registry currently allows one endpoint per Pool; shared Pool ownership and lease coordination must be addressed before lifting this restriction |
 | VM lifecycle integration | Incomplete: exports are not a complete managed create/publish/attach/restart/detach lifecycle |
@@ -32,6 +32,7 @@ does not trigger automatic storage failover.
   conformance, remote automation, and benchmark profiles.
 - Unicode normalization, filesystem test-suite dependencies, scheduled raw Blob
   performance harnesses, and the now-unused grpc-lite/profiling build dependency.
+- iSCSI, RDMA/RXE, and vhost block adapters and protocol automation profiles.
 
 These are retired capabilities, not deferred roadmap items.
 
@@ -46,8 +47,10 @@ The raw-disk creation planner now accepts only Catalog mode and fixed one- or
 three-device profiles. Its versioned confirmation-token domain has changed;
 obtain a fresh plan rather than reusing a token from a filesystem command.
 
-Additional block protocol paths remain transitional. Removing them must not
-silently reinterpret persisted endpoint frontend values.
+Protocol composition is now TCP-only. Persisted TCP frontend value `3` is
+unchanged; v1 state and retired v2 values are rejected without rewriting state.
+Full local Volume management and coordinated multi-Volume publication remain
+incomplete; shrinking the protocol surface does not complete those workflows.
 
 Loop devices, regular files, unit tests, and focused export tests do not prove
 real multi-disk durability or a complete virtualization integration. No current

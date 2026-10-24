@@ -18,18 +18,14 @@
     zettide_spdk_profiles:
       - nvmf-fio
       - nvmf-catalog-fio
-      - nvmf-catalog-rxe-fio
       - nvmf-catalog-mapped-fio
       - nvmf-catalog-optane-fio
-      - iscsi-catalog-fio
     zettide_profile_tasks:
       block: tasks/run-mode.yml
       nvmf-fio: tasks/run-nvmf-fio.yml
       nvmf-catalog-fio: tasks/run-nvmf-fio.yml
-      nvmf-catalog-rxe-fio: tasks/run-nvmf-fio.yml
       nvmf-catalog-mapped-fio: tasks/run-nvmf-fio.yml
       nvmf-catalog-optane-fio: tasks/run-nvmf-fio.yml
-      iscsi-catalog-fio: tasks/run-iscsi-fio.yml
     zettide_packages:
       RedHat: [gcc, git, kmod, sudo, util-linux, e2fsprogs]
       Debian: [build-essential, git, kmod, sudo, util-linux, e2fsprogs]
@@ -76,12 +72,6 @@
         - pkg-config
         - python3-pyelftools
         - uuid-dev
-    zettide_nvmf_rdma_packages:
-      RedHat: [iproute, libibverbs-devel, libibverbs-utils, librdmacm-devel, psmisc, rdma-core, util-linux]
-      Debian: [ibverbs-utils, iproute2, libibverbs-dev, librdmacm-dev, psmisc, rdma-core, util-linux]
-    zettide_iscsi_packages:
-      RedHat: [iscsi-initiator-utils]
-      Debian: [open-iscsi]
 
   pre_tasks:
     - name: Require a supported target family and profile before staging or installing
@@ -89,7 +79,7 @@
         that:
           - ansible_facts.os_family in zettide_packages
           - zettide_test_profile in zettide_profile_tasks
-        fail_msg: "Use the block profile or a retained SPDK profile; filesystem and CSI profiles are retired."
+        fail_msg: "Use block or an NVMe/TCP profile; other protocols, filesystem, and CSI profiles are retired."
 
     - name: Read the source revision
       ansible.builtin.command:
@@ -214,21 +204,14 @@
             name: >-
               {{ zettide_packages[ansible_facts.os_family]
                  + (zettide_nvmf_packages[ansible_facts.os_family]
-                    if zettide_test_profile in zettide_spdk_profiles else [])
-                 + (zettide_nvmf_rdma_packages[ansible_facts.os_family]
-                    if zettide_test_profile == 'nvmf-catalog-rxe-fio' else [])
-                 + (zettide_iscsi_packages[ansible_facts.os_family]
-                    if zettide_test_profile == 'iscsi-catalog-fio' else []) }}
+                    if zettide_test_profile in zettide_spdk_profiles else []) }}
             state: present
 
         - name: Load block transport modules
           ansible.builtin.command:
             argv: [modprobe, "{{ item }}"]
           loop: >-
-            {{ ['nvme', 'nvme-rdma', 'rdma_rxe']
-               if zettide_test_profile == 'nvmf-catalog-rxe-fio'
-               else (['iscsi_tcp'] if zettide_test_profile == 'iscsi-catalog-fio'
-               else (['loop'] if zettide_test_profile == 'block' else ['nvme', 'nvme-tcp'])) }}
+            {{ ['loop'] if zettide_test_profile == 'block' else ['nvme', 'nvme-tcp'] }}
           changed_when: false
 
         - name: Check the remote Zig version
@@ -276,9 +259,7 @@
               spdk_source_archive_sha256: "{{ zettide_spdk_source_archive.stat.checksum | default('not-recorded') }}"
               zig_version: "{{ zettide_remote_zig.stdout }}"
               fio_version: "{{ zettide_remote_fio.stdout | default('not-recorded') }}"
-              nvmf_transport: >-
-                {{ 'rdma' if zettide_test_profile == 'nvmf-catalog-rxe-fio'
-                   else ('tcp' if zettide_test_profile.startswith('nvmf-') else '') }}
+              nvmf_transport: "{{ 'tcp' if zettide_test_profile.startswith('nvmf-') else '' }}"
               fio_runtime: "{{ zettide_nvmf_fio_runtime }}"
               fio_ramp_time: "{{ zettide_nvmf_fio_ramp_time }}"
               raw_device: "{{ zettide_raw_device | default({}) }}"

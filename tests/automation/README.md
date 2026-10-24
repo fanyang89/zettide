@@ -37,12 +37,10 @@ The remote workspace is retained if archiving or fetching fails, or when
 | `nvmf-fio.yml` | Standard NVMe/TCP target baseline |
 | `nvmf-catalog-fio.yml` | Catalog Volume export |
 | `nvmf-catalog-mapped-fio.yml` | Mapped Catalog data path |
-| `nvmf-catalog-rxe-fio.yml` | Transitional Catalog RDMA adapter |
 | `nvmf-catalog-optane-fio.yml` | Explicitly configured physical Catalog Pool |
-| `iscsi-catalog-fio.yml` | Transitional Catalog iSCSI adapter |
 
-NVMe/TCP is the primary product direction. Additional protocol profiles remain
-component validation only, not a promise to deliver several parallel products.
+NVMe/TCP is the sole supported transport. iSCSI, RDMA/RXE, and vhost profiles
+have been removed; their old profile names fail before staging or installation.
 
 **Physical profiles may overwrite disk data or Catalog metadata.** Read the
 selected task and script, use disposable devices, and satisfy their exact

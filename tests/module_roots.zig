@@ -30,6 +30,11 @@ test "data-node module owns product lifecycle and borrows the storage module" {
     try std.testing.expect(!@hasDecl(data_node, "dufs_server"));
     try std.testing.expect(!@hasDecl(data_node, "nfs_backend"));
     try std.testing.expect(!@hasDecl(data_node, "filesystem_target"));
+    try std.testing.expect(!@hasDecl(data_node, "spdk_catalog_iscsi_export"));
+    try std.testing.expect(!@hasDecl(data_node, "spdk_catalog_vhost_export"));
+    try std.testing.expect(!@hasDecl(data_node, "spdk_iscsi_export"));
+    try std.testing.expect(!@hasDecl(data_node, "spdk_vhost_block_export"));
+    try std.testing.expectEqual(@as(usize, 1), @typeInfo(data_node.endpoint_registry.Frontend).@"enum".field_names.len);
     try std.testing.expect(!@hasDecl(data_node, "data_service"));
     try std.testing.expect(!@hasDecl(data_node, "replica_rpc_client"));
     try std.testing.expect(!@hasDecl(data_node, "write_coordinator_manager"));

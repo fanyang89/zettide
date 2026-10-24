@@ -45,7 +45,9 @@
     argv:
       - ./configure
       - --with-shared
-      - "{{ '--with-rdma' if zettide_test_profile == 'nvmf-catalog-rxe-fio' else '--without-rdma' }}"
+      - --without-rdma
+      - --without-vhost
+      - --without-iscsi-initiator
       - --without-uring
       - --disable-tests
       - --disable-unit-tests
@@ -70,11 +72,11 @@
   ansible.builtin.shell:
     cmd: >-
       cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
-      -Iservices/data-node -Itest services/data-node/spdk/runtime.c services/data-node/spdk/bdev_provider.c
+      -Iservices/data-node -Itests services/data-node/spdk/runtime.c services/data-node/spdk/bdev_provider.c
       services/data-node/spdk/nvmf_tcp_export.c tests/spdk_runtime.c tests/spdk_nvmf_benchmark.c
       -o tests/spdk-nvmf-benchmark -pthread -Wl,--no-as-needed
       $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
-      spdk_event spdk_event_bdev spdk_vhost spdk_event_nvmf spdk_bdev_modules spdk_env_dpdk
+      spdk_event spdk_event_bdev spdk_event_nvmf spdk_bdev_modules spdk_env_dpdk
       spdk_nvmf spdk_sock_modules spdk_syslibs) -Wl,--as-needed
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
@@ -94,24 +96,23 @@
   environment:
     PKG_CONFIG_PATH: "{{ zettide_remote_workspace.path }}/spdk/build/lib/pkgconfig"
   changed_when: true
-  when: zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
+  when: zettide_test_profile != 'nvmf-fio'
 
 - name: Link the Catalog NVMe-oF benchmark target | {{ zettide_optimize }}
   ansible.builtin.shell:
     cmd: >-
       cc -O3 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -Wno-unused-parameter
-      -Iservices/data-node -Itest services/data-node/spdk/runtime.c services/data-node/spdk/bdev_provider.c
-      services/data-node/spdk/iscsi_export.c services/data-node/spdk/nvmf_tcp_export.c tests/spdk_runtime.c tests/spdk_catalog_nvmf_benchmark_main.c
+      -Iservices/data-node -Itests services/data-node/spdk/runtime.c services/data-node/spdk/bdev_provider.c
+      services/data-node/spdk/nvmf_tcp_export.c tests/spdk_runtime.c tests/spdk_catalog_nvmf_benchmark_main.c
       zig-out/lib/libzettide-spdk-catalog-nvmf-benchmark.a
-      -o tests/spdk-catalog-nvmf-benchmark -pthread -lstdc++ -Wl,--no-as-needed
+      -o tests/spdk-catalog-nvmf-benchmark -pthread -lubsan -lstdc++ -Wl,--no-as-needed
       $(PKG_CONFIG_PATH=./spdk/build/lib/pkgconfig pkg-config --cflags --libs
-      spdk_event spdk_event_bdev spdk_event_scsi spdk_event_iscsi spdk_vhost
-      spdk_event_nvmf spdk_bdev_modules spdk_env_dpdk spdk_scsi spdk_iscsi
+      spdk_event spdk_event_bdev spdk_event_nvmf spdk_bdev_modules spdk_env_dpdk
       spdk_nvmf spdk_sock_modules spdk_syslibs) -Wl,--as-needed
   args:
     chdir: "{{ zettide_remote_workspace.path }}"
   changed_when: true
-  when: zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
+  when: zettide_test_profile != 'nvmf-fio'
 
 - name: Discover SPDK shared library paths | {{ zettide_optimize }}
   ansible.builtin.command:
@@ -120,7 +121,6 @@
       - --libs-only-L
       - spdk_event
       - spdk_event_bdev
-      - spdk_vhost
       - spdk_event_nvmf
       - spdk_bdev_modules
       - spdk_env_dpdk
@@ -142,7 +142,7 @@
       - >-
         {{ zettide_remote_workspace.path ~
            ('/tests/spdk-catalog-nvmf-benchmark'
-            if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio', 'nvmf-catalog-optane-fio']
+            if zettide_test_profile != 'nvmf-fio'
             else '/tests/spdk-nvmf-benchmark') }}
       - "{{ zettide_remote_workspace.path }}/nvmf-ready"
       - "{{ zettide_remote_workspace.path }}/test-results/{{ zettide_optimize }}/{{ zettide_test_profile }}"
@@ -154,8 +154,8 @@
          | map('regex_replace', '^-L', '') | join(':') }}
     ZETTIDE_NVMF_FIO_RUNTIME: "{{ zettide_nvmf_fio_runtime }}"
     ZETTIDE_NVMF_FIO_RAMP_TIME: "{{ zettide_nvmf_fio_ramp_time }}"
-    ZETTIDE_NVMF_TRANSPORT: "{{ 'rdma' if zettide_test_profile == 'nvmf-catalog-rxe-fio' else 'tcp' }}"
-    ZETTIDE_NVMF_TARGET_ADDR: "{{ '192.0.2.2' if zettide_test_profile == 'nvmf-catalog-rxe-fio' else '127.0.0.1' }}"
+    ZETTIDE_NVMF_TRANSPORT: tcp
+    ZETTIDE_NVMF_TARGET_ADDR: "127.0.0.1"
     ZETTIDE_NVMF_TARGET_PORT: "44220"
     ZETTIDE_NVMF_FIO_SIZE: >-
       {{ '256M'
@@ -167,7 +167,7 @@
       {{ zettide_nvmf_pool_config.path
          if zettide_test_profile == 'nvmf-catalog-optane-fio'
          else (zettide_remote_workspace.path ~ '/catalog-member'
-                if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-rxe-fio', 'nvmf-catalog-mapped-fio'] else '') }}
+                 if zettide_test_profile in ['nvmf-catalog-fio', 'nvmf-catalog-mapped-fio'] else '') }}
     ZETTIDE_NVMF_TARGET_MODE: >-
       {{ 'mapped' if zettide_test_profile == 'nvmf-catalog-mapped-fio'
          else ('existing' if zettide_test_profile == 'nvmf-catalog-optane-fio' else '') }}

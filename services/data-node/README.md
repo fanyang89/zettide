@@ -13,8 +13,9 @@ required to build or use the existing local endpoint path.
 
 `zettide endpoint serve` retains the local endpoint daemon and owner-only Unix
 control API. The registry persists desired endpoints and composes Catalog
-exports through SPDK. NVMe/TCP is the primary direction; iSCSI, RDMA, and vhost
-remain transitional implementations.
+exports through SPDK. NVMe/TCP is the sole frontend; iSCSI, RDMA, and vhost
+are removed. Old protocol options and persisted endpoint state are rejected,
+never converted or discarded. See [upgrade safety](../../docs/block-safety.md#retired-endpoint-protocols).
 
 Important limits:
 

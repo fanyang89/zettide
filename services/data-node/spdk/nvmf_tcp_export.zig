@@ -2,11 +2,6 @@ const std = @import("std");
 
 pub const c = @import("spdk_c");
 
-pub const Transport = enum {
-    tcp,
-    rdma,
-};
-
 pub const Options = struct {
     target_name: ?[]const u8 = null,
     nqn: []const u8,
@@ -18,7 +13,6 @@ pub const Options = struct {
     trsvcid: []const u8 = "4420",
     nsid: u32 = 1,
     allow_any_host: bool = false,
-    transport: Transport = .tcp,
 };
 
 /// Owns one active NVMe-oF subsystem and listener for an existing SPDK bdev.
@@ -59,10 +53,7 @@ pub const NvmfExport = struct {
         c_options.trsvcid = trsvcid.ptr;
         c_options.nsid = options.nsid;
         c_options.allow_any_host = options.allow_any_host;
-        c_options.transport = switch (options.transport) {
-            .tcp => c.ZETTIDE_SPDK_NVMF_TRANSPORT_TCP,
-            .rdma => c.ZETTIDE_SPDK_NVMF_TRANSPORT_RDMA,
-        };
+        c_options.transport = c.ZETTIDE_SPDK_NVMF_TRANSPORT_TCP;
 
         var handle: ?*c.struct_zettide_spdk_nvmf_tcp_export = null;
         try statusError(c.zettide_spdk_nvmf_tcp_export_create(

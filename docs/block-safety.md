@@ -11,10 +11,29 @@ independent writers or bypass Pool locks and Catalog data leases. Keep the
 registry's one-endpoint-per-Pool guard until shared ownership and multi-Volume
 lease coordination are implemented and tested.
 
-The endpoint Unix control socket is owner-only. Standard block frontends still
+The endpoint Unix control socket is owner-only. The NVMe/TCP frontend still
 need an isolated trusted storage network and explicit host access configuration;
 do not infer production authentication, encryption, or safe multi-writer access
 from a running SPDK export.
+
+## Retired endpoint protocols
+
+Only `nvme_of_tcp` is accepted by the control API. The `ZETENDP1` v2 state
+format and TCP frontend value `3` are unchanged; values `1` (vhost), `2` (iSCSI),
+and `4` (RDMA) remain retired. v1 state implicitly described vhost endpoints
+and is rejected as well. Startup reports `RetiredEndpointFrontend`, preserves
+the entire state file, and does not start SPDK or open Pools for that state.
+Even a mixed TCP/retired state file is rejected in full, not partially reconciled.
+
+There is no automatic migration or deletion. Retain a backup and use the prior
+version to inspect and release retired endpoints before switching versions.
+Then explicitly configure TCP access policy and recreate the intended endpoints;
+do not edit frontend bytes or bypass checksums. Unchanged TCP-only v2 state
+continues to reconcile with the same bdev name, NQN, serial, and NSID.
+
+Old daemon protocol flags and non-TCP benchmark settings fail before runtime or
+media changes. C adapter ABI slots for transport and the retired vhost path are
+retained only to reject old requests; they do not restore those capabilities.
 
 ## Provisioning and compatibility
 

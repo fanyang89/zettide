@@ -91,24 +91,17 @@ pub fn configureSpdk(
         .files = &.{
             "services/data-node/spdk/runtime.c",
             "services/data-node/spdk/bdev_provider.c",
-            "services/data-node/spdk/iscsi_export.c",
             "services/data-node/spdk/nvmf_tcp_export.c",
-            "services/data-node/spdk/vhost_blk_controller.c",
         },
         .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
     });
     const libraries = [_][]const u8{
         "spdk_event",
         "spdk_event_bdev",
-        "spdk_event_scsi",
-        "spdk_event_iscsi",
         "spdk_event_nvmf",
-        "spdk_event_vhost_blk",
         "spdk_bdev_modules",
         "spdk_env_dpdk",
         "spdk_nvmf",
-        "spdk_scsi",
-        "spdk_iscsi",
         "spdk_sock_modules",
         "spdk_syslibs",
     };
@@ -131,9 +124,7 @@ pub fn createSpdkCModule(
         \\#include <spdk/bdev_dispatcher.h>
         \\#include <spdk/nvme_controller.h>
         \\#include <spdk/bdev_provider.h>
-        \\#include <spdk/iscsi_export.h>
         \\#include <spdk/nvmf_tcp_export.h>
-        \\#include <spdk/vhost_blk_controller.h>
     ;
     const test_header =
         \\#include <pthread.h>
@@ -221,30 +212,6 @@ pub fn createSpdkNvmfExportTest(
     module.addIncludePath(b.path("services/data-node"));
     return b.addLibrary(.{
         .name = "zettide-spdk-nvmf-export-test",
-        .root_module = module,
-    });
-}
-
-pub fn createSpdkVhostExportTest(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    storage_engine: *std.Build.Module,
-    data_node_module: *std.Build.Module,
-) *std.Build.Step.Compile {
-    const module = b.createModule(.{
-        .root_source_file = b.path("tests/spdk_vhost_export.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "zettide_storage", .module = storage_engine },
-            .{ .name = "zettide_data_node", .module = data_node_module },
-        },
-    });
-    module.addIncludePath(b.path("services/data-node"));
-    return b.addLibrary(.{
-        .name = "zettide-spdk-vhost-export-test",
         .root_module = module,
     });
 }

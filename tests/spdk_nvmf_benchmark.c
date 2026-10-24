@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -51,8 +52,11 @@ main(int argc, char **argv)
 	int ready_fd;
 	int signal_number;
 	int status;
+	const char *transport = getenv("ZETTIDE_NVMF_TRANSPORT");
+	const char *frontend = getenv("ZETTIDE_SPDK_FRONTEND");
 
-	if (argc != 2) {
+	if (argc != 2 || (transport != NULL && strcmp(transport, "tcp") != 0) ||
+		(frontend != NULL && strcmp(frontend, "nvmf") != 0)) {
 		return 2;
 	}
 	sigemptyset(&signals);

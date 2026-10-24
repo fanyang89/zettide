@@ -15,7 +15,6 @@ struct zettide_spdk_nvmf_tcp_export;
 
 enum zettide_spdk_nvmf_transport {
 	ZETTIDE_SPDK_NVMF_TRANSPORT_TCP = 0,
-	ZETTIDE_SPDK_NVMF_TRANSPORT_RDMA = 1,
 };
 
 struct zettide_spdk_nvmf_tcp_export_opts {
@@ -31,6 +30,7 @@ struct zettide_spdk_nvmf_tcp_export_opts {
 	const char *trsvcid;
 	uint32_t nsid;
 	bool allow_any_host;
+	/* ABI guard: only zero/TCP is accepted; retired value 1 is rejected. */
 	enum zettide_spdk_nvmf_transport transport;
 };
 
