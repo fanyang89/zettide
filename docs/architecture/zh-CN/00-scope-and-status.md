@@ -35,6 +35,8 @@ does not trigger automatic storage failover.
 - iSCSI, RDMA/RXE, and vhost block adapters and protocol automation profiles.
 - Fixed and scheduled raw Blob data-plane adapters; SPDK storage integration now
   uses an authenticated Catalog Volume rather than a raw Blob Pool.
+- The legacy fixed-three MemberSet and generation coordinator, plus the unused
+  ReplicaEndpoint adapter. Current Catalog Pool coordination is retained.
 
 These are retired capabilities, not deferred roadmap items.
 
@@ -44,6 +46,10 @@ Filesystem and raw Blob I/O entry points are gone. Retired format bits, Blob
 geometry checks, and low-level local format/layout primitives remain for safe format
 recognition and existing engine validation. They do not implement file semantics
 or a supported Blob export. No on-media enum values or feature bits were reused.
+Fixed-v1 Member and journal codecs also remain for safe identification. Pool
+opens release old Member locks and exclude them from authority; legacy-only
+input returns `LegacyMemberUnsupported`. Mixed input never promotes legacy
+Members into dynamic Pool voters or data placements.
 
 `test-catalog-io` covers one- and three-Member Catalog reopen, matching-copy
 reads, write/flush failures on every replica, whole-lease freeze, and Linux

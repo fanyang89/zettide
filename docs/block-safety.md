@@ -56,6 +56,13 @@ layout/placement codecs remain for diagnostics and compatibility tests, not as
 supported read/write services. Rejection must not write, sync, or retain data
 claims on the old Members.
 
+The legacy fixed-three MemberSet/coordinator is retired independently of modern
+three-voter Catalog Pools. Low-level Member/journal decoders still recognize
+fixed-v1 media, but Pool opens close and exclude it without writes or syncs,
+including when one header copy is damaged. Legacy-only input reports
+`LegacyMemberUnsupported`; adoption rejects legacy Members without taking any
+caller ownership. Current Catalog local replication and fault freezing remain.
+
 ## Failures and recovery
 
 Keep the existing conservative write/flush failure and freeze behavior.

@@ -31,6 +31,12 @@ adapters are removed; they are not an alternative to Catalog Volume I/O.
 Catalog replica reads, data leases, journal durability, and recovery remain.
 Retired format recognition never authorizes reinterpreting Blob media as Volumes.
 
+The legacy fixed-three MemberSet/coordinator and ReplicaEndpoint abstraction are
+also removed. The current PoolMemberSet and Catalog coordinator retain local
+multi-disk protection. Fixed-v1 codecs and member-local journal validation remain;
+Pool opens exclude legacy Members without mutating media or retaining locks,
+and adoption rejects them without consuming caller-owned Members.
+
 From the repository root, `zig build test-catalog-io` exercises the retained
 Catalog data path and Linux request worker with regular-file Members. It runs
 in the default test gate without starting SPDK; SPDK storage integration uses

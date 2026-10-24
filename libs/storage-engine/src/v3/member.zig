@@ -8,7 +8,6 @@ const member_format = @import("member_format.zig");
 const pool_genesis_payload = @import("pool_genesis_payload.zig");
 const pool_layout = @import("pool_layout.zig");
 const pool_topology = @import("pool_topology.zig");
-const replica_endpoint = @import("replica_endpoint.zig");
 const storage_api = @import("storage.zig");
 const topology_format = @import("topology.zig");
 
@@ -18,7 +17,6 @@ const File = Io.File;
 pub const OpenMode = member_format.OpenMode;
 pub const SourceSlot = member_format.SourceSlot;
 pub const Storage = storage_api.Storage;
-pub const ReplicaEndpoint = replica_endpoint.ReplicaEndpoint;
 
 pub const CreateFaultPoint = enum {
     extent_sync,
@@ -408,18 +406,6 @@ pub const Member = struct {
 
     pub fn fenceUnleasedCatalogWrites(self: *Member) void {
         self.catalog_mode_active.store(true, .release);
-    }
-
-    pub fn asReplicaEndpoint(self: *Member) ReplicaEndpoint {
-        const selected = self.header();
-        return ReplicaEndpoint.init(
-            self,
-            .{
-                .logical_capacity = selected.logical_capacity,
-                .data_length = selected.data.length,
-            },
-            &member_replica_vtable,
-        );
     }
 
     pub fn claimJournal(self: *Member) !void {
@@ -922,57 +908,6 @@ pub const Member = struct {
         self.frozen.store(true, .release);
     }
 };
-
-const member_replica_vtable: ReplicaEndpoint.VTable = .{
-    .read_metadata = replicaReadMetadata,
-    .read_data = replicaReadData,
-    .read_data_many = replicaReadDataMany,
-    .submit_read_data_many = replicaSubmitReadDataMany,
-    .write_data = replicaWriteData,
-    .write_metadata_durable = replicaWriteMetadataDurable,
-    .sync = replicaSync,
-};
-
-fn replicaMember(context: *anyopaque) *Member {
-    return @ptrCast(@alignCast(context));
-}
-
-fn replicaReadMetadata(context: *anyopaque, offset: u64, buffer: []u8) anyerror!void {
-    return replicaMember(context).read(.metadata, offset, buffer);
-}
-
-fn replicaReadData(context: *anyopaque, offset: u64, buffer: []u8) anyerror!void {
-    return replicaMember(context).read(.data, offset, buffer);
-}
-
-fn replicaReadDataMany(
-    context: *anyopaque,
-    reads: []const storage_api.Read,
-    results: []storage_api.ReadResult,
-) anyerror!void {
-    return replicaMember(context).readMany(.data, reads, results);
-}
-
-fn replicaSubmitReadDataMany(
-    context: *anyopaque,
-    reads: []const storage_api.Read,
-    results: []storage_api.ReadResult,
-    completion: storage_api.AsyncReadCompletion,
-) anyerror!storage_api.AsyncReadSubmit {
-    return replicaMember(context).submitReadMany(.data, reads, results, completion);
-}
-
-fn replicaWriteData(context: *anyopaque, offset: u64, data: []const u8) anyerror!void {
-    return replicaMember(context).write(.data, offset, data);
-}
-
-fn replicaWriteMetadataDurable(context: *anyopaque, offset: u64, data: []const u8) anyerror!void {
-    return replicaMember(context).writeDurable(.metadata, offset, data);
-}
-
-fn replicaSync(context: *anyopaque) anyerror!void {
-    return replicaMember(context).sync();
-}
 
 pub fn openAt(io: Io, parent: Io.Dir, basename: []const u8, mode: OpenMode) !Member {
     return Member.openAt(io, parent, basename, mode);

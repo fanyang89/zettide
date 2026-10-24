@@ -170,7 +170,12 @@ pub const PoolMemberSet = struct {
                 history_count += 1;
             }
         }
-        if (history_count == 0) return error.NoReadableMember;
+        if (history_count == 0) {
+            for (set.statuses[0..set.supplied_count]) |status| {
+                if (status == .legacy) return error.LegacyMemberUnsupported;
+            }
+            return error.NoReadableMember;
+        }
         const selected_authority = try pool_authority.select(history_pointers[0..history_count]);
         try set.validateAuthorityGeometry(selected_authority);
         set.authority_state = selected_authority;
@@ -1107,6 +1112,234 @@ fn rewriteDataMode(dir: std.Io.Dir, name: []const u8, data_mode: member_format.P
     try file.sync(std.testing.io);
 }
 
+fn createLegacyTestMember(dir: std.Io.Dir) !member_format.Header {
+    const genesis = @import("genesis_payload.zig");
+    const payload: genesis.GenesisPayload = .{
+        .topology = .{
+            .set_id = id(0x10),
+            .epoch = 1,
+            .parent_digest = @splat(0),
+            .members = .{
+                .{ .member_id = id(0x20), .slot = 0 },
+                .{ .member_id = id(0x30), .slot = 1 },
+                .{ .member_id = id(0x40), .slot = 2 },
+            },
+        },
+        .layout = .{ .layout_epoch = 1, .topology_epoch = 1, .chunk_size = 1024 * 1024 },
+    };
+    const header: member_format.Header = .{
+        .header_sequence = 1,
+        .set_id = payload.topology.set_id,
+        .member_id = payload.topology.members[0].member_id,
+        .member_slot = 0,
+        .created_ns = 1,
+        .member_bytes = 3 * 1024 * 1024,
+        .logical_capacity = 1024 * 1024,
+        .control = .{ .offset = 64 * 1024, .length = 4096 },
+        .metadata = .{ .offset = 1024 * 1024, .length = 256 * 1024 },
+        .data = .{ .offset = 2 * 1024 * 1024, .length = 1024 * 1024 },
+        .metadata_block_size = 4096,
+        .metadata_read_size = 512,
+        .metadata_program_size = 512,
+        .chunk_size = 1024 * 1024,
+        .metadata_format_version = 1,
+        .object_format_version = 1,
+        .layout_format_version = member_format.supported_layout_format_version,
+        .control_record_format_version = 1,
+        .label = try member_format.Label.init("retired-fixed-member"),
+        .genesis_topology_digest = try @import("topology.zig").digest(payload.topology),
+    };
+    var member = try member_api.createAt(std.testing.io, dir, "legacy", header, payload, .{});
+    try member.close();
+    return header;
+}
+
+// Probe the actual file-backed storage boundary, including close-time syncs.
+const LegacyStorageProbe = struct {
+    inner: storage_api.Storage,
+    reads: usize = 0,
+    writes: usize = 0,
+    syncs: usize = 0,
+    closes: usize = 0,
+
+    fn storage(self: *@This()) storage_api.Storage {
+        return storage_api.Storage.initBackend(self, &vtable, self.inner.capacity(), self.inner.kind, self.inner.minimum_io_size);
+    }
+
+    fn from(context: *anyopaque) *@This() {
+        return @ptrCast(@alignCast(context));
+    }
+
+    const vtable: storage_api.Storage.VTable = .{
+        .same_identity = sameIdentity,
+        .read_at = readAt,
+        .write_all_at = writeAt,
+        .sync = sync,
+        .close = close,
+    };
+
+    fn sameIdentity(context: *anyopaque, other: *anyopaque) bool {
+        return from(context).inner.sameIdentity(&from(other).inner);
+    }
+
+    fn readAt(context: *anyopaque, io: std.Io, buffer: []u8, offset: u64) !usize {
+        const self = from(context);
+        self.reads += 1;
+        return self.inner.readAt(io, buffer, offset);
+    }
+
+    fn writeAt(context: *anyopaque, _: std.Io, _: []const u8, _: u64) !void {
+        from(context).writes += 1;
+        return error.UnexpectedLegacyMutation;
+    }
+
+    fn sync(context: *anyopaque, _: std.Io) !void {
+        from(context).syncs += 1;
+        return error.UnexpectedLegacyMutation;
+    }
+
+    fn close(context: *anyopaque, io: std.Io) !void {
+        const self = from(context);
+        self.closes += 1;
+        return self.inner.close(io);
+    }
+
+    fn expectRejected(self: *const @This()) !void {
+        // Only the A/B headers may be read; no journal scan or repair is allowed.
+        try std.testing.expectEqual(@as(usize, 2), self.reads);
+        try std.testing.expectEqual(@as(usize, 0), self.writes);
+        try std.testing.expectEqual(@as(usize, 0), self.syncs);
+        try std.testing.expectEqual(@as(usize, 1), self.closes);
+    }
+};
+
+fn legacyMediaDigest(dir: std.Io.Dir) ![32]u8 {
+    const file = try dir.openFile(std.testing.io, "legacy", .{});
+    defer file.close(std.testing.io);
+    var hash = std.crypto.hash.Blake3.init(.{});
+    var offset: u64 = 0;
+    var buffer: [4096]u8 = undefined;
+    while (true) {
+        const amount = try file.readPositionalAll(std.testing.io, &buffer, offset);
+        if (amount == 0) break;
+        hash.update(buffer[0..amount]);
+        offset += amount;
+    }
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return digest;
+}
+
+test "fixed-format media decodes but Pool opens reject it without mutation or retained locks" {
+    inline for ([_]bool{ false, true }) |degraded| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const header = try createLegacyTestMember(tmp.dir);
+        if (degraded) {
+            const file = try tmp.dir.openFile(std.testing.io, "legacy", .{ .mode = .read_write });
+            defer file.close(std.testing.io);
+            try file.writePositionalAll(std.testing.io, &.{0}, 0);
+            try file.sync(std.testing.io);
+        }
+        const before = try legacyMediaDigest(tmp.dir);
+        var member = try member_api.openAt(std.testing.io, tmp.dir, "legacy", .read_only);
+        defer member.deinit();
+        try std.testing.expectEqual(degraded, member.redundancyDegraded());
+        try std.testing.expect(!member_format.isDynamicPool(member.header()));
+        try std.testing.expectEqual(member_format.PoolDataMode.legacy_unsupported, member_format.poolDataMode(member.header()));
+        try std.testing.expectEqualDeep(header, try member_format.decode(&(try member_format.encode(member.header()))));
+        var history = try journal.scanHistory(std.testing.allocator, &member);
+        defer history.deinit();
+        try std.testing.expectEqual(@as(usize, 1), history.entries().len);
+        const payload = try @import("genesis_payload.zig").validateRecord(history.entries()[0].record);
+        try std.testing.expectEqualDeep(header.set_id, payload.topology.set_id);
+        try std.testing.expectEqual(@as(u32, 1024 * 1024), payload.layout.chunk_size);
+        try member.close();
+
+        const locations = [_]Location{.{ .parent = tmp.dir, .basename = "legacy" }};
+        inline for (std.enums.values(OpenIntent)) |intent| {
+            try std.testing.expectError(error.LegacyMemberUnsupported, open(std.testing.io, std.testing.allocator, &locations, intent));
+            inline for ([_]bool{ false, true }) |in_place| {
+                var probe: LegacyStorageProbe = .{ .inner = try storage_api.Storage.openFile(std.testing.io, tmp.dir, "legacy", true) };
+                var storages = [_]storage_api.Storage{probe.storage()};
+                if (in_place) {
+                    var set: PoolMemberSet = undefined;
+                    try std.testing.expectError(error.LegacyMemberUnsupported, PoolMemberSet.openStoragesInto(&set, std.testing.io, std.testing.allocator, &storages, intent));
+                    try std.testing.expect(set.isClosed());
+                    try std.testing.expect((try set.memberAt(0)) == null);
+                } else {
+                    try std.testing.expectError(error.LegacyMemberUnsupported, openStorages(std.testing.io, std.testing.allocator, &storages, intent));
+                }
+                try probe.expectRejected();
+            }
+        }
+        // Writable acquisition also proves every rejection released the file lock.
+        var reopened = try member_api.openAt(std.testing.io, tmp.dir, "legacy", .writable);
+        try reopened.close();
+        try std.testing.expectEqualDeep(before, try legacyMediaDigest(tmp.dir));
+    }
+}
+
+test "mixed Pool inputs exclude legacy media from authority and release its lock" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try createLegacyTestMember(tmp.dir);
+    try createTestPool(tmp.dir, "modern", .unprotected);
+    const before = try legacyMediaDigest(tmp.dir);
+    inline for (std.enums.values(OpenIntent)) |intent| {
+        inline for ([_]usize{ 0, 1 }) |legacy_index| {
+            var probe: LegacyStorageProbe = .{ .inner = try storage_api.Storage.openFile(std.testing.io, tmp.dir, "legacy", true) };
+            var storages: [2]storage_api.Storage = undefined;
+            storages[legacy_index] = probe.storage();
+            storages[1 - legacy_index] = try storage_api.Storage.openFile(std.testing.io, tmp.dir, "modern", true);
+            var set = try openStorages(std.testing.io, std.testing.allocator, &storages, intent);
+            defer set.deinit();
+            try probe.expectRejected();
+            try std.testing.expectEqual(MemberStatus.legacy, try set.statusAt(legacy_index));
+            try std.testing.expect((try set.memberAt(legacy_index)) == null);
+            try std.testing.expect(set.histories[legacy_index] == null);
+            try std.testing.expectEqualDeep(id(1), set.authority().?.topology.set_id);
+            try std.testing.expectEqual(@as(u16, 1), set.authority().?.topology.member_count);
+            if (intent == .writable) {
+                try std.testing.expectEqual(@as(u16, 1), set.controlWriteReady().?.active_count);
+                try std.testing.expect(!set.controlWriteReady().?.active_members[legacy_index]);
+            } else try std.testing.expect(set.controlWriteReady() == null);
+            var legacy = try member_api.openAt(std.testing.io, tmp.dir, "legacy", .writable);
+            try legacy.close();
+        }
+    }
+    try std.testing.expectEqualDeep(before, try legacyMediaDigest(tmp.dir));
+}
+
+test "Pool adoption rejects legacy inputs without consuming any caller-owned Member" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    _ = try createLegacyTestMember(tmp.dir);
+    try createTestPool(tmp.dir, "modern", .unprotected);
+    const before = try legacyMediaDigest(tmp.dir);
+    inline for ([_]usize{ 0, 1 }) |legacy_index| {
+        var members: [2]member_api.Member = undefined;
+        members[legacy_index] = try member_api.openAt(std.testing.io, tmp.dir, "legacy", .writable);
+        members[1 - legacy_index] = try member_api.openAt(std.testing.io, tmp.dir, "modern", .writable);
+        defer for (&members) |*member| member.deinit();
+        var faults: [2]member_api.FaultController = @splat(.{});
+        for (&members, &faults) |*member, *fault| member.setFaultController(fault);
+        defer for (&members) |*member| member.setFaultController(null);
+        try std.testing.expectError(error.LegacyMemberUnsupported, PoolMemberSet.adoptProvisionedMembers(std.testing.allocator, members[legacy_index..][0..1]));
+        try std.testing.expectError(error.LegacyMemberUnsupported, PoolMemberSet.adoptProvisionedMembers(std.testing.allocator, &members));
+        for (&members, faults) |*member, fault| {
+            try std.testing.expect(!member.isClosed());
+            try std.testing.expectEqual(@as(u64, 0), fault.write_count);
+            try std.testing.expectEqual(@as(u64, 0), fault.sync_count);
+            try member.claimJournal();
+            member.releaseJournal();
+            var claim = try member.claimData();
+            try claim.release();
+        }
+    }
+    try std.testing.expectEqualDeep(before, try legacyMediaDigest(tmp.dir));
+}
+
 test "one-member pool opens with one control voter" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1153,7 +1386,7 @@ test "replicated pool below full width permits maintenance but keeps data read o
     try std.testing.expectEqual(pool_policy.DataAccess.read_only, set.dataAccess());
 }
 
-test "duplicate locations and legacy members are not admitted" {
+test "duplicate locations are not admitted" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try createTestPool(tmp.dir, "member", .unprotected);
@@ -1165,6 +1398,13 @@ test "duplicate locations and legacy members are not admitted" {
         error.DuplicateMemberLocation,
         open(std.testing.io, std.testing.allocator, &duplicate, .read_only),
     );
+}
+
+test "unreadable inputs without identified legacy media retain NoReadableMember" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const locations = [_]Location{.{ .parent = tmp.dir, .basename = "missing" }};
+    try std.testing.expectError(error.NoReadableMember, open(std.testing.io, std.testing.allocator, &locations, .diagnostic));
 }
 
 test "authority geometry rejects mixed Pool filesystem members" {

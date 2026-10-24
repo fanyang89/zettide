@@ -410,7 +410,7 @@ no initialization. Their first transition to `mapped` does require complete dura
 A write or sync failure occurs before catalog staging, freezes mutation, and leaves the initialized
 space unreachable from current authority.
 
-After the one-way catalog fence is set, ordinary Member and ReplicaEndpoint data writes return
+After the one-way catalog fence is set, ordinary Member data writes return
 `DataGenerationLeaseRequired`; only an owner-token coordinator claim can initialize a new mapping.
 `CatalogVolumeBackend` exposes authority-bound reads for ready volumes. Holes and `reserved_zero`
 extents read as zero, while replicated mapped reads require two matching copies. A pool-wide

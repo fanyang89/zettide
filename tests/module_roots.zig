@@ -7,6 +7,13 @@ test "storage module exposes engine contracts without product adapters" {
     _ = storage_engine.v3.pool_member_set.PoolMemberSet;
     _ = storage_engine.v3.pool_catalog_volume.CatalogVolumeBackend;
     _ = storage_engine.v3.pool_catalog_volume.CatalogDataLease;
+    _ = storage_engine.v3.pool_replicated_journal.ReplicatedJournal;
+    _ = storage_engine.v3.genesis_payload.GenesisPayload;
+    try std.testing.expect(!@hasDecl(storage_engine.v3, "member_set"));
+    try std.testing.expect(!@hasDecl(storage_engine.v3, "replicated_journal"));
+    try std.testing.expect(!@hasDecl(storage_engine.v3, "replica_endpoint"));
+    try std.testing.expect(!@hasDecl(storage_engine.v3.member, "ReplicaEndpoint"));
+    try std.testing.expect(!@hasDecl(storage_engine.v3.member.Member, "asReplicaEndpoint"));
     try std.testing.expect(!@hasDecl(storage_engine.v3, "pool_data_storage"));
     try std.testing.expect(!@hasDecl(storage_engine.v3, "pool_data_device"));
     try std.testing.expect(!@hasDecl(storage_engine.v3, "pool_scheduled_data_device"));
@@ -26,6 +33,11 @@ test "storage module exposes engine contracts without product adapters" {
 test "data-node module owns product lifecycle and borrows the storage module" {
     _ = data_node.storage.v3.storage.Storage;
     _ = data_node.endpoint_registry.Spec;
+    _ = data_node.storage.v3.pool_member_set.PoolMemberSet;
+    _ = data_node.storage.v3.pool_replicated_journal.ReplicatedJournal;
+    try std.testing.expect(!@hasDecl(data_node.storage.v3, "member_set"));
+    try std.testing.expect(!@hasDecl(data_node.storage.v3, "replicated_journal"));
+    try std.testing.expect(!@hasDecl(data_node.storage.v3, "replica_endpoint"));
 
     try std.testing.expect(@hasDecl(data_node, "endpoint_control"));
     try std.testing.expect(@hasDecl(data_node, "endpoint_daemon"));

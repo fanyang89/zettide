@@ -103,9 +103,10 @@ pub const ReplicatedJournal = struct {
         for (ready.active_members[0..set.supplied_count], 0..) |active, set_index| {
             if (!active) continue;
             if (coordinator.participant_count == max_control_participant_count) return error.TooManyControlVoters;
+            const journal = try journal_api.Journal.open(&(set.members[set_index].?));
             coordinator.participants[coordinator.participant_count] = .{
                 .set_index = set_index,
-                .journal = try journal_api.Journal.open(&(set.members[set_index].?)),
+                .journal = journal,
                 .active = true,
             };
             coordinator.participant_count += 1;
@@ -2048,6 +2049,34 @@ test "member removal requires catalog drain" {
     try std.testing.expect(!removesMember(current, current));
 }
 
+test "Catalog coordinator owns the Pool exclusively and rolls back partial open" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var set = try createThreeVoterTestSet(tmp.dir);
+    defer set.deinit();
+    for (0..3) |blocked_index| {
+        const blocked = (try set.memberAt(blocked_index)).?;
+        try blocked.claimJournal();
+        defer blocked.releaseJournal();
+        try std.testing.expectError(error.JournalAlreadyOpen, open(std.testing.io, &set));
+        try std.testing.expectError(error.JournalAlreadyOpen, blocked.claimJournal());
+        for (0..blocked_index) |index| {
+            const earlier = (try set.memberAt(index)).?;
+            try earlier.claimJournal();
+            earlier.releaseJournal();
+        }
+    }
+    var coordinator = try open(std.testing.io, &set);
+    defer coordinator.deinit();
+    try std.testing.expectError(error.CoordinatorAlreadyOpen, open(std.testing.io, &set));
+    try std.testing.expectError(error.CoordinatorActive, set.close());
+    coordinator.close();
+    coordinator.close();
+    var reopened = try open(std.testing.io, &set);
+    defer reopened.deinit();
+    try std.testing.expectEqual(@as(usize, 3), reopened.participant_count);
+}
+
 test "three-voter catalog publication fault matrix" {
     const Case = enum {
         success,
@@ -2530,7 +2559,7 @@ test "mapped extents are durable before catalog publication" {
                 lease = try pool_catalog_volume.CatalogDataLease.acquire(&set);
                 try std.testing.expectError(
                     error.DataGenerationLeaseRequired,
-                    member.asReplicaEndpoint().writeData(0, "stale"),
+                    member.write(.data, 0, "stale"),
                 );
                 _ = try coordinator.commitAuthorityCheckpoint(
                     try checkpointProposalForAuthority(set.authority().?, id(14)),
@@ -2555,7 +2584,7 @@ test "mapped extents are durable before catalog publication" {
                 try std.testing.expectEqualSlices(u8, &replacement, &actual);
                 try std.testing.expectError(
                     error.DataGenerationLeaseRequired,
-                    member.asReplicaEndpoint().writeData(0, "stale"),
+                    member.write(.data, 0, "stale"),
                 );
 
                 const mapped_contents = try std.testing.allocator.alloc(u8, extent_size);
@@ -2636,7 +2665,7 @@ test "mapped extents are durable before catalog publication" {
             try std.testing.expectEqual(pool_policy.DataAccess.unavailable, set.dataAccess());
             try std.testing.expectError(
                 error.DataGenerationLeaseRequired,
-                member.asReplicaEndpoint().writeData(0, "stale"),
+                member.write(.data, 0, "stale"),
             );
             var root_a: [pool_catalog.root_encoded_size]u8 = undefined;
             var root_b: [pool_catalog.root_encoded_size]u8 = undefined;

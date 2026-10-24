@@ -3,12 +3,16 @@
 ## Scope
 
 This document freezes the v3 member header, topology record, replicated layout, genesis payload,
-control record, commit certificate codecs, member-local creation, fixed-three-member set creation,
-existing-set control authority, control journal scan, append, and the Blob and Catalog Pool data modes.
+control record, commit certificate codecs, member-local creation, Pool control authority,
+control journal scan, append, and the Blob and Catalog Pool data modes.
 It defines no journal repair, signatures, manifest, erasure coding, member replacement, or rebalance.
 Under [ADR 0005](decisions/0005-single-node-vm-block-storage.md), the filesystem
 service has been removed. Blob markers and geometry below are retained format
 contracts, not mountable product capabilities. Catalog is the VM block data mode.
+The historical fixed-three MemberSet, its generation coordinator, and the
+ReplicaEndpoint adapter are removed. Fixed-v1 header, topology, layout, genesis,
+journal, and certificate codecs remain for identification and validation; the
+dynamic Pool path does not adopt or convert those Members.
 
 The multi-volume catalog codecs under development are specified separately in
 [`v3-multivolume-format.md`](v3-multivolume-format.md). The local CLI now provisions
@@ -284,51 +288,25 @@ and original error. The failed member may contain any prefix of its publication 
 voters may already form a writable quorum. Callers must retain this identity and inspect or recover the
 partial pool; they must not interpret the outcome as proof that no pool exists.
 
-The fixed-three-member creation boundary accepts three borrowed directory handles and basenames in
-topology slot order. Before creating any file, it validates every member input and cross-validates
-the complete header set against the genesis topology and layout. Reusing the same borrowed directory
-handle and basename for multiple slots is rejected. It then creates members in slot order using the
-single-member durability protocol. A failure closes and unlocks every member already
-returned, retains every file whose creation was attempted, and does not attempt later slots. Set
-close attempts all three member closes, reports the first error, and is idempotent. The set owns only
-the returned member handles; caller-owned directories and basename storage remain borrowed. This
-boundary does not open existing sets, select authority, establish quorum, or repair partial creation.
+## Retired Fixed-Three Runtime
 
-## Member Set Open and Control Authority
+The fixed-three owning MemberSet and replicated generation coordinator are no
+longer public APIs or product runtime paths. Member-local format creation and
+journal scanning remain available for compatibility tests and diagnostics; they
+do not provide a supported fixed-v1 Pool service.
 
-Existing-set open accepts three slot-indexed optional locations and acquires member locks in slot
-order. A null location is absent. A provided member that cannot open, scans unsuccessfully, or is in
-the wrong input slot is recorded in that slot's diagnostics and excluded. History allocation failure
-aborts open. Every error path releases all retained history allocations and member locks.
+`PoolMemberSet` closes non-dynamic Members immediately after header validation,
+marks them `legacy`, and does not scan their journals or retain their locks.
+If no dynamic history is readable and a legacy Member was identified, diagnostic,
+read-only, and writable opens return `LegacyMemberUnsupported` rather than
+`NoReadableMember`. In mixed input, legacy Members remain visible only as status:
+they supply neither authority, control votes, nor data access. Adoption rejects
+legacy inputs before taking ownership of any caller-supplied Member. Neither path
+converts media, repairs legacy header mirrors, or syncs old Members.
 
-Open has three intents. Diagnostic open requires one readable history and may return without an
-authority. Read-only open requires a genesis authority. Writable open additionally requires a
-control-write-ready quorum and never silently downgrades. The resulting owning set must be moved
-rather than copied. It exposes per-slot status, selected authority, and optional control-write state.
-An out-of-group member's writable handle is closed before successful return; its retained history is
-available only as diagnostic evidence.
-
-Genesis witnesses are unique topology slots whose accepted first records have the same shared
-history digest. At least two witnesses establish the genesis group. Selected headers are
-cross-validated for identity, static geometry, format, and layout even when the third member is
-missing. Other genesis groups are foreign. A quorum-observed membership prepare or commit is rejected
-until membership transitions have defined payload and authority semantics.
-
-Generation commits are grouped by shared history digest and count each selected member at most once.
-A group with at least two witnesses is a candidate only after its certificate resolves to exact
-prepare evidence under the selected topology. Failure to validate a quorum-observed candidate is
-fatal and cannot fall back to an older state. Candidates are ordered only by their position in an
-accepted digest chain. The unique ancestry-maximal candidate becomes authority; incomparable quorum
-candidates are conflicting authority. Generation, writer term, local sequence, physical frontier,
-and checkpoint hints are never ordering tie-breakers.
-
-Control-write-ready requires at least two writable, unfrozen selected members with no unresolved
-tail damage, available journal capacity, the selected authority in their history, and exactly equal
-tail history digests. The stable tail must currently be genesis or a generation commit; a prepare
-quorum remains recovery-only. Interior abandoned damage, zero holes, degraded header redundancy, and
-stale checkpoint hints do not independently disqualify a member. This state establishes only that a
-control journal quorum can be extended. It does not establish metadata or data-root recovery and is
-not a volume-writable claim.
+Current Pool authority and generation transactions use the dynamic topology and
+coordinator described below. A three-voter Catalog Pool is not the retired
+fixed-v1 runtime and retains local replication, data leases, and recovery.
 
 ## Topology Record
 
@@ -538,7 +516,7 @@ The dynamic generation coordinator claims a writable `PoolMemberSet` and opens o
 active voters, at most three participants regardless of total Pool size. It uses the topology's
 dynamic quorum for exact prepare and commit acknowledgements and emits a version 2 certificate.
 Prepare quorum failure or unknown commit outcome sticky-freezes the coordinator and revokes the
-member set's write-ready histories until full reopen, matching the fixed-v1 failure boundary.
+member set's write-ready histories until full reopen.
 
 Membership transactions prepare on the union of old and proposed voter sets. Normal transitions
 require both old and new prepare quorums and both old and new commit quorums; administrative recovery
@@ -800,29 +778,10 @@ byte, digest, or slot before I/O. Only an exact match proceeds to the same durab
 state update used by ordinary append. This lets a coordinator prove a common shared parent before
 any member write while preserving member-local raw chains.
 
-The fixed-three replicated coordinator exclusively claims a control-write-ready member set and opens
-member-local journals for its active slots. The set cannot close while claimed and must not move.
-Callers must not query or mutate the set while its coordinator is active; coordinator results are the
-only current control-state view until close and full reopen. Deinitializing a claimed set is a
-programming error.
-One coordinator mutex serializes the complete generation transaction with close. Before the first
-write, all participating journals must have two available slots, exact preparations must share one
-history digest, and generation, membership, topology, and layout must extend the selected authority.
-Members without two slots are excluded when two others remain.
-
-The coordinator attempts every prepared member and never cancels remaining writes after reaching a
-quorum. Two explicitly acknowledged durable prepares produce the canonical certificate. Commit is
-attempted only on members whose prepare was explicitly acknowledged, and two explicitly acknowledged
-durable commits are required for success. A single prepare failure can therefore produce a degraded
-successful commit on the other two members. Prepare quorum failure and any commit result with fewer
-than two acknowledgements sticky-freeze the coordinator; the latter is an unknown outcome because a
-failed call may still have reached durable media.
-
-Immediately before prepare I/O, the set revokes its old control-write-ready state and frees retained
-history evidence. Any member I/O failure is conservatively marked damaged. Successful commit installs
-the new authority and exact active tail; failed or unknown transactions leave the set non-write-ready
-until close and full reopen. This coordinator only commits generation control records. It does not
-establish writer fencing, data-root durability, retry idempotence, repair, or background catch-up.
+The historical fixed-three replicated coordinator is removed. Current Catalog
+publication uses `pool_replicated_journal` with `PoolMemberSet`, dynamic voter
+quorums, and data/metadata durability checks, as described above. Retaining the
+member-local journal primitives does not restore fixed-v1 quorum authority.
 
 The append target is exactly the retained physical frontier. Interior zero or invalid slots are
 never reused, and a full journal never wraps. Read-only, closed, frozen, full, sequence-overflow,
