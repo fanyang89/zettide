@@ -25,6 +25,13 @@ consumer, DAG, validation, and release evidence.
 
 The filesystem engine and its public exports have been removed under
 [ADR 0005](../../docs/decisions/0005-single-node-vm-block-storage.md). Shared
-on-disk feature bits, geometry checks, and local raw protection primitives are
-retained for compatibility and validation. They do not provide a filesystem or
-authorize reinterpreting Blob media as Catalog Volumes.
+on-disk feature bits, geometry checks, and layout codecs are retained for
+compatibility and validation. The fixed and scheduled raw Blob data-plane
+adapters are removed; they are not an alternative to Catalog Volume I/O.
+Catalog replica reads, data leases, journal durability, and recovery remain.
+Retired format recognition never authorizes reinterpreting Blob media as Volumes.
+
+From the repository root, `zig build test-catalog-io` exercises the retained
+Catalog data path and Linux request worker with regular-file Members. It runs
+in the default test gate without starting SPDK; SPDK storage integration uses
+the same test-only Catalog initialization fixture.

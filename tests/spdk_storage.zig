@@ -239,7 +239,7 @@ fn runStorageTest(context: *TestContext, runtime: *data_node.spdk_runtime.Runtim
     // Provisioning consumes every supplied storage on both success and failure.
     opened_count = 0;
     const outcome = try storage_engine.v3.pool_provision.create(context.io, context.allocator, &storages, .{
-        .data_mode = .blob,
+        .data_mode = .catalog,
     });
     var provisioned = switch (outcome) {
         .complete => |value| value,
@@ -248,17 +248,18 @@ fn runStorageTest(context: *TestContext, runtime: *data_node.spdk_runtime.Runtim
     defer provisioned.deinit();
     var provisioned_set = try provisioned.intoMemberSet();
     defer provisioned_set.deinit();
-    var pool_storage = try storage_engine.v3.pool_data_storage.create(context.allocator, context.io, &provisioned_set, true);
-    var pool_storage_open = true;
-    defer if (pool_storage_open) pool_storage.close(context.io) catch {};
+    const volume_id = try @import("catalog_fixture.zig").publishMapped(context.io, &provisioned_set);
+    var lease = try storage_engine.v3.pool_catalog_volume.CatalogDataLease.acquire(&provisioned_set);
+    defer lease.deinit();
+    var volume = try storage_engine.v3.pool_catalog_volume.CatalogVolumeBackend.openWritable(context.allocator, &lease, volume_id);
     const expected: [4096]u8 align(4096) = @splat(0x5a);
-    try pool_storage.writeAllAt(context.io, &expected, 0);
-    try pool_storage.sync(context.io);
-    try pool_storage.close(context.io);
-    pool_storage_open = false;
+    try volume.write(&lease, 0, &expected);
+    try volume.flush(&lease);
+    lease.release();
+    try provisioned_set.close();
 
     for (names, 0..) |name, index| {
-        storages[index] = try runtime.openStorage(context.allocator, name, true);
+        storages[index] = try runtime.openStorage(context.allocator, name, false);
         opened_count += 1;
     }
     // PoolMemberSet likewise owns every storage once scanning starts.
@@ -267,13 +268,12 @@ fn runStorageTest(context: *TestContext, runtime: *data_node.spdk_runtime.Runtim
         context.io,
         context.allocator,
         &storages,
-        .writable,
+        .read_only,
     );
     defer set.deinit();
-    pool_storage = try storage_engine.v3.pool_data_storage.create(context.allocator, context.io, &set, false);
-    pool_storage_open = true;
+    volume = try storage_engine.v3.pool_catalog_volume.CatalogVolumeBackend.open(context.allocator, &set, volume_id);
     var payload: [4096]u8 align(4096) = undefined;
-    if (try pool_storage.readAt(context.io, &payload, 0) != payload.len) return error.ShortRead;
+    try volume.read(0, &payload);
     if (!std.mem.eql(u8, &payload, &expected)) return error.DataMismatch;
 }
 

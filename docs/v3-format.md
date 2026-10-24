@@ -228,9 +228,10 @@ to POSIX positional I/O and full fsync. Resource exhaustion and operation failur
 fallback, and callers may force either transport. The storage interface remains synchronous to
 preserve ordering and durability semantics. These fds do not use `O_DIRECT`.
 
-The Linux raw-pool CLI requires every device path explicitly. The mountable implementation accepts
-exactly one device for `unprotected`, exactly three devices for `replicated`, and 3 through 12 devices
-for `scheduled-replicated`.
+The Linux raw-pool CLI requires every device path explicitly. Catalog-mode creation accepts
+exactly one device for `unprotected` or exactly three devices for `replicated`.
+`scheduled-replicated` and filesystem mount commands are retired; their on-disk
+layout identities remain reserved and decoded for diagnostics.
 `pool plan-create` scans the complete capacity of every device and rejects any nonzero data. A
 confirmation token binds the ordered device instances, capacities, logical sector sizes, profile,
 and label. `pool create` acquires all devices with `O_EXCL`, reconstructs the plan from those fds,
@@ -239,19 +240,17 @@ Tokens cease to match when a device path is rebound to a different `diskseq` ins
 
 `pool inspect` reopens an explicitly supplied member set read-only, selects control authority, and
 reports data mode, topology, layout, generation, member classifications, and policy-level data
-access. Blob mountability requires a successful read-only BlobFilesystem open; the incompatible
-marker alone is not sufficient. Catalog and `legacy_unsupported` modes are not filesystem-mountable.
-The policy value reflects available authoritative members only and is distinct from the stricter
-exact-width requirement of the initial mount command.
+access. No data mode is mounted as a filesystem by this product. The policy value
+reflects available authoritative members only, not a usable Volume or permission
+to export retired Blob data. Catalog creation leaves its root and Volumes uninitialized.
 
 ### Pool Data Planes
 
-An unprotected Blob Pool reads and writes its one member. Replicated and scheduled Blob layouts map
-logical BlobDevice I/O through the Pool data-storage policy. A Blob Pool uses that device as one
-native BlobStore; creation formats the BlobStore, filesystem root, name profile, and current Linux
-root UID/GID while the provisioned members remain exclusively open. The product does not convert a
-Pool with `legacy_unsupported` data mode. Blob Pools currently exclude Catalog Volumes, encryption,
-erasure coding, garbage collection, online expansion, and protection migration.
+Fixed and scheduled raw Blob I/O adapters are removed. The retained Member,
+layout, placement-page, and genesis codecs preserve their old geometry and
+feature identities for diagnostics and explicit rejection, not for a supported
+BlobDevice or filesystem service. The product does not convert Blob or
+`legacy_unsupported` media into Catalog mode.
 
 Catalog mode uses member metadata for the Catalog graph and member data for block extents. Catalog
 Volumes are exported as blocks by the managed SPDK path, not mounted through BlobFilesystem. The
@@ -261,12 +260,12 @@ state, creation identity, and geometry. Catalog graph validation separately bind
 This retained codec is Catalog metadata; it does not make the removed LittleFS filesystem backend or
 standalone `LFSDRV2` containers supported.
 
-Writable `pool mount` requires the complete Blob profile width and exclusively acquires writable
-devices. `pool mount --read-only` exclusively acquires readable devices, passes `ro` to FUSE, permits
-read-only block devices, and performs majority reads without modifying access times or syncing the
-backing members. Fixed-width
-profiles still require every member. A scheduled Blob Pool may omit exactly one member; each read then
-requires its two remaining replicas to agree. Two missing scheduled members make data unavailable.
+Catalog Volume reads resolve only validated extent ownership. Replicated reads
+require two matching copies; writable I/O holds Catalog data claims and writes
+every placement. A write or flush failure freezes the lease and revokes Pool
+write readiness and data access. The SPDK Catalog worker serializes writes and
+flushes and drains queued requests before releasing ownership. None of these
+rules implies degraded writes, online rebuild, or a retired Blob mount path.
 
 Dynamic pool provisioning accepts one owned storage per initial member. It rejects erasure coding and
 profiles wider than the supplied storage set, derives a common logical capacity from the smallest

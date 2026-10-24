@@ -33,15 +33,22 @@ does not trigger automatic storage failover.
 - Unicode normalization, filesystem test-suite dependencies, scheduled raw Blob
   performance harnesses, and the now-unused grpc-lite/profiling build dependency.
 - iSCSI, RDMA/RXE, and vhost block adapters and protocol automation profiles.
+- Fixed and scheduled raw Blob data-plane adapters; SPDK storage integration now
+  uses an authenticated Catalog Volume rather than a raw Blob Pool.
 
 These are retired capabilities, not deferred roadmap items.
 
 ## Remaining convergence work
 
-Filesystem entry points are gone. Retired format bits, Blob geometry checks,
-and low-level local protection/layout primitives remain for safe format
+Filesystem and raw Blob I/O entry points are gone. Retired format bits, Blob
+geometry checks, and low-level local format/layout primitives remain for safe format
 recognition and existing engine validation. They do not implement file semantics
 or a supported Blob export. No on-media enum values or feature bits were reused.
+
+`test-catalog-io` covers one- and three-Member Catalog reopen, matching-copy
+reads, write/flush failures on every replica, whole-lease freeze, and Linux
+worker ordering/drain. The fixture initializes a test Volume through the real
+journal; it is not a new operator Volume-management command.
 
 The raw-disk creation planner now accepts only Catalog mode and fixed one- or
 three-device profiles. Its versioned confirmation-token domain has changed;

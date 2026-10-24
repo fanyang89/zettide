@@ -51,6 +51,10 @@ Blob files cannot be mounted, reformatted, or converted by a filesystem CLI;
 those commands are gone. Retained Member feature bits and layout/geometry
 validation can identify old Blob Pools. Catalog I/O must reject their data mode,
 not reinterpret their bytes or reuse retired feature values.
+Both fixed and scheduled raw Blob I/O adapters are removed. Their persisted
+layout/placement codecs remain for diagnostics and compatibility tests, not as
+supported read/write services. Rejection must not write, sync, or retain data
+claims on the old Members.
 
 ## Failures and recovery
 
@@ -66,6 +70,12 @@ identity; do not clear uncertainty by recreating metadata.
 Run `mise run test` and `mise run check` without incremental compilation before
 committing. `zig build build-spdk-tests` compiles the SPDK integration libraries
 without a runtime; it does not execute them.
+
+`zig build test-catalog-io` runs regular-file Catalog data-path tests without
+SPDK. It checks one- and three-Member durable reopen, two-matching-copy reads,
+per-replica write/flush fault freezing, and Linux worker request ordering and
+drain. The default test gate includes it. These tests use test-only Catalog
+initialization, not a supported CLI for Volume creation or repair.
 
 `zig build test-linux-block -Dblock-tests=required` uses temporary loop backing
 files to verify Catalog Pool creation, rejection of invalid/stale tokens,

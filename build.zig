@@ -93,6 +93,22 @@ pub fn build(b: *std.Build) void {
     unit_step.dependOn(compatibility_step);
     unit_step.dependOn(data_node_step);
     unit_step.dependOn(&run_module_roots_tests.step);
+    const catalog_io_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/catalog_io.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zettide_storage", .module = storage_engine },
+                .{ .name = "zettide_data_node", .module = data_node_module },
+            },
+        }),
+    });
+    const run_catalog_io_tests = b.addRunArtifact(catalog_io_tests);
+    const catalog_io_step = b.step("test-catalog-io", "Run Catalog replica durability and request-ordering tests");
+    catalog_io_step.dependOn(&run_catalog_io_tests.step);
+    unit_step.dependOn(catalog_io_step);
     const module_roots_step = b.step("test-module-roots", "Check storage and data-node module boundaries");
     module_roots_step.dependOn(&run_module_roots_tests.step);
 

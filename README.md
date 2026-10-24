@@ -60,6 +60,7 @@ zig build test-storage-engine
 zig build test-data-node
 zig build test-module-roots
 zig build test-compatibility
+zig build test-catalog-io
 zig build build-spdk-tests
 ```
 

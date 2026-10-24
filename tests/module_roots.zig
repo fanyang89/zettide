@@ -7,6 +7,9 @@ test "storage module exposes engine contracts without product adapters" {
     _ = storage_engine.v3.pool_member_set.PoolMemberSet;
     _ = storage_engine.v3.pool_catalog_volume.CatalogVolumeBackend;
     _ = storage_engine.v3.pool_catalog_volume.CatalogDataLease;
+    try std.testing.expect(!@hasDecl(storage_engine.v3, "pool_data_storage"));
+    try std.testing.expect(!@hasDecl(storage_engine.v3, "pool_data_device"));
+    try std.testing.expect(!@hasDecl(storage_engine.v3, "pool_scheduled_data_device"));
     try std.testing.expect(!@hasDecl(storage_engine, "blob_filesystem"));
     try std.testing.expect(!@hasDecl(storage_engine, "filesystem_backend"));
     try std.testing.expect(!@hasDecl(storage_engine, "nfs_filesystem"));
