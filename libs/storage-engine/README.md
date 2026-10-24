@@ -33,6 +33,9 @@ Retired format recognition never authorizes reinterpreting Blob media as Volumes
 High-level provisioning defaults to Catalog and rejects Blob/scheduled Blob
 options before I/O. Retired-media regression fixtures use the retained low-level
 Member and format APIs, not a hidden provisioning mode.
+Scheduled Blob capacity planning and stripe mapping are also removed. Its
+placement codecs retain exact stored quotas and permutation fields, including
+golden-byte, corruption, and overflow-boundary validation.
 
 The legacy fixed-three MemberSet/coordinator and ReplicaEndpoint abstraction are
 also removed. The current PoolMemberSet and Catalog coordinator retain local

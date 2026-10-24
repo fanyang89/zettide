@@ -255,6 +255,11 @@ layout, placement-page, and genesis codecs preserve their old geometry and
 feature identities for diagnostics and explicit rejection, not for a supported
 BlobDevice or filesystem service. The product does not convert Blob or
 `legacy_unsupported` media into Catalog mode.
+The retired scheduled Blob module retains only placement format values, codecs,
+digests, and structural validation. Capacity allocation and logical-to-physical
+stripe mapping APIs are removed. Permutation fields and assignment quotas remain
+part of the persisted identity and are validated, not recomputed or discarded.
+A frozen legacy placement encoding guards the unchanged wire format.
 
 Catalog mode uses member metadata for the Catalog graph and member data for block extents. Catalog
 Volumes are exported as blocks by the managed SPDK path, not mounted through BlobFilesystem. The

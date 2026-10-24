@@ -345,15 +345,21 @@ test "unknown kind reserved bytes and checksum corruption are rejected" {
     try std.testing.expectError(error.ChecksumMismatch, decode(&bytes));
 }
 
-fn testPlan(member_count: usize, stripes: u64) !pool_blob_schedule.PlacementPlan {
-    var geometries: [pool_blob_schedule.max_member_count]pool_blob_schedule.Geometry = undefined;
-    for (geometries[0..member_count], 0..) |*geometry, index|
-        geometry.* = .{ .slot = @intCast(index * 3 + 1), .available_stripes = stripes };
-    return pool_blob_schedule.build(1024 * 1024, geometries[0..member_count], 41);
+fn testPlan(member_count: usize, stripes: u64) pool_blob_schedule.PlacementPlan {
+    var plan: pool_blob_schedule.PlacementPlan = .{
+        .stripe_size = 1024 * 1024,
+        .logical_stripe_count = member_count / 3 * stripes,
+        .multiplier = 1,
+        .addend = 0,
+        .member_count = @intCast(member_count),
+    };
+    for (plan.entries[0..member_count], 0..) |*entry, index|
+        entry.* = .{ .slot = @intCast(index * 3 + 1), .assigned_stripes = stripes };
+    return plan;
 }
 
 test "scheduled blob layout round trips and binds placement fields" {
-    const plan = try testPlan(6, 17);
+    const plan = testPlan(6, 17);
     const layout = try Layout.initScheduledBlob(plan, 3, 2);
     const bytes = try encode(layout);
     try std.testing.expectEqualSlices(u8, &scheduled_magic, bytes[0x000..0x008]);
@@ -391,7 +397,7 @@ test "scheduled blob layout round trips and binds placement fields" {
 
 test "scheduled blob supports capacities above 16 TiB and exact access thresholds" {
     const stripes = (@as(u64, 16) * 1024 * 1024 * 1024 * 1024) / (1024 * 1024) + 1;
-    const layout = try Layout.initScheduledBlob(try testPlan(6, stripes), 1, 1);
+    const layout = try Layout.initScheduledBlob(testPlan(6, stripes), 1, 1);
     try std.testing.expect(layout.scheduled_blob.?.logical_capacity > @as(u64, 16) * 1024 * 1024 * 1024 * 1024);
     try std.testing.expectEqual(@as(u16, 3), layout.durable_write_threshold);
     try std.testing.expectEqual(@as(u16, 2), layout.read_threshold);
@@ -401,7 +407,7 @@ test "scheduled blob supports capacities above 16 TiB and exact access threshold
 }
 
 test "scheduled blob member availability requires all but at most one" {
-    const layout = try Layout.initScheduledBlob(try testPlan(12, 17), 1, 1);
+    const layout = try Layout.initScheduledBlob(testPlan(12, 17), 1, 1);
     try std.testing.expectEqual(.read_write, try dataAccessForMemberCount(layout, 12));
     try std.testing.expectEqual(.read_only, try dataAccessForMemberCount(layout, 11));
     try std.testing.expectEqual(.unavailable, try dataAccessForMemberCount(layout, 10));
@@ -414,7 +420,7 @@ test "layout magic and version pairs cannot be crossed" {
     fixChecksum(&bytes);
     try std.testing.expectError(error.UnsupportedFormatVersion, decode(&bytes));
 
-    bytes = try encode(try Layout.initScheduledBlob(try testPlan(3, 4), 1, 1));
+    bytes = try encode(try Layout.initScheduledBlob(testPlan(3, 4), 1, 1));
     @memcpy(bytes[0x000..0x008], &legacy_magic);
     fixChecksum(&bytes);
     try std.testing.expectError(error.UnsupportedFormatVersion, decode(&bytes));

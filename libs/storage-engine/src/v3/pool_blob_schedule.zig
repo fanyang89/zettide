@@ -14,19 +14,9 @@ const entries_offset: usize = 0x030;
 const entry_size: usize = 16;
 const reserved_offset: usize = entries_offset + max_member_count * entry_size;
 
-pub const Geometry = struct {
-    slot: u16,
-    available_stripes: u64,
-};
-
 pub const Entry = struct {
     slot: u16 = 0,
     assigned_stripes: u64 = 0,
-};
-
-pub const Location = struct {
-    slot: u16,
-    physical_stripe: u64,
 };
 
 pub const PlacementPlan = struct {
@@ -42,70 +32,6 @@ pub const PlacementPlan = struct {
         return self.entries[0..self.member_count];
     }
 };
-
-pub fn build(stripe_size: u32, geometries: []const Geometry, seed: u64) !PlacementPlan {
-    if (geometries.len < replica_count or geometries.len > max_member_count)
-        return error.InvalidMemberCount;
-
-    var sorted: [max_member_count]Geometry = undefined;
-    @memcpy(sorted[0..geometries.len], geometries);
-    std.mem.sort(Geometry, sorted[0..geometries.len], {}, struct {
-        fn lessThan(_: void, a: Geometry, b: Geometry) bool {
-            return a.slot < b.slot;
-        }
-    }.lessThan);
-    for (sorted[0..geometries.len], 0..) |geometry, index| {
-        if (geometry.available_stripes == 0) return error.ZeroCapacity;
-        if (index != 0 and sorted[index - 1].slot == geometry.slot) return error.DuplicateSlot;
-    }
-
-    const logical_stripe_count = maximumLogicalStripes(sorted[0..geometries.len]);
-    if (logical_stripe_count == 0) return error.InsufficientCapacity;
-
-    const target = @as(u128, replica_count) * logical_stripe_count;
-    var low: u64 = 0;
-    var high: u64 = logical_stripe_count;
-    while (low < high) {
-        const level: u64 = @intCast((@as(u128, low) + high + 1) / 2);
-        if (cappedSum(sorted[0..geometries.len], level) <= target)
-            low = level
-        else
-            high = level - 1;
-    }
-
-    var assignments: [max_member_count]u64 = @splat(0);
-    var assigned_sum: u128 = 0;
-    for (sorted[0..geometries.len], 0..) |geometry, index| {
-        const assigned = @min(geometry.available_stripes, low);
-        assignments[index] = assigned;
-        assigned_sum += assigned;
-    }
-    var remainder: usize = @intCast(target - assigned_sum);
-    for (sorted[0..geometries.len], 0..) |geometry, index| {
-        if (remainder == 0) break;
-        if (assignments[index] < @min(geometry.available_stripes, logical_stripe_count)) {
-            assignments[index] += 1;
-            remainder -= 1;
-        }
-    }
-    std.debug.assert(remainder == 0);
-
-    var plan: PlacementPlan = .{
-        .stripe_size = stripe_size,
-        .logical_stripe_count = logical_stripe_count,
-        .multiplier = undefined,
-        .addend = if (logical_stripe_count == 1) 0 else seed % logical_stripe_count,
-        .member_count = 0,
-    };
-    for (sorted[0..geometries.len], assignments[0..geometries.len]) |geometry, assigned| {
-        if (assigned == 0) continue;
-        plan.entries[plan.member_count] = .{ .slot = geometry.slot, .assigned_stripes = assigned };
-        plan.member_count += 1;
-    }
-    plan.multiplier = chooseMultiplier(logical_stripe_count, plan.member_count);
-    try validate(plan);
-    return plan;
-}
 
 pub fn encode(plan: PlacementPlan) ![encoded_size]u8 {
     try validate(plan);
@@ -209,77 +135,6 @@ pub fn validate(plan: PlacementPlan) !void {
     }
 }
 
-pub fn map(plan: PlacementPlan, logical_stripe: u64) ![replica_count]Location {
-    try validate(plan);
-    return mapValidated(&plan, logical_stripe);
-}
-
-/// Maps a stripe in a plan that has already passed `validate`.
-pub fn mapValidated(plan: *const PlacementPlan, logical_stripe: u64) ![replica_count]Location {
-    if (logical_stripe >= plan.logical_stripe_count) return error.LogicalStripeOutOfRange;
-    const n = plan.logical_stripe_count;
-    const permuted: u64 = if (n == 1) 0 else @intCast(
-        (@as(u128, plan.multiplier) * logical_stripe + plan.addend) % n,
-    );
-    var result: [replica_count]Location = undefined;
-    for (0..replica_count) |lane| {
-        const position = @as(u128, lane) * n + permuted;
-        var band_start: u128 = 0;
-        for (plan.memberSlice()) |entry| {
-            const band_end = band_start + entry.assigned_stripes;
-            if (position < band_end) {
-                result[lane] = .{
-                    .slot = entry.slot,
-                    .physical_stripe = @intCast(position - band_start),
-                };
-                break;
-            }
-            band_start = band_end;
-        } else unreachable;
-    }
-    std.debug.assert(result[0].slot != result[1].slot and result[0].slot != result[2].slot and
-        result[1].slot != result[2].slot);
-    return result;
-}
-
-fn maximumLogicalStripes(geometries: []const Geometry) u64 {
-    var total: u128 = 0;
-    for (geometries) |geometry| total += geometry.available_stripes;
-    var low: u64 = 0;
-    var high: u64 = @intCast(@min(total / replica_count, std.math.maxInt(u64)));
-    while (low < high) {
-        const candidate: u64 = @intCast((@as(u128, low) + high + 1) / 2);
-        if (cappedSum(geometries, candidate) >= @as(u128, replica_count) * candidate)
-            low = candidate
-        else
-            high = candidate - 1;
-    }
-    return low;
-}
-
-fn cappedSum(geometries: []const Geometry, limit: u64) u128 {
-    var sum: u128 = 0;
-    for (geometries) |geometry| sum += @min(geometry.available_stripes, limit);
-    return sum;
-}
-
-fn chooseMultiplier(n: u64, member_count: usize) u64 {
-    if (n == 1) return 0;
-    const groups: u64 = @intCast((member_count + replica_count - 1) / replica_count);
-    const target = @max(@as(u64, 1), n / groups);
-    var distance: u64 = 0;
-    while (true) : (distance += 1) {
-        if (distance <= target - 1) {
-            const lower = target - distance;
-            if (gcd(lower, n) == 1) return lower;
-        }
-        if (distance != 0 and distance <= n - 1 - target) {
-            const upper = target + distance;
-            if (gcd(upper, n) == 1) return upper;
-        }
-    }
-}
-
 fn gcd(a_initial: u64, b_initial: u64) u64 {
     var a = a_initial;
     var b = b_initial;
@@ -295,22 +150,38 @@ fn fixChecksum(bytes: *[encoded_size]u8) void {
     codec.putInt(u32, bytes, checksum_offset, codec.crc32c(bytes[0..checksum_offset]));
 }
 
-fn uniformGeometries(count: usize, capacity: u64) [max_member_count]Geometry {
-    var geometries: [max_member_count]Geometry = undefined;
-    for (0..count) |index| geometries[index] = .{ .slot = @intCast(index + 1), .available_stripes = capacity };
-    return geometries;
+fn testGoldenBytes() ![encoded_size]u8 {
+    // Frozen legacy planner output: six Members, 17 stripes each, seed 41.
+    var bytes: [encoded_size]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bytes, "44444253434831000100000000010000000010000600030022000000000000000f00000000000000070000000000000001000000000000001100000000000000" ++
+        "02000000000000001100000000000000030000000000000011000000000000000400000000000000110000000000000005000000000000001100000000000000" ++
+        "06000000000000001100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000" ++
+        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f1cc9e43");
+    return bytes;
+}
+
+test "historical placement golden bytes retain exact wire identity" {
+    const bytes = try testGoldenBytes();
+    const plan = try decode(&bytes);
+    try std.testing.expectEqual(@as(u16, 6), plan.member_count);
+    try std.testing.expectEqual(@as(u64, 34), plan.logical_stripe_count);
+    try std.testing.expectEqual(@as(u64, 15), plan.multiplier);
+    try std.testing.expectEqual(@as(u64, 7), plan.addend);
+    try std.testing.expectEqualSlices(u8, &bytes, &(try encode(plan)));
 }
 
 test "placement plan codec is canonical and rejects envelope corruption" {
-    const geometries = uniformGeometries(6, 17);
-    const plan = try build(1024 * 1024, geometries[0..6], 41);
-    const canonical = try encode(plan);
+    const canonical = try testGoldenBytes();
     try std.testing.expectEqualSlices(u8, &canonical, &(try encode(try decode(&canonical))));
-    try std.testing.expectEqual(codec.blake3(canonical[0..checksum_offset]), try digest(plan));
+    try std.testing.expectEqual(codec.blake3(canonical[0..checksum_offset]), try digest(try decode(&canonical)));
 
     var bytes = canonical;
     bytes[100] ^= 1;
     try std.testing.expectError(error.ChecksumMismatch, decode(&bytes));
+    bytes = canonical;
+    bytes[0] ^= 1;
+    fixChecksum(&bytes);
+    try std.testing.expectError(error.InvalidMagic, decode(&bytes));
     bytes = canonical;
     codec.putInt(u16, &bytes, 0x008, format_version + 1);
     fixChecksum(&bytes);
@@ -326,7 +197,7 @@ test "placement plan codec is canonical and rejects envelope corruption" {
 }
 
 test "placement page is canonical and rejects a non-zero tail" {
-    const plan = try build(1024 * 1024, uniformGeometries(6, 17)[0..6], 41);
+    const plan = try decode(&(try testGoldenBytes()));
     const page = try encodePage(plan);
     try std.testing.expectEqualSlices(u8, &(try encode(plan)), page[0..encoded_size]);
     try std.testing.expect(codec.isZero(page[encoded_size..]));
@@ -337,163 +208,89 @@ test "placement page is canonical and rejects a non-zero tail" {
     try std.testing.expectError(error.NonZeroPageTail, decodePage(&corrupted));
 }
 
-test "capacity assignment handles equal and heterogeneous members" {
-    var geometries = uniformGeometries(12, 100);
-    var plan = try build(4096, &geometries, 0);
-    try std.testing.expectEqual(@as(u64, 400), plan.logical_stripe_count);
-    for (plan.memberSlice()) |entry| try std.testing.expectEqual(@as(u64, 100), entry.assigned_stripes);
-
-    for (0..12) |index| geometries[index].available_stripes = if (index < 6) 4 else 2;
-    plan = try build(4096, &geometries, 0);
-    try std.testing.expectEqual(@as(u64, 12), plan.logical_stripe_count);
-    for (plan.memberSlice(), 0..) |entry, index|
-        try std.testing.expectEqual(geometries[index].available_stripes, entry.assigned_stripes);
-
-    for (0..12) |index| geometries[index].available_stripes = if (index < 2) 100 else 1;
-    plan = try build(4096, &geometries, 0);
-    try std.testing.expectEqual(@as(u64, 10), plan.logical_stripe_count);
-    try std.testing.expectEqual(@as(u64, 10), plan.entries[0].assigned_stripes);
-    try std.testing.expectEqual(@as(u64, 10), plan.entries[1].assigned_stripes);
-
-    for (0..12) |index| geometries[index].available_stripes = if (index < 3) 100 else 1;
-    plan = try build(4096, &geometries, 0);
-    try std.testing.expectEqual(@as(u64, 103), plan.logical_stripe_count);
-    for (plan.memberSlice()[3..]) |entry| try std.testing.expectEqual(@as(u64, 1), entry.assigned_stripes);
+test "persisted placement fields reject malformed values even with a valid checksum" {
+    inline for (.{
+        .{ u32, 0x00c, 128, error.InvalidEncodedSize },
+        .{ u16, 0x016, 2, error.InvalidReplicaCount },
+        .{ u16, 0x014, 2, error.InvalidMemberCount },
+        .{ u16, 0x014, 13, error.InvalidMemberCount },
+        .{ u16, 0x00a, 1, error.InvalidFlags },
+        .{ u32, 0x010, 2048, error.InvalidStripeSize },
+        .{ u32, 0x010, 6000, error.InvalidStripeSize },
+        .{ u64, 0x018, 0, error.InvalidLogicalStripeCount },
+        .{ u64, 0x020, 0, error.InvalidPermutation },
+        .{ u64, 0x020, 17, error.InvalidPermutation },
+        .{ u64, 0x020, 34, error.InvalidPermutation },
+        .{ u64, 0x028, 34, error.InvalidPermutation },
+        .{ u16, 0x040, 1, error.NonCanonicalSlotOrder },
+        .{ u16, 0x032, 1, error.NonZeroReserved },
+        .{ u64, 0x038, 0, error.InvalidAssignedStripeCount },
+        .{ u64, 0x038, 35, error.InvalidAssignedStripeCount },
+        .{ u64, 0x038, 16, error.InvalidAssignedStripeSum },
+        .{ u16, 0x090, 1, error.NonCanonicalUnusedEntry },
+        .{ u16, 0x092, 1, error.NonZeroReserved },
+        .{ u64, 0x098, 1, error.NonCanonicalUnusedEntry },
+    }) |case| {
+        var bytes = try testGoldenBytes();
+        codec.putInt(case[0], &bytes, case[1], case[2]);
+        fixChecksum(&bytes);
+        try std.testing.expectError(case[3], decode(&bytes));
+        var page: PlacementPage = @splat(0);
+        page[0..encoded_size].* = bytes;
+        try std.testing.expectError(case[3], decodePage(&page));
+    }
 }
 
-test "surplus assignment is balanced and input order independent" {
-    const ordered = [_]Geometry{
-        .{ .slot = 2, .available_stripes = 20 },
-        .{ .slot = 4, .available_stripes = 20 },
-        .{ .slot = 6, .available_stripes = 20 },
-        .{ .slot = 8, .available_stripes = 20 },
-    };
-    const shuffled = [_]Geometry{ ordered[2], ordered[0], ordered[3], ordered[1] };
-    const plan = try build(4096, &ordered, 19);
-    try std.testing.expectEqual(@as(u64, 26), plan.logical_stripe_count);
-    try std.testing.expectEqual(@as(u64, 20), plan.entries[0].assigned_stripes);
-    try std.testing.expectEqual(@as(u64, 20), plan.entries[1].assigned_stripes);
-    try std.testing.expectEqual(@as(u64, 19), plan.entries[2].assigned_stripes);
-    try std.testing.expectEqual(@as(u64, 19), plan.entries[3].assigned_stripes);
-    try std.testing.expectEqualSlices(u8, &(try encode(plan)), &(try encode(try build(4096, &shuffled, 19))));
-}
-
-test "small capacities produce the maximum feasible logical count" {
-    var geometries: [5]Geometry = undefined;
-    for (3..6) |member_count| {
-        var combinations: usize = 1;
-        for (0..member_count) |_| combinations *= 4;
-        for (0..combinations) |value_initial| {
-            var value = value_initial;
-            for (0..member_count) |index| {
-                geometries[index] = .{ .slot = @intCast(index + 1), .available_stripes = @intCast(value % 4 + 1) };
-                value /= 4;
-            }
-            const plan = try build(4096, geometries[0..member_count], 0);
-            var expected: u64 = 0;
-            for (1..8) |candidate| {
-                if (cappedSum(geometries[0..member_count], candidate) >= replica_count * candidate)
-                    expected = candidate;
-            }
-            try std.testing.expectEqual(expected, plan.logical_stripe_count);
+test "stored stripe counts retain singleton and u64 limits without overflow" {
+    for ([_]u64{ 1, (@as(u64, 1) << 32) | 17, std.math.maxInt(u64) }) |n| {
+        var plan: PlacementPlan = .{
+            .stripe_size = 4096,
+            .logical_stripe_count = n,
+            .multiplier = if (n == 1) 0 else 1,
+            .addend = 0,
+            .member_count = 3,
+        };
+        for (plan.entries[0..3], 0..) |*entry, index|
+            entry.* = .{ .slot = @intCast(index + 1), .assigned_stripes = n };
+        const bytes = try encode(plan);
+        try std.testing.expectEqualDeep(plan, try decode(&bytes));
+        plan.multiplier = n;
+        try std.testing.expectError(error.InvalidPermutation, encode(plan));
+        plan.multiplier = if (n == 1) 0 else 1;
+        plan.addend = n;
+        try std.testing.expectError(error.InvalidPermutation, encode(plan));
+        plan.addend = 0;
+        if (n > 1) {
+            plan.entries[0].assigned_stripes -= 1;
+            try std.testing.expectError(error.InvalidAssignedStripeSum, encode(plan));
         }
     }
 }
 
-test "mapping exhaustively partitions assigned member stripes" {
-    var geometries: [5]Geometry = undefined;
-    for (3..6) |member_count| {
-        var combinations: usize = 1;
-        for (0..member_count) |_| combinations *= 3;
-        for (0..combinations) |value_initial| {
-            var value = value_initial;
-            for (0..member_count) |index| {
-                geometries[index] = .{ .slot = @intCast(index * 2 + 1), .available_stripes = @intCast(value % 3 + 1) };
-                value /= 3;
-            }
-            const plan = try build(4096, geometries[0..member_count], 7);
-            var seen: [max_member_count][16]bool = @splat(@splat(false));
-            var counts: [max_member_count]u64 = @splat(0);
-            for (0..plan.logical_stripe_count) |logical_stripe| {
-                const locations = try map(plan, logical_stripe);
-                try std.testing.expect(locations[0].slot != locations[1].slot);
-                try std.testing.expect(locations[0].slot != locations[2].slot);
-                try std.testing.expect(locations[1].slot != locations[2].slot);
-                for (locations) |location| {
-                    var member_index: usize = 0;
-                    while (plan.entries[member_index].slot != location.slot) : (member_index += 1) {}
-                    try std.testing.expect(location.physical_stripe < plan.entries[member_index].assigned_stripes);
-                    try std.testing.expect(!seen[member_index][location.physical_stripe]);
-                    seen[member_index][location.physical_stripe] = true;
-                    counts[member_index] += 1;
-                }
-            }
-            for (plan.memberSlice(), 0..) |entry, index|
-                try std.testing.expectEqual(entry.assigned_stripes, counts[index]);
-        }
-    }
-}
-
-test "large logical counts round trip and map with u128 arithmetic" {
-    const n = @as(u64, 1) << 32 | 17;
-    const geometries = [_]Geometry{
-        .{ .slot = 1, .available_stripes = n },
-        .{ .slot = 2, .available_stripes = n },
-        .{ .slot = 3, .available_stripes = n },
+test "stored heterogeneous placement retains exact assignments" {
+    var plan: PlacementPlan = .{
+        .stripe_size = 4096,
+        .logical_stripe_count = 26,
+        .multiplier = 25,
+        .addend = 19,
+        .member_count = 4,
     };
-    const plan = try decode(&(try encode(try build(4096, &geometries, std.math.maxInt(u64)))));
-    try std.testing.expectEqual(n, plan.logical_stripe_count);
-    const locations = try map(plan, n - 1);
-    for (locations) |location| try std.testing.expect(location.physical_stripe < n);
-    try std.testing.expectError(error.LogicalStripeOutOfRange, map(plan, n));
+    for (plan.entries[0..4], [_]u64{ 20, 20, 19, 19 }, 0..) |*entry, assigned, index|
+        entry.* = .{ .slot = @intCast(index * 2 + 2), .assigned_stripes = assigned };
+    try std.testing.expectEqualDeep(plan, try decode(&(try encode(plan))));
 }
 
-test "maximum input capacities do not overflow placement arithmetic" {
-    const geometries = uniformGeometries(replica_count, std.math.maxInt(u64));
-    const plan = try build(4096, geometries[0..replica_count], std.math.maxInt(u64));
-    try std.testing.expectEqual(std.math.maxInt(u64), plan.logical_stripe_count);
-    for (plan.memberSlice()) |entry|
-        try std.testing.expectEqual(std.math.maxInt(u64), entry.assigned_stripes);
-    const locations = try map(plan, std.math.maxInt(u64) - 1);
-    for (locations) |location|
-        try std.testing.expect(location.physical_stripe < std.math.maxInt(u64));
-}
-
-test "invalid geometry and persisted plans are rejected" {
-    const too_few = uniformGeometries(2, 1);
-    try std.testing.expectError(error.InvalidMemberCount, build(4096, too_few[0..2], 0));
-    const duplicate = [_]Geometry{
-        .{ .slot = 1, .available_stripes = 1 },
-        .{ .slot = 1, .available_stripes = 1 },
-        .{ .slot = 2, .available_stripes = 1 },
+test "stored maximum-width placement validates every entry" {
+    var plan: PlacementPlan = .{
+        .stripe_size = 4096,
+        .logical_stripe_count = 4,
+        .multiplier = 1,
+        .addend = 0,
+        .member_count = max_member_count,
     };
-    try std.testing.expectError(error.DuplicateSlot, build(4096, &duplicate, 0));
-    var zero = uniformGeometries(3, 1);
-    zero[1].available_stripes = 0;
-    try std.testing.expectError(error.ZeroCapacity, build(4096, zero[0..3], 0));
-
-    var plan = try build(4096, uniformGeometries(3, 4)[0..3], 0);
-    plan.stripe_size = 2048;
-    try std.testing.expectError(error.InvalidStripeSize, validate(plan));
-    plan = try build(4096, uniformGeometries(3, 4)[0..3], 0);
-    plan.entries[1].slot = plan.entries[0].slot;
-    try std.testing.expectError(error.NonCanonicalSlotOrder, validate(plan));
-    plan = try build(4096, uniformGeometries(3, 4)[0..3], 0);
-    plan.entries[0].assigned_stripes -= 1;
-    try std.testing.expectError(error.InvalidAssignedStripeSum, validate(plan));
-    plan = try build(4096, uniformGeometries(3, 4)[0..3], 0);
-    plan.multiplier = 0;
-    try std.testing.expectError(error.InvalidPermutation, validate(plan));
-    plan = try build(4096, uniformGeometries(3, 4)[0..3], 0);
-    plan.addend = plan.logical_stripe_count;
-    try std.testing.expectError(error.InvalidPermutation, validate(plan));
-    plan = try build(4096, uniformGeometries(3, 4)[0..3], 0);
-    plan.flags = 1;
-    try std.testing.expectError(error.InvalidFlags, validate(plan));
-    plan = try build(4096, uniformGeometries(3, 4)[0..3], 0);
-    plan.entries[3].assigned_stripes = 1;
-    try std.testing.expectError(error.NonCanonicalUnusedEntry, validate(plan));
-    plan = try build(4096, uniformGeometries(3, 1)[0..3], 99);
-    try std.testing.expectEqual(@as(u64, 0), plan.multiplier);
-    try std.testing.expectEqual(@as(u64, 0), plan.addend);
+    for (&plan.entries, 0..) |*entry, index|
+        entry.* = .{ .slot = @intCast(index + 1), .assigned_stripes = 1 };
+    try std.testing.expectEqualDeep(plan, try decode(&(try encode(plan))));
+    plan.entries[max_member_count - 1].slot = plan.entries[max_member_count - 2].slot;
+    try std.testing.expectError(error.NonCanonicalSlotOrder, encode(plan));
 }

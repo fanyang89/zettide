@@ -9,6 +9,10 @@ test "storage module exposes engine contracts without product adapters" {
     _ = storage_engine.v3.pool_catalog_volume.CatalogDataLease;
     _ = storage_engine.v3.pool_replicated_journal.ReplicatedJournal;
     _ = storage_engine.v3.genesis_payload.GenesisPayload;
+    _ = storage_engine.v3.pool_blob_schedule.decodePage;
+    _ = storage_engine.v3.pool_blob_schedule.digest;
+    inline for (.{ "build", "map", "mapValidated", "Geometry", "Location" }) |name|
+        try std.testing.expect(!@hasDecl(storage_engine.v3.pool_blob_schedule, name));
     try std.testing.expect(!@hasDecl(storage_engine.v3, "member_set"));
     try std.testing.expect(!@hasDecl(storage_engine.v3, "replicated_journal"));
     try std.testing.expect(!@hasDecl(storage_engine.v3, "replica_endpoint"));
@@ -35,6 +39,9 @@ test "data-node module owns product lifecycle and borrows the storage module" {
     _ = data_node.endpoint_registry.Spec;
     _ = data_node.storage.v3.pool_member_set.PoolMemberSet;
     _ = data_node.storage.v3.pool_replicated_journal.ReplicatedJournal;
+    _ = data_node.storage.v3.pool_blob_schedule.PlacementPlan;
+    try std.testing.expect(!@hasDecl(data_node.storage.v3.pool_blob_schedule, "build"));
+    try std.testing.expect(!@hasDecl(data_node.storage.v3.pool_blob_schedule, "map"));
     try std.testing.expect(!@hasDecl(data_node.storage.v3, "member_set"));
     try std.testing.expect(!@hasDecl(data_node.storage.v3, "replicated_journal"));
     try std.testing.expect(!@hasDecl(data_node.storage.v3, "replica_endpoint"));

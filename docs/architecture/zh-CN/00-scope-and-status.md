@@ -37,6 +37,8 @@ does not trigger automatic storage failover.
   uses an authenticated Catalog Volume rather than a raw Blob Pool.
 - Library Blob/scheduled Blob provisioning. Catalog is the creation default;
   retired option values are rejected before storage I/O, not silently converted.
+- Scheduled Blob capacity allocation and stripe mapping algorithms. Placement
+  codecs and persisted-field validation remain, without a Blob runtime.
 - The legacy fixed-three MemberSet and generation coordinator, plus the unused
   ReplicaEndpoint adapter. Current Catalog Pool coordination is retained.
 

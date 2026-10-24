@@ -207,28 +207,33 @@ fn testHeader(payload: GenesisPayload, member: pool_topology.Member) !member_for
     };
 }
 
-fn testScheduledPayload(member_count: usize) !GenesisPayload {
-    var members: [12]pool_topology.Member = undefined;
-    var geometries: [12]@import("pool_blob_schedule.zig").Geometry = undefined;
-    for (members[0..member_count], geometries[0..member_count], 0..) |*member, *geometry, index| {
+fn testScheduledPayload() !GenesisPayload {
+    const schedule = @import("pool_blob_schedule.zig");
+    var members: [6]pool_topology.Member = undefined;
+    var plan: schedule.PlacementPlan = .{
+        .stripe_size = 1024 * 1024,
+        .logical_stripe_count = 16,
+        .multiplier = 1,
+        .addend = 0,
+        .member_count = members.len,
+    };
+    for (&members, plan.entries[0..members.len], 0..) |*member, *entry, index| {
         const slot: u16 = @intCast(index * 5 + 3);
         member.* = .{ .member_id = id(@intCast(index + 2)), .slot = slot };
-        geometry.* = .{ .slot = slot, .available_stripes = 8 };
+        entry.* = .{ .slot = slot, .assigned_stripes = 8 };
         if (index < 3) {
             member.control_role = pool_topology.voter_role;
             member.role_flags = member_format.known_role_flags;
         }
     }
-    const schedule = @import("pool_blob_schedule.zig");
-    const plan = try schedule.build(1024 * 1024, geometries[0..member_count], 7);
     return .{
-        .topology = try pool_topology.Topology.init(id(1), 1, @splat(0), members[0..member_count]),
+        .topology = try pool_topology.Topology.init(id(1), 1, @splat(0), &members),
         .layout = try pool_layout.Layout.initScheduledBlob(plan, 1, 1),
     };
 }
 
 test "scheduled genesis binds feature capacity member count and layout version" {
-    const payload = try testScheduledPayload(6);
+    const payload = try testScheduledPayload();
     var header = try testHeader(payload, payload.topology.members[0]);
     try validateMemberHeader(payload, header);
 
