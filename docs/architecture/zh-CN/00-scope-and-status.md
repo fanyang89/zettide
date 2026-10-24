@@ -14,6 +14,7 @@ does not trigger automatic storage failover.
 | --- | --- |
 | Pool/Member formats and recovery | Local format, authority scan, control journal, validation, and recovery primitives retained |
 | Catalog block engine | Multi-Volume metadata, extent mapping, writable backend, and data lease retained |
+| Local Pool CLI | Plans and provisions Catalog-mode Pool metadata with confirmation; initializes no Catalog root or Volume |
 | Local protection | Existing local protection and conservative write/flush failure behavior retained; degraded writes and rebuild are not implied |
 | SPDK exports | Existing Catalog NVMe-oF, iSCSI, and vhost adapters retained during protocol convergence; NVMe/TCP is the primary direction |
 | Endpoint lifecycle | Registry, durable desired state, owner-only Unix control API, and endpoint daemon retained |
@@ -27,15 +28,23 @@ does not trigger automatic storage failover.
   controller-managed leases, and the three-node Docker/file-member E2E profile.
 - Shared data-service contracts, TxFS, CSI, and the cluster administration CLI.
 - The `raftz` source dependency and controller/protobuf build targets.
+- Blob/BlobFilesystem, filesystem ports, FUSE, NFS/FSAL, dufs, and their CLI,
+  conformance, remote automation, and benchmark profiles.
+- Unicode normalization, filesystem test-suite dependencies, scheduled raw Blob
+  performance harnesses, and the now-unused grpc-lite/profiling build dependency.
 
 These are retired capabilities, not deferred roadmap items.
 
 ## Remaining convergence work
 
-Filesystem implementations and FUSE/NFS/dufs compatibility entry points remain
-temporarily in the source tree, with their existing tests. They are scheduled
-for removal, not further feature development. Their shared persistent-format
-definitions must be audited before deleting dependencies.
+Filesystem entry points are gone. Retired format bits, Blob geometry checks,
+and low-level local protection/layout primitives remain for safe format
+recognition and existing engine validation. They do not implement file semantics
+or a supported Blob export. No on-media enum values or feature bits were reused.
+
+The raw-disk creation planner now accepts only Catalog mode and fixed one- or
+three-device profiles. Its versioned confirmation-token domain has changed;
+obtain a fresh plan rather than reusing a token from a filesystem command.
 
 Additional block protocol paths remain transitional. Removing them must not
 silently reinterpret persisted endpoint frontend values.

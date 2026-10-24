@@ -27,7 +27,7 @@ in [Member/Pool](../../v3-format.md),
 [Catalog](../../v3-multivolume-format.md), and
 [control rollover](../../v3-control-rollover-format.md).
 
-Other chapters in this directory describe the pre-convergence implementation.
-They do not override ADR 0005 and are not a future product roadmap. In
-particular, references to the removed controller, TxFS, CSI, and distributed
-Replica protocol are historical only.
+See [component boundaries](component-dependencies.md) and
+[block safety](../../block-safety.md) for retained ownership and failure rules.
+Obsolete filesystem/distributed architecture chapters have been removed. The
+superseded ADRs and repository history record the former product direction.

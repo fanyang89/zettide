@@ -14,26 +14,22 @@ skip_or_fail() {
 probe=$2
 cli=$3
 [[ $(uname -s) == Linux ]] || skip_or_fail "Linux is required"
-for command in losetup truncate blockdev fusermount3 mountpoint timeout; do
+for command in losetup truncate blockdev mount umount mkfs.ext4; do
     command -v "$command" >/dev/null || skip_or_fail "$command is unavailable"
 done
-[[ -r /dev/fuse && -w /dev/fuse ]] || skip_or_fail "/dev/fuse is unavailable"
 sudo -n true 2>/dev/null || skip_or_fail "passwordless sudo is unavailable"
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/zettide-block.XXXXXX")
+tmp_root=${TMPDIR:-$HOME/tmp}/opencode
+mkdir -p "$tmp_root"
+work=$(mktemp -d "$tmp_root/zettide-block.XXXXXX")
 loop=
-mount_pid=
-
+replica_loops=()
+mounted=false
 cleanup() {
     set +e
-    if sudo -n mountpoint -q "$work/mount" 2>/dev/null; then
-        sudo -n timeout --kill-after=2s 5s fusermount3 -uz "$work/mount"
-    fi
-    if [[ -n "$mount_pid" ]]; then
-        sudo -n kill -TERM "$mount_pid" 2>/dev/null
-        wait "$mount_pid" 2>/dev/null
-    fi
+    if $mounted; then sudo -n umount "$work/mount"; fi
     [[ -z "$loop" ]] || sudo -n losetup --detach "$loop"
+    for replica_loop in "${replica_loops[@]}"; do sudo -n losetup --detach "$replica_loop"; done
     rm -rf "$work"
 }
 trap cleanup EXIT
@@ -41,71 +37,69 @@ trap cleanup EXIT
 truncate --size 32MiB "$work/backing"
 loop=$(sudo -n losetup --find --show "$work/backing") || skip_or_fail "no loop device is available"
 sudo -n "$cli" device inspect "$loop" | grep -q '^Preflight: eligible$'
-if sudo -n "$cli" format "$loop" >/dev/null 2>&1; then
-    echo "standalone Blob format accepted a block device" >&2
-    exit 1
-fi
+sudo -n blockdev --setro "$loop"
+sudo -n "$probe" expect-read-only "$loop"
+sudo -n blockdev --setrw "$loop"
+sudo -n "$probe" check-exclusive "$loop"
 
-plan=$(sudo -n "$cli" pool plan-create --device "$loop" --profile unprotected \
-    --name-profile portable-v1 --label loop-cli)
-grep -q '^Data mode: blob$' <<<"$plan"
+plan=$(sudo -n "$cli" pool plan-create --device "$loop" --profile unprotected --label loop-cli)
+grep -q '^Data mode: catalog$' <<<"$plan"
 grep -q '^Plan: ready$' <<<"$plan"
 token=$(grep '^Confirm token: ' <<<"$plan")
 token=${token#Confirm token: }
-if sudo -n "$cli" pool create --device "$loop" --profile unprotected --label loop-cli \
-    --name-profile portable-v1 --confirm invalid >/dev/null 2>&1; then
-    echo "invalid confirmation token was accepted" >&2
-    exit 1
-fi
+for label in loop-cli changed-label; do
+    confirmation=invalid
+    [[ "$label" == loop-cli ]] || confirmation=$token
+    if sudo -n "$cli" pool create --device "$loop" --profile unprotected --label "$label" \
+        --confirm "$confirmation" >/dev/null 2>&1; then
+        echo "invalid or mismatched confirmation token was accepted" >&2
+        exit 1
+    fi
+done
 sudo -n "$cli" pool create --device "$loop" --profile unprotected --label loop-cli \
-    --name-profile portable-v1 --confirm "$token" | grep -q '^Created pool: '
-
+    --confirm "$token" | grep -q '^Created pool: '
 inspect=$(sudo -n "$cli" pool inspect --device "$loop")
-grep -q '^Data mode: blob$' <<<"$inspect"
-grep -q '^Mountable: yes$' <<<"$inspect"
-if sudo -n "$cli" pool mount "$work/mount" --device "$loop" --filesystem blob >/dev/null 2>&1; then
-    echo "pool mount accepted a filesystem selector" >&2
+grep -q '^Data mode: catalog$' <<<"$inspect"
+grep -q '^Catalog: uninitialized$' <<<"$inspect"
+sudo -n "$probe" reopen "$loop"
+
+# Existing Pool data must never be overwritten by a new plan or an old token.
+replan=$(sudo -n "$cli" pool plan-create --device "$loop" --profile unprotected --label loop-cli)
+grep -q '^Plan: rejected$' <<<"$replan"
+if sudo -n "$cli" pool create --device "$loop" --profile unprotected --label loop-cli \
+    --confirm "$token" >/dev/null 2>&1; then
+    echo "existing Pool accepted a stale creation token" >&2
     exit 1
 fi
 
+# The retained protected profile provisions three local Members, not one disk
+# silently downgraded to unprotected mode.
+replica_args=()
+for index in 0 1 2; do
+    truncate --size 32MiB "$work/replica-$index"
+    replica_loop=$(sudo -n losetup --find --show "$work/replica-$index")
+    replica_loops+=("$replica_loop")
+    replica_args+=(--device "$replica_loop")
+done
+plan=$(sudo -n "$cli" pool plan-create "${replica_args[@]}" --profile replicated --label replicated-cli)
+grep -q '^Profile: replicated$' <<<"$plan"
+grep -q '^Data mode: catalog$' <<<"$plan"
+token=$(grep '^Confirm token: ' <<<"$plan")
+token=${token#Confirm token: }
+sudo -n "$cli" pool create "${replica_args[@]}" --profile replicated --label replicated-cli \
+    --confirm "$token" | grep -q '^Created pool: '
+inspect=$(sudo -n "$cli" pool inspect "${replica_args[@]}")
+grep -q '^Members: 3/3$' <<<"$inspect"
+grep -q '^Profile: replicated$' <<<"$inspect"
+grep -q '^Data mode: catalog$' <<<"$inspect"
+sudo -n "$probe" reopen "${replica_loops[@]}"
+
+sudo -n losetup --detach "$loop"
+loop=
+truncate --size 32MiB "$work/mounted-backing"
+loop=$(sudo -n losetup --find --show "$work/mounted-backing")
+sudo -n mkfs.ext4 -q "$loop"
 mkdir "$work/mount"
-start_mount() {
-    : >"$work/mount.log"
-    sudo -n timeout --kill-after=2s 30s "$cli" pool mount "$work/mount" --device "$loop" "$@" \
-        >"$work/mount.log" 2>&1 &
-    mount_pid=$!
-    for _ in $(seq 1 100); do
-        sudo -n mountpoint -q "$work/mount" && return
-        kill -0 "$mount_pid" 2>/dev/null || { cat "$work/mount.log" >&2; return 1; }
-        sleep 0.05
-    done
-    cat "$work/mount.log" >&2
-    return 1
-}
-
-stop_mount() {
-    sudo -n timeout --kill-after=2s 5s "$cli" unmount "$work/mount" >/dev/null
-    wait "$mount_pid"
-    mount_pid=
-}
-
-printf 'Blob Pool data' >"$work/expected"
-start_mount --metrics
-sudo -n "$probe" expect-busy "$loop"
-sudo -n cp "$work/expected" "$work/mount/payload"
-sudo -n sync -f "$work/mount/payload"
-stop_mount
-grep -q '^fuse_metrics ' "$work/mount.log"
-grep -q '^pool_transport_metrics ' "$work/mount.log"
-if grep -Eq '^(pipeline_metrics|member_transport_metrics) ' "$work/mount.log"; then
-    echo "Blob Pool mount printed legacy metrics" >&2
-    exit 1
-fi
-
-start_mount --read-only
-sudo -n cmp "$work/expected" "$work/mount/payload"
-if sudo -n touch "$work/mount/rejected" 2>/dev/null; then
-    echo "read-only Blob Pool mount accepted a write" >&2
-    exit 1
-fi
-stop_mount
+sudo -n mount "$loop" "$work/mount"
+mounted=true
+sudo -n "$probe" expect-mounted "$loop"

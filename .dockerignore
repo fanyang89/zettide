@@ -13,5 +13,3 @@ zig-pkg
 **/test-results
 tests/external/.prepared
 vendor/spdk
-vendor/libfuse-tests
-vendor/xfstests

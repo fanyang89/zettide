@@ -474,6 +474,33 @@ fn testCatalog(
     return catalog;
 }
 
+test "Catalog data access rejects retired Blob media without changing its mode" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "blob-member", .{ .read = true });
+    var file_owned = true;
+    defer if (file_owned) file.close(std.testing.io);
+    try file.setLength(std.testing.io, 8 * 1024 * 1024);
+    var storages = [_]member_api.Storage{member_api.Storage.initOwned(file, 8 * 1024 * 1024, .regular_file, 1, false)};
+    file_owned = false;
+    const outcome = try @import("pool_provision.zig").create(std.testing.io, std.testing.allocator, &storages, .{
+        .protection = .unprotected,
+        .data_mode = .blob,
+    });
+    var provisioned = switch (outcome) {
+        .complete => |value| value,
+        .partial => |partial| return partial.cause,
+    };
+    defer provisioned.deinit();
+    var set = try provisioned.intoMemberSet();
+    defer set.deinit();
+    try std.testing.expectError(error.PoolDataRequiresCatalogMode, CatalogVolumeBackend.open(std.testing.allocator, &set, @splat(1)));
+    try std.testing.expectError(error.PoolDataRequiresCatalogMode, CatalogDataLease.acquire(&set));
+    try std.testing.expectEqual(.blob, try set.dataMode());
+    try std.testing.expect(set.controlWriteReady() != null);
+    try std.testing.expectEqual(.read_write, set.dataAccess());
+}
+
 test "volume map resolves holes mapped extents and logical bounds" {
     const run: pool_catalog.ExtentRun = .{
         .logical_start = 1,

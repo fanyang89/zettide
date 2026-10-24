@@ -1,6 +1,6 @@
 # 0002：首轮提取后保持单一 Storage Engine Package
 
-- 状态：Accepted
+- 状态：Accepted for the single-package rule; filesystem-specific clauses are superseded by [ADR 0005](0005-single-node-vm-block-storage.md)
 - 范围：`libs/storage-engine/` 的第二阶段 package 边界
 - 前置决策：[0001：数据节点命名与进程模型](0001-data-node-naming-and-process-model.md)
 

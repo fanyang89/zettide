@@ -6,12 +6,15 @@ This document freezes the v3 member header, topology record, replicated layout, 
 control record, commit certificate codecs, member-local creation, fixed-three-member set creation,
 existing-set control authority, control journal scan, append, and the Blob and Catalog Pool data modes.
 It defines no journal repair, signatures, manifest, erasure coding, member replacement, or rebalance.
-A Blob Pool is mountable only after its BlobFilesystem root is durably formatted. Catalog is a block
-data mode and is not mounted as a filesystem.
+Under [ADR 0005](decisions/0005-single-node-vm-block-storage.md), the filesystem
+service has been removed. Blob markers and geometry below are retained format
+contracts, not mountable product capabilities. Catalog is the VM block data mode.
 
 The multi-volume catalog codecs under development are specified separately in
-[`v3-multivolume-format.md`](v3-multivolume-format.md). They are not yet selected by Pool
-provisioning and do not change the single-volume format defined here.
+[`v3-multivolume-format.md`](v3-multivolume-format.md). The local CLI now provisions
+Catalog-mode Pool metadata, but does not initialize a Catalog root or Volume.
+See [implementation status](architecture/zh-CN/00-scope-and-status.md) for current
+publication and lifecycle limits.
 
 The planned control rollover authority snapshot payload is specified in
 [`v3-control-rollover-format.md`](v3-control-rollover-format.md). Quorum-replicated checkpoints can

@@ -2,94 +2,57 @@
 set -euo pipefail
 
 exe=$1
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/zettide-cli.XXXXXX")
+tmp_root=${TMPDIR:-$HOME/tmp}/opencode
+mkdir -p "$tmp_root"
+tmp=$(mktemp -d "$tmp_root/zettide-cli.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
+help=$("$exe" --help)
+[[ "$help" == *"zettide pool plan-create"* ]]
+[[ "$help" == *"Catalog data mode"* ]]
+if grep -Eq 'zettide (format|info|check|mount|unmount|serve)|pool mount|name-profile|scheduled-replicated' <<<"$help"; then
+    echo "help advertises a retired filesystem operation" >&2
+    exit 1
+fi
+
+# Removed commands must fail without touching an existing image or creating paths.
 image="$tmp/image with spaces.blob"
-"$exe" format "$image" --size 8MiB --name-profile portable-v1
-info=$("$exe" info "$image")
-[[ "$info" == *"Data mode: blob"* ]]
-[[ "$info" == *"Capacity: 8.00MiB"* ]]
-[[ "$info" == *"Name profile: portable-v1"* ]]
-"$exe" check "$image" | grep -q '^Filesystem traversal succeeded:'
-
-default_image="$tmp/default.blob"
-"$exe" format "$default_image" --size 8MiB >/dev/null
-"$exe" info "$default_image" | grep -q '^Name profile: legacy-raw$'
-
-for removed in \
-    "create $tmp/create.blob --size 8MiB" \
-    "key generate $tmp/key" \
-    "format $tmp/filesystem.blob --filesystem blob --size 8MiB" \
-    "format $tmp/label.blob --label old --size 8MiB" \
-    "format $tmp/encrypted.blob --encrypt --size 8MiB"; do
-    if "$exe" $removed >/dev/null 2>&1; then
-        echo "removed product option unexpectedly succeeded: $removed" >&2
+printf 'BLOB: legacy data must survive rejected commands\n' >"$image"
+cp "$image" "$tmp/expected"
+for command in format info check mount unmount serve; do
+    if "$exe" "$command" "$image" >"$tmp/out" 2>"$tmp/err"; then
+        echo "retired command unexpectedly succeeded: $command" >&2
         exit 1
     fi
-done
-
-if "$exe" format "$image" --size 8MiB >/dev/null 2>&1; then
-    echo "existing format target unexpectedly accepted --size" >&2
-    exit 1
-fi
-if "$exe" format "$tmp/bad.blob" --size nonsense >/dev/null 2>&1; then
-    echo "invalid size unexpectedly succeeded" >&2
-    exit 1
-fi
-if "$exe" format "$tmp/missing.blob" >/dev/null 2>&1; then
-    echo "missing size unexpectedly succeeded" >&2
-    exit 1
-fi
-if "$exe" format /dev/null >/dev/null 2>&1; then
-    echo "format accepted a non-regular target" >&2
-    exit 1
-fi
-
-existing="$tmp/existing.blob"
-truncate -s 8MiB "$existing"
-plan=$("$exe" format "$existing")
-[[ "$plan" == *"Filesystem: blob"* ]]
-[[ "$plan" == *"Type: regular_file"* ]]
-token=$(grep '^Confirm token: ' <<<"$plan")
-token=${token#Confirm token: }
-if "$exe" format "$existing" --name-profile portable-v1 --confirm "$token" >/dev/null 2>&1; then
-    echo "format accepted a confirmation for another name profile" >&2
-    exit 1
-fi
-"$exe" format "$existing" --confirm "$token" >/dev/null
-
-changed="$tmp/changed.blob"
-truncate -s 8MiB "$changed"
-printf first | dd of="$changed" conv=notrunc status=none
-changed_plan=$("$exe" format "$changed")
-changed_token=$(grep '^Confirm token: ' <<<"$changed_plan")
-changed_token=${changed_token#Confirm token: }
-printf second | dd of="$changed" conv=notrunc status=none
-if "$exe" format "$changed" --confirm "$changed_token" >/dev/null 2>&1; then
-    echo "changed target accepted stale confirmation" >&2
-    exit 1
-fi
-
-legacy="$tmp/legacy.ddv"
-truncate -s 8MiB "$legacy"
-printf 'LFSDRV2\0' | dd of="$legacy" conv=notrunc status=none
-printf 'LFSDRV2\0' | dd of="$legacy" bs=1 seek=4096 conv=notrunc status=none
-for command in info check format; do
-    if "$exe" "$command" "$legacy" >"$tmp/legacy.out" 2>"$tmp/legacy.err"; then
-        echo "$command accepted a legacy regular file" >&2
-        exit 1
-    fi
-    grep -q '^error: UnsupportedLegacyFormat$' "$tmp/legacy.err"
+    grep -q '^error: InvalidCommand$' "$tmp/err"
+    cmp "$image" "$tmp/expected"
 done
 
 if [[ $(uname -s) == Linux ]]; then
-    if "$exe" pool plan-create --device /dev/null --profile unprotected --filesystem blob >/dev/null 2>&1; then
-        echo "pool plan accepted a filesystem selector" >&2
+    expect_error() {
+        local expected=$1
+        shift
+        if "$exe" "$@" >"$tmp/out" 2>"$tmp/err"; then
+            echo "invalid block command unexpectedly succeeded: $*" >&2
+            exit 1
+        fi
+        grep -qx "error: $expected" "$tmp/err"
+    }
+    expect_error InvalidArguments pool mount "$image"
+    expect_error UnknownOption pool plan-create --device "$image" --name-profile portable-v1
+    expect_error UnknownOption pool plan-create --device "$image" --filesystem blob
+    expect_error InvalidProfile pool plan-create --device "$image" --profile scheduled-replicated
+    expect_error MissingConfirmation pool create --device "$image" --profile unprotected
+    expect_error DuplicateOption pool create --device "$image" --confirm first --confirm second
+    expect_error UnknownOption pool plan-create --device "$image" --confirm invalid
+    expect_error InvalidMemberCount pool plan-create
+    expect_error UnsupportedPoolWidth pool plan-create --device "$image" --profile replicated
+    expect_error UnsupportedPoolWidth pool plan-create --device "$image" --device "$image" --profile unprotected
+    expect_error MissingOptionValue pool plan-create --device
+    if "$exe" endpoint serve >"$tmp/out" 2>"$tmp/err"; then
+        echo "endpoint serve accepted missing runtime configuration" >&2
         exit 1
     fi
-    if "$exe" pool initialize --device /dev/null --confirm invalid >/dev/null 2>&1; then
-        echo "removed pool initialize command succeeded" >&2
-        exit 1
-    fi
+    grep -Eq '^error: (SpdkSupportNotEnabled|MissingRuntimeDirectory)$' "$tmp/err"
+    cmp "$image" "$tmp/expected"
 fi

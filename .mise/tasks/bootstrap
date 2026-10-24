@@ -3,4 +3,4 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-git -C "$root" submodule update --init --recursive -- vendor/grpc-lite vendor/spdk
+git -C "$root" submodule update --init --recursive -- vendor/spdk

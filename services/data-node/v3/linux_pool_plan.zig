@@ -2,19 +2,15 @@ const std = @import("std");
 const linux_block = @import("linux_block_device.zig");
 const storage_engine = @import("zettide_storage");
 const member_format = storage_engine.v3.member_format;
-const pool_blob_schedule = storage_engine.v3.pool_blob_schedule;
 const pool_policy = storage_engine.v3.pool_policy;
 const pool_provision = storage_engine.v3.pool_provision;
 const storage_api = storage_engine.v3.storage;
 const pool_topology = storage_engine.v3.pool_topology;
-const name_profile = storage_engine.name_profile;
 
 pub const Options = struct {
     protection: pool_policy.Protection,
     label: []const u8,
-    name_profile: name_profile.Profile = .legacy_raw,
-    data_mode: member_format.PoolDataMode = .blob,
-    scheduled_blob: bool = false,
+    data_mode: member_format.PoolDataMode = .catalog,
 };
 
 pub const Plan = struct {
@@ -197,6 +193,7 @@ fn scanStorage(
 }
 
 pub fn acquire(plan: *const Plan, io: std.Io, allocator: std.mem.Allocator) ![]storage_api.Storage {
+    try validateRequest(plan.paths, plan.options);
     if (!plan.ready()) return error.PlanNotReady;
     const storages = try allocator.alloc(storage_api.Storage, plan.paths.len);
     var acquired: usize = 0;
@@ -232,35 +229,24 @@ pub fn deviceReadyForDataMode(device: linux_block.DeviceInfo, data_mode: member_
 fn validateRequest(paths: []const []const u8, options: Options) !void {
     if (paths.len == 0 or paths.len > pool_topology.max_member_count)
         return error.InvalidMemberCount;
-    if (options.scheduled_blob) {
-        if (options.data_mode != .blob or
-            options.protection != .replicated or
-            paths.len < pool_blob_schedule.replica_count or
-            paths.len > pool_blob_schedule.max_member_count)
-            return error.InvalidScheduledBlobOptions;
-    }
+    if (options.data_mode != .catalog) return error.UnsupportedPoolDataMode;
     if (options.protection == .erasure_coded) return error.ErasureCodingNotImplemented;
-    if (!options.scheduled_blob and paths.len != try options.protection.fullWidth())
+    if (paths.len != try options.protection.fullWidth())
         return error.UnsupportedPoolWidth;
     _ = try member_format.Label.init(options.label);
 }
 
 fn computeToken(devices: []const linux_block.DeviceInfo, contains_data: []const bool, options: Options) [32]u8 {
     var hasher = std.crypto.hash.Blake3.init(.{});
-    hasher.update("zettide-linux-pool-plan-v4\x00");
+    hasher.update("zettide-linux-pool-plan-v5\x00");
     hasher.update(@tagName(options.data_mode));
     hasher.update("\x00");
-    hasher.update(&.{@intFromBool(options.scheduled_blob)});
     var plan_header: [10]u8 = undefined;
     std.mem.writeInt(u64, plan_header[0..8], options.label.len, .little);
     plan_header[8] = @backingInt(std.meta.activeTag(options.protection));
     plan_header[9] = @intCast(devices.len);
     hasher.update(&plan_header);
     hasher.update(options.label);
-    if (options.name_profile != .legacy_raw) {
-        hasher.update("zettide-name-profile\x00");
-        hasher.update(options.name_profile.name());
-    }
     for (devices, contains_data) |device, has_data| {
         var bytes: [29]u8 = undefined;
         std.mem.writeInt(u32, bytes[0..4], device.id.major, .little);
@@ -296,34 +282,10 @@ test "plan token binds device order geometry and options" {
     const reversed = [_]linux_block.DeviceInfo{ second, first };
     const contains_data = [_]bool{ false, false };
     const options: Options = .{ .protection = .unprotected, .label = "pool" };
-    const blob_token = computeToken(&devices, &contains_data, options);
+    const catalog_token = computeToken(&devices, &contains_data, options);
     try std.testing.expectEqualSlices(
         u8,
-        &blob_token,
-        &computeToken(&devices, &contains_data, .{
-            .protection = .unprotected,
-            .label = "pool",
-            .data_mode = .blob,
-        }),
-    );
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &computeToken(&devices, &contains_data, options),
-        &computeToken(&reversed, &contains_data, options),
-    ));
-    const catalog_options: Options = .{
-        .protection = .unprotected,
-        .label = "pool",
-        .data_mode = .catalog,
-    };
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &blob_token,
-        &computeToken(&devices, &contains_data, catalog_options),
-    ));
-    try std.testing.expectEqualSlices(
-        u8,
-        &computeToken(&devices, &contains_data, catalog_options),
+        &catalog_token,
         &computeToken(&devices, &contains_data, .{
             .protection = .unprotected,
             .label = "pool",
@@ -333,32 +295,26 @@ test "plan token binds device order geometry and options" {
     try std.testing.expect(!std.mem.eql(
         u8,
         &computeToken(&devices, &contains_data, options),
+        &computeToken(&reversed, &contains_data, options),
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &catalog_token,
+        &computeToken(&devices, &contains_data, .{
+            .protection = .unprotected,
+            .label = "pool",
+            .data_mode = .blob,
+        }),
+    ));
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &computeToken(&devices, &contains_data, options),
         &computeToken(&devices, &contains_data, .{ .protection = .unprotected, .label = "other" }),
     ));
     try std.testing.expect(!std.mem.eql(
         u8,
         &computeToken(&devices, &contains_data, options),
         &computeToken(&devices, &contains_data, .{ .protection = .replicated, .label = "pool" }),
-    ));
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &computeToken(&devices, &contains_data, options),
-        &computeToken(&devices, &contains_data, .{
-            .protection = .unprotected,
-            .label = "pool",
-            .name_profile = .portable_v1,
-        }),
-    ));
-    const scheduled_options: Options = .{
-        .protection = .replicated,
-        .label = "pool",
-        .data_mode = .blob,
-        .scheduled_blob = true,
-    };
-    try std.testing.expect(!std.mem.eql(
-        u8,
-        &computeToken(&devices, &contains_data, options),
-        &computeToken(&devices, &contains_data, scheduled_options),
     ));
     var changed = devices;
     changed[0].disk_sequence += 1;
@@ -382,44 +338,24 @@ test "plan token binds device order geometry and options" {
     ));
 }
 
-test "scheduled Blob request validates profile and member count" {
-    const scheduled: Options = .{
-        .protection = .replicated,
-        .label = "pool",
-        .data_mode = .blob,
-        .scheduled_blob = true,
-    };
-    const paths: [pool_blob_schedule.max_member_count][]const u8 = @splat("device");
-    const too_many_paths: [pool_blob_schedule.max_member_count + 1][]const u8 = @splat("device");
-
-    try validateRequest(paths[0..pool_blob_schedule.replica_count], scheduled);
-    try validateRequest(&paths, scheduled);
-    try std.testing.expectError(
-        error.InvalidScheduledBlobOptions,
-        validateRequest(paths[0 .. pool_blob_schedule.replica_count - 1], scheduled),
-    );
-    try std.testing.expectError(
-        error.InvalidScheduledBlobOptions,
-        validateRequest(&too_many_paths, scheduled),
-    );
-    try std.testing.expectError(error.InvalidMemberCount, validateRequest(&.{}, scheduled));
-    try std.testing.expectError(error.InvalidScheduledBlobOptions, validateRequest(paths[0..3], .{
-        .protection = .unprotected,
-        .label = "pool",
-        .data_mode = .blob,
-        .scheduled_blob = true,
-    }));
-    try std.testing.expectError(error.InvalidScheduledBlobOptions, validateRequest(paths[0..3], .{
-        .protection = .replicated,
-        .label = "pool",
-        .data_mode = .catalog,
-        .scheduled_blob = true,
-    }));
-    try std.testing.expectError(error.UnsupportedPoolWidth, validateRequest(paths[0..4], .{
-        .protection = .replicated,
-        .label = "pool",
-        .data_mode = .blob,
-    }));
+test "Catalog request validates data mode protection and member count before opening devices" {
+    const replicated: Options = .{ .protection = .replicated, .label = "pool" };
+    const unprotected: Options = .{ .protection = .unprotected, .label = "pool" };
+    const paths: [pool_topology.max_member_count + 1][]const u8 = @splat("device");
+    try validateRequest(paths[0..3], replicated);
+    try validateRequest(paths[0..1], unprotected);
+    try std.testing.expectError(error.InvalidMemberCount, validateRequest(&.{}, replicated));
+    try std.testing.expectError(error.InvalidMemberCount, validateRequest(&paths, replicated));
+    try std.testing.expectError(error.UnsupportedPoolWidth, validateRequest(paths[0..2], replicated));
+    try std.testing.expectError(error.UnsupportedPoolWidth, validateRequest(paths[0..4], replicated));
+    try std.testing.expectError(error.UnsupportedPoolWidth, validateRequest(paths[0..3], unprotected));
+    for ([_]member_format.PoolDataMode{ .blob, .legacy_unsupported }) |data_mode| {
+        try std.testing.expectError(error.UnsupportedPoolDataMode, validateRequest(paths[0..1], .{
+            .protection = .unprotected,
+            .label = "pool",
+            .data_mode = data_mode,
+        }));
+    }
 }
 
 test "device readiness rejects unsupported geometry" {
@@ -439,6 +375,18 @@ test "device readiness rejects unsupported geometry" {
     device.capacity_bytes += 1;
     device.logical_sector_size = 8192;
     try std.testing.expect(!deviceReadyForDataMode(device, .blob));
+}
+
+test "acquire rejects a retired data mode before accessing devices" {
+    const plan: Plan = .{
+        .allocator = std.testing.allocator,
+        .paths = &.{"must-not-be-opened"},
+        .devices = &.{},
+        .contains_data = &.{},
+        .options = .{ .protection = .unprotected, .label = "pool", .data_mode = .blob },
+        .token = @splat(0),
+    };
+    try std.testing.expectError(error.UnsupportedPoolDataMode, acquire(&plan, std.testing.io, std.testing.allocator));
 }
 
 test "Blob device readiness enforces Blob logical capacity" {

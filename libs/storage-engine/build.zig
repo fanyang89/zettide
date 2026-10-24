@@ -18,7 +18,6 @@ pub fn build(b: *std.Build) void {
         target,
         optimize,
         "",
-        "../../vendor/utf8proc",
         "test",
     );
 
@@ -39,7 +38,6 @@ pub fn addComponent(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     base_dir: []const u8,
-    utf8proc_dir: []const u8,
     test_step_name: []const u8,
 ) Component {
     const crc32c_dependency = b.dependency("crc32c", .{});
@@ -50,7 +48,7 @@ pub fn addComponent(
         .optimize = optimize,
         .link_libc = true,
     });
-    addStorageDependencies(b, storage, target, optimize, crc32c, utf8proc_dir);
+    storage.addImport("crc32c", crc32c);
 
     const library = b.addLibrary(.{
         .name = "zettide-storage-engine",
@@ -74,7 +72,6 @@ pub fn createPrivateModules(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     base_dir: []const u8,
-    utf8proc_dir: []const u8,
 ) Modules {
     const crc32c_dependency = b.dependency("crc32c", .{});
     const crc32c = createCrc32cModule(b, target, optimize, crc32c_dependency, base_dir);
@@ -84,38 +81,8 @@ pub fn createPrivateModules(
         .optimize = optimize,
         .link_libc = true,
     });
-    addStorageDependencies(b, storage, target, optimize, crc32c, utf8proc_dir);
+    storage.addImport("crc32c", crc32c);
     return .{ .storage = storage, .crc32c = crc32c };
-}
-
-fn addStorageDependencies(
-    b: *std.Build,
-    module: *std.Build.Module,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    crc32c: *std.Build.Module,
-    utf8proc_dir: []const u8,
-) void {
-    const utf8proc_root = b.path(utf8proc_dir);
-    module.addIncludePath(utf8proc_root);
-    module.addCMacro("UTF8PROC_STATIC", "1");
-    module.addCSourceFile(.{
-        .file = b.path(b.pathJoin(&.{ utf8proc_dir, "utf8proc.c" })),
-        .flags = &.{ "-std=c99", "-DUTF8PROC_STATIC" },
-    });
-    const utf8proc_header = b.addWriteFiles().add("utf8proc_c.h",
-        \\#include <stdlib.h>
-        \\#include <utf8proc.h>
-    );
-    const utf8proc_translate = b.addTranslateC(.{
-        .root_source_file = utf8proc_header,
-        .target = target,
-        .optimize = optimize,
-    });
-    utf8proc_translate.addIncludePath(utf8proc_root);
-    utf8proc_translate.defineCMacro("UTF8PROC_STATIC", "1");
-    module.addImport("utf8proc_c", utf8proc_translate.createModule());
-    module.addImport("crc32c", crc32c);
 }
 
 fn createCrc32cModule(

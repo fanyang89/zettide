@@ -246,16 +246,16 @@ fn runStorageTest(context: *TestContext, runtime: *data_node.spdk_runtime.Runtim
         .partial => |partial| return partial.cause,
     };
     defer provisioned.deinit();
-    var filesystem = try data_node.filesystem_target.formatProvisionedBlobPool(
-        context.allocator,
-        context.io,
-        &provisioned,
-        .legacy_raw,
-        .{},
-    );
-    const inode = try filesystem.createFile(context.io, 1, "payload", 0o644, 0, 0);
-    if (try filesystem.write(context.io, inode, "SPDK", 0) != 4) return error.ShortWrite;
-    try filesystem.close(context.io);
+    var provisioned_set = try provisioned.intoMemberSet();
+    defer provisioned_set.deinit();
+    var pool_storage = try storage_engine.v3.pool_data_storage.create(context.allocator, context.io, &provisioned_set, true);
+    var pool_storage_open = true;
+    defer if (pool_storage_open) pool_storage.close(context.io) catch {};
+    const expected: [4096]u8 align(4096) = @splat(0x5a);
+    try pool_storage.writeAllAt(context.io, &expected, 0);
+    try pool_storage.sync(context.io);
+    try pool_storage.close(context.io);
+    pool_storage_open = false;
 
     for (names, 0..) |name, index| {
         storages[index] = try runtime.openStorage(context.allocator, name, true);
@@ -269,18 +269,12 @@ fn runStorageTest(context: *TestContext, runtime: *data_node.spdk_runtime.Runtim
         &storages,
         .writable,
     );
-    filesystem = try data_node.filesystem_target.openBlobPoolFilesystem(
-        context.allocator,
-        context.io,
-        &set,
-        true,
-    );
-    defer filesystem.close(context.io) catch {};
-    const reopened_inode = try filesystem.resolvePath(context.io, "/payload");
-    var payload: [4]u8 = undefined;
-    if (try filesystem.read(context.io, reopened_inode, &payload, 0) != payload.len)
-        return error.ShortRead;
-    if (!std.mem.eql(u8, &payload, "SPDK")) return error.DataMismatch;
+    defer set.deinit();
+    pool_storage = try storage_engine.v3.pool_data_storage.create(context.allocator, context.io, &set, false);
+    pool_storage_open = true;
+    var payload: [4096]u8 align(4096) = undefined;
+    if (try pool_storage.readAt(context.io, &payload, 0) != payload.len) return error.ShortRead;
+    if (!std.mem.eql(u8, &payload, &expected)) return error.DataMismatch;
 }
 
 fn testAsyncReadMany(context: *TestContext, storage: *storage_engine.v3.storage.Storage) !void {

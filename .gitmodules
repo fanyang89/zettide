@@ -1,7 +1,3 @@
-[submodule "vendor/grpc-lite"]
-	path = vendor/grpc-lite
-	url = https://github.com/fanyang89/grpc-lite.git
-	branch = main
 [submodule "vendor/spdk"]
 	path = vendor/spdk
 	url = https://github.com/fanyang89/spdk.git

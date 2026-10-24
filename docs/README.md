@@ -6,7 +6,7 @@
 
 当前产品范围由 [ADR 0005](decisions/0005-single-node-vm-block-storage.md) 定义：
 单节点虚拟机块存储，自研块引擎与本地多盘保护。此前的文件系统、集群控制面、
-跨节点复制、TxFS 和 CSI 目标不再构成产品承诺。旧架构章节仅供历史参考。
+跨节点复制、TxFS 和 CSI 产品线及旧架构章节已经移除，历史方向由 superseded ADR 保留。
 
 ## 规范层级
 
@@ -27,7 +27,7 @@
 
 ### 架构与决策
 
-- [存储架构](architecture/zh-CN/README.md)：系统边界、数据模型、控制面、数据面与路线图。
+- [存储架构](architecture/zh-CN/README.md)：单节点块存储边界、模块归属和当前限制。
 - [架构决策](decisions/README.md)：已经接受的仓库级边界和不变量。
 
 ### 持久格式与语义
@@ -35,21 +35,18 @@
 - [v3 Member 与 Pool 格式](v3-format.md)
 - [v3 multi-Volume Catalog 格式](v3-multivolume-format.md)
 - [v3 control rollover 格式](v3-control-rollover-format.md)
-- [文件系统语义](fs-semantics.md)
-- [跨平台名称规范](portable-name-profile.md)
 
 格式文档中的 `current` 表示已有编码器、解码器或 reopen 路径；仅有 schema、预留字段或未来
 布局说明不能证明产品 lifecycle 已实现。
 
 ### 验证与运行 profile
 
-- [POSIX profile](posix-profile.md)
-- [POSIX nightly](posix-nightly.md)
-- [SMB3 profile](smb3-profile.md)
+- [Block safety and validation](block-safety.md)
+- [Remote block tests](../tests/automation/README.md)
 
 组件自身的运行与构建说明位于 `libs/storage-engine/` 和 `services/data-node/`
-的 `README.md`。尚存的文件系统 profile 和 `services/nfs-fsal/` 属于待移除的兼容路径，
-不是继续发展的产品方向。
+的 `README.md`。文件系统 profile、FUSE/NFS/FSAL、Unicode 规范化依赖和旧 scheduled
+Blob 专项压测已经移除；共用磁盘格式标记和本地保护机制仍保留。
 
 ### 报告与历史
 

@@ -23,8 +23,10 @@ Important limits:
   multi-Volume publication from one Pool.
 - Existing exports are not a complete managed VM attachment lifecycle.
 - Local protection does not imply degraded writes, online rebuild, or node HA.
-- Filesystem/FUSE/NFS/dufs code is temporarily retained for the next removal
-  slice; it is no longer a product development target.
+- Filesystem/FUSE/NFS/dufs code and commands have been removed. Existing Blob
+  media is not converted to Catalog mode.
+- `pool create` provisions Catalog-mode Pool metadata only; it does not create
+  an initialized Catalog or Volume. Creation requires a fresh scan-bound token.
 
 Validation:
 
@@ -32,4 +34,9 @@ Validation:
 zig build test-data-node
 zig build test-compatibility
 zig build test-module-roots
+zig build build-spdk-tests
 ```
+
+The last gate compiles the existing SPDK integration libraries without starting
+SPDK or touching disks. Real SPDK execution and the required Linux loop gate are
+separate explicit test profiles; see [block safety](../../docs/block-safety.md).

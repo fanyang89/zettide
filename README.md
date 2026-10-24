@@ -16,9 +16,9 @@ direction is Catalog block storage, Linux data-node composition, local recovery,
 and a narrow host-facing block interface. NVMe/TCP is the intended primary
 frontend.
 
-The cluster controller, distributed Replica protocol, TxFS, CSI, and `zettidectl`
-have been removed. Filesystem and additional block frontend code still present
-during the transition is not a product commitment. See
+The cluster controller, distributed Replica protocol, TxFS, CSI, `zettidectl`,
+and the BlobFilesystem/FUSE/NFS/dufs product line have been removed. Additional
+block frontends still present during the transition are not a product commitment. See
 [scope and implementation status](docs/architecture/zh-CN/00-scope-and-status.md).
 
 ## Repository
@@ -35,9 +35,8 @@ lifecycle.
 
 ## Development
 
-Use `mise` for the pinned Zig, CMake, and Ninja toolchain. During the filesystem
-removal transition, the existing CLI build still requires FUSE3 development
-headers on Linux.
+Use `mise` for the pinned Zig, CMake, and Ninja toolchain. The default build does
+not require FUSE, Unicode normalization libraries, a cluster, or an SPDK runtime.
 
 ```sh
 mise trust
@@ -61,11 +60,23 @@ zig build test-storage-engine
 zig build test-data-node
 zig build test-module-roots
 zig build test-compatibility
+zig build build-spdk-tests
 ```
 
 The existing `zettide endpoint serve` path is retained for local block exports;
 it requires an SPDK-enabled build. A successful local export is not proof of
 managed VM attachment or multiple simultaneously published Volumes per Pool.
+
+The CLI now exposes `device inspect`, `pool plan-create`, `pool create`,
+`pool inspect`, and `endpoint serve`. Pool creation uses Catalog mode: one
+unprotected device or three replicated devices. It creates Pool metadata only,
+not an initialized Catalog or Volume. Old filesystem commands and
+`--name-profile`/`scheduled-replicated` creation options are rejected. A new
+scan-bound confirmation token is required; old creation tokens cannot be reused.
+
+No automatic conversion of existing Blob files or Pools is provided. Retained
+format identities let diagnostics identify old media without interpreting it as
+a Catalog. See [block safety](docs/block-safety.md).
 
 ## Documentation
 

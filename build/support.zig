@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn createNameProfileCrossTest(
+pub fn createBlockFormatCrossTest(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
@@ -8,33 +8,13 @@ pub fn createNameProfileCrossTest(
 ) *std.Build.Step.Compile {
     return b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/name-profile-cross.zig"),
+            .root_source_file = b.path("tests/block-format-cross.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{.{ .name = "zettide_storage", .module = storage_engine }},
         }),
     });
-}
-
-pub fn createDataNodePrivateModule(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-    storage_engine: *std.Build.Module,
-    crc32c: *std.Build.Module,
-) *std.Build.Module {
-    const module = b.createModule(.{
-        .root_source_file = b.path("services/data-node/data_node_root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    module.addImport("zettide_storage", storage_engine);
-    module.addImport("crc32c", crc32c);
-    module.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
-    module.addIncludePath(b.path("services/data-node"));
-    return module;
 }
 
 pub fn createDataNodeModule(
@@ -61,7 +41,6 @@ pub fn createCoreModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
-    with_fuse: bool,
     storage_engine: *std.Build.Module,
     crc32c: *std.Build.Module,
 ) *std.Build.Module {
@@ -71,78 +50,11 @@ pub fn createCoreModule(
         .optimize = optimize,
         .link_libc = true,
     });
-    const unavailable_c_source = b.addWriteFiles().add("unavailable_c.zig", "");
-    const unavailable_c = b.createModule(.{
-        .root_source_file = unavailable_c_source,
-        .target = target,
-        .optimize = optimize,
-    });
-    core.addImport("linux_c", unavailable_c);
     core.addImport("spdk_c", createSpdkCModule(b, target, optimize, false));
     core.addImport("zettide_storage", storage_engine);
     core.addImport("crc32c", crc32c);
     core.addIncludePath(b.path("services/data-node"));
-    if (target.result.os.tag == .linux) {
-        const linux_header = b.addWriteFiles().add("linux_c.h",
-            \\#include <errno.h>
-            \\#include <fcntl.h>
-            \\#include <signal.h>
-            \\#include <sys/signalfd.h>
-            \\#include <unistd.h>
-            \\#include <fuse_shim.h>
-        );
-        const linux_translate = b.addTranslateC(.{
-            .root_source_file = linux_header,
-            .target = target,
-            .optimize = optimize,
-        });
-        linux_translate.addIncludePath(b.path("services/data-node"));
-        linux_translate.defineCMacro("_FORTIFY_SOURCE", "0");
-        linux_translate.defineCMacro("FUSE_USE_VERSION", "35");
-        linux_translate.linkSystemLibrary("fuse3", .{});
-        core.addImport("linux_c", linux_translate.createModule());
-    }
-    if (with_fuse) {
-        core.addCMacro("FUSE_USE_VERSION", "35");
-        core.linkSystemLibrary("fuse3", .{});
-        core.addCSourceFiles(.{
-            .files = &.{"services/data-node/fuse_shim.c"},
-            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-DFUSE_USE_VERSION=35" },
-        });
-    }
     return core;
-}
-
-const BenchmarkCpuProfiler = struct {
-    archive: std.Build.LazyPath,
-    force_link: std.Build.LazyPath,
-};
-
-pub fn addBenchmarkCpuProfiler(
-    b: *std.Build,
-    source_dir: std.Build.LazyPath,
-    target: std.Build.ResolvedTarget,
-) BenchmarkCpuProfiler {
-    const target_triple = target.query.zigTriple(b.allocator) catch @panic("OOM");
-    const run = b.addSystemCommand(&.{"bash"});
-    run.addFileArg(b.path("vendor/grpc-lite/tools/build_native.sh"));
-    run.addArg("gperftools");
-    run.addDirectoryArg(source_dir);
-    const output = run.addOutputDirectoryArg("gperftools");
-    run.addArgs(&.{
-        "RelWithDebInfo",
-        "cc",
-        "c++",
-        b.graph.zig_exe,
-        target_triple,
-    });
-    run.addFileArg(b.path("vendor/grpc-lite/tools/gperftools_force_link.c"));
-    run.addFileArg(b.path("vendor/grpc-lite/tools/mbedtls_user_config.h"));
-    run.addArgs(&.{ "false", "false", "true", "false" });
-    return .{
-        .archive = output.path(b, "libgrpc_lite_gperftools.a"),
-        .force_link = output.path(b, "gperftools_force_link.o"),
-    };
 }
 
 pub fn createExecutable(
@@ -335,147 +247,4 @@ pub fn createSpdkVhostExportTest(
         .name = "zettide-spdk-vhost-export-test",
         .root_module = module,
     });
-}
-
-pub fn createFsProbe(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const probe = b.addExecutable(.{
-        .name = "fs-probe",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    probe.root_module.addCSourceFile(.{
-        .file = b.path("tests/fs_probe.c"),
-        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
-    });
-    return probe;
-}
-
-pub fn createLibfuseProbe(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const probe = b.addExecutable(.{
-        .name = "libfuse-test-syscalls",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    probe.root_module.addIncludePath(b.path("tests/external"));
-    probe.root_module.addCSourceFile(.{
-        .file = b.path("vendor/libfuse-tests/test_syscalls.c"),
-        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
-    });
-    return probe;
-}
-
-pub fn createDurabilityProbe(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const probe = b.addExecutable(.{
-        .name = "durability-probe",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    probe.root_module.addCSourceFile(.{
-        .file = b.path("tests/durability_probe.c"),
-        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
-    });
-    return probe;
-}
-
-pub fn createSignalMaskExec(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const executable = b.addExecutable(.{
-        .name = "signal-mask-exec",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    executable.root_module.addCSourceFile(.{
-        .file = b.path("tests/signal_mask_exec.c"),
-        .flags = &.{"-std=c11"},
-    });
-    return executable;
-}
-
-pub fn createPosixProbe(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const probe = b.addExecutable(.{
-        .name = "posix-probe",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    probe.root_module.addCSourceFile(.{
-        .file = b.path("tests/posix_probe.c"),
-        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
-    });
-    return probe;
-}
-
-pub fn createFsxProbe(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const probe = b.addExecutable(.{
-        .name = "xfstests-fsx",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    probe.root_module.addIncludePath(b.path("tests/external"));
-    probe.root_module.addIncludePath(b.path("vendor/xfstests/src"));
-    probe.root_module.addCSourceFile(.{
-        .file = b.path("vendor/xfstests/ltp/fsx.c"),
-        .flags = &.{ "-std=gnu11", "-D_GNU_SOURCE" },
-    });
-    return probe;
-}
-
-pub fn createPermissionProbe(
-    b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) *std.Build.Step.Compile {
-    const probe = b.addExecutable(.{
-        .name = "permission-probe",
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    probe.root_module.addCSourceFile(.{
-        .file = b.path("tests/conformance/permission_probe.c"),
-        .flags = &.{ "-std=c11", "-D_GNU_SOURCE" },
-    });
-    return probe;
 }

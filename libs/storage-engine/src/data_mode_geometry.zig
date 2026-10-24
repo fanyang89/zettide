@@ -1,10 +1,10 @@
 const std = @import("std");
 
-/// Geometry contract shared by Pool provisioning and the Blob format adapter.
+/// Retained geometry contract for the retired Blob data mode.
 ///
 /// These values are part of the existing on-disk compatibility contract. The
 /// Pool layer uses them to validate `.blob` data members without importing or
-/// interpreting the Blob format implementation.
+/// interpreting a filesystem or reusing its on-disk feature identity.
 pub const blob = struct {
     pub const chunk_size: u32 = 1024 * 1024;
     pub const minimum_device_size: u64 = 2 * 1024 * 1024;

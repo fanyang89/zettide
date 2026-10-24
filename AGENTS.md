@@ -6,9 +6,9 @@ Zettide is single-node VM block storage with an in-house engine and local
 multi-disk protection; see ADR 0005. Core components live in
 `libs/storage-engine/` and `services/data-node/`. Tests live under `tests/`.
 External source dependencies are pinned as submodules under `vendor/`.
-Filesystem code and `services/nfs-fsal/` are transitional removal candidates,
-not active product directions. Do not reintroduce a cluster controller,
-cross-node replication, TxFS, or CSI.
+Do not reintroduce a filesystem service, FUSE/NFS/CSI, a cluster controller,
+cross-node replication, or TxFS. Preserve retired on-disk feature identities
+for safe decoding and rejection, not as new product capabilities.
 
 `qtr` and `etz` are separate projects and are not part of this repository's
 build or test lifecycle.

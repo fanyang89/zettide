@@ -5,7 +5,6 @@ pub const endpoint_control = if (@import("builtin").os.tag == .linux) @import("e
 pub const endpoint_daemon = if (@import("builtin").os.tag == .linux) @import("endpoint_daemon.zig") else struct {};
 
 pub const size = @import("size.zig");
-pub const filesystem_target = if (@import("builtin").os.tag == .linux) @import("filesystem_target.zig") else struct {};
 pub const file_storage = @import("v3/file_storage.zig");
 pub const linux_block_device = if (@import("builtin").os.tag == .linux) @import("v3/linux_block_device.zig") else struct {};
 

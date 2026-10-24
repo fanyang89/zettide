@@ -2,7 +2,8 @@
 
 - Status: Accepted
 - Supersedes: ADR 0003 and ADR 0004; the filesystem, controller, DataService,
-  and distributed-daemon requirements of ADR 0001
+  and distributed-daemon requirements of ADR 0001; filesystem-specific clauses
+  of ADR 0002 (the one-package rule remains accepted)
 
 ## Decision
 
